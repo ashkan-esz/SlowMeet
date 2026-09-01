@@ -1,0 +1,22 @@
+:root { font-family: system-ui, sans-serif; color: #17202a; background: #eef2f5; }
+body { margin: 0; }
+.shell { max-width: 36rem; margin: 10vh auto; padding: 2rem; background: white; border-radius: .75rem; box-shadow: 0 1rem 3rem #17202a18; }
+.controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .5rem; }
+label { display: block; margin-top: 1rem; font-weight: 600; }
+label span { font-weight: 400; color: #68737d; }
+input, button { box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .7rem; font: inherit; }
+select { box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .7rem; font: inherit; }
+button { cursor: pointer; color: white; background: #1769aa; border: 0; border-radius: .35rem; margin-top: 1.25rem; }
+#status { min-height: 1.4rem; color: #a33; }
+.connection { color: #a66; font-weight: 600; }
+.connection.good { color: #287a45; }
+.connection.fair { color: #a36e20; }
+.connection.poor { color: #b33b36; }
+#diagnostics { overflow: auto; padding: .75rem; background: #17202a; color: #d9e3ea; border-radius: .35rem; font-size: .8rem; }
+#participants { padding: 0; list-style: none; display: grid; gap: .75rem; }
+#participants li { padding: .75rem; background: #f3f6f8; border-radius: .5rem; }
+#participants video { display: block; width: 100%; max-height: 15rem; margin-top: .5rem; background: #17202a; border-radius: .35rem; }
+#participants audio { display: none; }
+@media (max-width: 34rem) {
+  .controls { grid-template-columns: 1fr; }
+}

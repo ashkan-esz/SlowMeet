@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LowMeet</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <main class="shell">
+    <h1>LowMeet</h1>
+    <p>Simple, resilient video meetings.</p>
+    <form id="join-form">
+      <label for="name">Name</label>
+      <input id="name" name="name" maxlength="32" autocomplete="name" required>
+      <label for="password">Meeting password <span>(if required)</span></label>
+      <input id="password" name="password" type="password" autocomplete="off">
+      <button type="submit">Join meeting</button>
+      <p id="status" role="status"></p>
+    </form>
+    <section id="meeting" hidden>
+      <p id="connection" class="connection" aria-live="polite">● Connecting</p>
+      <h2>Participants</h2>
+      <ul id="participants"></ul>
+      <details>
+        <summary>Connection details</summary>
+        <pre id="diagnostics">Waiting for media statistics…</pre>
+      </details>
+      <label for="profile">Bandwidth profile</label>
+      <select id="profile">
+        <option value="auto">Auto</option>
+        <option value="very-slow">Very slow</option>
+        <option value="slow">Slow</option>
+        <option value="normal">Normal</option>
+      </select>
+      <div class="controls">
+        <button id="mic" type="button">Mute microphone</button>
+        <button id="camera" type="button">Turn camera off</button>
+        <button id="leave" type="button">Leave</button>
+      </div>
+    </section>
+  </main>
+  <script src="/js/app.js"></script>
+</body>
+</html>
