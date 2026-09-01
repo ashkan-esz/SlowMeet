@@ -39,6 +39,7 @@ let hostLimits = {
 };
 const pendingCandidates = [];
 const participantElements = new Map();
+const storedProfile = localStorage.getItem("meeting.bandwidthProfile");
 const profiles = [
   { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000, audioBitrate: 24000 },
   { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000, audioBitrate: 32000 },
@@ -46,9 +47,17 @@ const profiles = [
 ];
 fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
+  hostLimits.maxVideoFPS = config.max_video_fps || hostLimits.maxVideoFPS;
   hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
   screen.disabled = config.screen_share_enabled === false;
+  if (!storedProfile && config.default_video_quality) {
+    profile.value = config.default_video_quality === "high" ? "normal" :
+      config.default_video_quality === "medium" || config.default_video_quality === "low" ? "slow" : "very-slow";
+  }
 }).catch(() => {});
+if (storedProfile && [...profile.options].some((option) => option.value === storedProfile)) {
+  profile.value = storedProfile;
+}
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const name = nameInput.value.trim();
@@ -179,6 +188,7 @@ async function startWebRTC() {
       local.video.autoplay = true;
       local.video.muted = true;
     }
+    sendMediaState();
     for (const track of localStream.getTracks()) peer.addTrack(track, localStream);
     await applyProfile(profile.value);
     clearInterval(statsTimer);
@@ -306,6 +316,7 @@ async function applyProfile(name) {
 }
 
 profile.addEventListener("change", async () => {
+  localStorage.setItem("meeting.bandwidthProfile", profile.value);
   if (profile.value !== "auto") {
     adaptationLevel = profiles.findIndex((item) => item.name === profile.value);
     poorSamples = 0;
@@ -317,13 +328,36 @@ profile.addEventListener("change", async () => {
 function addParticipant(participant) {
   if (participantElements.has(participant.id)) return;
   const item = document.createElement("li");
-  item.textContent = participant.name;
+  const name = document.createElement("strong");
+  name.textContent = participant.name;
+  const state = document.createElement("small");
+  state.className = "media-state";
+  state.textContent = "Mic on · Camera on";
   const video = document.createElement("video");
   const audio = document.createElement("audio");
   video.playsInline = true;
-  item.append(video, audio);
+  item.append(name, state, video, audio);
   participants.append(item);
-  participantElements.set(participant.id, { item, video, audio });
+  participantElements.set(participant.id, { item, name, state, video, audio });
+}
+
+function updateMediaState(message) {
+  const element = participantElements.get(message.participant_id);
+  if (!element) return;
+  const audioOn = message.audio_enabled !== false;
+  const videoOn = message.video_enabled !== false;
+  element.state.textContent = `${audioOn ? "Mic on" : "Mic off"} · ${videoOn ? "Camera on" : "Camera off"}`;
+}
+
+function sendMediaState() {
+  const audioEnabled = localStream?.getAudioTracks()[0]?.enabled === true;
+  const videoEnabled = localStream?.getVideoTracks()[0]?.enabled === true && cameraRequested;
+  const message = {
+    version: 1, type: "media_state", participant_id: localParticipantID,
+    audio_enabled: audioEnabled, video_enabled: videoEnabled
+  };
+  updateMediaState(message);
+  socket?.send(JSON.stringify(message));
 }
 
 async function setVideoSending(enabled) {
@@ -374,6 +408,10 @@ async function stopScreenShare() {
 }
 
 function handleWebRTCMessage(message) {
+  if (message.type === "media_state") {
+    updateMediaState(message);
+    return;
+  }
   if (message.type === "offer") {
     peer?.setRemoteDescription({ type: "offer", sdp: message.sdp })
       .then(() => {
@@ -409,6 +447,7 @@ mic.addEventListener("click", () => {
   if (!track) return;
   track.enabled = !track.enabled;
   mic.textContent = track.enabled ? "Mute microphone" : "Unmute microphone";
+  sendMediaState();
 });
 
 camera.addEventListener("click", () => {
@@ -416,6 +455,7 @@ camera.addEventListener("click", () => {
   if (!track) return;
   cameraRequested = !cameraRequested;
   setVideoSending(!videoSuspended);
+  sendMediaState();
 });
 
 screen.addEventListener("click", toggleScreenShare);

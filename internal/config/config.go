@@ -21,6 +21,7 @@ type Config struct {
 	MaxParticipants     int
 	DefaultVideoQuality string
 	DefaultVideoFPS     int
+	MaxVideoFPS         int
 	DefaultAudioBitrate int
 	MaxVideoBitrate     int
 	MaxAudioBitrate     int
@@ -42,6 +43,7 @@ func LoadFromEnv() (Config, error) {
 		MaxParticipants:     envInt("MAX_PARTICIPANTS", 5),
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
 		DefaultVideoFPS:     envInt("DEFAULT_VIDEO_FPS", 15),
+		MaxVideoFPS:         envInt("MAX_VIDEO_FPS", 30),
 		DefaultAudioBitrate: envInt("DEFAULT_AUDIO_BITRATE", 32000),
 		MaxVideoBitrate:     envInt("MAX_VIDEO_BITRATE", 500000),
 		MaxAudioBitrate:     envInt("MAX_AUDIO_BITRATE", 64000),
@@ -63,6 +65,9 @@ func (c Config) Validate() error {
 	}
 	if c.DefaultVideoFPS < 1 || c.DefaultVideoFPS > 60 {
 		return fmt.Errorf("DEFAULT_VIDEO_FPS must be between 1 and 60")
+	}
+	if c.MaxVideoFPS < c.DefaultVideoFPS || c.MaxVideoFPS > 60 {
+		return fmt.Errorf("MAX_VIDEO_FPS must be between DEFAULT_VIDEO_FPS and 60")
 	}
 	if c.DefaultAudioBitrate < 1 || c.MaxAudioBitrate < c.DefaultAudioBitrate {
 		return fmt.Errorf("audio bitrate configuration is invalid")

@@ -17,6 +17,7 @@ const (
 	TypeAnswer      = "answer"
 	TypeCandidate   = "candidate"
 	TypeICERestart  = "ice_restart"
+	TypeMediaState  = "media_state"
 	TypeError       = "error"
 )
 
@@ -33,6 +34,8 @@ type Message struct {
 	Candidate     string               `json:"candidate,omitempty"`
 	SDPMid        *string              `json:"sdp_mid,omitempty"`
 	SDPMLineIndex *uint16              `json:"sdp_mline_index,omitempty"`
+	AudioEnabled  *bool                `json:"audio_enabled,omitempty"`
+	VideoEnabled  *bool                `json:"video_enabled,omitempty"`
 }
 
 func (m Message) Validate() error {
@@ -57,6 +60,10 @@ func (m Message) Validate() error {
 			return fmt.Errorf("candidate is required")
 		}
 	case TypeICERestart:
+	case TypeMediaState:
+		if m.ParticipantID == "" || (m.AudioEnabled == nil && m.VideoEnabled == nil) {
+			return fmt.Errorf("media state requires participant_id and a state")
+		}
 	default:
 		return fmt.Errorf("unknown message type %q", m.Type)
 	}

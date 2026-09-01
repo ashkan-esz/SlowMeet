@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -32,7 +34,7 @@ func New(maxParticipants int) *Meeting {
 
 func (m *Meeting) Join(name string) (Participant, error) {
 	name = strings.TrimSpace(name)
-	if len([]rune(name)) < 1 || len([]rune(name)) > 32 {
+	if !validName(name) {
 		return Participant{}, ErrInvalidName
 	}
 	m.mu.Lock()
@@ -43,6 +45,22 @@ func (m *Meeting) Join(name string) (Participant, error) {
 	participant := Participant{ID: uuid.NewString(), Name: name, JoinedAt: time.Now().UTC()}
 	m.participants[participant.ID] = participant
 	return participant, nil
+}
+
+func validName(name string) bool {
+	if !utf8.ValidString(name) {
+		return false
+	}
+	runes := []rune(name)
+	if len(runes) < 1 || len(runes) > 32 {
+		return false
+	}
+	for _, char := range runes {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Meeting) Leave(id string) bool {

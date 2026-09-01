@@ -93,6 +93,10 @@ func (p *Peer) OnICECandidate(handler func(pion.ICECandidateInit)) {
 	})
 }
 
+func (p *Peer) OnICEConnectionStateChange(handler func(pion.ICEConnectionState)) {
+	p.connection.OnICEConnectionStateChange(handler)
+}
+
 func (p *Peer) Close() error {
 	var err error
 	p.closeOnce.Do(func() { err = p.connection.Close() })

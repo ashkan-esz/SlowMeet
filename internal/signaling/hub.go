@@ -3,6 +3,7 @@ package signaling
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 
 	"SlowMeet/internal/config"
@@ -39,10 +40,19 @@ func (h *Hub) ActiveParticipants() int {
 func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
-		Upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		Upgrader: websocket.Upgrader{CheckOrigin: sameOrigin},
 		clients:  make(map[*client]struct{}),
 		router:   media.NewRouter(),
 	}
+}
+
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	return err == nil && parsed.Host == r.Host
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +60,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(16 * 1024)
 	c := &client{conn: conn}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
@@ -80,6 +91,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if msg.Type != TypeJoin {
 			if c.participant.ID != "" {
+				if msg.Type == TypeMediaState {
+					msg.ParticipantID = c.participant.ID
+					h.broadcastExcept(c, msg)
+					continue
+				}
 				h.handleWebRTCMessage(c, msg)
 			}
 			continue
@@ -110,6 +126,18 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Candidate: candidate.Candidate, SDPMid: candidate.SDPMid,
 				SDPMLineIndex: candidate.SDPMLineIndex,
 			})
+		})
+		c.peer.OnICEConnectionStateChange(func(state pion.ICEConnectionState) {
+			event := "webrtc_state_changed"
+			switch state {
+			case pion.ICEConnectionStateConnected, pion.ICEConnectionStateCompleted:
+				event = "webrtc_connected"
+			case pion.ICEConnectionStateDisconnected:
+				event = "network_degraded"
+			case pion.ICEConnectionStateFailed:
+				event = "webrtc_failed"
+			}
+			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
 		})
 		c.peer.OnTrack(func(track *pion.TrackRemote) {
 			h.router.Publish(c.participant.ID, track)

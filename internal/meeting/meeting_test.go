@@ -35,7 +35,7 @@ func TestJoinAndLeaveParticipant(t *testing.T) {
 
 func TestJoinRejectsInvalidNames(t *testing.T) {
 	m := New(5)
-	for _, name := range []string{"", "   ", string(make([]byte, 33))} {
+	for _, name := range []string{"", "   ", string(make([]byte, 33)), "Ash\nkan", string([]byte{0xff})} {
 		if _, err := m.Join(name); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("Join(%q) error = %v, want ErrInvalidName", name, err)
 		}

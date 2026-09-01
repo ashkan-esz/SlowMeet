@@ -24,6 +24,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	if cfg.DefaultVideoQuality != "low" || cfg.DefaultVideoFPS != 15 {
 		t.Fatalf("unexpected media defaults: %+v", cfg)
 	}
+	if cfg.MaxVideoFPS != 30 {
+		t.Fatalf("unexpected maximum FPS: %+v", cfg)
+	}
 }
 
 func TestMeetingPasswordUsesConstantTimeComparisonSemantics(t *testing.T) {

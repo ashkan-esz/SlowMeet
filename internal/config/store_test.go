@@ -7,7 +7,7 @@ import (
 )
 
 func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
-	cfg := Config{AdminPassword: "admin", MaxParticipants: 5, DefaultVideoFPS: 15,
+	cfg := Config{AdminPassword: "admin", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
 		DefaultVideoQuality: "low", HTTPAddr: ":8080"}
 	store := NewStore(cfg)
@@ -25,7 +25,7 @@ func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
 
 func TestStorePersistsAdminUpdate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	cfg := Config{ConfigFile: path, MaxParticipants: 5, DefaultVideoFPS: 15,
+	cfg := Config{ConfigFile: path, MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
 		DefaultVideoQuality: "low", HTTPAddr: ":8080"}
 	store, err := LoadStore(cfg)

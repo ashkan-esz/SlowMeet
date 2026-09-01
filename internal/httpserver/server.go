@@ -18,7 +18,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 		logger.Warn("config_persistence_unavailable", "error", err)
 		store = config.NewStore(cfg)
 	}
-	meetingState := meeting.New(cfg.MaxParticipants)
+	meetingState := meeting.New(store.Snapshot().MaxParticipants)
 	hub := signaling.NewHub(meetingState, store, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -38,6 +38,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			"default_video_fps":     cfg.DefaultVideoFPS,
 			"default_audio_bitrate": cfg.DefaultAudioBitrate,
 			"max_video_bitrate":     cfg.MaxVideoBitrate,
+			"max_video_fps":         cfg.MaxVideoFPS,
 			"max_audio_bitrate":     cfg.MaxAudioBitrate,
 			"screen_share_enabled":  cfg.EnableScreenShare,
 		})
@@ -86,7 +87,8 @@ func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"max_participants": cfg.MaxParticipants, "max_video_bitrate": cfg.MaxVideoBitrate,
-		"max_video_fps": cfg.DefaultVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,
+		"default_video_quality": cfg.DefaultVideoQuality,
+		"max_video_fps":         cfg.MaxVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,
 		"screen_share_enabled": cfg.EnableScreenShare,
 	})
 }

@@ -21,3 +21,16 @@ func TestValidateRejectsUnknownOrMalformedMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMediaStateRequiresParticipantAndState(t *testing.T) {
+	enabled := true
+	if err := (Message{
+		Version: ProtocolVersion, Type: TypeMediaState,
+		ParticipantID: "participant-1", AudioEnabled: &enabled,
+	}).Validate(); err != nil {
+		t.Fatalf("valid media state rejected: %v", err)
+	}
+	if err := (Message{Version: ProtocolVersion, Type: TypeMediaState}).Validate(); err == nil {
+		t.Fatal("media state without participant/state was accepted")
+	}
+}

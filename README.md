@@ -31,6 +31,12 @@ go test ./...
 go build ./...
 ```
 
+Run the local HTTP smoke test:
+
+```sh
+./scripts/smoke.sh
+```
+
 ## Configuration
 
 The complete starter configuration is in `.env.example`.
@@ -58,10 +64,15 @@ The application listens on port `8080`. Health endpoints are `/health` and
 Production browsers require a secure origin for camera and microphone access.
 Put Caddy, Nginx, or another TLS reverse proxy in front of LowMeet. Examples
 are provided in `deploy/caddy/Caddyfile` and `deploy/nginx/lowmeet.conf`.
+For a non-container installation, `deploy/systemd/lowmeet.service` provides a
+least-privilege service template.
 
 The proxy must preserve WebSocket upgrade headers and allow long-lived
 connections. Configure DNS and certificates for your actual hostname before
 using the examples.
+
+For low-bandwidth validation scenarios using Linux `tc netem`, see
+`docs/network-testing.md`.
 
 ## Scope
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"os"
@@ -58,11 +59,7 @@ func (c Config) checkAdminPassword(candidate string) bool {
 }
 
 func subtleCompare(a, b string) bool {
-	var result byte
-	for i := range []byte(a) {
-		result |= []byte(a)[i] ^ []byte(b)[i]
-	}
-	return result == 0
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 type AdminUpdate struct {
@@ -91,7 +88,7 @@ func (s *Store) apply(update AdminUpdate) error {
 		next.MaxVideoBitrate = *update.MaxVideoBitrate
 	}
 	if update.MaxVideoFPS != nil {
-		next.DefaultVideoFPS = *update.MaxVideoFPS
+		next.MaxVideoFPS = *update.MaxVideoFPS
 	}
 	if update.MaxAudioBitrate != nil {
 		next.MaxAudioBitrate = *update.MaxAudioBitrate
@@ -113,7 +110,7 @@ func (s *Store) persistLocked() error {
 	data, err := json.MarshalIndent(AdminUpdate{
 		MaxParticipants: intPointer(s.cfg.MaxParticipants),
 		MaxVideoBitrate: intPointer(s.cfg.MaxVideoBitrate),
-		MaxVideoFPS:     intPointer(s.cfg.DefaultVideoFPS),
+		MaxVideoFPS:     intPointer(s.cfg.MaxVideoFPS),
 		MaxAudioBitrate: intPointer(s.cfg.MaxAudioBitrate),
 		ScreenShare:     boolPointer(s.cfg.EnableScreenShare),
 	}, "", "  ")
