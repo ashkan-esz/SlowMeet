@@ -23,6 +23,16 @@ func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
 	}
 }
 
+func TestEmptyAdminPasswordOnlyAcceptsEmptyCandidate(t *testing.T) {
+	store := NewStore(Config{})
+	if store.CheckAdminPassword("unexpected") {
+		t.Fatal("empty admin password accepted a non-empty candidate")
+	}
+	if !store.CheckAdminPassword("") {
+		t.Fatal("empty admin password rejected an empty candidate")
+	}
+}
+
 func TestStorePersistsAdminUpdate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := Config{ConfigFile: path, MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,

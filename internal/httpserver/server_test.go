@@ -82,3 +82,25 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 		t.Fatalf("runtime config was not updated: %#v", values)
 	}
 }
+
+func TestAdminConfigGetReturnsPublicRuntimeValues(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	request := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+	request.Header.Set("X-Admin-Password", "admin-secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var values map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if values["max_participants"] != float64(5) {
+		t.Fatalf("unexpected public config: %#v", values)
+	}
+	if _, exposed := values["admin_password"]; exposed {
+		t.Fatal("admin password was exposed")
+	}
+}

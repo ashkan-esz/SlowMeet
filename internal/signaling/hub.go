@@ -117,6 +117,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.participant = participant
 		c.peer, err = webrtc.NewPeer(cfg.STUNServers)
 		if err != nil {
+			_ = h.Meeting.Leave(participant.ID)
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return
 		}

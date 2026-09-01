@@ -11,6 +11,7 @@ const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
 const diagnostics = document.querySelector("#diagnostics");
 const profile = document.querySelector("#profile");
+const effectiveProfile = document.querySelector("#effective-profile");
 const storedName = localStorage.getItem("meeting.displayName");
 if (storedName) nameInput.value = storedName;
 
@@ -289,6 +290,11 @@ async function applyProfile(name) {
   const bitrate = Math.min(requested.bitrate, hostLimits.maxVideoBitrate);
   const fps = Math.min(requested.fps, hostLimits.maxVideoFPS);
   const audioBitrate = Math.min(requested.audioBitrate, hostLimits.maxAudioBitrate);
+  if (effectiveProfile) {
+    effectiveProfile.textContent =
+      `Requested: ${requested.name}; effective: ${Math.round(requested.width)}x${Math.round(requested.height)} / ` +
+      `${fps} FPS / ${Math.round(bitrate / 1000)} kbps video / ${Math.round(audioBitrate / 1000)} kbps audio`;
+  }
   const videoTrack = localStream?.getVideoTracks()[0];
   if (videoTrack) {
     await videoTrack.applyConstraints({

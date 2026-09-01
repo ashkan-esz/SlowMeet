@@ -13,6 +13,7 @@ button { cursor: pointer; color: white; background: #1769aa; border: 0; border-r
 .connection.fair { color: #a36e20; }
 .connection.poor { color: #b33b36; }
 #diagnostics { overflow: auto; padding: .75rem; background: #17202a; color: #d9e3ea; border-radius: .35rem; font-size: .8rem; }
+.setting-note { color: #68737d; font-size: .85rem; }
 #participants { padding: 0; list-style: none; display: grid; gap: .75rem; }
 #participants li { padding: .75rem; background: #f3f6f8; border-radius: .5rem; }
 #participants .media-state { display: block; margin-top: .25rem; color: #68737d; font-size: .8rem; }

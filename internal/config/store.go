@@ -52,8 +52,11 @@ func (s *Store) CheckAdminPassword(candidate string) bool {
 }
 
 func (c Config) checkAdminPassword(candidate string) bool {
-	if c.AdminPassword == "" || len(candidate) != len(c.AdminPassword) {
-		return c.AdminPassword == ""
+	if c.AdminPassword == "" {
+		return candidate == ""
+	}
+	if len(candidate) != len(c.AdminPassword) {
+		return false
 	}
 	return subtleCompare(candidate, c.AdminPassword)
 }

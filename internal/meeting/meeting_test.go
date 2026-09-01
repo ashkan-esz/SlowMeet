@@ -41,3 +41,20 @@ func TestJoinRejectsInvalidNames(t *testing.T) {
 		}
 	}
 }
+
+func TestSetMaxParticipantsDoesNotEvictExistingParticipants(t *testing.T) {
+	m := New(3)
+	for _, name := range []string{"Ashkan", "Ali", "Sara"} {
+		if _, err := m.Join(name); err != nil {
+			t.Fatalf("Join(%q) error = %v", name, err)
+		}
+	}
+
+	m.SetMaxParticipants(1)
+	if got := m.Count(); got != 3 {
+		t.Fatalf("Count() = %d, want existing participants preserved", got)
+	}
+	if _, err := m.Join("Reza"); !errors.Is(err, ErrMeetingFull) {
+		t.Fatalf("Join() error = %v, want ErrMeetingFull", err)
+	}
+}

@@ -34,3 +34,15 @@ func TestValidateMediaStateRequiresParticipantAndState(t *testing.T) {
 		t.Fatal("media state without participant/state was accepted")
 	}
 }
+
+func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
+	for _, msg := range []Message{
+		{Version: ProtocolVersion, Type: TypeOffer},
+		{Version: ProtocolVersion, Type: TypeAnswer},
+		{Version: ProtocolVersion, Type: TypeCandidate},
+	} {
+		if err := msg.Validate(); err == nil {
+			t.Errorf("Validate(%+v) succeeded, want error", msg)
+		}
+	}
+}

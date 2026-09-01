@@ -31,6 +31,22 @@
       max_audio_bitrate: document.querySelector("#audio-bitrate"),
       screen_share_enabled: document.querySelector("#screen-share")
     };
+    async function loadSettings() {
+      const response = await fetch("/admin/config", {
+        headers: {"X-Admin-Password": password.value}
+      });
+      if (!response.ok) {
+        status.textContent = response.status === 401 ? "Enter the admin password." : await response.text();
+        return;
+      }
+      const values = await response.json();
+      fields.max_participants.value = values.max_participants;
+      fields.max_video_bitrate.value = values.max_video_bitrate;
+      fields.max_video_fps.value = values.max_video_fps;
+      fields.max_audio_bitrate.value = values.max_audio_bitrate;
+      fields.screen_share_enabled.checked = values.screen_share_enabled;
+      status.textContent = "Loaded.";
+    }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = {
@@ -47,6 +63,7 @@
       });
       status.textContent = response.ok ? "Saved." : await response.text();
     });
+    password.addEventListener("change", loadSettings);
   </script>
 </body>
 </html>
