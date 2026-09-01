@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 		store = config.NewStore(cfg)
 	}
 	meetingState := meeting.New(cfg.MaxParticipants)
+	hub := signaling.NewHub(meetingState, store, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -39,6 +41,14 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			"max_audio_bitrate":     cfg.MaxAudioBitrate,
 			"screen_share_enabled":  cfg.EnableScreenShare,
 		})
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		cfg := store.Snapshot()
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "lowmeet_active_participants %d\n", meetingState.Count())
+		_, _ = fmt.Fprintf(w, "lowmeet_max_participants %d\n", cfg.MaxParticipants)
+		_, _ = fmt.Fprintf(w, "lowmeet_max_video_bitrate %d\n", cfg.MaxVideoBitrate)
+		_, _ = fmt.Fprintf(w, "lowmeet_max_audio_bitrate %d\n", cfg.MaxAudioBitrate)
 	})
 	mux.HandleFunc("/admin/config", func(w http.ResponseWriter, r *http.Request) {
 		cfg := store.Snapshot()
@@ -66,7 +76,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	mux.Handle("/ws", signaling.NewHub(meetingState, store, logger))
+	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return mux

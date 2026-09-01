@@ -63,7 +63,7 @@ func (r *Router) Publish(sourceID string, remote *pion.TrackRemote) {
 	key := sourceID + "/" + remote.Kind().String()
 	pub := &publication{
 		sourceID: sourceID,
-		trackID:  fmt.Sprintf("%s-%s", sourceID, remote.Kind().String()),
+		trackID:  fmt.Sprintf("%s|%s", sourceID, remote.Kind().String()),
 		codec:    remote.Codec().RTPCodecCapability,
 		remote:   remote,
 		tracks:   make(map[string]*pion.TrackLocalStaticRTP),

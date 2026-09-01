@@ -28,6 +28,9 @@ func TestJoinAndLeaveParticipant(t *testing.T) {
 	if got := len(m.List()); got != 1 {
 		t.Fatalf("List() length = %d, want 1", got)
 	}
+	if got := m.Count(); got != 1 {
+		t.Fatalf("Count() = %d, want 1", got)
+	}
 }
 
 func TestJoinRejectsInvalidNames(t *testing.T) {

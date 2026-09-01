@@ -73,3 +73,9 @@ func (m *Meeting) List() []Participant {
 	}
 	return result
 }
+
+func (m *Meeting) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.participants)
+}

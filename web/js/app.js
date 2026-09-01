@@ -132,7 +132,7 @@ async function startWebRTC() {
   peer.addTransceiver("video", { direction: "recvonly" });
   peer.ontrack = ({ streams, track }) => {
     if (!streams[0]) return;
-    const participantID = track.id.split("-")[0];
+    const participantID = track.id.split("|")[0];
     const element = participantElements.get(participantID);
     if (!element) return;
     if (track.kind === "video") {
@@ -151,11 +151,27 @@ async function startWebRTC() {
     }));
   };
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: {
-      width: { ideal: 360, max: 640 },
-      height: { ideal: 240, max: 360 },
-      frameRate: { ideal: 15, max: 30 }
-    }});
+    localStream = new MediaStream();
+    try {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStream.getAudioTracks().forEach((track) => localStream.addTrack(track));
+    } catch (_) {
+      status.textContent = "Microphone unavailable; continuing without audio.";
+    }
+    try {
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: {
+        width: { ideal: 360, max: 640 },
+        height: { ideal: 240, max: 360 },
+        frameRate: { ideal: 15, max: 30 }
+      }});
+      videoStream.getVideoTracks().forEach((track) => localStream.addTrack(track));
+    } catch (_) {
+      cameraRequested = false;
+      camera.disabled = true;
+      camera.textContent = "Camera unavailable";
+      status.textContent = "Camera unavailable; continuing audio-only.";
+    }
+    if (localStream.getTracks().length === 0) throw new Error("No microphone or camera is available");
     cameraTrack = localStream.getVideoTracks()[0];
     const local = participantElements.get(localParticipantID);
     if (local) {
@@ -429,6 +445,7 @@ leave.addEventListener("click", () => {
   pendingCandidates.splice(0);
   mic.textContent = "Mute microphone";
   camera.textContent = "Turn camera off";
+  camera.disabled = false;
   screen.textContent = "Share screen";
   setConnection("", "Connecting");
   diagnostics.textContent = "Waiting for media statistics…";

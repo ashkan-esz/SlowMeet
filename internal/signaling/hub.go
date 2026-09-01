@@ -32,6 +32,10 @@ type Hub struct {
 	router  *media.Router
 }
 
+func (h *Hub) ActiveParticipants() int {
+	return h.Meeting.Count()
+}
+
 func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
