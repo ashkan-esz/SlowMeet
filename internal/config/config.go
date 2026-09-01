@@ -11,6 +11,7 @@ import (
 type Config struct {
 	AppEnv              string
 	HTTPAddr            string
+	ConfigFile          string
 	MeetingPassword     string
 	AdminPassword       string
 	STUNServers         []string
@@ -31,6 +32,7 @@ func LoadFromEnv() (Config, error) {
 	cfg := Config{
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
+		ConfigFile:          envString("CONFIG_FILE", "config.json"),
 		MeetingPassword:     os.Getenv("MEETING_PASSWORD"),
 		AdminPassword:       os.Getenv("ADMIN_PASSWORD"),
 		STUNServers:         splitCSV(os.Getenv("STUN_SERVERS")),

@@ -12,7 +12,11 @@ import (
 )
 
 func New(cfg config.Config, logger *slog.Logger) http.Handler {
-	store := config.NewStore(cfg)
+	store, err := config.LoadStore(cfg)
+	if err != nil {
+		logger.Warn("config_persistence_unavailable", "error", err)
+		store = config.NewStore(cfg)
+	}
 	meetingState := meeting.New(cfg.MaxParticipants)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
