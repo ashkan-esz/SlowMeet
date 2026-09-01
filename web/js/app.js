@@ -26,19 +26,24 @@ let previousStats;
 let adaptationLevel = 2;
 let poorSamples = 0;
 let goodSamples = 0;
+let criticalSamples = 0;
+let videoSuspended = false;
+let cameraRequested = true;
 let hostLimits = {
   maxVideoBitrate: 500000,
-  maxVideoFPS: 30
+  maxVideoFPS: 30,
+  maxAudioBitrate: 64000
 };
 const pendingCandidates = [];
 const participantElements = new Map();
 const profiles = [
-  { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000 },
-  { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000 },
-  { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000 }
+  { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000, audioBitrate: 24000 },
+  { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000, audioBitrate: 32000 },
+  { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000, audioBitrate: 48000 }
 ];
 fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
+  hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
 }).catch(() => {});
 form.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -222,7 +227,15 @@ async function updateDiagnostics() {
   if (values.rttMs != null && values.rttMs > 250) setConnection("poor", "Poor");
   else if (values.rttMs != null && values.rttMs > 120) setConnection("fair", "Fair");
   const poor = (values.rttMs != null && values.rttMs > 250) || values.packetLoss > 5 || values.inboundKbps < 80;
+  const critical = (values.rttMs != null && values.rttMs > 500) || values.packetLoss > 10 || values.inboundKbps < 40;
   const good = (values.rttMs == null || values.rttMs < 120) && values.packetLoss < 1;
+  criticalSamples = critical ? criticalSamples + 1 : 0;
+  if (criticalSamples >= 2) {
+    criticalSamples = 0;
+    await setVideoSending(false);
+  } else if (!critical && videoSuspended && good) {
+    await setVideoSending(true);
+  }
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
     goodSamples = good ? goodSamples + 1 : 0;
@@ -244,6 +257,7 @@ async function applyProfile(name) {
   if (!requested || !peer) return;
   const bitrate = Math.min(requested.bitrate, hostLimits.maxVideoBitrate);
   const fps = Math.min(requested.fps, hostLimits.maxVideoFPS);
+  const audioBitrate = Math.min(requested.audioBitrate, hostLimits.maxAudioBitrate);
   const videoTrack = localStream?.getVideoTracks()[0];
   if (videoTrack) {
     await videoTrack.applyConstraints({
@@ -259,6 +273,13 @@ async function applyProfile(name) {
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
     parameters.encodings[0].maxBitrate = bitrate;
     parameters.encodings[0].maxFramerate = fps;
+    await sender.setParameters(parameters).catch(() => {});
+  }
+  for (const sender of peer.getSenders()) {
+    if (sender.track?.kind !== "audio") continue;
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0].maxBitrate = audioBitrate;
     await sender.setParameters(parameters).catch(() => {});
   }
 }
@@ -282,6 +303,21 @@ function addParticipant(participant) {
   item.append(video, audio);
   participants.append(item);
   participantElements.set(participant.id, { item, video, audio });
+}
+
+async function setVideoSending(enabled) {
+  videoSuspended = !enabled;
+  for (const sender of peer?.getSenders() || []) {
+    if (sender.track?.kind !== "video") continue;
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0].active = enabled && cameraRequested;
+    await sender.setParameters(parameters).catch(() => {});
+  }
+  const track = localStream?.getVideoTracks()[0];
+  if (track) track.enabled = enabled && cameraRequested;
+  camera.textContent = enabled && cameraRequested ? "Turn camera off" : "Turn camera on";
+  if (!enabled) setConnection("poor", "Audio only");
 }
 
 function handleWebRTCMessage(message) {
@@ -325,8 +361,8 @@ mic.addEventListener("click", () => {
 camera.addEventListener("click", () => {
   const track = localStream?.getVideoTracks()[0];
   if (!track) return;
-  track.enabled = !track.enabled;
-  camera.textContent = track.enabled ? "Turn camera off" : "Turn camera on";
+  cameraRequested = !cameraRequested;
+  setVideoSending(!videoSuspended);
 });
 
 leave.addEventListener("click", () => {
@@ -340,6 +376,9 @@ leave.addEventListener("click", () => {
   peer = undefined;
   localParticipantID = undefined;
   remoteDescriptionSet = false;
+  criticalSamples = 0;
+  videoSuspended = false;
+  cameraRequested = true;
   previousStats = undefined;
   adaptationLevel = 2;
   poorSamples = 0;
