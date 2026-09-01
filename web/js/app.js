@@ -6,6 +6,7 @@ const meeting = document.querySelector("#meeting");
 const participants = document.querySelector("#participants");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
+const screen = document.querySelector("#screen");
 const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
 const diagnostics = document.querySelector("#diagnostics");
@@ -16,6 +17,8 @@ if (storedName) nameInput.value = storedName;
 let socket;
 let peer;
 let localStream;
+let screenStream;
+let cameraTrack;
 let localParticipantID;
 let remoteDescriptionSet = false;
 let reconnectTimer;
@@ -44,6 +47,7 @@ const profiles = [
 fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
   hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
+  screen.disabled = config.screen_share_enabled === false;
 }).catch(() => {});
 form.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -152,6 +156,7 @@ async function startWebRTC() {
       height: { ideal: 240, max: 360 },
       frameRate: { ideal: 15, max: 30 }
     }});
+    cameraTrack = localStream.getVideoTracks()[0];
     const local = participantElements.get(localParticipantID);
     if (local) {
       local.video.srcObject = localStream;
@@ -320,6 +325,38 @@ async function setVideoSending(enabled) {
   if (!enabled) setConnection("poor", "Audio only");
 }
 
+async function toggleScreenShare() {
+  if (screenStream) {
+    await stopScreenShare();
+    return;
+  }
+  if (screen.disabled || !peer) return;
+  try {
+    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const screenTrack = screenStream.getVideoTracks()[0];
+    const sender = peer.getSenders().find((item) => item.track?.kind === "video");
+    if (!sender) return;
+    await sender.replaceTrack(screenTrack);
+    const local = participantElements.get(localParticipantID);
+    if (local) local.video.srcObject = screenStream;
+    screen.textContent = "Stop sharing";
+    screenTrack.addEventListener("ended", stopScreenShare, { once: true });
+  } catch (error) {
+    if (error.name !== "NotAllowedError") status.textContent = `Screen share unavailable: ${error.message}`;
+  }
+}
+
+async function stopScreenShare() {
+  if (!screenStream) return;
+  const sender = peer?.getSenders().find((item) => item.track?.kind === "video");
+  if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+  screenStream.getTracks().forEach((track) => track.stop());
+  screenStream = undefined;
+  const local = participantElements.get(localParticipantID);
+  if (local && localStream) local.video.srcObject = localStream;
+  screen.textContent = "Share screen";
+}
+
 function handleWebRTCMessage(message) {
   if (message.type === "offer") {
     peer?.setRemoteDescription({ type: "offer", sdp: message.sdp })
@@ -365,14 +402,19 @@ camera.addEventListener("click", () => {
   setVideoSending(!videoSuspended);
 });
 
+screen.addEventListener("click", toggleScreenShare);
+
 leave.addEventListener("click", () => {
   intentionalClose = true;
   clearTimeout(reconnectTimer);
   clearInterval(statsTimer);
   socket?.close();
   localStream?.getTracks().forEach((track) => track.stop());
+  screenStream?.getTracks().forEach((track) => track.stop());
   peer?.close();
   localStream = undefined;
+  screenStream = undefined;
+  cameraTrack = undefined;
   peer = undefined;
   localParticipantID = undefined;
   remoteDescriptionSet = false;
@@ -387,6 +429,7 @@ leave.addEventListener("click", () => {
   pendingCandidates.splice(0);
   mic.textContent = "Mute microphone";
   camera.textContent = "Turn camera off";
+  screen.textContent = "Share screen";
   setConnection("", "Connecting");
   diagnostics.textContent = "Waiting for media statistics…";
   participantElements.clear();
