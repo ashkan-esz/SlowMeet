@@ -55,6 +55,15 @@ func (m *Meeting) Leave(id string) bool {
 	return true
 }
 
+func (m *Meeting) SetMaxParticipants(max int) {
+	if max < 1 {
+		return
+	}
+	m.mu.Lock()
+	m.max = max
+	m.mu.Unlock()
+}
+
 func (m *Meeting) List() []Participant {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

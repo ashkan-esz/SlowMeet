@@ -23,7 +23,7 @@ type client struct {
 
 type Hub struct {
 	Meeting  *meeting.Meeting
-	Config   config.Config
+	Config   *config.Store
 	Logger   *slog.Logger
 	Upgrader websocket.Upgrader
 
@@ -32,7 +32,7 @@ type Hub struct {
 	router  *media.Router
 }
 
-func NewHub(m *meeting.Meeting, cfg config.Config, logger *slog.Logger) *Hub {
+func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
 		Upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
@@ -84,7 +84,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "already joined"})
 			continue
 		}
-		if !h.Config.CheckMeetingPassword(msg.Password) {
+		cfg := h.Config.Snapshot()
+		if !cfg.CheckMeetingPassword(msg.Password) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "invalid meeting password"})
 			continue
 		}
@@ -94,7 +95,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		c.participant = participant
-		c.peer, err = webrtc.NewPeer(h.Config.STUNServers)
+		c.peer, err = webrtc.NewPeer(cfg.STUNServers)
 		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return

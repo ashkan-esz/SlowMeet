@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LowMeet admin</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <main class="shell">
+    <h1>Meeting settings</h1>
+    <form id="admin-form">
+      <label>Admin password<input id="password" type="password" required></label>
+      <label>Maximum participants<input id="participants" type="number" min="1" max="100" value="5"></label>
+      <label>Maximum video bitrate<input id="video-bitrate" type="number" min="1" value="500000"></label>
+      <label>Maximum video FPS<input id="video-fps" type="number" min="1" max="60" value="15"></label>
+      <label>Maximum audio bitrate<input id="audio-bitrate" type="number" min="1" value="64000"></label>
+      <label><input id="screen-share" type="checkbox" checked> Enable screen sharing</label>
+      <button type="submit">Save settings</button>
+      <p id="status" role="status"></p>
+    </form>
+  </main>
+  <script>
+    const form = document.querySelector("#admin-form");
+    const password = document.querySelector("#password");
+    const status = document.querySelector("#status");
+    const fields = {
+      max_participants: document.querySelector("#participants"),
+      max_video_bitrate: document.querySelector("#video-bitrate"),
+      max_video_fps: document.querySelector("#video-fps"),
+      max_audio_bitrate: document.querySelector("#audio-bitrate"),
+      screen_share_enabled: document.querySelector("#screen-share")
+    };
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = {
+        max_participants: Number(fields.max_participants.value),
+        max_video_bitrate: Number(fields.max_video_bitrate.value),
+        max_video_fps: Number(fields.max_video_fps.value),
+        max_audio_bitrate: Number(fields.max_audio_bitrate.value),
+        screen_share_enabled: fields.screen_share_enabled.checked
+      };
+      const response = await fetch("/admin/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-Admin-Password": password.value},
+        body: JSON.stringify(body)
+      });
+      status.textContent = response.ok ? "Saved." : await response.text();
+    });
+  </script>
+</body>
+</html>
