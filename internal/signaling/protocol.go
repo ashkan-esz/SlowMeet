@@ -7,35 +7,41 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	TypeJoin        = "join"
-	TypeLeave       = "leave"
-	TypeParticipant = "participant"
-	TypeJoined      = "participant_joined"
-	TypeLeft        = "participant_left"
-	TypeOffer       = "offer"
-	TypeAnswer      = "answer"
-	TypeCandidate   = "candidate"
-	TypeICERestart  = "ice_restart"
-	TypeMediaState  = "media_state"
-	TypeError       = "error"
+	ProtocolVersion  = 1
+	TypeJoin         = "join"
+	TypeLeave        = "leave"
+	TypeParticipant  = "participant"
+	TypeJoined       = "participant_joined"
+	TypeLeft         = "participant_left"
+	TypeOffer        = "offer"
+	TypeAnswer       = "answer"
+	TypeCandidate    = "candidate"
+	TypeICERestart   = "ice_restart"
+	TypeMediaState   = "media_state"
+	TypeConfigUpdate = "config_update"
+	TypeError        = "error"
 )
 
 type Message struct {
-	Version       int                  `json:"version"`
-	Type          string               `json:"type"`
-	Name          string               `json:"name,omitempty"`
-	Password      string               `json:"password,omitempty"`
-	ParticipantID string               `json:"participant_id,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Participant   *meeting.Participant `json:"participant,omitempty"`
-	TargetID      string               `json:"target_id,omitempty"`
-	SDP           string               `json:"sdp,omitempty"`
-	Candidate     string               `json:"candidate,omitempty"`
-	SDPMid        *string              `json:"sdp_mid,omitempty"`
-	SDPMLineIndex *uint16              `json:"sdp_mline_index,omitempty"`
-	AudioEnabled  *bool                `json:"audio_enabled,omitempty"`
-	VideoEnabled  *bool                `json:"video_enabled,omitempty"`
+	Version            int                  `json:"version"`
+	Type               string               `json:"type"`
+	Name               string               `json:"name,omitempty"`
+	Password           string               `json:"password,omitempty"`
+	ReconnectToken     string               `json:"reconnect_token,omitempty"`
+	ParticipantID      string               `json:"participant_id,omitempty"`
+	Error              string               `json:"error,omitempty"`
+	Participant        *meeting.Participant `json:"participant,omitempty"`
+	TargetID           string               `json:"target_id,omitempty"`
+	SDP                string               `json:"sdp,omitempty"`
+	Candidate          string               `json:"candidate,omitempty"`
+	SDPMid             *string              `json:"sdp_mid,omitempty"`
+	SDPMLineIndex      *uint16              `json:"sdp_mline_index,omitempty"`
+	AudioEnabled       *bool                `json:"audio_enabled,omitempty"`
+	VideoEnabled       *bool                `json:"video_enabled,omitempty"`
+	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
+	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
+	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
+	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
 }
 
 func (m Message) Validate() error {

@@ -49,8 +49,14 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	if values["max_video_bitrate"] != float64(500000) {
 		t.Fatalf("unexpected public config: %#v", values)
 	}
+	if values["default_video_quality"] != "low" {
+		t.Fatalf("unexpected default video quality: %#v", values["default_video_quality"])
+	}
 	if _, exposed := values["admin_password"]; exposed {
 		t.Fatal("public config exposed admin password")
+	}
+	if got := public.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public config Cache-Control = %q, want no-store", got)
 	}
 }
 
@@ -64,7 +70,7 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/config",
-		strings.NewReader(`{"max_participants":3,"max_video_bitrate":250000}`))
+		strings.NewReader(`{"max_participants":3,"default_video_quality":"medium","max_video_bitrate":250000}`))
 	request.Header.Set("X-Admin-Password", "admin-secret")
 	updated := httptest.NewRecorder()
 	handler.ServeHTTP(updated, request)
@@ -78,7 +84,7 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	if err := json.NewDecoder(public.Body).Decode(&values); err != nil {
 		t.Fatalf("decode updated config: %v", err)
 	}
-	if values["max_participants"] != float64(3) || values["max_video_bitrate"] != float64(250000) {
+	if values["max_participants"] != float64(3) || values["default_video_quality"] != "medium" || values["max_video_bitrate"] != float64(250000) {
 		t.Fatalf("runtime config was not updated: %#v", values)
 	}
 }
@@ -102,6 +108,9 @@ func TestAdminConfigGetReturnsPublicRuntimeValues(t *testing.T) {
 	}
 	if _, exposed := values["admin_password"]; exposed {
 		t.Fatal("admin password was exposed")
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("admin config Cache-Control = %q, want no-store", got)
 	}
 }
 
@@ -136,5 +145,44 @@ func TestReadOnlyEndpointsRejectNonGETRequests(t *testing.T) {
 		if got := response.Header().Get("Allow"); got != http.MethodGet {
 			t.Errorf("%s Allow = %q, want GET", path, got)
 		}
+	}
+}
+
+func TestSecurityHeadersArePresent(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	for _, path := range []string{"/", "/health", "/admin"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if response.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s missing nosniff header", path)
+		}
+		if response.Header().Get("X-Frame-Options") != "DENY" {
+			t.Errorf("%s missing frame protection header", path)
+		}
+		if response.Header().Get("Content-Security-Policy") == "" {
+			t.Errorf("%s missing CSP header", path)
+		}
+		if response.Header().Get("Permissions-Policy") == "" {
+			t.Errorf("%s missing permissions policy", path)
+		}
+	}
+}
+
+func TestCloseMarksServerNotReady(t *testing.T) {
+	server := New(testConfig(t), NewLogger("error"))
+	defer server.Close()
+
+	before := httptest.NewRecorder()
+	server.ServeHTTP(before, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if before.Code != http.StatusOK {
+		t.Fatalf("ready before close = %d, want 200", before.Code)
+	}
+
+	server.Close()
+	after := httptest.NewRecorder()
+	server.ServeHTTP(after, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if after.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ready after close = %d, want 503", after.Code)
 	}
 }

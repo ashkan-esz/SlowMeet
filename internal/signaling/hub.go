@@ -11,6 +11,7 @@ import (
 	"SlowMeet/internal/media"
 	"SlowMeet/internal/meeting"
 	"SlowMeet/internal/webrtc"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	pion "github.com/pion/webrtc/v4"
 )
@@ -21,11 +22,18 @@ const (
 )
 
 type client struct {
-	conn          *websocket.Conn
-	writeMu       sync.Mutex
-	participant   meeting.Participant
-	peer          *webrtc.Peer
-	negotiationMu sync.Mutex
+	conn           *websocket.Conn
+	writeMu        sync.Mutex
+	participant    meeting.Participant
+	reconnectToken string
+	peer           *webrtc.Peer
+	negotiationMu  sync.Mutex
+}
+
+type pendingReconnect struct {
+	participant meeting.Participant
+	token       string
+	timer       *time.Timer
 }
 
 type Hub struct {
@@ -37,10 +45,32 @@ type Hub struct {
 	mu      sync.RWMutex
 	clients map[*client]struct{}
 	router  *media.Router
+	pending map[string]*pendingReconnect
 }
 
 func (h *Hub) ActiveParticipants() int {
 	return h.Meeting.Count()
+}
+
+func (h *Hub) Close() {
+	h.mu.RLock()
+	connections := make([]*websocket.Conn, 0, len(h.clients))
+	for client := range h.clients {
+		connections = append(connections, client.conn)
+	}
+	h.mu.RUnlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+}
+
+func (h *Hub) BroadcastConfig(cfg config.Config) {
+	screenShareEnabled := cfg.EnableScreenShare
+	h.broadcast(Message{
+		Version: ProtocolVersion, Type: TypeConfigUpdate,
+		MaxVideoBitrate: cfg.MaxVideoBitrate, MaxVideoFPS: cfg.MaxVideoFPS,
+		MaxAudioBitrate: cfg.MaxAudioBitrate, ScreenShareEnabled: &screenShareEnabled,
+	})
 }
 
 func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
@@ -48,6 +78,7 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		Meeting: m, Config: cfg, Logger: logger,
 		Upgrader: websocket.Upgrader{CheckOrigin: sameOrigin},
 		clients:  make(map[*client]struct{}),
+		pending:  make(map[string]*pendingReconnect),
 		router:   media.NewRouter(),
 	}
 }
@@ -82,14 +113,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		delete(h.clients, c)
 		h.mu.Unlock()
-		if c.participant.ID != "" && h.Meeting.Leave(c.participant.ID) {
-			h.router.Unregister(c.participant.ID)
-			if c.peer != nil {
-				_ = c.peer.Close()
-			}
-			h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant})
-			h.Logger.Info("participant_left", "participant_id", c.participant.ID, "name", c.participant.Name)
-		}
+		h.disconnect(c)
 	}()
 	go func() {
 		ticker := time.NewTicker(websocketPingPeriod)
@@ -118,21 +142,23 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if msg.Type != TypeJoin {
-			if c.participant.ID != "" {
-				if msg.Type == TypeLeave {
-					if msg.ParticipantID != c.participant.ID {
-						_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "participant_id does not belong to this connection"})
-						continue
-					}
-					return
-				}
-				if msg.Type == TypeMediaState {
-					msg.ParticipantID = c.participant.ID
-					h.broadcastExcept(c, msg)
+			if c.participant.ID == "" {
+				_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "join is required before this message"})
+				continue
+			}
+			if msg.Type == TypeLeave {
+				if msg.ParticipantID != c.participant.ID {
+					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "participant_id does not belong to this connection"})
 					continue
 				}
-				h.handleWebRTCMessage(c, msg)
+				return
 			}
+			if msg.Type == TypeMediaState {
+				msg.ParticipantID = c.participant.ID
+				h.broadcastExcept(c, msg)
+				continue
+			}
+			h.handleWebRTCMessage(c, msg)
 			continue
 		}
 		if c.participant.ID != "" {
@@ -144,15 +170,26 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "invalid meeting password"})
 			continue
 		}
-		participant, err := h.Meeting.Join(msg.Name)
-		if err != nil {
-			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
-			continue
+		participant, resumed := h.reclaim(msg.ReconnectToken)
+		if !resumed {
+			participant, err = h.Meeting.Join(msg.Name)
+			if err != nil {
+				_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+				continue
+			}
 		}
 		c.participant = participant
+		c.reconnectToken = msg.ReconnectToken
+		if !resumed {
+			c.reconnectToken = uuid.NewString()
+		}
 		c.peer, err = webrtc.NewPeerWithTURN(cfg.STUNServers, cfg.TURNURL, cfg.TURNUsername, cfg.TURNPassword)
 		if err != nil {
-			_ = h.Meeting.Leave(participant.ID)
+			if resumed {
+				h.deferReconnect(participant, c.reconnectToken)
+			} else {
+				_ = h.Meeting.Leave(participant.ID)
+			}
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return
 		}
@@ -181,13 +218,17 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})
-		_ = c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant})
+		_ = c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant, ReconnectToken: c.reconnectToken})
 		for _, existing := range h.Meeting.List() {
 			if existing.ID != participant.ID {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})
 			}
 		}
-		h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+		if resumed {
+			h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+		} else {
+			h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+		}
 		h.Logger.Info("participant_joined", "participant_id", participant.ID, "name", participant.Name)
 	}
 }

@@ -11,6 +11,7 @@ import (
 type Offerer func() error
 
 type publication struct {
+	key      string
 	sourceID string
 	trackID  string
 	codec    pion.RTPCodecCapability
@@ -67,6 +68,7 @@ func (r *Router) Unregister(id string) {
 func (r *Router) Publish(sourceID string, source *webrtc.Peer, remote *pion.TrackRemote) {
 	key := sourceID + "/" + remote.Kind().String()
 	pub := &publication{
+		key:      key,
 		sourceID: sourceID,
 		trackID:  fmt.Sprintf("%s|%s", sourceID, remote.Kind().String()),
 		codec:    remote.Codec().RTPCodecCapability,
@@ -136,9 +138,7 @@ func (r *Router) forward(pub *publication) {
 	for {
 		packet, _, err := pub.remote.ReadRTP()
 		if err != nil {
-			r.mu.Lock()
-			delete(r.pubs, pub.sourceID+"/"+pub.remote.Kind().String())
-			r.mu.Unlock()
+			r.removePublication(pub)
 			return
 		}
 		r.mu.RLock()
@@ -146,5 +146,13 @@ func (r *Router) forward(pub *publication) {
 			_ = track.WriteRTP(packet)
 		}
 		r.mu.RUnlock()
+	}
+}
+
+func (r *Router) removePublication(pub *publication) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current, exists := r.pubs[pub.key]; exists && current == pub {
+		delete(r.pubs, pub.key)
 	}
 }

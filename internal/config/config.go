@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -26,6 +27,7 @@ type Config struct {
 	MaxVideoBitrate     int
 	MaxAudioBitrate     int
 	EnableScreenShare   bool
+	ReconnectTimeout    time.Duration
 	LogLevel            string
 }
 
@@ -60,6 +62,10 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	reconnectSeconds, err := envInt("RECONNECT_TIMEOUT_SECONDS", 30)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
@@ -78,6 +84,7 @@ func LoadFromEnv() (Config, error) {
 		MaxVideoBitrate:     maxVideoBitrate,
 		MaxAudioBitrate:     maxAudioBitrate,
 		EnableScreenShare:   enableScreenShare,
+		ReconnectTimeout:    time.Duration(reconnectSeconds) * time.Second,
 		LogLevel:            envString("LOG_LEVEL", "info"),
 	}
 	if err := cfg.Validate(); err != nil {
@@ -104,6 +111,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxVideoBitrate < 1 {
 		return fmt.Errorf("MAX_VIDEO_BITRATE must be positive")
+	}
+	if c.ReconnectTimeout < 0 || c.ReconnectTimeout > 10*time.Minute {
+		return fmt.Errorf("RECONNECT_TIMEOUT_SECONDS must be between 0 and 600")
 	}
 	if c.DefaultVideoQuality == "" {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not be empty")

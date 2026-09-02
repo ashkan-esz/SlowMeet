@@ -15,10 +15,11 @@ func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
 		t.Fatal("admin password validation failed")
 	}
 	max := 3
-	if err := store.Update(AdminUpdate{MaxParticipants: &max}); err != nil {
+	quality := "medium"
+	if err := store.Update(AdminUpdate{MaxParticipants: &max, DefaultVideoQuality: &quality}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if got := store.Snapshot(); got.MaxParticipants != 3 || got.AdminPassword != "admin" {
+	if got := store.Snapshot(); got.MaxParticipants != 3 || got.DefaultVideoQuality != "medium" || got.AdminPassword != "admin" {
 		t.Fatalf("unexpected snapshot: %+v", got)
 	}
 }

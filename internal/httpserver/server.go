@@ -7,13 +7,20 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync/atomic"
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/meeting"
 	"SlowMeet/internal/signaling"
 )
 
-func New(cfg config.Config, logger *slog.Logger) http.Handler {
+type Server struct {
+	handler http.Handler
+	hub     *signaling.Hub
+	ready   atomic.Bool
+}
+
+func New(cfg config.Config, logger *slog.Logger) *Server {
 	store, err := config.LoadStore(cfg)
 	if err != nil {
 		logger.Warn("config_persistence_unavailable", "error", err)
@@ -21,6 +28,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 	}
 	meetingState := meeting.New(store.Snapshot().MaxParticipants)
 	hub := signaling.NewHub(meetingState, store, logger)
+	app := &Server{hub: hub}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -33,6 +41,10 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
+		if !app.ready.Load() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 	})
@@ -41,6 +53,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			return
 		}
 		cfg := store.Snapshot()
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"max_participants":      cfg.MaxParticipants,
@@ -92,6 +105,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			}
 			snapshot := store.Snapshot()
 			meetingState.SetMaxParticipants(snapshot.MaxParticipants)
+			hub.BroadcastConfig(snapshot)
 			writePublicConfig(w, snapshot)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -100,10 +114,22 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
-	return mux
+	app.handler = withSecurityHeaders(mux)
+	app.ready.Store(true)
+	return app
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) Close() {
+	s.ready.Store(false)
+	s.hub.Close()
 }
 
 func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"max_participants": cfg.MaxParticipants, "max_video_bitrate": cfg.MaxVideoBitrate,
@@ -120,6 +146,20 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	w.Header().Set("Allow", method)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	return false
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; "+
+				"frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self)")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func NewLogger(level string) *slog.Logger {

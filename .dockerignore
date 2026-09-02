@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+config.json
+data
+coverage
+tmp
+*.log
+Dockerfile
+docker-compose.yml
+docs
+scripts
+internal/*/*_test.go

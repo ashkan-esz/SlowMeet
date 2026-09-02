@@ -12,6 +12,13 @@
     <form id="admin-form">
       <label>Admin password<input id="password" type="password" required></label>
       <label>Maximum participants<input id="participants" type="number" min="1" max="100" value="5"></label>
+      <label>Default video quality
+        <select id="video-quality">
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </label>
       <label>Maximum video bitrate<input id="video-bitrate" type="number" min="1" value="500000"></label>
       <label>Maximum video FPS<input id="video-fps" type="number" min="1" max="60" value="15"></label>
       <label>Maximum audio bitrate<input id="audio-bitrate" type="number" min="1" value="64000"></label>
@@ -26,6 +33,7 @@
     const status = document.querySelector("#status");
     const fields = {
       max_participants: document.querySelector("#participants"),
+      default_video_quality: document.querySelector("#video-quality"),
       max_video_bitrate: document.querySelector("#video-bitrate"),
       max_video_fps: document.querySelector("#video-fps"),
       max_audio_bitrate: document.querySelector("#audio-bitrate"),
@@ -41,6 +49,7 @@
       }
       const values = await response.json();
       fields.max_participants.value = values.max_participants;
+      fields.default_video_quality.value = values.default_video_quality;
       fields.max_video_bitrate.value = values.max_video_bitrate;
       fields.max_video_fps.value = values.max_video_fps;
       fields.max_audio_bitrate.value = values.max_audio_bitrate;
@@ -51,6 +60,7 @@
       event.preventDefault();
       const body = {
         max_participants: Number(fields.max_participants.value),
+        default_video_quality: fields.default_video_quality.value,
         max_video_bitrate: Number(fields.max_video_bitrate.value),
         max_video_fps: Number(fields.max_video_fps.value),
         max_audio_bitrate: Number(fields.max_audio_bitrate.value),

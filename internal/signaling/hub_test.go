@@ -58,6 +58,21 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 		t.Fatalf("participant broadcast = %+v", firstSeesSecond)
 	}
 
+	hub.BroadcastConfig(config.Config{
+		MaxVideoBitrate:   250000,
+		MaxVideoFPS:       10,
+		MaxAudioBitrate:   32000,
+		EnableScreenShare: false,
+	})
+	for _, conn := range []*websocket.Conn{first, second} {
+		var update Message
+		readTestMessage(t, conn, &update)
+		if update.Type != TypeConfigUpdate || update.MaxVideoBitrate != 250000 ||
+			update.MaxVideoFPS != 10 || update.MaxAudioBitrate != 32000 ||
+			update.ScreenShareEnabled == nil || *update.ScreenShareEnabled {
+			t.Fatalf("configuration update = %+v", update)
+		}
+	}
 	writeTestMessage(t, first, Message{
 		Version:       ProtocolVersion,
 		Type:          TypeLeave,
@@ -125,6 +140,58 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 	if fullError.Type != TypeError || fullError.Error != "meeting is full" {
 		t.Fatalf("full meeting response = %+v", fullError)
 	}
+}
+
+func TestHubRejectsMessagesBeforeJoin(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	conn := dialTestSocket(t, socketURL)
+	defer conn.Close()
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeICERestart})
+
+	var response Message
+	readTestMessage(t, conn, &response)
+	if response.Type != TypeError || response.Error != "join is required before this message" {
+		t.Fatalf("pre-join response = %+v", response)
+	}
+}
+
+func TestHubCloseCleansUpJoinedParticipants(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	conn := dialTestSocket(t, socketURL)
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	if joined.Type != TypeParticipant {
+		t.Fatalf("join response = %+v", joined)
+	}
+
+	hub.Close()
+	defer conn.Close()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if hub.ActiveParticipants() == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("active participants after Close() = %d, want 0", hub.ActiveParticipants())
 }
 
 func dialTestSocket(t *testing.T, url string) *websocket.Conn {

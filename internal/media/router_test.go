@@ -42,3 +42,22 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 		t.Fatal("unrelated subscription was removed")
 	}
 }
+
+func TestRemovePublicationDoesNotDeleteReplacement(t *testing.T) {
+	router := NewRouter()
+	old := &publication{
+		key:      "source/audio",
+		sourceID: "source",
+	}
+	replacement := &publication{
+		key:      "source/audio",
+		sourceID: "source",
+	}
+	router.pubs["source/audio"] = replacement
+
+	router.removePublication(old)
+
+	if got := router.pubs["source/audio"]; got != replacement {
+		t.Fatal("replacement publication was deleted by stale forwarder")
+	}
+}

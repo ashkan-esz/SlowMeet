@@ -15,7 +15,7 @@
       <input id="name" name="name" maxlength="32" autocomplete="name" required>
       <label for="password">Meeting password <span>(if required)</span></label>
       <input id="password" name="password" type="password" autocomplete="off">
-      <button type="submit">Join meeting</button>
+      <button id="join" type="submit">Join meeting</button>
       <p id="status" role="status"></p>
     </form>
     <section id="meeting" hidden>
@@ -24,8 +24,11 @@
       <ul id="participants"></ul>
       <details>
         <summary>Connection details</summary>
+        <button id="copy-diagnostics" type="button">Copy diagnostics</button>
         <pre id="diagnostics">Waiting for media statistics…</pre>
+        <p id="diagnostics-status" role="status"></p>
       </details>
+      <button id="enable-audio" type="button" hidden>Enable remote audio</button>
       <label for="profile">Bandwidth profile</label>
       <select id="profile">
         <option value="auto">Auto</option>
@@ -43,6 +46,7 @@
     </section>
   </main>
   <script src="/js/adaptation-policy.js"></script>
+  <script src="/js/protocol.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

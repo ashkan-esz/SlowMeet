@@ -20,9 +20,10 @@ func main() {
 		os.Exit(1)
 	}
 	logger := httpserver.NewLogger(cfg.LogLevel)
+	app := httpserver.New(cfg, logger)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpserver.New(cfg, logger),
+		Handler:           app,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
@@ -46,6 +47,7 @@ func main() {
 	case <-shutdown:
 	}
 	logger.Info("server_shutting_down")
+	app.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
