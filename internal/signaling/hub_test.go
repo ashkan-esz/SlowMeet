@@ -250,6 +250,8 @@ func TestHubReleasesScreenShareWhenOwnerDisconnects(t *testing.T) {
 	readTestMessage(t, owner, &ownerJoined)
 	var ownerSeesObserver Message
 	readTestMessage(t, owner, &ownerSeesObserver)
+	var observerSeesOwner Message
+	readTestMessage(t, observer, &observerSeesOwner)
 	active := true
 	writeTestMessage(t, owner, Message{
 		Version: ProtocolVersion, Type: TypeScreenShare,
@@ -257,6 +259,8 @@ func TestHubReleasesScreenShareWhenOwnerDisconnects(t *testing.T) {
 	})
 	var ownerState Message
 	readTestMessage(t, owner, &ownerState)
+	var observerState Message
+	readTestMessage(t, observer, &observerState)
 	owner.Close()
 
 	var released Message
@@ -291,6 +295,31 @@ func TestHubScreenShareLeaseBindsToConnection(t *testing.T) {
 	hub.mu.RUnlock()
 	if current != nil {
 		t.Fatal("owner did not release the screen-share lease")
+	}
+}
+
+func TestHubAllowsScreenShareReleaseWhenDisabled(t *testing.T) {
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{
+		HTTPAddr: ":8080", EnableScreenShare: false,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}), slog.Default())
+	owner := &client{participant: meeting.Participant{ID: "owner"}}
+	hub.mu.Lock()
+	hub.screenSharer = owner
+	hub.mu.Unlock()
+
+	if err := hub.requestScreenShare(owner, false); err != nil {
+		t.Fatalf("release with screen sharing disabled: %v", err)
+	}
+	hub.mu.RLock()
+	current := hub.screenSharer
+	hub.mu.RUnlock()
+	if current != nil {
+		t.Fatal("disabled screen sharing release did not clear the lease")
+	}
+	if err := hub.requestScreenShare(owner, true); err == nil {
+		t.Fatal("acquisition with screen sharing disabled succeeded")
 	}
 }
 

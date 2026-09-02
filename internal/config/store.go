@@ -68,6 +68,7 @@ func subtleCompare(a, b string) bool {
 type AdminUpdate struct {
 	MaxParticipants     *int    `json:"max_participants"`
 	DefaultVideoQuality *string `json:"default_video_quality"`
+	MaxVideoQuality     *string `json:"max_video_quality"`
 	MaxVideoBitrate     *int    `json:"max_video_bitrate"`
 	MaxVideoFPS         *int    `json:"max_video_fps"`
 	MaxAudioBitrate     *int    `json:"max_audio_bitrate"`
@@ -105,6 +106,9 @@ func updatedConfig(current Config, update AdminUpdate) (Config, error) {
 	if update.DefaultVideoQuality != nil {
 		next.DefaultVideoQuality = *update.DefaultVideoQuality
 	}
+	if update.MaxVideoQuality != nil {
+		next.MaxVideoQuality = *update.MaxVideoQuality
+	}
 	if update.MaxVideoBitrate != nil {
 		next.MaxVideoBitrate = *update.MaxVideoBitrate
 	}
@@ -134,6 +138,7 @@ func persist(cfg Config, path string) error {
 	data, err := json.MarshalIndent(AdminUpdate{
 		MaxParticipants:     intPointer(cfg.MaxParticipants),
 		DefaultVideoQuality: stringPointer(cfg.DefaultVideoQuality),
+		MaxVideoQuality:     stringPointer(cfg.EffectiveMaxVideoQuality()),
 		MaxVideoBitrate:     intPointer(cfg.MaxVideoBitrate),
 		MaxVideoFPS:         intPointer(cfg.MaxVideoFPS),
 		MaxAudioBitrate:     intPointer(cfg.MaxAudioBitrate),

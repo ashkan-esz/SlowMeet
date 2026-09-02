@@ -21,6 +21,7 @@ type Config struct {
 	TURNPassword        string
 	MaxParticipants     int
 	DefaultVideoQuality string
+	MaxVideoQuality     string
 	DefaultVideoFPS     int
 	MaxVideoFPS         int
 	DefaultAudioBitrate int
@@ -78,6 +79,7 @@ func LoadFromEnv() (Config, error) {
 		TURNPassword:        os.Getenv("TURN_PASSWORD"),
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
+		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "high"),
 		DefaultVideoFPS:     defaultVideoFPS,
 		MaxVideoFPS:         maxVideoFPS,
 		DefaultAudioBitrate: defaultAudioBitrate,
@@ -123,10 +125,40 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must be one of low, medium, or high")
 	}
+	maxVideoQuality := c.MaxVideoQuality
+	if maxVideoQuality == "" {
+		maxVideoQuality = "high"
+	}
+	switch maxVideoQuality {
+	case "low", "medium", "high":
+	default:
+		return fmt.Errorf("MAX_VIDEO_QUALITY must be one of low, medium, or high")
+	}
+	if videoQualityRank(c.DefaultVideoQuality) > videoQualityRank(maxVideoQuality) {
+		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not exceed MAX_VIDEO_QUALITY")
+	}
 	if c.LogLevel != "" && c.LogLevel != "info" && c.LogLevel != "debug" {
 		return fmt.Errorf("LOG_LEVEL must be info or debug")
 	}
 	return nil
+}
+
+func (c Config) EffectiveMaxVideoQuality() string {
+	if c.MaxVideoQuality == "" {
+		return "high"
+	}
+	return c.MaxVideoQuality
+}
+
+func videoQualityRank(quality string) int {
+	switch quality {
+	case "medium":
+		return 1
+	case "high":
+		return 2
+	default:
+		return 0
+	}
 }
 
 func (c Config) CheckMeetingPassword(candidate string) bool {

@@ -7,73 +7,302 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <main class="shell">
-    <h1>Meeting settings</h1>
-    <form id="admin-form">
-      <label>Admin password<input id="password" type="password" required></label>
-      <label>Maximum participants<input id="participants" type="number" min="1" max="100" value="5"></label>
-      <label>Default video quality
-        <select id="video-quality">
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-        </select>
-      </label>
-      <label>Maximum video bitrate<input id="video-bitrate" type="number" min="1" value="500000"></label>
-      <label>Maximum video FPS<input id="video-fps" type="number" min="1" max="60" value="15"></label>
-      <label>Maximum audio bitrate<input id="audio-bitrate" type="number" min="1" value="64000"></label>
-      <label><input id="screen-share" type="checkbox" checked> Enable screen sharing</label>
-      <button type="submit">Save settings</button>
-      <p id="status" role="status"></p>
-    </form>
+  <main class="admin-shell">
+    <aside class="signal-rail" aria-label="Service status">
+      <span class="signal-dot" aria-hidden="true"></span>
+      <span id="service-label">Checking service</span>
+      <small id="service-detail">Waiting for readiness</small>
+    </aside>
+    <section class="admin-main">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">LowMeet / Operations</p>
+          <h1>Meeting settings</h1>
+          <p class="admin-intro">A quiet control room for one meeting. Watch the live signal, then adjust the limits that protect audio continuity.</p>
+        </div>
+        <button id="refresh" class="button-secondary" type="button">Refresh status</button>
+      </header>
+
+      <section class="admin-summary" aria-label="Service summary">
+        <article class="summary-card">
+          <span class="summary-label">Active participants</span>
+          <strong id="active-participants" class="summary-value">—</strong>
+          <span id="capacity-detail" class="summary-detail">Waiting for metrics</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Peer connections</span>
+          <strong id="peer-connections" class="summary-value">—</strong>
+          <span id="reconnect-count" class="summary-detail">— reconnects</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Average RTT</span>
+          <strong id="average-rtt" class="summary-value">—</strong>
+          <span class="summary-detail">Latest network sample</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Packet loss</span>
+          <strong id="packet-loss" class="summary-value">—</strong>
+          <span id="network-detail" class="summary-detail">Audio is prioritized</span>
+        </article>
+      </section>
+
+      <div class="admin-columns">
+        <section class="admin-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">Policy</p>
+              <h2>Meeting limits</h2>
+            </div>
+            <span id="save-state" class="status-chip">Protected</span>
+          </div>
+          <p class="card-copy">Changes apply to the active meeting and are broadcast to connected clients.</p>
+          <form id="admin-form">
+            <label>Admin password<input id="password" type="password" autocomplete="current-password" required></label>
+            <fieldset>
+              <legend>Capacity</legend>
+              <label>Maximum participants
+                <span class="field-help">1–100 people</span>
+                <input id="participants" type="number" min="1" max="100" value="5">
+              </label>
+            </fieldset>
+            <fieldset>
+              <legend>Video policy</legend>
+              <label>Default video quality
+                <select id="video-quality">
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+              <label>Maximum video quality
+                <span class="field-help">Hard ceiling for participant profiles</span>
+                <select id="max-video-quality">
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+              <label>Maximum video bitrate
+                <span class="field-help">bits per second</span>
+                <input id="video-bitrate" type="number" min="1" value="500000">
+              </label>
+              <label>Maximum video FPS
+                <span class="field-help">1–60 frames per second</span>
+                <input id="video-fps" type="number" min="1" max="60" value="30">
+              </label>
+            </fieldset>
+            <fieldset>
+              <legend>Audio policy</legend>
+              <label>Maximum audio bitrate
+                <span class="field-help">bits per second</span>
+                <input id="audio-bitrate" type="number" min="1" value="64000">
+              </label>
+            </fieldset>
+            <label class="checkbox-row"><input id="screen-share" type="checkbox" checked> <span>Enable screen sharing</span></label>
+            <button id="save" type="submit">Save settings</button>
+            <p id="status" role="status" class="form-status"></p>
+          </form>
+        </section>
+
+        <section class="admin-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">Network watch</p>
+              <h2>Live signal</h2>
+            </div>
+            <span id="updated-at" class="updated-at">Not refreshed</span>
+          </div>
+          <p class="card-copy">These are the latest reported values, not historical trends.</p>
+          <dl class="metric-list">
+            <div><dt>Latest RTT</dt><dd id="latest-rtt">—</dd></div>
+            <div><dt>Jitter</dt><dd id="jitter">—</dd></div>
+            <div><dt>Video bitrate</dt><dd id="video-kbps">—</dd></div>
+            <div><dt>Audio bitrate</dt><dd id="audio-kbps">—</dd></div>
+            <div><dt>Network samples</dt><dd id="network-samples">—</dd></div>
+            <div><dt>Connection failures</dt><dd id="connection-failures">—</dd></div>
+          </dl>
+          <div class="policy-note">
+            <strong>Reliability first</strong>
+            <span>When conditions worsen, video may reduce quality while audio remains available.</span>
+          </div>
+        </section>
+      </div>
+
+      <footer class="admin-footer">
+        <span id="endpoint-status">Endpoints: /health · /ready · /metrics · /ws</span>
+        <a href="/">Open meeting</a>
+      </footer>
+    </section>
   </main>
   <script>
     const form = document.querySelector("#admin-form");
     const password = document.querySelector("#password");
     const status = document.querySelector("#status");
+    const save = document.querySelector("#save");
+    const refresh = document.querySelector("#refresh");
+    const serviceLabel = document.querySelector("#service-label");
+    const serviceDetail = document.querySelector("#service-detail");
+    const signalRail = document.querySelector(".signal-rail");
+    const updatedAt = document.querySelector("#updated-at");
     const fields = {
       max_participants: document.querySelector("#participants"),
       default_video_quality: document.querySelector("#video-quality"),
+      max_video_quality: document.querySelector("#max-video-quality"),
       max_video_bitrate: document.querySelector("#video-bitrate"),
       max_video_fps: document.querySelector("#video-fps"),
       max_audio_bitrate: document.querySelector("#audio-bitrate"),
       screen_share_enabled: document.querySelector("#screen-share")
     };
-    async function loadSettings() {
-      const response = await fetch("/admin/config", {
-        headers: {"X-Admin-Password": password.value}
-      });
-      if (!response.ok) {
-        status.textContent = response.status === 401 ? "Enter the admin password." : await response.text();
-        return;
+
+    const metricFields = {
+      active: document.querySelector("#active-participants"),
+      capacity: document.querySelector("#capacity-detail"),
+      peers: document.querySelector("#peer-connections"),
+      reconnects: document.querySelector("#reconnect-count"),
+      averageRtt: document.querySelector("#average-rtt"),
+      latestRtt: document.querySelector("#latest-rtt"),
+      packetLoss: document.querySelector("#packet-loss"),
+      jitter: document.querySelector("#jitter"),
+      video: document.querySelector("#video-kbps"),
+      audio: document.querySelector("#audio-kbps"),
+      samples: document.querySelector("#network-samples"),
+      failures: document.querySelector("#connection-failures"),
+      network: document.querySelector("#network-detail")
+    };
+
+    function setServiceState(level, label, detail) {
+      signalRail.className = `signal-rail ${level}`;
+      serviceLabel.textContent = label;
+      serviceDetail.textContent = detail;
+    }
+
+    function parseMetrics(body) {
+      return body.split("\n").reduce((values, line) => {
+        const match = line.match(/^lowmeet_([a-z0-9_]+)\s+([-+]?[0-9]*\.?[0-9]+)$/);
+        if (match) values[match[1]] = Number(match[2]);
+        return values;
+      }, {});
+    }
+
+    function formatMetric(value, suffix = "") {
+      return Number.isFinite(value) && value >= 0 ? `${value}${suffix}` : "No sample yet";
+    }
+
+    function renderMetrics(values) {
+      const active = values.active_participants;
+      const max = values.max_participants;
+      metricFields.active.textContent = Number.isFinite(active) ? active : "—";
+      metricFields.capacity.textContent = Number.isFinite(max) ? `of ${max} allowed` : "Waiting for metrics";
+      metricFields.peers.textContent = Number.isFinite(values.peer_connections) ? values.peer_connections : "—";
+      metricFields.reconnects.textContent = `${values.reconnects_total || 0} reconnects`;
+      const hasSamples = values.network_samples_total > 0;
+      metricFields.averageRtt.textContent = hasSamples ? formatMetric(values.average_rtt_ms, " ms") : "No sample yet";
+      metricFields.latestRtt.textContent = hasSamples ? formatMetric(values.last_rtt_ms, " ms") : "No sample yet";
+      metricFields.packetLoss.textContent = hasSamples && Number.isFinite(values.last_packet_loss_percent) ?
+        `${values.last_packet_loss_percent.toFixed(1)}%` : "No sample yet";
+      metricFields.jitter.textContent = hasSamples ? formatMetric(values.last_jitter_ms, " ms") : "No sample yet";
+      metricFields.video.textContent = hasSamples ? formatMetric(values.last_video_kbps, " kbps") : "No sample yet";
+      metricFields.audio.textContent = hasSamples ? formatMetric(values.last_audio_kbps, " kbps") : "No sample yet";
+      metricFields.samples.textContent = values.network_samples_total || 0;
+      metricFields.failures.textContent = values.connection_failures_total || 0;
+      const degraded = values.last_packet_loss_percent > 5 || values.average_rtt_ms > 250;
+      metricFields.network.textContent = degraded ? "Video may be degrading" : "Audio is prioritized";
+      if (serviceLabel.textContent !== "Service unavailable") {
+        setServiceState(degraded ? "warning" : "success", degraded ? "Network watch" : "Service ready",
+          degraded ? "Video may reduce quality" : "Meeting path is available");
       }
-      const values = await response.json();
-      fields.max_participants.value = values.max_participants;
+    }
+
+    async function refreshStatus() {
+      refresh.disabled = true;
+      try {
+        const [readyResponse, metricsResponse] = await Promise.all([
+          fetch("/ready", {cache: "no-store"}),
+          fetch("/metrics", {cache: "no-store"})
+        ]);
+        if (!readyResponse.ok) throw new Error("Service is not ready");
+        renderMetrics(parseMetrics(await metricsResponse.text()));
+        updatedAt.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        setServiceState("danger", "Service unavailable", error.message);
+        updatedAt.textContent = "Refresh failed";
+      } finally {
+        refresh.disabled = false;
+      }
+    }
+
+    async function loadSettings() {
+      if (!password.value) return;
+      try {
+        const response = await fetch("/admin/config", {
+          cache: "no-store",
+          headers: {"X-Admin-Password": password.value}
+        });
+        if (response.status === 401) {
+          status.textContent = "Admin password rejected.";
+          document.querySelector("#save-state").textContent = "Protected";
+          return;
+        }
+        if (!response.ok) {
+          status.textContent = `Could not load settings (${response.status}).`;
+          return;
+        }
+        const values = await response.json();
+        fields.max_participants.value = values.max_participants;
       fields.default_video_quality.value = values.default_video_quality;
-      fields.max_video_bitrate.value = values.max_video_bitrate;
-      fields.max_video_fps.value = values.max_video_fps;
-      fields.max_audio_bitrate.value = values.max_audio_bitrate;
-      fields.screen_share_enabled.checked = values.screen_share_enabled;
-      status.textContent = "Loaded.";
+      fields.max_video_quality.value = values.max_video_quality;
+        fields.max_video_bitrate.value = values.max_video_bitrate;
+        fields.max_video_fps.value = values.max_video_fps;
+        fields.max_audio_bitrate.value = values.max_audio_bitrate;
+        fields.screen_share_enabled.checked = values.screen_share_enabled;
+        status.textContent = "Loaded.";
+        document.querySelector("#save-state").textContent = "Authenticated";
+      } catch (_) {
+        status.textContent = "Could not reach the service. Settings were not loaded.";
+      }
     }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      save.disabled = true;
+      status.textContent = "Saving…";
+      save.textContent = "Saving settings…";
       const body = {
         max_participants: Number(fields.max_participants.value),
         default_video_quality: fields.default_video_quality.value,
+        max_video_quality: fields.max_video_quality.value,
         max_video_bitrate: Number(fields.max_video_bitrate.value),
         max_video_fps: Number(fields.max_video_fps.value),
         max_audio_bitrate: Number(fields.max_audio_bitrate.value),
         screen_share_enabled: fields.screen_share_enabled.checked
       };
-      const response = await fetch("/admin/config", {
-        method: "POST",
-        headers: {"Content-Type": "application/json", "X-Admin-Password": password.value},
-        body: JSON.stringify(body)
-      });
-      status.textContent = response.ok ? "Saved." : await response.text();
+      try {
+        const response = await fetch("/admin/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-Admin-Password": password.value},
+          body: JSON.stringify(body)
+        });
+        if (response.status === 401) {
+          status.textContent = "Admin password rejected.";
+        } else if (response.status === 400) {
+          status.textContent = `Settings rejected: ${await response.text()}`;
+        } else if (!response.ok) {
+          status.textContent = `Could not save settings (${response.status}).`;
+        } else {
+          status.textContent = "Settings saved. Changes are live.";
+          document.querySelector("#save-state").textContent = "Saved";
+          await refreshStatus();
+        }
+      } catch (_) {
+        status.textContent = "Could not reach the service. Settings were not changed.";
+      } finally {
+        save.disabled = false;
+        save.textContent = "Save settings";
+      }
     });
     password.addEventListener("change", loadSettings);
+    refresh.addEventListener("click", refreshStatus);
+    refreshStatus();
+    setInterval(refreshStatus, 10000);
   </script>
 </body>
 </html>

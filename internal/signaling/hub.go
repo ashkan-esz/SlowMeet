@@ -1,7 +1,10 @@
 package signaling
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -109,7 +112,8 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 	h.broadcast(Message{
 		Version: ProtocolVersion, Type: TypeConfigUpdate,
 		MaxVideoBitrate: cfg.MaxVideoBitrate, MaxVideoFPS: cfg.MaxVideoFPS,
-		MaxAudioBitrate: cfg.MaxAudioBitrate, ScreenShareEnabled: &screenShareEnabled,
+		MaxAudioBitrate: cfg.MaxAudioBitrate, MaxVideoQuality: cfg.EffectiveMaxVideoQuality(),
+		ScreenShareEnabled: &screenShareEnabled,
 	})
 	if releasedScreenShare {
 		h.broadcast(h.screenShareMessage(false, ""))
@@ -163,7 +167,7 @@ func (h *Hub) screenShareMessage(active bool, owner string) Message {
 
 func (h *Hub) requestScreenShare(c *client, active bool) error {
 	cfg := h.Config.Snapshot()
-	if !cfg.EnableScreenShare {
+	if active && !cfg.EnableScreenShare {
 		return fmt.Errorf("screen sharing is disabled")
 	}
 	h.mu.Lock()
@@ -324,7 +328,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		var msg Message
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := readMessage(conn, &msg); err != nil {
 			return
 		}
 		if err := msg.Validate(); err != nil {
@@ -447,10 +451,44 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func readMessage(conn *websocket.Conn, message *Message) error {
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		return err
+	}
+	if messageType != websocket.TextMessage {
+		return fmt.Errorf("signaling messages must be text")
+	}
+	return decodeMessage(payload, message)
+}
+
+func decodeMessage(payload []byte, message *Message) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(message); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("signaling message must contain one JSON object")
+		}
+		return err
+	}
+	return nil
+}
+
 func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 	switch msg.Type {
 	case TypeOffer:
 		c.negotiationMu.Lock()
+		if c.offerInFlight {
+			// The server is the impolite offerer. The browser's polite
+			// negotiation path rolls back its colliding offer and answers
+			// this server offer instead.
+			c.negotiationMu.Unlock()
+			return
+		}
 		if err := c.peer.SetRemoteOffer(msg.SDP); err != nil {
 			c.negotiationMu.Unlock()
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
@@ -466,6 +504,10 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		_ = c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer})
 	case TypeAnswer:
 		c.negotiationMu.Lock()
+		if !c.offerInFlight {
+			c.negotiationMu.Unlock()
+			return
+		}
 		err := c.peer.SetRemoteAnswer(msg.SDP)
 		shouldOffer := c.offerInFlight && c.pendingOffer
 		iceRestart := c.pendingICERestart

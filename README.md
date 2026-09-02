@@ -48,14 +48,21 @@ Set `MEETING_PASSWORD` to require a password at join time. Set
 `ADMIN_PASSWORD` separately to enable `/admin` and protect runtime settings.
 Passwords are never sent to the frontend or written to logs.
 
+Open `/admin` to use the protected operations cockpit. It shows readiness,
+active participants, peer connections, reconnects, RTT, packet loss, jitter,
+and current audio/video bitrate, then groups the runtime limits by capacity,
+video policy, audio policy, and meeting features. The dashboard refreshes
+health and metrics automatically; settings remain unchanged if a save fails.
+
 `STUN_SERVERS` accepts a comma-separated list. For users behind restrictive
 NATs, configure a coturn deployment and set `TURN_URL`, `TURN_USERNAME`, and
 `TURN_PASSWORD` as appropriate.
 
-`MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and `MAX_AUDIO_BITRATE` are enforced by
-the SFU as forwarding ceilings. Excess RTP is dropped immediately rather than
-queued or transcoded, preserving latency and keeping audio/video processing
-lightweight.
+`MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and
+`MAX_AUDIO_BITRATE` are enforced as hard ceilings. The quality ceiling limits
+the browser profile resolution; bitrate and FPS ceilings are also enforced by
+the SFU, which drops excess RTP immediately rather than queuing or
+transcoding.
 
 ## Docker
 

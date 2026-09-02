@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"SlowMeet/internal/config"
+	"SlowMeet/internal/signaling"
+	"github.com/gorilla/websocket"
 )
 
 func testConfig(t *testing.T) config.Config {
@@ -52,6 +55,9 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	if values["default_video_quality"] != "low" {
 		t.Fatalf("unexpected default video quality: %#v", values["default_video_quality"])
 	}
+	if values["max_video_quality"] != "high" {
+		t.Fatalf("unexpected maximum video quality: %#v", values["max_video_quality"])
+	}
 	if _, exposed := values["admin_password"]; exposed {
 		t.Fatal("public config exposed admin password")
 	}
@@ -77,7 +83,7 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/config",
-		strings.NewReader(`{"max_participants":3,"default_video_quality":"medium","max_video_bitrate":250000}`))
+		strings.NewReader(`{"max_participants":3,"default_video_quality":"medium","max_video_quality":"medium","max_video_bitrate":250000}`))
 	request.Header.Set("X-Admin-Password", "admin-secret")
 	updated := httptest.NewRecorder()
 	handler.ServeHTTP(updated, request)
@@ -91,7 +97,8 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	if err := json.NewDecoder(public.Body).Decode(&values); err != nil {
 		t.Fatalf("decode updated config: %v", err)
 	}
-	if values["max_participants"] != float64(3) || values["default_video_quality"] != "medium" || values["max_video_bitrate"] != float64(250000) {
+	if values["max_participants"] != float64(3) || values["default_video_quality"] != "medium" ||
+		values["max_video_quality"] != "medium" || values["max_video_bitrate"] != float64(250000) {
 		t.Fatalf("runtime config was not updated: %#v", values)
 	}
 }
@@ -113,11 +120,99 @@ func TestAdminConfigGetReturnsPublicRuntimeValues(t *testing.T) {
 	if values["max_participants"] != float64(5) {
 		t.Fatalf("unexpected public config: %#v", values)
 	}
+	if values["default_video_fps"] != float64(15) || values["default_audio_bitrate"] != float64(32000) {
+		t.Fatalf("default media settings missing from admin config: %#v", values)
+	}
 	if _, exposed := values["admin_password"]; exposed {
 		t.Fatal("admin password was exposed")
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("admin config Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestAdminCapacityUpdateAffectsWebSocketAdmission(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxParticipants = 1
+	app := New(cfg, NewLogger("error"))
+	server := httptest.NewServer(app)
+	defer server.Close()
+	defer app.Close()
+
+	socketURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	first, _, err := websocket.DefaultDialer.Dial(socketURL+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial first participant: %v", err)
+	}
+	defer first.Close()
+	if err := first.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Ashkan",
+	}); err != nil {
+		t.Fatalf("join first participant: %v", err)
+	}
+	var firstJoined signaling.Message
+	if err := first.ReadJSON(&firstJoined); err != nil {
+		t.Fatalf("read first join response: %v", err)
+	}
+	if firstJoined.Type != signaling.TypeParticipant {
+		t.Fatalf("first join response = %+v", firstJoined)
+	}
+
+	updateCapacity := func(t *testing.T, max int) {
+		t.Helper()
+		body := strings.NewReader(fmt.Sprintf(`{"max_participants":%d}`, max))
+		request, err := http.NewRequest(http.MethodPost, server.URL+"/admin/config", body)
+		if err != nil {
+			t.Fatalf("create capacity update: %v", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Admin-Password", "admin-secret")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("update capacity: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("capacity update status = %d", response.StatusCode)
+		}
+	}
+
+	updateCapacity(t, 2)
+	second, _, err := websocket.DefaultDialer.Dial(socketURL+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial second participant: %v", err)
+	}
+	defer second.Close()
+	if err := second.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Ali",
+	}); err != nil {
+		t.Fatalf("join second participant: %v", err)
+	}
+	var secondJoined signaling.Message
+	if err := second.ReadJSON(&secondJoined); err != nil {
+		t.Fatalf("read second join response: %v", err)
+	}
+	if secondJoined.Type != signaling.TypeParticipant {
+		t.Fatalf("second join response = %+v", secondJoined)
+	}
+
+	updateCapacity(t, 1)
+	third, _, err := websocket.DefaultDialer.Dial(socketURL+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial third participant: %v", err)
+	}
+	defer third.Close()
+	if err := third.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Sara",
+	}); err != nil {
+		t.Fatalf("join third participant: %v", err)
+	}
+	var thirdResponse signaling.Message
+	if err := third.ReadJSON(&thirdResponse); err != nil {
+		t.Fatalf("read third join response: %v", err)
+	}
+	if thirdResponse.Type != signaling.TypeError || thirdResponse.Error != "meeting is full" {
+		t.Fatalf("third join response = %+v", thirdResponse)
 	}
 }
 

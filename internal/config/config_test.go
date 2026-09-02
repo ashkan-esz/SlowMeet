@@ -10,6 +10,7 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "")
 	t.Setenv("MAX_PARTICIPANTS", "")
 	t.Setenv("DEFAULT_VIDEO_QUALITY", "")
+	t.Setenv("MAX_VIDEO_QUALITY", "")
 	t.Setenv("DEFAULT_VIDEO_FPS", "")
 	t.Setenv("DEFAULT_AUDIO_BITRATE", "")
 	t.Setenv("MAX_VIDEO_BITRATE", "")
@@ -27,6 +28,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.DefaultVideoQuality != "low" || cfg.DefaultVideoFPS != 15 {
 		t.Fatalf("unexpected media defaults: %+v", cfg)
+	}
+	if cfg.MaxVideoQuality != "high" {
+		t.Fatalf("unexpected maximum video quality: %+v", cfg)
 	}
 	if cfg.MaxVideoFPS != 30 {
 		t.Fatalf("unexpected maximum FPS: %+v", cfg)
@@ -91,6 +95,20 @@ func TestValidateRejectsUnknownQualityAndLogLevel(t *testing.T) {
 	}
 
 	cfg.DefaultVideoQuality = "low"
+	cfg.MaxVideoQuality = "low"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("matching maximum video quality rejected: %v", err)
+	}
+	cfg.DefaultVideoQuality = "medium"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("default quality above maximum was accepted")
+	}
+	cfg.DefaultVideoQuality = "low"
+	cfg.MaxVideoQuality = "ultra"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown maximum video quality was accepted")
+	}
+	cfg.MaxVideoQuality = ""
 	cfg.LogLevel = "trace"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unknown log level was accepted")

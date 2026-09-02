@@ -34,6 +34,7 @@ let reconnectToken;
 let screenShareOwner;
 let screenShareRequest;
 let screenShareEnabled = true;
+let serverDefaultProfile = false;
 let remoteDescriptionSet = false;
 let reconnectTimer;
 let intentionalClose = false;
@@ -52,7 +53,12 @@ let receiveVideoEnabled = true;
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
-  maxAudioBitrate: 64000
+  maxAudioBitrate: 64000,
+  maxVideoQuality: "high"
+};
+const hostDefaults = {
+  videoFPS: 15,
+  audioBitrate: 32000
 };
 const pendingCandidates = [];
 const participantElements = new Map();
@@ -61,7 +67,8 @@ const storedProfile = localStorage.getItem("meeting.bandwidthProfile");
 const profiles = [
   { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000, audioBitrate: 24000 },
   { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000, audioBitrate: 32000 },
-  { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000, audioBitrate: 48000 }
+  { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000, audioBitrate: 48000 },
+  { name: "high", width: 854, height: 480, fps: 24, bitrate: 650000, audioBitrate: 64000 }
 ];
 copyDiagnostics.addEventListener("click", async () => {
   try {
@@ -87,12 +94,22 @@ fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
   hostLimits.maxVideoFPS = config.max_video_fps || hostLimits.maxVideoFPS;
   hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
+  if (config.max_video_quality) hostLimits.maxVideoQuality = config.max_video_quality;
+  if (Number.isFinite(config.default_video_fps) && config.default_video_fps > 0) {
+    hostDefaults.videoFPS = config.default_video_fps;
+  }
+  if (Number.isFinite(config.default_audio_bitrate) && config.default_audio_bitrate > 0) {
+    hostDefaults.audioBitrate = config.default_audio_bitrate;
+  }
   screenShareEnabled = config.screen_share_enabled !== false;
   screen.disabled = !screenShareEnabled;
   if (!storedProfile && config.default_video_quality) {
-    profile.value = config.default_video_quality === "high" ? "normal" :
-      config.default_video_quality === "medium" || config.default_video_quality === "low" ? "slow" : "very-slow";
+    profile.value = config.default_video_quality === "high" ? "high" :
+      config.default_video_quality === "medium" ? "normal" :
+      config.default_video_quality === "low" ? "slow" : "very-slow";
+    serverDefaultProfile = true;
   }
+  if (peer) applyProfile(profile.value);
 }).catch(() => {});
 if (storedProfile && [...profile.options].some((option) => option.value === storedProfile)) {
   profile.value = storedProfile;
@@ -161,6 +178,7 @@ function connectSocket(name, password) {
       if (Number.isFinite(message.max_audio_bitrate) && message.max_audio_bitrate > 0) {
         hostLimits.maxAudioBitrate = message.max_audio_bitrate;
       }
+      if (message.max_video_quality) hostLimits.maxVideoQuality = message.max_video_quality;
       if (message.screen_share_enabled === false) {
         screenShareEnabled = false;
         if (screenStream) stopScreenShare();
@@ -353,6 +371,8 @@ async function startWebRTC() {
     sendMediaState();
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     for (const track of localStream.getTracks()) currentPeer.addTrack(track, localStream);
+    await setVideoSending(!videoSuspended);
+    if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     await applyProfile(profile.value, currentPeer, localStream);
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     clearInterval(statsTimer);
@@ -381,7 +401,7 @@ async function updateDiagnostics() {
     jitterMs: null,
     packetLoss: 0,
     outboundKbps: 0,
-    inboundKbps: 0,
+    inboundKbps: null,
     outboundAudioKbps: 0,
     inboundAudioKbps: 0,
     sentFps: null,
@@ -400,6 +420,13 @@ async function updateDiagnostics() {
   let totalLost = 0;
   let totalReceived = 0;
   let timestamp = 0;
+  let hasInboundVideo = false;
+  const codecById = new Map();
+  report.forEach((stat) => {
+    if (stat.type === "codec" && stat.id && stat.mimeType) {
+      codecById.set(stat.id, stat.mimeType);
+    }
+  });
   report.forEach((stat) => {
     timestamp = Math.max(timestamp, stat.timestamp || 0);
     if (stat.type === "candidate-pair" && stat.state === "succeeded") {
@@ -410,12 +437,13 @@ async function updateDiagnostics() {
       values.sentFps = stat.framesPerSecond ?? null;
       framesDropped += stat.framesDropped || 0;
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
-      values.codec = stat.codecId || values.codec;
+      values.codec = resolveCodecName(codecById, stat.codecId) || values.codec;
     }
     if (stat.type === "outbound-rtp" && stat.kind === "audio") {
       sentAudioBytes += stat.bytesSent || 0;
     }
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
+      hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
       framesDropped += stat.framesDropped || 0;
@@ -431,7 +459,7 @@ async function updateDiagnostics() {
       totalReceived += stat.packetsReceived || 0;
     }
   });
-  if (previousStats && timestamp > previousStats.timestamp) {
+  if (previousStats && timestamp > previousStats.timestamp && hasInboundVideo) {
     const seconds = (timestamp - previousStats.timestamp) / 1000;
     values.outboundKbps = Math.round((sentBytes - previousStats.sentBytes) * 8 / seconds / 1000);
     values.inboundKbps = Math.round((receivedBytes - previousStats.receivedBytes) * 8 / seconds / 1000);
@@ -445,8 +473,10 @@ async function updateDiagnostics() {
   previousStats = { timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes };
   if (values.rttMs != null && values.rttMs > 250) setConnection("poor", "Poor");
   else if (values.rttMs != null && values.rttMs > 120) setConnection("fair", "Fair");
-  const poor = (values.rttMs != null && values.rttMs > 250) || values.packetLoss > 5 || values.inboundKbps < 80;
-  const critical = (values.rttMs != null && values.rttMs > 500) || values.packetLoss > 10 || values.inboundKbps < 40;
+  const poor = (values.rttMs != null && values.rttMs > 250) || values.packetLoss > 5 ||
+    isBelowBitrate(values.inboundKbps, 80);
+  const critical = (values.rttMs != null && values.rttMs > 500) || values.packetLoss > 10 ||
+    isBelowBitrate(values.inboundKbps, 40);
   const good = (values.rttMs == null || values.rttMs < 120) && values.packetLoss < 1;
   criticalSamples = critical ? criticalSamples + 1 : 0;
   recoverySamples = good ? recoverySamples + 1 : 0;
@@ -488,14 +518,19 @@ async function updateDiagnostics() {
 }
 
 async function applyProfile(name, targetPeer = peer, targetStream = localStream) {
-  const requested = name === "auto" ? profiles[adaptationLevel] : profiles.find((item) => item.name === name);
+  const selected = name === "auto" ? profiles[adaptationLevel] : profiles.find((item) => item.name === name);
+  const selectedIndex = selected ? profiles.findIndex((item) => item.name === selected.name) : -1;
+  const maximumIndex = profiles.findIndex((item) => item.name === profileNameForQuality(hostLimits.maxVideoQuality));
+  const capped = maximumIndex >= 0 && selectedIndex > maximumIndex ? profiles[maximumIndex] : selected;
+  const requested = applyServerDefaults(capped, hostDefaults, serverDefaultProfile && name !== "auto");
   if (!requested || !targetPeer) return;
   const bitrate = Math.min(requested.bitrate, hostLimits.maxVideoBitrate);
   const fps = Math.min(requested.fps, hostLimits.maxVideoFPS);
   const audioBitrate = Math.min(requested.audioBitrate, hostLimits.maxAudioBitrate);
   if (effectiveProfile) {
     effectiveProfile.textContent =
-      `Requested: ${requested.name}; effective: ${Math.round(requested.width)}x${Math.round(requested.height)} / ` +
+      `Requested: ${selected?.name || "unknown"}; effective: ${requested.name} ` +
+      `${Math.round(requested.width)}x${Math.round(requested.height)} / ` +
       `${fps} FPS / ${Math.round(bitrate / 1000)} kbps video / ${Math.round(audioBitrate / 1000)} kbps audio`;
   }
   const videoTrack = targetStream?.getVideoTracks()[0];
@@ -526,6 +561,7 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
 
 profile.addEventListener("change", async () => {
   localStorage.setItem("meeting.bandwidthProfile", profile.value);
+  serverDefaultProfile = false;
   if (profile.value !== "auto") {
     adaptationLevel = profiles.findIndex((item) => item.name === profile.value);
     poorSamples = 0;
@@ -720,7 +756,12 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
     renegotiationChain = renegotiationChain
       .catch(() => {})
-      .then(() => currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp }))
+      .then(async () => {
+        if (currentPeer.signalingState === "have-local-offer") {
+          await currentPeer.setLocalDescription({ type: "rollback" });
+        }
+        await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
+      })
       .then(() => {
         if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
         remoteDescriptionSet = true;
@@ -740,6 +781,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     const currentPeer = peer;
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
+    if (currentPeer.signalingState !== "have-local-offer") return;
     renegotiationChain = renegotiationChain
       .catch(() => {})
       .then(() => currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp }))

@@ -16,10 +16,14 @@ func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
 	}
 	max := 3
 	quality := "medium"
-	if err := store.Update(AdminUpdate{MaxParticipants: &max, DefaultVideoQuality: &quality}); err != nil {
+	maxQuality := "medium"
+	if err := store.Update(AdminUpdate{
+		MaxParticipants: &max, DefaultVideoQuality: &quality, MaxVideoQuality: &maxQuality,
+	}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if got := store.Snapshot(); got.MaxParticipants != 3 || got.DefaultVideoQuality != "medium" || got.AdminPassword != "admin" {
+	if got := store.Snapshot(); got.MaxParticipants != 3 || got.DefaultVideoQuality != "medium" ||
+		got.MaxVideoQuality != "medium" || got.AdminPassword != "admin" {
 		t.Fatalf("unexpected snapshot: %+v", got)
 	}
 }
@@ -44,7 +48,8 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 		t.Fatalf("LoadStore() error = %v", err)
 	}
 	max := 2
-	if err := store.Update(AdminUpdate{MaxParticipants: &max}); err != nil {
+	maxQuality := "medium"
+	if err := store.Update(AdminUpdate{MaxParticipants: &max, MaxVideoQuality: &maxQuality}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
 	reloaded, err := LoadStore(cfg)
@@ -53,6 +58,9 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 	}
 	if got := reloaded.Snapshot().MaxParticipants; got != 2 {
 		t.Fatalf("reloaded MaxParticipants = %d, want 2", got)
+	}
+	if got := reloaded.Snapshot().MaxVideoQuality; got != "medium" {
+		t.Fatalf("reloaded MaxVideoQuality = %q, want medium", got)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

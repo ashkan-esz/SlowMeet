@@ -24,17 +24,20 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	sourceIngress := newIntegrationWrapperPeer(t)
 	targetEgress := newIntegrationWrapperPeer(t)
 	targetClient := newIntegrationPeer(t)
+	secondTargetEgress := newIntegrationWrapperPeer(t)
+	secondTargetClient := newIntegrationPeer(t)
 
 	t.Cleanup(func() {
 		router.Unregister("source")
 		router.Unregister("target")
+		router.Unregister("second-target")
 		for _, peer := range []*pion.PeerConnection{
-			sourceClient, targetClient,
+			sourceClient, targetClient, secondTargetClient,
 		} {
 			_ = peer.Close()
 		}
 		for _, peer := range []*internalwebrtc.Peer{
-			sourceIngress, targetEgress,
+			sourceIngress, targetEgress, secondTargetEgress,
 		} {
 			_ = peer.Close()
 		}
@@ -43,6 +46,10 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	targetTracks := make(chan receivedRTP, 2)
 	targetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
 		targetTracks <- receivedRTP{kind: track.Kind(), track: track}
+	})
+	secondTargetTracks := make(chan receivedRTP, 2)
+	secondTargetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		secondTargetTracks <- receivedRTP{kind: track.Kind(), track: track}
 	})
 	if _, err := sourceIngress.Connection().AddTransceiverFromKind(
 		pion.RTPCodecTypeAudio, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
@@ -56,10 +63,18 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	}
 
 	targetOffer := make(chan struct{}, 1)
+	secondTargetOffer := make(chan struct{}, 1)
 	router.Register("source", sourceIngress, nil)
 	router.Register("target", targetEgress, func() error {
 		select {
 		case targetOffer <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	router.Register("second-target", secondTargetEgress, func() error {
+		select {
+		case secondTargetOffer <- struct{}{}:
 		default:
 		}
 		return nil
@@ -92,15 +107,18 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	sendIntegrationPacket(t, audioTrack, pion.RTPCodecTypeAudio, 48_000, 0)
 	sendIntegrationPacket(t, videoTrack, pion.RTPCodecTypeVideo, 90_000, 0)
 	waitIntegrationSignal(t, targetOffer, "router target offer")
+	waitIntegrationSignal(t, secondTargetOffer, "router second target offer")
 	waitIntegrationPublicationCount(t, router, 2)
 	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
+	negotiateIntegrationPeers(t, secondTargetEgress.Connection(), secondTargetClient)
 	sendIntegrationRTP(t, audioTrack, pion.RTPCodecTypeAudio, 48_000)
 	sendIntegrationRTP(t, videoTrack, pion.RTPCodecTypeVideo, 90_000)
 
 	receivedKinds := make(map[pion.RTPCodecType]bool, 2)
+	secondReceivedKinds := make(map[pion.RTPCodecType]bool, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
 	defer cancel()
-	for len(receivedKinds) < 2 {
+	for len(receivedKinds) < 2 || len(secondReceivedKinds) < 2 {
 		select {
 		case received := <-targetTracks:
 			if received.track == nil {
@@ -113,8 +131,19 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 			if !readIntegrationRTP(ctx, received.track) {
 				t.Fatalf("timed out reading forwarded %s RTP", received.kind)
 			}
+		case received := <-secondTargetTracks:
+			if received.track == nil {
+				t.Fatal("second destination reported a nil remote track")
+			}
+			if received.kind != pion.RTPCodecTypeAudio && received.kind != pion.RTPCodecTypeVideo {
+				t.Fatalf("second destination received unexpected media kind %s", received.kind)
+			}
+			secondReceivedKinds[received.kind] = true
+			if !readIntegrationRTP(ctx, received.track) {
+				t.Fatalf("timed out reading second forwarded %s RTP", received.kind)
+			}
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for forwarded media; received %v", receivedKinds)
+			t.Fatalf("timed out waiting for forwarded media; received %v and %v", receivedKinds, secondReceivedKinds)
 		}
 	}
 }

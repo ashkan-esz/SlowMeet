@@ -1,6 +1,8 @@
 package signaling
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestValidateJoinMessage(t *testing.T) {
 	msg := Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"}
@@ -87,6 +89,19 @@ func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
 	} {
 		if err := msg.Validate(); err == nil {
 			t.Errorf("Validate(%+v) succeeded, want error", msg)
+		}
+	}
+}
+
+func TestReadMessageRejectsUnknownAndTrailingJSON(t *testing.T) {
+	cases := []string{
+		`{"version":1,"type":"join","name":"Ashkan","unexpected":true}`,
+		`{"version":1,"type":"join","name":"Ashkan"}{"version":1,"type":"join","name":"Ali"}`,
+	}
+	for _, payload := range cases {
+		var message Message
+		if err := decodeMessage([]byte(payload), &message); err == nil {
+			t.Fatalf("decodeMessage(%s) succeeded, want error", payload)
 		}
 	}
 }

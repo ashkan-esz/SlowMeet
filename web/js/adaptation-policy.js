@@ -12,6 +12,39 @@ function shouldRecoverVideo(goodSamples, isGood, threshold = 5) {
   return isGood && goodSamples >= threshold;
 }
 
+function applyServerDefaults(profile, defaults, enabled) {
+  if (!enabled || !profile) return profile;
+  return {
+    ...profile,
+    fps: defaults.videoFPS,
+    audioBitrate: defaults.audioBitrate
+  };
+}
+
+function resolveCodecName(codecById, codecId) {
+  if (!codecId) return null;
+  return codecById.get(codecId) || codecId;
+}
+
+function profileNameForQuality(quality) {
+  return {
+    low: "slow",
+    medium: "normal",
+    high: "high"
+  }[quality] || "high";
+}
+
+function isBelowBitrate(value, threshold) {
+  return Number.isFinite(value) && value >= 0 && value < threshold;
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { chooseAdaptationLevel, shouldRecoverVideo };
+  module.exports = {
+    chooseAdaptationLevel,
+    shouldRecoverVideo,
+    applyServerDefaults,
+    resolveCodecName,
+    profileNameForQuality,
+    isBelowBitrate
+  };
 }

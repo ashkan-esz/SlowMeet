@@ -44,6 +44,7 @@ type Message struct {
 	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
 	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
 	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
+	MaxVideoQuality    string               `json:"max_video_quality,omitempty"`
 	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
 	RTTMs              int                  `json:"rtt_ms,omitempty"`
 	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
