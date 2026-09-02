@@ -173,6 +173,127 @@ func TestHubRejectsMessagesBeforeJoin(t *testing.T) {
 	}
 }
 
+func TestHubAllowsOnlyOneScreenShare(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, EnableScreenShare: true,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	active := true
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: firstJoined.Participant.ID, ScreenShareActive: &active,
+	})
+	var granted Message
+	readTestMessage(t, first, &granted)
+	if granted.Type != TypeScreenState || granted.ScreenShareOwner != firstJoined.Participant.ID ||
+		granted.ScreenShareActive == nil || !*granted.ScreenShareActive {
+		t.Fatalf("screen-share grant = %+v", granted)
+	}
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	var existing Message
+	readTestMessage(t, second, &existing)
+	var state Message
+	readTestMessage(t, second, &state)
+	if state.Type != TypeScreenState || state.ScreenShareOwner != firstJoined.Participant.ID {
+		t.Fatalf("late-join screen state = %+v", state)
+	}
+
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: secondJoined.Participant.ID, ScreenShareActive: &active,
+	})
+	var denied Message
+	readTestMessage(t, second, &denied)
+	if denied.Type != TypeError || denied.Error != "screen sharing is already active" {
+		t.Fatalf("second screen-share request = %+v", denied)
+	}
+}
+
+func TestHubReleasesScreenShareWhenOwnerDisconnects(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, EnableScreenShare: true,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: time.Second,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	observer := dialTestSocket(t, socketURL)
+	defer observer.Close()
+	writeTestMessage(t, observer, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Observer"})
+	var observerJoined Message
+	readTestMessage(t, observer, &observerJoined)
+
+	owner := dialTestSocket(t, socketURL)
+	writeTestMessage(t, owner, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var ownerJoined Message
+	readTestMessage(t, owner, &ownerJoined)
+	var ownerSeesObserver Message
+	readTestMessage(t, owner, &ownerSeesObserver)
+	active := true
+	writeTestMessage(t, owner, Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: ownerJoined.Participant.ID, ScreenShareActive: &active,
+	})
+	var ownerState Message
+	readTestMessage(t, owner, &ownerState)
+	owner.Close()
+
+	var released Message
+	readTestMessage(t, observer, &released)
+	if released.Type != TypeScreenState || released.ScreenShareActive == nil || *released.ScreenShareActive {
+		t.Fatalf("disconnect release state = %+v", released)
+	}
+}
+
+func TestHubScreenShareLeaseBindsToConnection(t *testing.T) {
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{
+		HTTPAddr: ":8080", EnableScreenShare: true,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}), slog.Default())
+	old := &client{participant: meeting.Participant{ID: "old"}}
+	replacement := &client{participant: meeting.Participant{ID: "same-participant"}}
+	hub.mu.Lock()
+	hub.screenSharer = old
+	hub.mu.Unlock()
+
+	hub.releaseScreenShare(replacement)
+	hub.mu.RLock()
+	current := hub.screenSharer
+	hub.mu.RUnlock()
+	if current != old {
+		t.Fatal("stale replacement cleared the active screen-share lease")
+	}
+	hub.releaseScreenShare(old)
+	hub.mu.RLock()
+	current = hub.screenSharer
+	hub.mu.RUnlock()
+	if current != nil {
+		t.Fatal("owner did not release the screen-share lease")
+	}
+}
+
 func TestHubCloseCleansUpJoinedParticipants(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",

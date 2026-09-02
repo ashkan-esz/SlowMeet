@@ -45,6 +45,40 @@ func TestValidateMediaStateRequiresParticipantAndState(t *testing.T) {
 	}
 }
 
+func TestValidateNetworkState(t *testing.T) {
+	valid := Message{
+		Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: "p1",
+		RTTMs: 180, PacketLoss10: 25, JitterMs: 12, VideoKbps: 300, AudioKbps: 40,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid network state rejected: %v", err)
+	}
+	unknown := valid
+	unknown.RTTMs = -1
+	unknown.JitterMs = -1
+	if err := unknown.Validate(); err != nil {
+		t.Fatalf("unknown RTT/jitter should be accepted: %v", err)
+	}
+	invalid := valid
+	invalid.PacketLoss10 = 1001
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("out-of-range packet loss was accepted")
+	}
+}
+
+func TestValidateScreenShareRequest(t *testing.T) {
+	active := true
+	if err := (Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: "p1", ScreenShareActive: &active,
+	}).Validate(); err != nil {
+		t.Fatalf("valid screen-share request rejected: %v", err)
+	}
+	if err := (Message{Version: ProtocolVersion, Type: TypeScreenShare, ParticipantID: "p1"}).Validate(); err == nil {
+		t.Fatal("screen-share request without state was accepted")
+	}
+}
+
 func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
 	for _, msg := range []Message{
 		{Version: ProtocolVersion, Type: TypeOffer},

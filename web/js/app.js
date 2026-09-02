@@ -9,6 +9,7 @@ const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
 const receiveVideo = document.querySelector("#receive-video");
 const screen = document.querySelector("#screen");
+const screenStatus = document.querySelector("#screen-status");
 const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
 const diagnostics = document.querySelector("#diagnostics");
@@ -30,6 +31,9 @@ let screenStream;
 let cameraTrack;
 let localParticipantID;
 let reconnectToken;
+let screenShareOwner;
+let screenShareRequest;
+let screenShareEnabled = true;
 let remoteDescriptionSet = false;
 let reconnectTimer;
 let intentionalClose = false;
@@ -83,7 +87,8 @@ fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
   hostLimits.maxVideoFPS = config.max_video_fps || hostLimits.maxVideoFPS;
   hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
-  screen.disabled = config.screen_share_enabled === false;
+  screenShareEnabled = config.screen_share_enabled !== false;
+  screen.disabled = !screenShareEnabled;
   if (!storedProfile && config.default_video_quality) {
     profile.value = config.default_video_quality === "high" ? "normal" :
       config.default_video_quality === "medium" || config.default_video_quality === "low" ? "slow" : "very-slow";
@@ -126,6 +131,26 @@ function connectSocket(name, password) {
       return;
     }
     handleWebRTCMessage(message, generation);
+    if (message.type === "screen_share_state") {
+      screenShareOwner = message.screen_share_active === true ? message.screen_share_owner : undefined;
+      updateScreenShareUI();
+      if (screenShareRequest) {
+        const granted = screenShareRequest.active
+          ? screenShareOwner === localParticipantID
+          : !screenShareOwner;
+        if (granted) {
+          clearTimeout(screenShareRequest.timer);
+          screenShareRequest.resolve();
+          screenShareRequest = undefined;
+        } else if (screenShareRequest.active && screenShareOwner &&
+            screenShareOwner !== localParticipantID) {
+          clearTimeout(screenShareRequest.timer);
+          screenShareRequest.reject(new Error("screen sharing is already active"));
+          screenShareRequest = undefined;
+        }
+      }
+      return;
+    }
     if (message.type === "config_update") {
       if (Number.isFinite(message.max_video_bitrate) && message.max_video_bitrate > 0) {
         hostLimits.maxVideoBitrate = message.max_video_bitrate;
@@ -137,15 +162,21 @@ function connectSocket(name, password) {
         hostLimits.maxAudioBitrate = message.max_audio_bitrate;
       }
       if (message.screen_share_enabled === false) {
-        screen.disabled = true;
+        screenShareEnabled = false;
         if (screenStream) stopScreenShare();
       } else if (message.screen_share_enabled === true) {
-        screen.disabled = false;
+        screenShareEnabled = true;
       }
+      updateScreenShareUI();
       applyProfile(profile.value);
       return;
     }
     if (message.type === "error") {
+      if (screenShareRequest) {
+        clearTimeout(screenShareRequest.timer);
+        screenShareRequest.reject(new Error(message.error || "screen share request failed"));
+        screenShareRequest = undefined;
+      }
       status.textContent = message.error;
       if (meeting.hidden) joinButton.disabled = false;
       return;
@@ -195,6 +226,13 @@ function connectSocket(name, password) {
       localStream = undefined;
       screenStream = undefined;
       cameraTrack = undefined;
+      screenShareOwner = undefined;
+      if (screenShareRequest) {
+        clearTimeout(screenShareRequest.timer);
+        screenShareRequest.reject(new Error("signaling connection closed"));
+        screenShareRequest = undefined;
+      }
+      updateScreenShareUI();
       remoteDescriptionSet = false;
       pendingCandidates.splice(0);
       previousStats = undefined;
@@ -435,6 +473,18 @@ async function updateDiagnostics() {
     }
   }
   diagnostics.textContent = JSON.stringify(values, null, 2);
+  if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "network_state",
+      participant_id: localParticipantID,
+      rtt_ms: values.rttMs ?? -1,
+      packet_loss10: Math.round(values.packetLoss * 10),
+      jitter_ms: values.jitterMs ?? -1,
+      video_kbps: values.outboundKbps,
+      audio_kbps: values.outboundAudioKbps
+    }));
+  }
 }
 
 async function applyProfile(name, targetPeer = peer, targetStream = localStream) {
@@ -562,23 +612,76 @@ function setReceiveVideo(enabled) {
     });
 }
 
+function updateScreenShareUI() {
+  const owner = participantElements.get(screenShareOwner);
+  const ownerName = owner?.name?.textContent || "Someone";
+  const ownedByOther = Boolean(screenShareOwner && screenShareOwner !== localParticipantID);
+  screen.disabled = !screenShareEnabled || ownedByOther;
+  if (ownedByOther) {
+    screen.textContent = "Screen share in use";
+    screenStatus.textContent = `${ownerName} is sharing their screen.`;
+  } else if (screenStream) {
+    screen.textContent = "Stop sharing";
+    screenStatus.textContent = "You are sharing your screen.";
+  } else {
+    screen.disabled = false;
+    screen.textContent = "Share screen";
+    screenStatus.textContent = "No one is sharing their screen.";
+  }
+}
+
+function requestScreenShare(active) {
+  if (screenShareRequest) {
+    return Promise.reject(new Error("screen share request already in progress"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (!screenShareRequest) return;
+      screenShareRequest = undefined;
+      if (active && socket?.readyState === WebSocket.OPEN && localParticipantID) {
+        socket.send(JSON.stringify({
+          version: 1, type: "screen_share", participant_id: localParticipantID,
+          screen_share_active: false
+        }));
+      }
+      reject(new Error("screen share request timed out"));
+    }, 5000);
+    screenShareRequest = { active, resolve, reject, timer };
+    socket?.send(JSON.stringify({
+      version: 1, type: "screen_share", participant_id: localParticipantID,
+      screen_share_active: active
+    }));
+  });
+}
+
 async function toggleScreenShare() {
   if (screenStream) {
     await stopScreenShare();
     return;
   }
-  if (screen.disabled || !peer) return;
+  if (screen.disabled || !peer || (screenShareOwner && screenShareOwner !== localParticipantID)) return;
   try {
     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    await requestScreenShare(true);
     const screenTrack = screenStream.getVideoTracks()[0];
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
-    if (!sender) return;
+    if (!sender) throw new Error("video sender is unavailable");
     await sender.replaceTrack(screenTrack);
+    await applyProfile(profile.value, peer, screenStream);
     const local = participantElements.get(localParticipantID);
     if (local) local.video.srcObject = screenStream;
-    screen.textContent = "Stop sharing";
+    updateScreenShareUI();
     screenTrack.addEventListener("ended", stopScreenShare, { once: true });
   } catch (error) {
+    screenStream?.getTracks().forEach((track) => track.stop());
+    screenStream = undefined;
+    if (screenShareOwner === localParticipantID) {
+      socket?.send(JSON.stringify({
+        version: 1, type: "screen_share", participant_id: localParticipantID,
+        screen_share_active: false
+      }));
+    }
+    updateScreenShareUI();
     if (error.name !== "NotAllowedError") status.textContent = `Screen share unavailable: ${error.message}`;
   }
 }
@@ -589,9 +692,16 @@ async function stopScreenShare() {
   if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
   screenStream.getTracks().forEach((track) => track.stop());
   screenStream = undefined;
+  if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
+    socket.send(JSON.stringify({
+      version: 1, type: "screen_share", participant_id: localParticipantID,
+      screen_share_active: false
+    }));
+  }
+  await applyProfile(profile.value);
   const local = participantElements.get(localParticipantID);
   if (local && localStream) local.video.srcObject = localStream;
-  screen.textContent = "Share screen";
+  updateScreenShareUI();
 }
 
 function isCurrentWebRTC(generation, currentPeer, currentSocket) {
@@ -608,7 +718,9 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     const currentPeer = peer;
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
-    currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp })
+    renegotiationChain = renegotiationChain
+      .catch(() => {})
+      .then(() => currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp }))
       .then(() => {
         if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
         remoteDescriptionSet = true;
@@ -628,7 +740,9 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     const currentPeer = peer;
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
-    currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp })
+    renegotiationChain = renegotiationChain
+      .catch(() => {})
+      .then(() => currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp }))
       .then(() => {
         if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
         remoteDescriptionSet = true;
@@ -683,6 +797,11 @@ leave.addEventListener("click", () => {
   reconnectToken = undefined;
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
+  if (screenShareRequest) {
+    clearTimeout(screenShareRequest.timer);
+    screenShareRequest.reject(new Error("meeting left"));
+    screenShareRequest = undefined;
+  }
   remoteAudioElements.clear();
   enableAudio.hidden = true;
   peer?.close();
@@ -708,6 +827,9 @@ leave.addEventListener("click", () => {
   camera.textContent = "Turn camera off";
   camera.disabled = false;
   screen.textContent = "Share screen";
+  screenShareOwner = undefined;
+  screenShareEnabled = true;
+  updateScreenShareUI();
   setConnection("", "Connecting");
   diagnostics.textContent = "Waiting for media statistics…";
   participantElements.clear();

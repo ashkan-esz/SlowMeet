@@ -58,6 +58,13 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	if got := public.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("public config Cache-Control = %q, want no-store", got)
 	}
+
+	metrics := httptest.NewRecorder()
+	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "lowmeet_peer_connections 0") ||
+		!strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms 0.0") {
+		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
+	}
 }
 
 func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {

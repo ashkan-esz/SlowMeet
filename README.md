@@ -14,6 +14,8 @@ The current MVP provides:
 - Camera/microphone controls
 - Per-user remote video pause/resume control
 - Bandwidth profiles and automatic video degradation
+- Server-side RTP bitrate/FPS ceilings that drop excess packets without buffering
+- Single active screen-share lease with disconnect cleanup
 - Connection recovery, diagnostics, and runtime admin limits
 
 ## Run locally
@@ -50,6 +52,11 @@ Passwords are never sent to the frontend or written to logs.
 NATs, configure a coturn deployment and set `TURN_URL`, `TURN_USERNAME`, and
 `TURN_PASSWORD` as appropriate.
 
+`MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and `MAX_AUDIO_BITRATE` are enforced by
+the SFU as forwarding ceilings. Excess RTP is dropped immediately rather than
+queued or transcoded, preserving latency and keeping audio/video processing
+lightweight.
+
 ## Docker
 
 ```sh
@@ -78,6 +85,10 @@ using the examples.
 
 For low-bandwidth validation scenarios using Linux `tc netem`, see
 `docs/network-testing.md`.
+
+`/metrics` exposes Prometheus-compatible counters and latest network samples,
+including active participants, peer connections, reconnects, ICE failures, RTT,
+packet loss, jitter, and reported audio/video bitrate.
 
 ## Scope
 

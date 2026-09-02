@@ -18,6 +18,9 @@ const (
 	TypeCandidate    = "candidate"
 	TypeICERestart   = "ice_restart"
 	TypeMediaState   = "media_state"
+	TypeNetworkState = "network_state"
+	TypeScreenShare  = "screen_share"
+	TypeScreenState  = "screen_share_state"
 	TypeConfigUpdate = "config_update"
 	TypeError        = "error"
 )
@@ -42,6 +45,13 @@ type Message struct {
 	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
 	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
 	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
+	RTTMs              int                  `json:"rtt_ms,omitempty"`
+	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
+	JitterMs           int                  `json:"jitter_ms,omitempty"`
+	VideoKbps          int                  `json:"video_kbps,omitempty"`
+	AudioKbps          int                  `json:"audio_kbps,omitempty"`
+	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
+	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
 }
 
 func (m Message) Validate() error {
@@ -72,6 +82,19 @@ func (m Message) Validate() error {
 	case TypeMediaState:
 		if m.ParticipantID == "" || (m.AudioEnabled == nil && m.VideoEnabled == nil) {
 			return fmt.Errorf("media state requires participant_id and a state")
+		}
+	case TypeNetworkState:
+		if m.ParticipantID == "" {
+			return fmt.Errorf("network state requires participant_id")
+		}
+		if m.RTTMs < -1 || m.PacketLoss10 < 0 || m.PacketLoss10 > 1000 ||
+			m.JitterMs < -1 || m.VideoKbps < 0 || m.AudioKbps < 0 ||
+			m.RTTMs > 120000 || m.JitterMs > 120000 {
+			return fmt.Errorf("network state contains invalid values")
+		}
+	case TypeScreenShare:
+		if m.ParticipantID == "" || m.ScreenShareActive == nil {
+			return fmt.Errorf("screen share requires participant_id and state")
 		}
 	default:
 		return fmt.Errorf("unknown message type %q", m.Type)

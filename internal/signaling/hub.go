@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/media"
 	"SlowMeet/internal/meeting"
+	"SlowMeet/internal/metrics"
 	"SlowMeet/internal/webrtc"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -23,13 +25,16 @@ const (
 )
 
 type client struct {
-	conn             *websocket.Conn
-	writeMu          sync.Mutex
-	participant      meeting.Participant
-	reconnectToken   string
-	intentionalLeave bool
-	peer             *webrtc.Peer
-	negotiationMu    sync.Mutex
+	conn              *websocket.Conn
+	writeMu           sync.Mutex
+	participant       meeting.Participant
+	reconnectToken    string
+	intentionalLeave  bool
+	peer              *webrtc.Peer
+	negotiationMu     sync.Mutex
+	offerInFlight     bool
+	pendingOffer      bool
+	pendingICERestart bool
 }
 
 type pendingReconnect struct {
@@ -44,15 +49,21 @@ type Hub struct {
 	Logger   *slog.Logger
 	Upgrader websocket.Upgrader
 
-	mu      sync.RWMutex
-	clients map[*client]struct{}
-	router  *media.Router
-	pending map[string]*pendingReconnect
-	closed  bool
+	mu           sync.RWMutex
+	clients      map[*client]struct{}
+	router       *media.Router
+	pending      map[string]*pendingReconnect
+	metrics      *metrics.Metrics
+	screenSharer *client
+	closed       bool
 }
 
 func (h *Hub) ActiveParticipants() int {
 	return h.Meeting.Count()
+}
+
+func (h *Hub) Metrics() *metrics.Metrics {
+	return h.metrics
 }
 
 func (h *Hub) Close() {
@@ -83,20 +94,41 @@ func (h *Hub) Close() {
 
 func (h *Hub) BroadcastConfig(cfg config.Config) {
 	screenShareEnabled := cfg.EnableScreenShare
+	releasedScreenShare := false
+	h.mu.Lock()
+	if !cfg.EnableScreenShare && h.screenSharer != nil {
+		h.screenSharer = nil
+		releasedScreenShare = true
+	}
+	h.mu.Unlock()
+	h.router.SetLimits(media.Limits{
+		MaxAudioBitrate: cfg.MaxAudioBitrate,
+		MaxVideoBitrate: cfg.MaxVideoBitrate,
+		MaxVideoFPS:     cfg.MaxVideoFPS,
+	})
 	h.broadcast(Message{
 		Version: ProtocolVersion, Type: TypeConfigUpdate,
 		MaxVideoBitrate: cfg.MaxVideoBitrate, MaxVideoFPS: cfg.MaxVideoFPS,
 		MaxAudioBitrate: cfg.MaxAudioBitrate, ScreenShareEnabled: &screenShareEnabled,
 	})
+	if releasedScreenShare {
+		h.broadcast(h.screenShareMessage(false, ""))
+	}
 }
 
 func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
+	snapshot := cfg.Snapshot()
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
 		Upgrader: websocket.Upgrader{CheckOrigin: sameOrigin},
 		clients:  make(map[*client]struct{}),
 		pending:  make(map[string]*pendingReconnect),
-		router:   media.NewRouter(),
+		metrics:  &metrics.Metrics{},
+		router: media.NewRouter(media.Limits{
+			MaxAudioBitrate: snapshot.MaxAudioBitrate,
+			MaxVideoBitrate: snapshot.MaxVideoBitrate,
+			MaxVideoFPS:     snapshot.MaxVideoFPS,
+		}),
 	}
 }
 
@@ -108,6 +140,8 @@ func (h *Hub) disconnect(c *client) {
 	if c.peer != nil {
 		_ = c.peer.Close()
 	}
+	h.metrics.PeerLeft()
+	h.releaseScreenShare(c)
 	h.mu.RLock()
 	closed := h.closed
 	h.mu.RUnlock()
@@ -115,9 +149,52 @@ func (h *Hub) disconnect(c *client) {
 		h.removeParticipant(c.participant)
 		return
 	}
-	h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant})
 	h.deferReconnect(c.participant, c.reconnectToken)
 	h.Logger.Info("participant_disconnected", "participant_id", c.participant.ID, "name", c.participant.Name)
+}
+
+func (h *Hub) screenShareMessage(active bool, owner string) Message {
+	return Message{
+		Version: ProtocolVersion, Type: TypeScreenState,
+		ParticipantID: owner, ScreenShareOwner: owner,
+		ScreenShareActive: &active,
+	}
+}
+
+func (h *Hub) requestScreenShare(c *client, active bool) error {
+	cfg := h.Config.Snapshot()
+	if !cfg.EnableScreenShare {
+		return fmt.Errorf("screen sharing is disabled")
+	}
+	h.mu.Lock()
+	if active {
+		if h.screenSharer != nil && h.screenSharer != c {
+			h.mu.Unlock()
+			return fmt.Errorf("screen sharing is already active")
+		}
+		h.screenSharer = c
+	} else if h.screenSharer == c {
+		h.screenSharer = nil
+	}
+	owner := ""
+	if h.screenSharer != nil {
+		owner = h.screenSharer.participant.ID
+	}
+	h.mu.Unlock()
+	h.broadcast(h.screenShareMessage(owner != "", owner))
+	return nil
+}
+
+func (h *Hub) releaseScreenShare(c *client) {
+	h.mu.Lock()
+	if h.screenSharer != c {
+		h.mu.Unlock()
+		return
+	}
+	h.screenSharer = nil
+	h.mu.Unlock()
+	active := false
+	h.broadcast(h.screenShareMessage(active, ""))
 }
 
 func (h *Hub) deferReconnect(participant meeting.Participant, token string) {
@@ -134,7 +211,16 @@ func (h *Hub) deferReconnect(participant meeting.Participant, token string) {
 	pending.timer = timer
 	h.mu.Lock()
 	h.pending[token] = pending
+	clients := make([]*client, 0, len(h.clients))
+	for client := range h.clients {
+		if client.participant.ID != "" && client.participant.ID != participant.ID {
+			clients = append(clients, client)
+		}
+	}
 	h.mu.Unlock()
+	for _, client := range clients {
+		_ = client.write(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &participant})
+	}
 	go func() {
 		<-timer.C
 		h.mu.Lock()
@@ -263,6 +349,18 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.broadcastExcept(c, msg)
 				continue
 			}
+			if msg.Type == TypeNetworkState {
+				msg.ParticipantID = c.participant.ID
+				h.metrics.ObserveNetwork(msg.RTTMs, msg.PacketLoss10, msg.JitterMs, msg.VideoKbps, msg.AudioKbps)
+				continue
+			}
+			if msg.Type == TypeScreenShare {
+				msg.ParticipantID = c.participant.ID
+				if err := h.requestScreenShare(c, *msg.ScreenShareActive); err != nil {
+					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+				}
+				continue
+			}
 			h.handleWebRTCMessage(c, msg)
 			continue
 		}
@@ -315,6 +413,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				event = "network_degraded"
 			case pion.ICEConnectionStateFailed:
 				event = "webrtc_failed"
+				h.metrics.ConnectionFailed()
 			}
 			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
 		})
@@ -330,8 +429,21 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})
 			}
 		}
+		h.mu.RLock()
+		screenOwner := ""
+		if h.screenSharer != nil {
+			screenOwner = h.screenSharer.participant.ID
+		}
+		h.mu.RUnlock()
+		if screenOwner != "" {
+			_ = c.write(h.screenShareMessage(true, screenOwner))
+		}
 		h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
 		h.Logger.Info("participant_joined", "participant_id", participant.ID, "name", participant.Name)
+		h.metrics.PeerJoined()
+		if resumed {
+			h.metrics.Reconnected()
+		}
 	}
 }
 
@@ -353,8 +465,19 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		c.negotiationMu.Unlock()
 		_ = c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer})
 	case TypeAnswer:
-		if err := c.peer.SetRemoteAnswer(msg.SDP); err != nil {
+		c.negotiationMu.Lock()
+		err := c.peer.SetRemoteAnswer(msg.SDP)
+		shouldOffer := c.offerInFlight && c.pendingOffer
+		iceRestart := c.pendingICERestart
+		c.offerInFlight = false
+		c.pendingOffer = false
+		c.pendingICERestart = false
+		c.negotiationMu.Unlock()
+		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+		}
+		if shouldOffer {
+			_ = h.sendOffer(c, iceRestart)
 		}
 	case TypeCandidate:
 		if err := c.peer.AddICECandidate(msg.Candidate, msg.SDPMid, msg.SDPMLineIndex); err != nil {
@@ -369,12 +492,25 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 
 func (h *Hub) sendOffer(c *client, iceRestart bool) error {
 	c.negotiationMu.Lock()
-	defer c.negotiationMu.Unlock()
+	if c.offerInFlight {
+		c.pendingOffer = true
+		c.pendingICERestart = c.pendingICERestart || iceRestart
+		c.negotiationMu.Unlock()
+		return nil
+	}
+	c.offerInFlight = true
 	offer, err := c.peer.CreateOffer(iceRestart)
 	if err != nil {
+		c.offerInFlight = false
+		c.negotiationMu.Unlock()
 		return err
 	}
-	return c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
+	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
+	if err != nil {
+		c.offerInFlight = false
+	}
+	c.negotiationMu.Unlock()
+	return err
 }
 
 func (c *client) write(msg Message) error {
