@@ -7,6 +7,7 @@ const meeting = document.querySelector("#meeting");
 const participants = document.querySelector("#participants");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
+const receiveVideo = document.querySelector("#receive-video");
 const screen = document.querySelector("#screen");
 const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
@@ -22,10 +23,13 @@ if (storedName) nameInput.value = storedName;
 let socket;
 let socketGeneration = 0;
 let peer;
+let videoTransceiver;
+let renegotiationChain = Promise.resolve();
 let localStream;
 let screenStream;
 let cameraTrack;
 let localParticipantID;
+let reconnectToken;
 let remoteDescriptionSet = false;
 let reconnectTimer;
 let intentionalClose = false;
@@ -37,8 +41,10 @@ let adaptationLevel = 2;
 let poorSamples = 0;
 let goodSamples = 0;
 let criticalSamples = 0;
+let recoverySamples = 0;
 let videoSuspended = false;
 let cameraRequested = true;
+let receiveVideoEnabled = true;
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
@@ -108,7 +114,9 @@ function connectSocket(name, password) {
     if (generation !== socketGeneration) return;
     clearTimeout(reconnectTimer);
     reconnectAttempts = 0;
-    currentSocket.send(JSON.stringify({ version: 1, type: "join", name, password }));
+    currentSocket.send(JSON.stringify({
+      version: 1, type: "join", name, password, reconnect_token: reconnectToken
+    }));
   });
   currentSocket.addEventListener("message", ({ data }) => {
     if (generation !== socketGeneration) return;
@@ -147,6 +155,7 @@ function connectSocket(name, password) {
       addParticipant(participant);
       if (message.type === "participant") {
         localParticipantID = participant.id;
+        reconnectToken = message.reconnect_token;
         form.hidden = true;
         meeting.hidden = false;
         status.textContent = "";
@@ -178,6 +187,7 @@ function connectSocket(name, password) {
       enableAudio.hidden = true;
       peer?.close();
       peer = undefined;
+      videoTransceiver = undefined;
       clearInterval(statsTimer);
       statsTimer = undefined;
       localStream?.getTracks().forEach((track) => track.stop());
@@ -188,6 +198,8 @@ function connectSocket(name, password) {
       remoteDescriptionSet = false;
       pendingCandidates.splice(0);
       previousStats = undefined;
+      criticalSamples = 0;
+      recoverySamples = 0;
       connectSocket(nameInput.value.trim(), passwordInput.value);
     }, delay);
   });
@@ -229,7 +241,10 @@ async function startWebRTC() {
     }
   };
   currentPeer.addTransceiver("audio", { direction: "recvonly" });
-  currentPeer.addTransceiver("video", { direction: "recvonly" });
+  videoTransceiver = currentPeer.addTransceiver("video", {
+    direction: receiveVideoEnabled ? "recvonly" : "inactive"
+  });
+  renegotiationChain = Promise.resolve();
   currentPeer.ontrack = ({ streams, track }) => {
     if (!streams[0]) return;
     const participantID = track.id.split("|")[0];
@@ -239,6 +254,7 @@ async function startWebRTC() {
       element.video.srcObject = streams[0];
       element.video.autoplay = true;
       element.video.playsInline = true;
+      element.video.hidden = !receiveVideoEnabled && participantID !== localParticipantID;
     } else {
       element.audio.srcObject = streams[0];
       element.audio.autoplay = true;
@@ -395,10 +411,13 @@ async function updateDiagnostics() {
   const critical = (values.rttMs != null && values.rttMs > 500) || values.packetLoss > 10 || values.inboundKbps < 40;
   const good = (values.rttMs == null || values.rttMs < 120) && values.packetLoss < 1;
   criticalSamples = critical ? criticalSamples + 1 : 0;
+  recoverySamples = good ? recoverySamples + 1 : 0;
   if (criticalSamples >= 2) {
     criticalSamples = 0;
+    recoverySamples = 0;
     await setVideoSending(false);
-  } else if (!critical && videoSuspended && good) {
+  } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, good)) {
+    recoverySamples = 0;
     await setVideoSending(true);
   }
   if (profile.value === "auto") {
@@ -516,6 +535,33 @@ async function setVideoSending(enabled) {
   sendMediaState();
 }
 
+function setReceiveVideo(enabled) {
+  receiveVideoEnabled = enabled;
+  receiveVideo.textContent = enabled ? "Pause remote video" : "Resume remote video";
+  for (const [participantID, element] of participantElements) {
+    if (participantID !== localParticipantID) element.video.hidden = !enabled;
+  }
+  const targetPeer = peer;
+  const targetSocket = socket;
+  const targetTransceiver = videoTransceiver;
+  const generation = socketGeneration;
+  if (!targetPeer || !targetTransceiver || !isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+  renegotiationChain = renegotiationChain
+    .catch(() => {})
+    .then(async () => {
+      if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+      targetTransceiver.direction = enabled ? "recvonly" : "inactive";
+      const offer = await targetPeer.createOffer();
+      await targetPeer.setLocalDescription(offer);
+      if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
+        targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
+      }
+    })
+    .catch(() => {
+      if (generation === socketGeneration) status.textContent = "Unable to change remote video.";
+    });
+}
+
 async function toggleScreenShare() {
   if (screenStream) {
     await stopScreenShare();
@@ -621,6 +667,7 @@ camera.addEventListener("click", () => {
 });
 
 screen.addEventListener("click", toggleScreenShare);
+receiveVideo.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 
 leave.addEventListener("click", () => {
   intentionalClose = true;
@@ -633,6 +680,7 @@ leave.addEventListener("click", () => {
     }));
   }
   socket?.close();
+  reconnectToken = undefined;
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
   remoteAudioElements.clear();
@@ -642,12 +690,15 @@ leave.addEventListener("click", () => {
   screenStream = undefined;
   cameraTrack = undefined;
   peer = undefined;
+  videoTransceiver = undefined;
   localParticipantID = undefined;
   remoteDescriptionSet = false;
   criticalSamples = 0;
   videoSuspended = false;
   cameraRequested = true;
   previousStats = undefined;
+  criticalSamples = 0;
+  recoverySamples = 0;
   adaptationLevel = 2;
   poorSamples = 0;
   goodSamples = 0;

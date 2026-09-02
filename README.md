@@ -12,6 +12,7 @@ The current MVP provides:
 - WebSocket signaling and Pion WebRTC
 - SFU RTP forwarding without server-side transcoding
 - Camera/microphone controls
+- Per-user remote video pause/resume control
 - Bandwidth profiles and automatic video degradation
 - Connection recovery, diagnostics, and runtime admin limits
 
@@ -58,6 +59,10 @@ docker compose up -d --build
 
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.
+
+Disconnected participants retain their meeting slot for
+`RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser
+session to reconnect without changing participant identity.
 
 ## HTTPS and WebSockets
 

@@ -36,6 +36,9 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	if firstJoined.Type != TypeParticipant || firstJoined.Participant == nil {
 		t.Fatalf("first join response = %+v", firstJoined)
 	}
+	if firstJoined.ReconnectToken == "" {
+		t.Fatal("first join response did not include reconnect token")
+	}
 
 	second := dialTestSocket(t, socketURL)
 	defer second.Close()
@@ -50,6 +53,9 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	readTestMessage(t, second, &secondSeesFirst)
 	if secondSeesFirst.Type != TypeJoined || secondSeesFirst.Participant.Name != "Ashkan" {
 		t.Fatalf("existing participant broadcast = %+v", secondSeesFirst)
+	}
+	if secondSeesFirst.ReconnectToken != "" {
+		t.Fatal("reconnect token leaked in participant broadcast")
 	}
 
 	var firstSeesSecond Message
@@ -88,6 +94,9 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 func TestWebSocketLivenessConfiguration(t *testing.T) {
 	if websocketPongWait <= websocketPingPeriod {
 		t.Fatalf("pong wait %s must exceed ping period %s", websocketPongWait, websocketPingPeriod)
+	}
+	if websocketWriteWait <= 0 || websocketWriteWait >= websocketPongWait {
+		t.Fatalf("write wait %s must be positive and below pong wait %s", websocketWriteWait, websocketPongWait)
 	}
 }
 
@@ -192,6 +201,127 @@ func TestHubCloseCleansUpJoinedParticipants(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("active participants after Close() = %d, want 0", hub.ActiveParticipants())
+}
+
+func TestHubReconnectReclaimsParticipantDuringGracePeriod(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 1, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 200 * time.Millisecond,
+	}
+	hub := NewHub(meeting.New(1), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	first := dialTestSocket(t, socketURL)
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, first, &joined)
+	if joined.Type != TypeParticipant || joined.ReconnectToken == "" {
+		t.Fatalf("join response = %+v", joined)
+	}
+	first.Close()
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan",
+		ReconnectToken: joined.ReconnectToken,
+	})
+	var rejoined Message
+	readTestMessage(t, second, &rejoined)
+	if rejoined.Type != TypeParticipant || rejoined.Participant.ID != joined.Participant.ID {
+		t.Fatalf("reconnect response = %+v, want participant %q", rejoined, joined.Participant.ID)
+	}
+}
+
+func TestHubHidesDisconnectedParticipantDuringGracePeriod(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: time.Second,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	first := dialTestSocket(t, socketURL)
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, first, &joined)
+	first.Close()
+
+	// Allow the closed handler to register the reconnect grace session.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.RLock()
+		pending := len(hub.pending)
+		hub.mu.RUnlock()
+		if pending > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	hub.mu.RLock()
+	pending := len(hub.pending)
+	hub.mu.RUnlock()
+	if pending == 0 {
+		t.Fatal("disconnect did not enter reconnect grace period")
+	}
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var response Message
+	readTestMessage(t, second, &response)
+	if response.Type != TypeParticipant {
+		t.Fatalf("join response = %+v", response)
+	}
+	_ = second.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	var unexpected Message
+	if err := second.ReadJSON(&unexpected); err == nil {
+		t.Fatalf("received disconnected participant: %+v", unexpected)
+	}
+}
+
+func TestHubReconnectExpiryReleasesParticipantSlot(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 1, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 40 * time.Millisecond,
+	}
+	hub := NewHub(meeting.New(1), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	first := dialTestSocket(t, socketURL)
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, first, &joined)
+	first.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && hub.ActiveParticipants() != 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := hub.ActiveParticipants(); got != 0 {
+		t.Fatalf("active participants after reconnect expiry = %d, want 0", got)
+	}
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var rejoined Message
+	readTestMessage(t, second, &rejoined)
+	if rejoined.Type != TypeParticipant || rejoined.Participant.Name != "Ali" {
+		t.Fatalf("fresh join after expiry = %+v", rejoined)
+	}
 }
 
 func dialTestSocket(t *testing.T, url string) *websocket.Conn {

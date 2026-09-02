@@ -142,10 +142,14 @@ func (r *Router) forward(pub *publication) {
 			return
 		}
 		r.mu.RLock()
+		tracks := make([]*pion.TrackLocalStaticRTP, 0, len(pub.tracks))
 		for _, track := range pub.tracks {
-			_ = track.WriteRTP(packet)
+			tracks = append(tracks, track)
 		}
 		r.mu.RUnlock()
+		for _, track := range tracks {
+			_ = track.WriteRTP(packet)
+		}
 	}
 }
 

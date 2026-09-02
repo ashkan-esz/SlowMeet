@@ -108,6 +108,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			hub.BroadcastConfig(snapshot)
 			writePublicConfig(w, snapshot)
 		default:
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})

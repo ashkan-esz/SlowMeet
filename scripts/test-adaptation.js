@@ -1,4 +1,4 @@
-const { chooseAdaptationLevel } = require("../web/js/adaptation-policy.js");
+const { chooseAdaptationLevel, shouldRecoverVideo } = require("../web/js/adaptation-policy.js");
 
 const transition = (level, poor, good) =>
   chooseAdaptationLevel(level, poor, good, 3);
@@ -11,5 +11,8 @@ if (transition(1, 0, 5).level !== 2) throw new Error("good network should upgrad
 if (transition(2, 0, 5).level !== 2) throw new Error("upgrade should stop at normal");
 if (transition(2, 1, 0).level !== 2) throw new Error("downgrade requires two samples");
 if (transition(0, 0, 4).level !== 0) throw new Error("upgrade requires five samples");
+if (!shouldRecoverVideo(5, true) || shouldRecoverVideo(4, true) || shouldRecoverVideo(5, false)) {
+  throw new Error("video recovery requires five consecutive good samples");
+}
 
 console.log("Adaptation tests passed");

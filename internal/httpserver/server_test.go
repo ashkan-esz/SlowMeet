@@ -148,6 +148,21 @@ func TestReadOnlyEndpointsRejectNonGETRequests(t *testing.T) {
 	}
 }
 
+func TestAdminConfigAdvertisesSupportedMethods(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	request := httptest.NewRequest(http.MethodPut, "/admin/config", nil)
+	request.Header.Set("X-Admin-Password", "admin-secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", response.Code)
+	}
+	if got := response.Header().Get("Allow"); got != "GET, POST" {
+		t.Fatalf("Allow = %q, want GET, POST", got)
+	}
+}
+
 func TestSecurityHeadersArePresent(t *testing.T) {
 	handler := New(testConfig(t), NewLogger("error"))
 	for _, path := range []string{"/", "/health", "/admin"} {

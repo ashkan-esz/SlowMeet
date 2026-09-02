@@ -8,6 +8,10 @@ function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
   return { level, reset: null };
 }
 
+function shouldRecoverVideo(goodSamples, isGood, threshold = 5) {
+  return isGood && goodSamples >= threshold;
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { chooseAdaptationLevel };
+  module.exports = { chooseAdaptationLevel, shouldRecoverVideo };
 }

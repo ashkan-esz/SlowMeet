@@ -53,6 +53,9 @@ func (m Message) Validate() error {
 		if m.Name == "" {
 			return fmt.Errorf("name is required")
 		}
+		if len(m.ReconnectToken) > 128 {
+			return fmt.Errorf("reconnect_token is too long")
+		}
 	case TypeLeave:
 		if m.ParticipantID == "" {
 			return fmt.Errorf("participant_id is required")

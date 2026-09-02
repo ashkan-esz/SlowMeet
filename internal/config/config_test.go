@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("APP_ENV", "")
@@ -12,6 +15,7 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("MAX_VIDEO_BITRATE", "")
 	t.Setenv("MAX_AUDIO_BITRATE", "")
 	t.Setenv("ENABLE_SCREEN_SHARE", "")
+	t.Setenv("RECONNECT_TIMEOUT_SECONDS", "")
 	t.Setenv("LOG_LEVEL", "")
 
 	cfg, err := LoadFromEnv()
@@ -26,6 +30,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.MaxVideoFPS != 30 {
 		t.Fatalf("unexpected maximum FPS: %+v", cfg)
+	}
+	if cfg.ReconnectTimeout != 30*time.Second {
+		t.Fatalf("unexpected reconnect timeout: %s", cfg.ReconnectTimeout)
 	}
 }
 
@@ -58,6 +65,12 @@ func TestLoadFromEnvRejectsMalformedTypedValues(t *testing.T) {
 	t.Setenv("ENABLE_SCREEN_SHARE", "sometimes")
 	if _, err := LoadFromEnv(); err == nil {
 		t.Fatal("expected malformed boolean to fail")
+	}
+
+	t.Setenv("ENABLE_SCREEN_SHARE", "true")
+	t.Setenv("RECONNECT_TIMEOUT_SECONDS", "not-a-number")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected malformed reconnect timeout to fail")
 	}
 }
 

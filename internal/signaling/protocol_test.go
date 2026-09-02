@@ -9,6 +9,16 @@ func TestValidateJoinMessage(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOversizedReconnectToken(t *testing.T) {
+	msg := Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan",
+		ReconnectToken: string(make([]byte, 129)),
+	}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("oversized reconnect token was accepted")
+	}
+}
+
 func TestValidateRejectsUnknownOrMalformedMessage(t *testing.T) {
 	cases := []Message{
 		{Version: 2, Type: TypeJoin, Name: "Ashkan"},

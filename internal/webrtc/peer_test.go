@@ -28,3 +28,16 @@ func TestNewPeerWithTURNCreatesConnection(t *testing.T) {
 		t.Fatal("Connection() returned nil")
 	}
 }
+
+func TestPeerCloseIsIdempotent(t *testing.T) {
+	peer, err := NewPeer(nil)
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}
