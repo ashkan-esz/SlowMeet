@@ -3,6 +3,7 @@ package httpserver
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,15 +22,24 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 	meetingState := meeting.New(store.Snapshot().MaxParticipants)
 	hub := signaling.NewHub(meetingState, store, logger)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 	})
-	mux.HandleFunc("/config", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		cfg := store.Snapshot()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -43,7 +53,10 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			"screen_share_enabled":  cfg.EnableScreenShare,
 		})
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		cfg := store.Snapshot()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = fmt.Fprintf(w, "lowmeet_active_participants %d\n", meetingState.Count())
@@ -62,7 +75,14 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 			writePublicConfig(w, store.Snapshot())
 		case http.MethodPost:
 			var update config.AdminUpdate
-			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&update); err != nil {
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&update); err != nil {
+				http.Error(w, "invalid configuration", http.StatusBadRequest)
+				return
+			}
+			var trailing any
+			if err := decoder.Decode(&trailing); err != io.EOF {
 				http.Error(w, "invalid configuration", http.StatusBadRequest)
 				return
 			}
@@ -91,6 +111,15 @@ func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
 		"max_video_fps":         cfg.MaxVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,
 		"screen_share_enabled": cfg.EnableScreenShare,
 	})
+}
+
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+	w.Header().Set("Allow", method)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return false
 }
 
 func NewLogger(level string) *slog.Logger {

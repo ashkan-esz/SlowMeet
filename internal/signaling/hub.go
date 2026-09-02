@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/media"
@@ -12,6 +13,11 @@ import (
 	"SlowMeet/internal/webrtc"
 	"github.com/gorilla/websocket"
 	pion "github.com/pion/webrtc/v4"
+)
+
+const (
+	websocketPongWait   = 60 * time.Second
+	websocketPingPeriod = (websocketPongWait * 9) / 10
 )
 
 type client struct {
@@ -61,11 +67,17 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(16 * 1024)
+	conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+	})
 	c := &client{conn: conn}
+	done := make(chan struct{})
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 	defer func() {
+		close(done)
 		conn.Close()
 		h.mu.Lock()
 		delete(h.clients, c)
@@ -77,6 +89,22 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant})
 			h.Logger.Info("participant_left", "participant_id", c.participant.ID, "name", c.participant.Name)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(websocketPingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = conn.WriteControl(
+					websocket.PingMessage,
+					nil,
+					time.Now().Add(5*time.Second),
+				)
+			case <-done:
+				return
+			}
 		}
 	}()
 
@@ -91,6 +119,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if msg.Type != TypeJoin {
 			if c.participant.ID != "" {
+				if msg.Type == TypeLeave {
+					if msg.ParticipantID != c.participant.ID {
+						_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "participant_id does not belong to this connection"})
+						continue
+					}
+					return
+				}
 				if msg.Type == TypeMediaState {
 					msg.ParticipantID = c.participant.ID
 					h.broadcastExcept(c, msg)
@@ -115,7 +150,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		c.participant = participant
-		c.peer, err = webrtc.NewPeer(cfg.STUNServers)
+		c.peer, err = webrtc.NewPeerWithTURN(cfg.STUNServers, cfg.TURNURL, cfg.TURNUsername, cfg.TURNPassword)
 		if err != nil {
 			_ = h.Meeting.Leave(participant.ID)
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
@@ -140,8 +175,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
 		})
-		c.peer.OnTrack(func(track *pion.TrackRemote) {
-			h.router.Publish(c.participant.ID, track)
+		c.peer.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+			h.router.Publish(c.participant.ID, c.peer, track)
 		})
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)

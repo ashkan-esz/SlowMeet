@@ -16,7 +16,7 @@ type Store struct {
 }
 
 func NewStore(cfg Config) *Store {
-	return &Store{cfg: cfg}
+	return &Store{cfg: cfg, path: cfg.ConfigFile}
 }
 
 func LoadStore(cfg Config) (*Store, error) {
@@ -76,14 +76,28 @@ type AdminUpdate struct {
 func (s *Store) Update(update AdminUpdate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.apply(update); err != nil {
+	next, err := updatedConfig(s.cfg, update)
+	if err != nil {
 		return err
 	}
-	return s.persistLocked()
+	if err := persist(next, s.path); err != nil {
+		return err
+	}
+	s.cfg = next
+	return nil
 }
 
 func (s *Store) apply(update AdminUpdate) error {
-	next := s.cfg
+	next, err := updatedConfig(s.cfg, update)
+	if err != nil {
+		return err
+	}
+	s.cfg = next
+	return nil
+}
+
+func updatedConfig(current Config, update AdminUpdate) (Config, error) {
+	next := current
 	if update.MaxParticipants != nil {
 		next.MaxParticipants = *update.MaxParticipants
 	}
@@ -100,30 +114,33 @@ func (s *Store) apply(update AdminUpdate) error {
 		next.EnableScreenShare = *update.ScreenShare
 	}
 	if err := next.Validate(); err != nil {
-		return err
+		return Config{}, err
 	}
-	s.cfg = next
-	return nil
+	return next, nil
 }
 
 func (s *Store) persistLocked() error {
-	if s.path == "" {
+	return persist(s.cfg, s.path)
+}
+
+func persist(cfg Config, path string) error {
+	if path == "" {
 		return nil
 	}
 	data, err := json.MarshalIndent(AdminUpdate{
-		MaxParticipants: intPointer(s.cfg.MaxParticipants),
-		MaxVideoBitrate: intPointer(s.cfg.MaxVideoBitrate),
-		MaxVideoFPS:     intPointer(s.cfg.MaxVideoFPS),
-		MaxAudioBitrate: intPointer(s.cfg.MaxAudioBitrate),
-		ScreenShare:     boolPointer(s.cfg.EnableScreenShare),
+		MaxParticipants: intPointer(cfg.MaxParticipants),
+		MaxVideoBitrate: intPointer(cfg.MaxVideoBitrate),
+		MaxVideoFPS:     intPointer(cfg.MaxVideoFPS),
+		MaxAudioBitrate: intPointer(cfg.MaxAudioBitrate),
+		ScreenShare:     boolPointer(cfg.EnableScreenShare),
 	}, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0750); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(s.path), ".lowmeet-config-*")
+	temp, err := os.CreateTemp(filepath.Dir(path), ".lowmeet-config-*")
 	if err != nil {
 		return err
 	}
@@ -140,7 +157,7 @@ func (s *Store) persistLocked() error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, s.path)
+	return os.Rename(tempName, path)
 }
 
 func intPointer(value int) *int { return &value }

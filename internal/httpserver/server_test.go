@@ -104,3 +104,37 @@ func TestAdminConfigGetReturnsPublicRuntimeValues(t *testing.T) {
 		t.Fatal("admin password was exposed")
 	}
 }
+
+func TestAdminConfigRejectsUnknownAndTrailingJSON(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	cases := []string{
+		`{"max_participants":3,"unexpected":true}`,
+		`{"max_participants":3}{"max_participants":2}`,
+	}
+	for _, body := range cases {
+		request := httptest.NewRequest(http.MethodPost, "/admin/config", strings.NewReader(body))
+		request.Header.Set("X-Admin-Password", "admin-secret")
+		response := httptest.NewRecorder()
+
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("body %q status = %d, want 400", body, response.Code)
+		}
+	}
+}
+
+func TestReadOnlyEndpointsRejectNonGETRequests(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	for _, path := range []string{"/health", "/ready", "/config", "/metrics"} {
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		response := httptest.NewRecorder()
+
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s status = %d, want 405", path, response.Code)
+		}
+		if got := response.Header().Get("Allow"); got != http.MethodGet {
+			t.Errorf("%s Allow = %q, want GET", path, got)
+		}
+	}
+}

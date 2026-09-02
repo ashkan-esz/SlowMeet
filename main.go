@@ -17,7 +17,7 @@ func main() {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		slog.Error("invalid configuration", "error", err)
-		return
+		os.Exit(1)
 	}
 	logger := httpserver.NewLogger(cfg.LogLevel)
 	server := &http.Server{

@@ -58,11 +58,72 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 		t.Fatalf("participant broadcast = %+v", firstSeesSecond)
 	}
 
-	first.Close()
+	writeTestMessage(t, first, Message{
+		Version:       ProtocolVersion,
+		Type:          TypeLeave,
+		ParticipantID: firstJoined.Participant.ID,
+	})
 	var left Message
 	readTestMessage(t, second, &left)
 	if left.Type != TypeLeft || left.Participant.Name != "Ashkan" {
 		t.Fatalf("leave broadcast = %+v", left)
+	}
+}
+
+func TestWebSocketLivenessConfiguration(t *testing.T) {
+	if websocketPongWait <= websocketPingPeriod {
+		t.Fatalf("pong wait %s must exceed ping period %s", websocketPongWait, websocketPingPeriod)
+	}
+}
+
+func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		MeetingPassword:     "secret",
+		MaxParticipants:     1,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(1), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	wrong := dialTestSocket(t, socketURL)
+	defer wrong.Close()
+	writeTestMessage(t, wrong, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Wrong", Password: "nope",
+	})
+	var passwordError Message
+	readTestMessage(t, wrong, &passwordError)
+	if passwordError.Type != TypeError || passwordError.Error != "invalid meeting password" {
+		t.Fatalf("wrong password response = %+v", passwordError)
+	}
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", Password: "secret",
+	})
+	var joined Message
+	readTestMessage(t, first, &joined)
+	if joined.Type != TypeParticipant {
+		t.Fatalf("valid join response = %+v", joined)
+	}
+
+	full := dialTestSocket(t, socketURL)
+	defer full.Close()
+	writeTestMessage(t, full, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ali", Password: "secret",
+	})
+	var fullError Message
+	readTestMessage(t, full, &fullError)
+	if fullError.Type != TypeError || fullError.Error != "meeting is full" {
+		t.Fatalf("full meeting response = %+v", fullError)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
 )
 
@@ -17,6 +18,25 @@ func NewPeer(iceServers []string) (*Peer, error) {
 	for _, server := range iceServers {
 		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{URLs: []string{server}})
 	}
+	return NewPeerWithConfiguration(configuration)
+}
+
+func NewPeerWithTURN(iceServers []string, turnURL, username, password string) (*Peer, error) {
+	configuration := pion.Configuration{}
+	for _, server := range iceServers {
+		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{URLs: []string{server}})
+	}
+	if turnURL != "" {
+		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{
+			URLs:       []string{turnURL},
+			Username:   username,
+			Credential: password,
+		})
+	}
+	return NewPeerWithConfiguration(configuration)
+}
+
+func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
 	connection, err := pion.NewPeerConnection(configuration)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
@@ -64,16 +84,21 @@ func (p *Peer) CreateOffer(iceRestart bool) (string, error) {
 	return offer.SDP, nil
 }
 
-func (p *Peer) AddTrack(track pion.TrackLocal) error {
-	if _, err := p.connection.AddTrack(track); err != nil {
-		return fmt.Errorf("add track: %w", err)
+func (p *Peer) AddTrack(track pion.TrackLocal) (*pion.RTPSender, error) {
+	sender, err := p.connection.AddTrack(track)
+	if err != nil {
+		return nil, fmt.Errorf("add track: %w", err)
 	}
-	return nil
+	return sender, nil
 }
 
-func (p *Peer) OnTrack(handler func(*pion.TrackRemote)) {
-	p.connection.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
-		handler(track)
+func (p *Peer) WriteRTCP(packets []rtcp.Packet) error {
+	return p.connection.WriteRTCP(packets)
+}
+
+func (p *Peer) OnTrack(handler func(*pion.TrackRemote, *pion.RTPReceiver)) {
+	p.connection.OnTrack(func(track *pion.TrackRemote, receiver *pion.RTPReceiver) {
+		handler(track, receiver)
 	})
 }
 

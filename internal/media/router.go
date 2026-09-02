@@ -15,6 +15,7 @@ type publication struct {
 	trackID  string
 	codec    pion.RTPCodecCapability
 	remote   *pion.TrackRemote
+	source   *webrtc.Peer
 	tracks   map[string]*pion.TrackLocalStaticRTP
 }
 
@@ -54,18 +55,23 @@ func (r *Router) Unregister(id string) {
 	defer r.mu.Unlock()
 	delete(r.peers, id)
 	delete(r.offerers, id)
-	for _, pub := range r.pubs {
+	for key, pub := range r.pubs {
+		if pub.sourceID == id {
+			delete(r.pubs, key)
+			continue
+		}
 		delete(pub.tracks, id)
 	}
 }
 
-func (r *Router) Publish(sourceID string, remote *pion.TrackRemote) {
+func (r *Router) Publish(sourceID string, source *webrtc.Peer, remote *pion.TrackRemote) {
 	key := sourceID + "/" + remote.Kind().String()
 	pub := &publication{
 		sourceID: sourceID,
 		trackID:  fmt.Sprintf("%s|%s", sourceID, remote.Kind().String()),
 		codec:    remote.Codec().RTPCodecCapability,
 		remote:   remote,
+		source:   source,
 		tracks:   make(map[string]*pion.TrackLocalStaticRTP),
 	}
 
@@ -100,11 +106,30 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 		return false
 	}
 	local, err := pion.NewTrackLocalStaticRTP(pub.codec, pub.trackID, "lowmeet-"+pub.sourceID)
-	if err != nil || peer.AddTrack(local) != nil {
+	if err != nil {
+		return false
+	}
+	sender, err := peer.AddTrack(local)
+	if err != nil {
 		return false
 	}
 	pub.tracks[targetID] = local
+	if pub.source != nil {
+		go relayRTCP(sender, pub.source)
+	}
 	return true
+}
+
+func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer) {
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		if err := source.WriteRTCP(packets); err != nil {
+			return
+		}
+	}
 }
 
 func (r *Router) forward(pub *publication) {

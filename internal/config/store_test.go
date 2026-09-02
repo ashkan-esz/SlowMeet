@@ -61,3 +61,26 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 		t.Fatal("persisted config is empty")
 	}
 }
+
+func TestStoreUpdateDoesNotMutateWhenPersistenceFails(t *testing.T) {
+	path := t.TempDir()
+	cfg := Config{
+		ConfigFile:          path,
+		HTTPAddr:            ":8080",
+		MaxParticipants:     5,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	store := NewStore(cfg)
+	max := 2
+	if err := store.Update(AdminUpdate{MaxParticipants: &max}); err == nil {
+		t.Fatal("Update() unexpectedly succeeded with a directory as config path")
+	}
+	if got := store.Snapshot().MaxParticipants; got != 5 {
+		t.Fatalf("MaxParticipants = %d after failed persistence, want 5", got)
+	}
+}

@@ -12,3 +12,19 @@ func TestNewPeerCreatesConnection(t *testing.T) {
 		t.Fatal("Connection() returned nil")
 	}
 }
+
+func TestNewPeerWithTURNCreatesConnection(t *testing.T) {
+	peer, err := NewPeerWithTURN(
+		[]string{"stun:stun.example.com:3478"},
+		"turn:turn.example.com:3478",
+		"turn-user",
+		"turn-password",
+	)
+	if err != nil {
+		t.Fatalf("NewPeerWithTURN() error = %v", err)
+	}
+	defer peer.Close()
+	if peer.Connection() == nil {
+		t.Fatal("Connection() returned nil")
+	}
+}

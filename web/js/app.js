@@ -213,11 +213,15 @@ async function updateDiagnostics() {
   const report = await peer.getStats();
   const values = {
     rttMs: null,
+    jitterMs: null,
     packetLoss: 0,
     outboundKbps: 0,
     inboundKbps: 0,
+    outboundAudioKbps: 0,
+    inboundAudioKbps: 0,
     sentFps: null,
     receivedFps: null,
+    framesDropped: 0,
     resolution: null,
     codec: null,
     ice: peer.iceConnectionState,
@@ -225,6 +229,9 @@ async function updateDiagnostics() {
   };
   let sentBytes = 0;
   let receivedBytes = 0;
+  let sentAudioBytes = 0;
+  let receivedAudioBytes = 0;
+  let framesDropped = 0;
   let totalLost = 0;
   let totalReceived = 0;
   let timestamp = 0;
@@ -236,13 +243,25 @@ async function updateDiagnostics() {
     if (stat.type === "outbound-rtp" && stat.kind === "video") {
       sentBytes += stat.bytesSent || 0;
       values.sentFps = stat.framesPerSecond ?? null;
+      framesDropped += stat.framesDropped || 0;
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       values.codec = stat.codecId || values.codec;
+    }
+    if (stat.type === "outbound-rtp" && stat.kind === "audio") {
+      sentAudioBytes += stat.bytesSent || 0;
     }
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
+      framesDropped += stat.framesDropped || 0;
+      if (stat.jitter != null) values.jitterMs = Math.round(stat.jitter * 1000);
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
+      totalLost += stat.packetsLost || 0;
+      totalReceived += stat.packetsReceived || 0;
+    }
+    if (stat.type === "inbound-rtp" && stat.kind === "audio") {
+      receivedAudioBytes += stat.bytesReceived || 0;
+      if (stat.jitter != null && values.jitterMs == null) values.jitterMs = Math.round(stat.jitter * 1000);
       totalLost += stat.packetsLost || 0;
       totalReceived += stat.packetsReceived || 0;
     }
@@ -251,11 +270,14 @@ async function updateDiagnostics() {
     const seconds = (timestamp - previousStats.timestamp) / 1000;
     values.outboundKbps = Math.round((sentBytes - previousStats.sentBytes) * 8 / seconds / 1000);
     values.inboundKbps = Math.round((receivedBytes - previousStats.receivedBytes) * 8 / seconds / 1000);
+    values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
+    values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
   if (totalLost + totalReceived > 0) {
     values.packetLoss = Number((totalLost / (totalLost + totalReceived) * 100).toFixed(1));
   }
-  previousStats = { timestamp, sentBytes, receivedBytes };
+  values.framesDropped = framesDropped;
+  previousStats = { timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes };
   if (values.rttMs != null && values.rttMs > 250) setConnection("poor", "Poor");
   else if (values.rttMs != null && values.rttMs > 120) setConnection("fair", "Fair");
   const poor = (values.rttMs != null && values.rttMs > 250) || values.packetLoss > 5 || values.inboundKbps < 80;
@@ -271,12 +293,13 @@ async function updateDiagnostics() {
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
     goodSamples = good ? goodSamples + 1 : 0;
-    if (poorSamples >= 2 && adaptationLevel < profiles.length - 1) {
-      adaptationLevel++;
+    const transition = chooseAdaptationLevel(adaptationLevel, poorSamples, goodSamples, profiles.length);
+    if (transition.reset === "poor") {
+      adaptationLevel = transition.level;
       poorSamples = 0;
       await applyProfile(profiles[adaptationLevel].name);
-    } else if (goodSamples >= 5 && adaptationLevel > 0) {
-      adaptationLevel--;
+    } else if (transition.reset === "good") {
+      adaptationLevel = transition.level;
       goodSamples = 0;
       await applyProfile(profiles[adaptationLevel].name);
     }
@@ -379,6 +402,7 @@ async function setVideoSending(enabled) {
   if (track) track.enabled = enabled && cameraRequested;
   camera.textContent = enabled && cameraRequested ? "Turn camera off" : "Turn camera on";
   if (!enabled) setConnection("poor", "Audio only");
+  sendMediaState();
 }
 
 async function toggleScreenShare() {
@@ -470,6 +494,11 @@ leave.addEventListener("click", () => {
   intentionalClose = true;
   clearTimeout(reconnectTimer);
   clearInterval(statsTimer);
+  if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
+    socket.send(JSON.stringify({
+      version: 1, type: "leave", participant_id: localParticipantID
+    }));
+  }
   socket?.close();
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());

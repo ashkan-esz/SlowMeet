@@ -41,4 +41,45 @@ func TestLoadFromEnvRejectsInvalidValues(t *testing.T) {
 	if _, err := LoadFromEnv(); err == nil {
 		t.Fatal("expected invalid participant limit to fail")
 	}
+
+	t.Setenv("MAX_PARTICIPANTS", "101")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected excessive participant limit to fail")
+	}
+}
+
+func TestLoadFromEnvRejectsMalformedTypedValues(t *testing.T) {
+	t.Setenv("MAX_PARTICIPANTS", "not-a-number")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected malformed integer to fail")
+	}
+
+	t.Setenv("MAX_PARTICIPANTS", "5")
+	t.Setenv("ENABLE_SCREEN_SHARE", "sometimes")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected malformed boolean to fail")
+	}
+}
+
+func TestValidateRejectsUnknownQualityAndLogLevel(t *testing.T) {
+	cfg := Config{
+		HTTPAddr:            ":8080",
+		MaxParticipants:     5,
+		DefaultVideoQuality: "ultra",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+		LogLevel:            "info",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown video quality was accepted")
+	}
+
+	cfg.DefaultVideoQuality = "low"
+	cfg.LogLevel = "trace"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown log level was accepted")
+	}
 }
