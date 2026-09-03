@@ -323,6 +323,7 @@ input:hover, select:hover { border-color: var(--primary); }
   border-radius: .4rem;
 }
 .participant-grid video.local-camera-preview { transform: scaleX(-1); }
+.participant-grid video.remote-camera-preview { transform: scaleX(-1); }
 .participant-grid audio { display: none; }
 .screen-status { margin-top: 1rem; padding: .7rem .8rem; background: var(--surface-raised); border-radius: var(--radius-control); }
 .meeting-sidebar { display: grid; align-content: start; gap: 1rem; min-width: 0; }

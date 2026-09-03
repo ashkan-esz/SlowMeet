@@ -227,7 +227,24 @@ function setLocalMediaControls() {
 
 function setLocalVideoMirror(enabled) {
   const local = participantElements.get(localParticipantID);
-  if (local) local.video.classList.toggle("local-camera-preview", enabled);
+  if (!local) return;
+  local.video.classList.toggle("local-camera-preview", enabled);
+  local.video.classList.remove("remote-camera-preview");
+}
+
+function updateVideoOrientation(participantID) {
+  if (!participantID) return;
+  const element = participantElements.get(participantID);
+  if (!element) return;
+  const isScreenShare = participantID === screenShareOwner;
+  element.video.classList.toggle(
+    "local-camera-preview",
+    participantID === localParticipantID && !isScreenShare
+  );
+  element.video.classList.toggle(
+    "remote-camera-preview",
+    participantID !== localParticipantID && !isScreenShare
+  );
 }
 
 function ensureAudioContext() {
@@ -238,6 +255,20 @@ function ensureAudioContext() {
   }
   audioContext.resume().catch(() => {});
   return audioContext;
+}
+
+function remoteParticipantID(streams, track) {
+  const streamID = streams?.[0]?.id || "";
+  const streamPrefix = "lowmeet-";
+  if (streamID.startsWith(streamPrefix)) return streamID.slice(streamPrefix.length);
+  return track.id?.split("|")[0] || "";
+}
+
+function remoteMediaStream(streams, track) {
+  if (streams?.[0]) return streams[0];
+  const stream = new MediaStream();
+  stream.addTrack(track);
+  return stream;
 }
 
 function updateSpeakerSummary() {
@@ -431,7 +462,10 @@ function connectSocket(name, password) {
     }
     handleWebRTCMessage(message, generation);
     if (message.type === "screen_share_state") {
+      const previousScreenShareOwner = screenShareOwner;
       screenShareOwner = message.screen_share_active === true ? message.screen_share_owner : undefined;
+      updateVideoOrientation(previousScreenShareOwner);
+      updateVideoOrientation(screenShareOwner);
       updateScreenShareUI();
       if (screenShareRequest) {
         const granted = screenShareRequest.active
@@ -606,17 +640,19 @@ async function startWebRTC() {
   renegotiationChain = Promise.resolve();
   renegotiationPending = false;
   currentPeer.ontrack = ({ streams, track }) => {
-    if (!streams[0]) return;
-    const participantID = track.id.split("|")[0];
+    const participantID = remoteParticipantID(streams, track);
     const element = participantElements.get(participantID);
     if (!element) return;
+    const stream = remoteMediaStream(streams, track);
     if (track.kind === "video") {
-      element.video.srcObject = streams[0];
+      element.video.srcObject = stream;
       element.video.autoplay = true;
       element.video.playsInline = true;
       element.video.hidden = !receiveVideoEnabled && participantID !== localParticipantID;
+      updateVideoOrientation(participantID);
+      element.video.play().catch(() => {});
     } else {
-      element.audio.srcObject = streams[0];
+      element.audio.srcObject = stream;
       element.audio.autoplay = true;
       remoteAudioElements.add(element.audio);
       attachSpeakerAnalyzer(participantID, element.audio, true);
