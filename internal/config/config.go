@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,8 +20,12 @@ type Config struct {
 	AdminPassword       string
 	STUNServers         []string
 	TURNURL             string
+	TURNURLs            []string
 	TURNUsername        string
 	TURNPassword        string
+	TURNSharedSecret    string
+	TURNCredentialTTL   time.Duration
+	ICEIPv4Only         bool
 	ICEUDPPortMin       int
 	ICEUDPPortMax       int
 	MaxParticipants     int
@@ -77,6 +84,14 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	turnCredentialTTLSeconds, err := envInt("TURN_CREDENTIAL_TTL_SECONDS", 86400)
+	if err != nil {
+		return Config{}, err
+	}
+	iceIPv4Only, err := envBool("ICE_IPV4_ONLY", true)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
@@ -85,8 +100,12 @@ func LoadFromEnv() (Config, error) {
 		AdminPassword:       os.Getenv("ADMIN_PASSWORD"),
 		STUNServers:         splitCSV(os.Getenv("STUN_SERVERS")),
 		TURNURL:             os.Getenv("TURN_URL"),
+		TURNURLs:            splitCSV(os.Getenv("TURN_URLS")),
 		TURNUsername:        os.Getenv("TURN_USERNAME"),
 		TURNPassword:        os.Getenv("TURN_PASSWORD"),
+		TURNSharedSecret:    os.Getenv("TURN_SHARED_SECRET"),
+		TURNCredentialTTL:   time.Duration(turnCredentialTTLSeconds) * time.Second,
+		ICEIPv4Only:         iceIPv4Only,
 		ICEUDPPortMin:       iceUDPPortMin,
 		ICEUDPPortMax:       iceUDPPortMax,
 		MaxParticipants:     maxParticipants,
@@ -136,6 +155,10 @@ func (c Config) Validate() error {
 	if c.ReconnectTimeout < 0 || c.ReconnectTimeout > 10*time.Minute {
 		return fmt.Errorf("RECONNECT_TIMEOUT_SECONDS must be between 0 and 600")
 	}
+	if c.TURNCredentialTTL != 0 &&
+		(c.TURNCredentialTTL < time.Minute || c.TURNCredentialTTL > 7*24*time.Hour) {
+		return fmt.Errorf("TURN_CREDENTIAL_TTL_SECONDS must be between 60 and 604800")
+	}
 	if c.DefaultVideoQuality == "" {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not be empty")
 	}
@@ -167,6 +190,29 @@ func (c Config) EffectiveMaxVideoQuality() string {
 		return "high"
 	}
 	return c.MaxVideoQuality
+}
+
+func (c Config) EffectiveTURNURLs() []string {
+	if len(c.TURNURLs) > 0 {
+		return append([]string(nil), c.TURNURLs...)
+	}
+	if c.TURNURL != "" {
+		return []string{c.TURNURL}
+	}
+	return nil
+}
+
+// TURNCredentials returns coturn REST API credentials when a shared secret is
+// configured. The username contains the expiry timestamp expected by coturn.
+func (c Config) TURNCredentials(subject string, now time.Time) (string, string, bool) {
+	if c.TURNSharedSecret == "" || c.TURNCredentialTTL <= 0 {
+		return "", "", false
+	}
+	expiresAt := now.Add(c.TURNCredentialTTL).Unix()
+	username := fmt.Sprintf("%d:%s", expiresAt, subject)
+	mac := hmac.New(sha1.New, []byte(c.TURNSharedSecret))
+	_, _ = mac.Write([]byte(username))
+	return username, base64.StdEncoding.EncodeToString(mac.Sum(nil)), true
 }
 
 func videoQualityRank(quality string) int {

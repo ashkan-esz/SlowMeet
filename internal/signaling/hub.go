@@ -406,9 +406,15 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !resumed {
 			c.reconnectToken = uuid.NewString()
 		}
-		c.peer, err = webrtc.NewPeerWithTURNAndPortRange(
-			cfg.STUNServers, cfg.TURNURL, cfg.TURNUsername, cfg.TURNPassword,
-			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax,
+		turnUsername := cfg.TURNUsername
+		turnPassword := cfg.TURNPassword
+		if username, password, ok := cfg.TURNCredentials(participant.ID, time.Now()); ok {
+			turnUsername = username
+			turnPassword = password
+		}
+		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRange(
+			cfg.STUNServers, cfg.EffectiveTURNURLs(), turnUsername, turnPassword,
+			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only,
 		)
 		if err != nil {
 			if resumed {

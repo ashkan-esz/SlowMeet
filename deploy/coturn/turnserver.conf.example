@@ -1,0 +1,22 @@
+# Copy to turnserver.conf and replace the placeholders.
+#
+# This listener configuration supports direct UDP, TCP fallback, and
+# TLS-over-TCP fallback for browsers on restrictive networks.
+
+listening-port=3478
+tls-listening-port=443
+
+fingerprint
+use-auth-secret
+static-auth-secret=REPLACE_WITH_A_LONG_RANDOM_SECRET
+realm=turn.example.com
+
+cert=/etc/letsencrypt/live/turn.example.com/fullchain.pem
+pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem
+
+# Use this when coturn is behind a NAT. Otherwise omit it.
+# external-ip=PUBLIC_IP/PRIVATE_IP
+
+# Keep this range separate from LowMeet's ICE_UDP_PORT_MIN/MAX range.
+min-port=49152
+max-port=65535

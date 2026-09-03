@@ -51,7 +51,7 @@ if (isBelowBitrate(20, 40) !== true ||
 const fs = require("node:fs");
 const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
-if (!appSource.includes("const currentPeer = new RTCPeerConnection();\n  restartRequested = false;")) {
+if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers });\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
 }
 if (!appSource.includes('setConnection("fair", "Reconnecting");') ||

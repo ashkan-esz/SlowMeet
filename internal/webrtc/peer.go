@@ -26,18 +26,26 @@ func NewPeerWithTURN(iceServers []string, turnURL, username, password string) (*
 }
 
 func NewPeerWithTURNAndPortRange(iceServers []string, turnURL, username, password string, portMin, portMax int) (*Peer, error) {
+	var turnURLs []string
+	if turnURL != "" {
+		turnURLs = []string{turnURL}
+	}
+	return NewPeerWithTURNURLsAndPortRange(iceServers, turnURLs, username, password, portMin, portMax, false)
+}
+
+func NewPeerWithTURNURLsAndPortRange(iceServers, turnURLs []string, username, password string, portMin, portMax int, ipv4Only bool) (*Peer, error) {
 	configuration := pion.Configuration{}
 	for _, server := range iceServers {
 		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{URLs: []string{server}})
 	}
-	if turnURL != "" {
+	if len(turnURLs) > 0 {
 		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{
-			URLs:       []string{turnURL},
+			URLs:       append([]string(nil), turnURLs...),
 			Username:   username,
 			Credential: password,
 		})
 	}
-	return NewPeerWithPortRange(configuration, portMin, portMax)
+	return newPeerWithPortRange(configuration, portMin, portMax, ipv4Only)
 }
 
 func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
@@ -45,6 +53,10 @@ func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
 }
 
 func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int) (*Peer, error) {
+	return newPeerWithPortRange(configuration, portMin, portMax, false)
+}
+
+func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool) (*Peer, error) {
 	settingEngine := pion.SettingEngine{}
 	if portMin != 0 || portMax != 0 {
 		if portMin < 1 || portMin > 65535 || portMax < 1 || portMax > 65535 || portMin > portMax {
@@ -53,6 +65,9 @@ func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 		if err := settingEngine.SetEphemeralUDPPortRange(uint16(portMin), uint16(portMax)); err != nil {
 			return nil, fmt.Errorf("configure ICE UDP port range: %w", err)
 		}
+	}
+	if ipv4Only {
+		settingEngine.SetNetworkTypes([]pion.NetworkType{pion.NetworkTypeUDP4})
 	}
 	api := pion.NewAPI(pion.WithSettingEngine(settingEngine))
 	connection, err := api.NewPeerConnection(configuration)

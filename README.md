@@ -59,8 +59,25 @@ video policy, audio policy, and meeting features. The dashboard refreshes
 health and metrics automatically; settings remain unchanged if a save fails.
 
 `STUN_SERVERS` accepts a comma-separated list. For users behind restrictive
-NATs, configure a coturn deployment and set `TURN_URL`, `TURN_USERNAME`, and
-`TURN_PASSWORD` as appropriate.
+NATs or networks that block UDP, configure coturn and set `TURN_URLS` to
+include UDP, TCP, and TLS/TCP transports. A typical production list is:
+
+```text
+turn:turn.example.com:3478?transport=udp
+turn:turn.example.com:3478?transport=tcp
+turns:turn.example.com:443?transport=tcp
+```
+
+Set `TURN_SHARED_SECRET` to enable short-lived browser and server credentials;
+`TURN_CREDENTIAL_TTL_SECONDS` defaults to 24 hours. The shared secret must
+match coturn's `static-auth-secret` when `use-auth-secret` is enabled.
+`TURN_URL`, `TURN_USERNAME`, and `TURN_PASSWORD` remain supported for
+server-side legacy configurations, but static credentials are not sent to
+browsers.
+
+`ICE_IPV4_ONLY=true` is the default because it avoids broken or slow IPv6
+paths. Set it to `false` only after IPv6 has been tested from your target
+networks.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and
 `MAX_AUDIO_BITRATE` are enforced as hard ceilings. The quality ceiling limits
@@ -85,6 +102,11 @@ The Compose example publishes the configured `ICE_UDP_PORT_MIN` through
 `ICE_UDP_PORT_MAX` range (default `50000-50100`) for direct ICE media
 connectivity. Allow that range through the VPS firewall. TURN remains
 recommended for restrictive NATs and networks that block inbound UDP.
+
+TURN is a separate service. Open its client listeners on UDP/TCP 3478 and
+TLS/TCP 443, plus the coturn UDP relay range configured by `min-port` and
+`max-port`. If HTTPS already uses TCP 443 on the same address, use a separate
+TURN IP or TCP passthrough routing.
 
 Disconnected participants retain their meeting slot for
 `RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser

@@ -78,6 +78,27 @@ const hostDefaults = {
   videoFPS: 15,
   audioBitrate: 32000
 };
+let iceServers = [];
+const iceConfigReady = fetch("/ice-config", { cache: "no-store" })
+  .then((response) => {
+    if (!response.ok) throw new Error("ICE configuration unavailable");
+    return response.json();
+  })
+  .then((config) => {
+    if (!Array.isArray(config.ice_servers)) return;
+    iceServers = config.ice_servers.map((server) => {
+      const urls = Array.isArray(server.urls) ?
+        server.urls.filter((url) => typeof url === "string" && url.length > 0) : [];
+      if (urls.length === 0) return null;
+      const normalized = { urls };
+      if (typeof server.username === "string" && server.username) normalized.username = server.username;
+      if (typeof server.credential === "string" && server.credential) normalized.credential = server.credential;
+      return normalized;
+    }).filter(Boolean);
+  })
+  .catch(() => {
+    iceServers = [];
+  });
 const pendingCandidates = [];
 const participantElements = new Map();
 const remoteAudioElements = new Set();
@@ -298,7 +319,9 @@ function resetMediaConnection() {
 async function startWebRTC() {
   const generation = socketGeneration;
   const currentSocket = socket;
-  const currentPeer = new RTCPeerConnection();
+  await iceConfigReady;
+  if (generation !== socketGeneration || socket !== currentSocket) return;
+  const currentPeer = new RTCPeerConnection({ iceServers });
   restartRequested = false;
   peer = currentPeer;
   currentPeer.oniceconnectionstatechange = () => {
@@ -447,6 +470,8 @@ async function updateDiagnostics() {
     resolution: null,
     codec: null,
     ice: peer.iceConnectionState,
+    iceCandidateType: null,
+    iceTransport: null,
     connection: peer.connectionState
   };
   let sentBytes = 0;
@@ -459,14 +484,20 @@ async function updateDiagnostics() {
   let timestamp = 0;
   let hasInboundVideo = false;
   const codecById = new Map();
+  const candidatesById = new Map();
+  let selectedCandidatePair;
   report.forEach((stat) => {
     if (stat.type === "codec" && stat.id && stat.mimeType) {
       codecById.set(stat.id, stat.mimeType);
+    }
+    if ((stat.type === "local-candidate" || stat.type === "remote-candidate") && stat.id) {
+      candidatesById.set(stat.id, stat);
     }
   });
   report.forEach((stat) => {
     timestamp = Math.max(timestamp, stat.timestamp || 0);
     if (stat.type === "candidate-pair" && stat.state === "succeeded") {
+      if (stat.nominated || stat.selected || !selectedCandidatePair) selectedCandidatePair = stat;
       values.rttMs = stat.currentRoundTripTime == null ? null : Math.round(stat.currentRoundTripTime * 1000);
     }
     if (stat.type === "outbound-rtp" && stat.kind === "video") {
@@ -496,6 +527,15 @@ async function updateDiagnostics() {
       totalReceived += stat.packetsReceived || 0;
     }
   });
+  if (selectedCandidatePair) {
+    const localCandidate = candidatesById.get(selectedCandidatePair.localCandidateId);
+    const remoteCandidate = candidatesById.get(selectedCandidatePair.remoteCandidateId);
+    if (localCandidate?.candidateType || remoteCandidate?.candidateType) {
+      values.iceCandidateType = `${localCandidate?.candidateType || "unknown"}/` +
+        `${remoteCandidate?.candidateType || "unknown"}`;
+    }
+    values.iceTransport = localCandidate?.protocol || remoteCandidate?.protocol || null;
+  }
   if (previousStats && timestamp > previousStats.timestamp && hasInboundVideo) {
     const seconds = (timestamp - previousStats.timestamp) / 1000;
     values.outboundKbps = Math.round((sentBytes - previousStats.sentBytes) * 8 / seconds / 1000);

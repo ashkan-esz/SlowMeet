@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/signaling"
@@ -71,6 +72,54 @@ func TestHealthAndPublicConfig(t *testing.T) {
 		!strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms 0.0") ||
 		!strings.Contains(metrics.Body.String(), "lowmeet_network_sample_available 0") {
 		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
+	}
+}
+
+func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.STUNServers = []string{"stun:stun.example.com:3478"}
+	cfg.TURNURLs = []string{
+		"turn:turn.example.com:3478?transport=udp",
+		"turns:turn.example.com:443?transport=tcp",
+	}
+	cfg.TURNSharedSecret = "shared-secret"
+	cfg.TURNUsername = "legacy-user"
+	cfg.TURNPassword = "legacy-password"
+	cfg.TURNCredentialTTL = time.Hour
+	handler := New(cfg, NewLogger("error"))
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ice-config", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ICE config status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var values struct {
+		ICEServers []struct {
+			URLs       []string `json:"urls"`
+			Username   string   `json:"username"`
+			Credential string   `json:"credential"`
+		} `json:"ice_servers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode ICE config: %v", err)
+	}
+	if len(values.ICEServers) != 2 {
+		t.Fatalf("ICE server count = %d, want 2: %#v", len(values.ICEServers), values)
+	}
+	if values.ICEServers[0].URLs[0] != "stun:stun.example.com:3478" {
+		t.Fatalf("unexpected STUN server: %#v", values.ICEServers[0])
+	}
+	turn := values.ICEServers[1]
+	if len(turn.URLs) != 2 || turn.Username == "" || turn.Credential == "" {
+		t.Fatalf("unexpected TURN server: %#v", turn)
+	}
+	if strings.Contains(response.Body.String(), "shared-secret") ||
+		strings.Contains(response.Body.String(), "legacy-user") ||
+		strings.Contains(response.Body.String(), "legacy-password") {
+		t.Fatal("TURN credentials were exposed")
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("ICE config Cache-Control = %q, want no-store", got)
 	}
 }
 
@@ -237,7 +286,7 @@ func TestAdminConfigRejectsUnknownAndTrailingJSON(t *testing.T) {
 
 func TestReadOnlyEndpointsRejectNonGETRequests(t *testing.T) {
 	handler := New(testConfig(t), NewLogger("error"))
-	for _, path := range []string{"/health", "/ready", "/config", "/metrics"} {
+	for _, path := range []string{"/health", "/ready", "/config", "/ice-config", "/metrics"} {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		response := httptest.NewRecorder()
 
