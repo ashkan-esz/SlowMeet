@@ -21,6 +21,7 @@ type Snapshot struct {
 	ConnectionFailures uint64
 	Reconnects         uint64
 	NetworkSamples     uint64
+	HasNetworkSample   bool
 	AverageRTTMs       float64
 	LastRTTMs          int64
 	LastPacketLoss10   int64
@@ -78,6 +79,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		LastVideoKbps:      m.lastVideoKbps.Load(),
 		LastAudioKbps:      m.lastAudioKbps.Load(),
 	}
+	snapshot.HasNetworkSample = snapshot.NetworkSamples > 0
 	if samples := m.rttSamples.Load(); samples > 0 {
 		snapshot.AverageRTTMs = float64(m.rttTotalMs.Load()) / float64(samples)
 	}

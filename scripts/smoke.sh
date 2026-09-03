@@ -17,6 +17,7 @@ trap cleanup EXIT INT TERM
 HTTP_ADDR="127.0.0.1:${port}" \
 CONFIG_FILE="${config_dir}/config.json" \
 ADMIN_PASSWORD= \
+GOCACHE="${GOCACHE:-/tmp/slowmeet-gocache}" \
 go run . >/tmp/lowmeet-smoke.log 2>&1 &
 server_pid=$!
 

@@ -74,6 +74,11 @@ docker compose up -d --build
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.
 
+The Compose example publishes the configured `ICE_UDP_PORT_MIN` through
+`ICE_UDP_PORT_MAX` range (default `50000-50100`) for direct ICE media
+connectivity. Allow that range through the VPS firewall. TURN remains
+recommended for restrictive NATs and networks that block inbound UDP.
+
 Disconnected participants retain their meeting slot for
 `RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser
 session to reconnect without changing participant identity.
@@ -92,6 +97,8 @@ using the examples.
 
 For low-bandwidth validation scenarios using Linux `tc netem`, see
 `docs/network-testing.md`.
+The included `scripts/netem.sh` runner applies named scenarios and removes the
+qdisc automatically when it exits.
 
 `/metrics` exposes Prometheus-compatible counters and latest network samples,
 including active participants, peer connections, reconnects, ICE failures, RTT,

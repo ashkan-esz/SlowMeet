@@ -68,7 +68,8 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	metrics := httptest.NewRecorder()
 	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "lowmeet_peer_connections 0") ||
-		!strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms 0.0") {
+		!strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms 0.0") ||
+		!strings.Contains(metrics.Body.String(), "lowmeet_network_sample_available 0") {
 		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
 	}
 }

@@ -19,6 +19,8 @@ type Config struct {
 	TURNURL             string
 	TURNUsername        string
 	TURNPassword        string
+	ICEUDPPortMin       int
+	ICEUDPPortMax       int
 	MaxParticipants     int
 	DefaultVideoQuality string
 	MaxVideoQuality     string
@@ -67,6 +69,14 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	iceUDPPortMin, err := envInt("ICE_UDP_PORT_MIN", 50000)
+	if err != nil {
+		return Config{}, err
+	}
+	iceUDPPortMax, err := envInt("ICE_UDP_PORT_MAX", 50100)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
@@ -77,6 +87,8 @@ func LoadFromEnv() (Config, error) {
 		TURNURL:             os.Getenv("TURN_URL"),
 		TURNUsername:        os.Getenv("TURN_USERNAME"),
 		TURNPassword:        os.Getenv("TURN_PASSWORD"),
+		ICEUDPPortMin:       iceUDPPortMin,
+		ICEUDPPortMax:       iceUDPPortMax,
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
 		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "high"),
@@ -98,6 +110,13 @@ func LoadFromEnv() (Config, error) {
 func (c Config) Validate() error {
 	if c.HTTPAddr == "" {
 		return fmt.Errorf("HTTP_ADDR must not be empty")
+	}
+	if (c.ICEUDPPortMin == 0) != (c.ICEUDPPortMax == 0) ||
+		(c.ICEUDPPortMin != 0 &&
+			(c.ICEUDPPortMin < 1 || c.ICEUDPPortMin > 65535 ||
+				c.ICEUDPPortMax < 1 || c.ICEUDPPortMax > 65535 ||
+				c.ICEUDPPortMin > c.ICEUDPPortMax)) {
+		return fmt.Errorf("ICE UDP port range must be between 1 and 65535 with minimum <= maximum")
 	}
 	if c.MaxParticipants < 1 || c.MaxParticipants > MaxAllowedParticipants {
 		return fmt.Errorf("MAX_PARTICIPANTS must be between 1 and %d", MaxAllowedParticipants)

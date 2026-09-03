@@ -17,6 +17,8 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("MAX_AUDIO_BITRATE", "")
 	t.Setenv("ENABLE_SCREEN_SHARE", "")
 	t.Setenv("RECONNECT_TIMEOUT_SECONDS", "")
+	t.Setenv("ICE_UDP_PORT_MIN", "")
+	t.Setenv("ICE_UDP_PORT_MAX", "")
 	t.Setenv("LOG_LEVEL", "")
 
 	cfg, err := LoadFromEnv()
@@ -34,6 +36,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.MaxVideoFPS != 30 {
 		t.Fatalf("unexpected maximum FPS: %+v", cfg)
+	}
+	if cfg.ICEUDPPortMin != 50000 || cfg.ICEUDPPortMax != 50100 {
+		t.Fatalf("unexpected ICE UDP port range: %d-%d", cfg.ICEUDPPortMin, cfg.ICEUDPPortMax)
 	}
 	if cfg.ReconnectTimeout != 30*time.Second {
 		t.Fatalf("unexpected reconnect timeout: %s", cfg.ReconnectTimeout)
@@ -75,6 +80,14 @@ func TestLoadFromEnvRejectsMalformedTypedValues(t *testing.T) {
 	t.Setenv("RECONNECT_TIMEOUT_SECONDS", "not-a-number")
 	if _, err := LoadFromEnv(); err == nil {
 		t.Fatal("expected malformed reconnect timeout to fail")
+	}
+}
+
+func TestLoadFromEnvRejectsInvalidICEUDPPortRange(t *testing.T) {
+	t.Setenv("ICE_UDP_PORT_MIN", "50100")
+	t.Setenv("ICE_UDP_PORT_MAX", "50000")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected reversed ICE UDP port range to fail")
 	}
 }
 

@@ -6,6 +6,7 @@ services:
       - .env
     ports:
       - "8080:8080"
+      - "${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}:${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}/udp"
     volumes:
       - lowmeet-data:/app/data
     healthcheck:

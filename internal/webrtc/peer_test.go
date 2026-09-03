@@ -1,6 +1,10 @@
 package webrtc
 
-import "testing"
+import (
+	"testing"
+
+	pion "github.com/pion/webrtc/v4"
+)
 
 func TestNewPeerCreatesConnection(t *testing.T) {
 	peer, err := NewPeer([]string{"stun:stun.example.com:3478"})
@@ -26,6 +30,20 @@ func TestNewPeerWithTURNCreatesConnection(t *testing.T) {
 	defer peer.Close()
 	if peer.Connection() == nil {
 		t.Fatal("Connection() returned nil")
+	}
+}
+
+func TestNewPeerWithTURNAndPortRangeCreatesConnection(t *testing.T) {
+	peer, err := NewPeerWithTURNAndPortRange(nil, "", "", "", 50000, 50010)
+	if err != nil {
+		t.Fatalf("NewPeerWithTURNAndPortRange() error = %v", err)
+	}
+	defer peer.Close()
+}
+
+func TestNewPeerWithPortRangeRejectsInvalidRange(t *testing.T) {
+	if _, err := NewPeerWithPortRange(pion.Configuration{}, 50010, 50000); err == nil {
+		t.Fatal("expected invalid ICE UDP port range to fail")
 	}
 }
 

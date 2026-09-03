@@ -91,6 +91,21 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	}
 }
 
+func TestSendOfferWaitsForInitialBrowserOffer(t *testing.T) {
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
+	client := &client{}
+
+	if err := hub.sendOffer(client, false); err != nil {
+		t.Fatalf("sendOffer() before negotiation ready returned error: %v", err)
+	}
+	client.negotiationMu.Lock()
+	ready, pending := client.negotiationReady, client.pendingOffer
+	client.negotiationMu.Unlock()
+	if ready || !pending {
+		t.Fatalf("unexpected negotiation state: ready=%t pending=%t", ready, pending)
+	}
+}
+
 func TestWebSocketLivenessConfiguration(t *testing.T) {
 	if websocketPongWait <= websocketPingPeriod {
 		t.Fatalf("pong wait %s must exceed ping period %s", websocketPongWait, websocketPingPeriod)

@@ -79,6 +79,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "lowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
 		_, _ = fmt.Fprintf(w, "lowmeet_reconnects_total %d\n", snapshot.Reconnects)
 		_, _ = fmt.Fprintf(w, "lowmeet_network_samples_total %d\n", snapshot.NetworkSamples)
+		_, _ = fmt.Fprintf(w, "lowmeet_network_sample_available %d\n", boolMetric(snapshot.HasNetworkSample))
 		_, _ = fmt.Fprintf(w, "lowmeet_average_rtt_ms %.1f\n", snapshot.AverageRTTMs)
 		_, _ = fmt.Fprintf(w, "lowmeet_last_rtt_ms %d\n", snapshot.LastRTTMs)
 		_, _ = fmt.Fprintf(w, "lowmeet_last_packet_loss_percent %.1f\n", float64(snapshot.LastPacketLoss10)/10)
@@ -161,6 +162,13 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	w.Header().Set("Allow", method)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	return false
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func withSecurityHeaders(next http.Handler) http.Handler {

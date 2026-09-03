@@ -35,6 +35,9 @@ type client struct {
 	intentionalLeave  bool
 	peer              *webrtc.Peer
 	negotiationMu     sync.Mutex
+	negotiationReady  bool
+	remoteDescription bool
+	pendingCandidates []Message
 	offerInFlight     bool
 	pendingOffer      bool
 	pendingICERestart bool
@@ -391,7 +394,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !resumed {
 			c.reconnectToken = uuid.NewString()
 		}
-		c.peer, err = webrtc.NewPeerWithTURN(cfg.STUNServers, cfg.TURNURL, cfg.TURNUsername, cfg.TURNPassword)
+		c.peer, err = webrtc.NewPeerWithTURNAndPortRange(
+			cfg.STUNServers, cfg.TURNURL, cfg.TURNUsername, cfg.TURNPassword,
+			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax,
+		)
 		if err != nil {
 			if resumed {
 				h.deferReconnect(participant, c.reconnectToken)
@@ -494,6 +500,12 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			return
 		}
+		if err := applyPendingCandidates(c); err != nil {
+			c.negotiationMu.Unlock()
+			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+			return
+		}
+		c.remoteDescription = true
 		answer, err := c.peer.CreateAnswer()
 		if err != nil {
 			c.negotiationMu.Unlock()
@@ -501,7 +513,19 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		c.negotiationMu.Unlock()
-		_ = c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer})
+		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
+			return
+		}
+		c.negotiationMu.Lock()
+		c.negotiationReady = true
+		shouldOffer := c.pendingOffer
+		iceRestart := c.pendingICERestart
+		c.pendingOffer = false
+		c.pendingICERestart = false
+		c.negotiationMu.Unlock()
+		if shouldOffer {
+			_ = h.sendOffer(c, iceRestart)
+		}
 	case TypeAnswer:
 		c.negotiationMu.Lock()
 		if !c.offerInFlight {
@@ -509,6 +533,9 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		err := c.peer.SetRemoteAnswer(msg.SDP)
+		if err == nil {
+			err = applyPendingCandidates(c)
+		}
 		shouldOffer := c.offerInFlight && c.pendingOffer
 		iceRestart := c.pendingICERestart
 		c.offerInFlight = false
@@ -522,6 +549,13 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = h.sendOffer(c, iceRestart)
 		}
 	case TypeCandidate:
+		c.negotiationMu.Lock()
+		if !c.remoteDescription {
+			c.pendingCandidates = append(c.pendingCandidates, msg)
+			c.negotiationMu.Unlock()
+			return
+		}
+		c.negotiationMu.Unlock()
 		if err := c.peer.AddICECandidate(msg.Candidate, msg.SDPMid, msg.SDPMLineIndex); err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		}
@@ -532,8 +566,25 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 	}
 }
 
+func applyPendingCandidates(c *client) error {
+	pending := c.pendingCandidates
+	c.pendingCandidates = nil
+	for _, candidate := range pending {
+		if err := c.peer.AddICECandidate(candidate.Candidate, candidate.SDPMid, candidate.SDPMLineIndex); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *Hub) sendOffer(c *client, iceRestart bool) error {
 	c.negotiationMu.Lock()
+	if !c.negotiationReady {
+		c.pendingOffer = true
+		c.pendingICERestart = c.pendingICERestart || iceRestart
+		c.negotiationMu.Unlock()
+		return nil
+	}
 	if c.offerInFlight {
 		c.pendingOffer = true
 		c.pendingICERestart = c.pendingICERestart || iceRestart

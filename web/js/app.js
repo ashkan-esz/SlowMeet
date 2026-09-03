@@ -18,7 +18,23 @@ const diagnosticsStatus = document.querySelector("#diagnostics-status");
 const enableAudio = document.querySelector("#enable-audio");
 const profile = document.querySelector("#profile");
 const effectiveProfile = document.querySelector("#effective-profile");
-const storedName = localStorage.getItem("meeting.displayName");
+function readStoredValue(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeStoredValue(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (_) {
+    // Storage is optional; a blocked storage policy must not break the call.
+  }
+}
+
+const storedName = readStoredValue("meeting.displayName");
 if (storedName) nameInput.value = storedName;
 
 let socket;
@@ -26,6 +42,7 @@ let socketGeneration = 0;
 let peer;
 let videoTransceiver;
 let renegotiationChain = Promise.resolve();
+let renegotiationPending = false;
 let localStream;
 let screenStream;
 let cameraTrack;
@@ -63,7 +80,7 @@ const hostDefaults = {
 const pendingCandidates = [];
 const participantElements = new Map();
 const remoteAudioElements = new Set();
-const storedProfile = localStorage.getItem("meeting.bandwidthProfile");
+const storedProfile = readStoredValue("meeting.bandwidthProfile");
 const profiles = [
   { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000, audioBitrate: 24000 },
   { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000, audioBitrate: 32000 },
@@ -118,7 +135,7 @@ form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (joinButton.disabled) return;
   const name = nameInput.value.trim();
-  localStorage.setItem("meeting.displayName", name);
+  writeStoredValue("meeting.displayName", name);
   intentionalClose = false;
   joinButton.disabled = true;
   connectSocket(name, passwordInput.value);
@@ -253,6 +270,7 @@ function connectSocket(name, password) {
       updateScreenShareUI();
       remoteDescriptionSet = false;
       pendingCandidates.splice(0);
+      renegotiationPending = false;
       previousStats = undefined;
       criticalSamples = 0;
       recoverySamples = 0;
@@ -301,6 +319,7 @@ async function startWebRTC() {
     direction: receiveVideoEnabled ? "recvonly" : "inactive"
   });
   renegotiationChain = Promise.resolve();
+  renegotiationPending = false;
   currentPeer.ontrack = ({ streams, track }) => {
     if (!streams[0]) return;
     const participantID = track.id.split("|")[0];
@@ -352,6 +371,8 @@ async function startWebRTC() {
       }});
       videoStream.getVideoTracks().forEach((track) => setupStream.addTrack(track));
       if (abortIfStale()) return;
+      camera.disabled = false;
+      camera.textContent = cameraRequested ? "Turn camera off" : "Turn camera on";
     } catch (_) {
       cameraRequested = false;
       camera.disabled = true;
@@ -465,6 +486,11 @@ async function updateDiagnostics() {
     values.inboundKbps = Math.round((receivedBytes - previousStats.receivedBytes) * 8 / seconds / 1000);
     values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
     values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
+  } else if (previousStats && timestamp > previousStats.timestamp) {
+    const seconds = (timestamp - previousStats.timestamp) / 1000;
+    values.outboundKbps = Math.round((sentBytes - previousStats.sentBytes) * 8 / seconds / 1000);
+    values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
+    values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
   if (totalLost + totalReceived > 0) {
     values.packetLoss = Number((totalLost / (totalLost + totalReceived) * 100).toFixed(1));
@@ -560,7 +586,7 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
 }
 
 profile.addEventListener("change", async () => {
-  localStorage.setItem("meeting.bandwidthProfile", profile.value);
+  writeStoredValue("meeting.bandwidthProfile", profile.value);
   serverDefaultProfile = false;
   if (profile.value !== "auto") {
     adaptationLevel = profiles.findIndex((item) => item.name === profile.value);
@@ -602,7 +628,9 @@ function sendMediaState() {
     audio_enabled: audioEnabled, video_enabled: videoEnabled
   };
   updateMediaState(message);
-  socket?.send(JSON.stringify(message));
+  if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
+    socket.send(JSON.stringify(message));
+  }
 }
 
 async function setVideoSending(enabled) {
@@ -619,6 +647,16 @@ async function setVideoSending(enabled) {
   camera.textContent = enabled && cameraRequested ? "Turn camera off" : "Turn camera on";
   if (!enabled) setConnection("poor", "Audio only");
   sendMediaState();
+}
+
+async function setVideoSenderActive(enabled) {
+  for (const sender of peer?.getSenders() || []) {
+    if (sender.track?.kind !== "video") continue;
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0].active = enabled;
+    await sender.setParameters(parameters).catch(() => {});
+  }
 }
 
 function setReceiveVideo(enabled) {
@@ -648,6 +686,16 @@ function setReceiveVideo(enabled) {
     });
 }
 
+async function createAndSendLocalOffer(targetPeer, targetSocket, generation) {
+  if (!isCurrentWebRTC(generation, targetPeer, targetSocket) ||
+      targetPeer.signalingState !== "stable") return;
+  const offer = await targetPeer.createOffer();
+  await targetPeer.setLocalDescription(offer);
+  if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
+    targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
+  }
+}
+
 function updateScreenShareUI() {
   const owner = participantElements.get(screenShareOwner);
   const ownerName = owner?.name?.textContent || "Someone";
@@ -669,6 +717,9 @@ function updateScreenShareUI() {
 function requestScreenShare(active) {
   if (screenShareRequest) {
     return Promise.reject(new Error("screen share request already in progress"));
+  }
+  if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) {
+    return Promise.reject(new Error("signaling connection is unavailable"));
   }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -703,6 +754,7 @@ async function toggleScreenShare() {
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
     if (!sender) throw new Error("video sender is unavailable");
     await sender.replaceTrack(screenTrack);
+    await setVideoSenderActive(true);
     await applyProfile(profile.value, peer, screenStream);
     const local = participantElements.get(localParticipantID);
     if (local) local.video.srcObject = screenStream;
@@ -725,7 +777,8 @@ async function toggleScreenShare() {
 async function stopScreenShare() {
   if (!screenStream) return;
   const sender = peer?.getSenders().find((item) => item.track?.kind === "video");
-  if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+  if (sender && cameraTrack) await sender.replaceTrack(cameraTrack).catch(() => {});
+  await setVideoSending(!videoSuspended).catch(() => {});
   screenStream.getTracks().forEach((track) => track.stop());
   screenStream = undefined;
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
@@ -757,7 +810,9 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     renegotiationChain = renegotiationChain
       .catch(() => {})
       .then(async () => {
-        if (currentPeer.signalingState === "have-local-offer") {
+        const collided = currentPeer.signalingState === "have-local-offer";
+        if (collided) {
+          renegotiationPending = true;
           await currentPeer.setLocalDescription({ type: "rollback" });
         }
         await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
@@ -769,11 +824,16 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
       })
       .then(() => currentPeer.createAnswer())
       .then((answer) => currentPeer.setLocalDescription(answer))
-      .then(() => {
+      .then(async () => {
         if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
         currentSocket.send(JSON.stringify({
           version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
         }));
+        if (renegotiationPending && videoTransceiver) {
+          renegotiationPending = false;
+          videoTransceiver.direction = receiveVideoEnabled ? "recvonly" : "inactive";
+          await createAndSendLocalOffer(currentPeer, currentSocket, generation);
+        }
       })
       .catch(() => {});
   }

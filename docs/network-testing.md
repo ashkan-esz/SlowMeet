@@ -26,6 +26,18 @@ sudo tc qdisc replace dev IFACE root netem rate 200kbit delay 200ms loss 3%
 sudo tc qdisc replace dev IFACE root netem rate 100kbit delay 300ms loss 5%
 ```
 
+The repository includes an explicit runner that removes the qdisc when it
+exits:
+
+```sh
+sudo scripts/netem.sh --interface IFACE --scenario 500kbit --duration 60
+sudo scripts/netem.sh --interface IFACE --scenario changing --duration 120
+```
+
+Keep the browser meeting open while the runner is active. The `changing`
+scenario applies the 1 Mbps, 200 kbps, 80 kbps, and 1 Mbps phases for equal
+quarters of the requested duration.
+
 Remove impairment after every test:
 
 ```sh
@@ -61,3 +73,11 @@ Record for each run:
 
 Do not run these commands on a shared production interface. `tc` changes the
 interface for all traffic handled by that namespace.
+
+## Docker media ports
+
+The default container configuration limits Pion's server-side ICE UDP
+allocation to ports `50000-50100`. Docker Compose publishes the configured
+range automatically; if you change `ICE_UDP_PORT_MIN` or `ICE_UDP_PORT_MAX`,
+allow the resulting range through the host firewall. Use TURN when direct UDP
+is blocked by the network or NAT.

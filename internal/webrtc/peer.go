@@ -22,6 +22,10 @@ func NewPeer(iceServers []string) (*Peer, error) {
 }
 
 func NewPeerWithTURN(iceServers []string, turnURL, username, password string) (*Peer, error) {
+	return NewPeerWithTURNAndPortRange(iceServers, turnURL, username, password, 0, 0)
+}
+
+func NewPeerWithTURNAndPortRange(iceServers []string, turnURL, username, password string, portMin, portMax int) (*Peer, error) {
 	configuration := pion.Configuration{}
 	for _, server := range iceServers {
 		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{URLs: []string{server}})
@@ -33,11 +37,25 @@ func NewPeerWithTURN(iceServers []string, turnURL, username, password string) (*
 			Credential: password,
 		})
 	}
-	return NewPeerWithConfiguration(configuration)
+	return NewPeerWithPortRange(configuration, portMin, portMax)
 }
 
 func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
-	connection, err := pion.NewPeerConnection(configuration)
+	return NewPeerWithPortRange(configuration, 0, 0)
+}
+
+func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int) (*Peer, error) {
+	settingEngine := pion.SettingEngine{}
+	if portMin != 0 || portMax != 0 {
+		if portMin < 1 || portMin > 65535 || portMax < 1 || portMax > 65535 || portMin > portMax {
+			return nil, fmt.Errorf("ICE UDP port range must be between 1 and 65535 with minimum <= maximum")
+		}
+		if err := settingEngine.SetEphemeralUDPPortRange(uint16(portMin), uint16(portMax)); err != nil {
+			return nil, fmt.Errorf("configure ICE UDP port range: %w", err)
+		}
+	}
+	api := pion.NewAPI(pion.WithSettingEngine(settingEngine))
+	connection, err := api.NewPeerConnection(configuration)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
