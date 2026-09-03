@@ -28,6 +28,7 @@
           <span class="summary-label">Active participants</span>
           <strong id="active-participants" class="summary-value">—</strong>
           <span id="capacity-detail" class="summary-detail">Waiting for metrics</span>
+          <progress id="capacity-meter" class="capacity-meter" max="1" value="0" aria-label="Meeting capacity utilization"></progress>
         </article>
         <article class="summary-card">
           <span class="summary-label">Peer connections</span>
@@ -110,7 +111,7 @@
               <p class="eyebrow">Network watch</p>
               <h2>Live signal</h2>
             </div>
-            <span id="updated-at" class="updated-at">Not refreshed</span>
+          <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
           </div>
           <p class="card-copy">These are the latest reported values, not historical trends.</p>
           <dl class="metric-list">
@@ -125,6 +126,10 @@
             <strong>Reliability first</strong>
             <span>When conditions worsen, video may reduce quality while audio remains available.</span>
           </div>
+          <div class="diagnostics-actions">
+            <button id="copy-diagnostics" class="button-secondary" type="button">Copy diagnostics</button>
+            <span id="diagnostics-status" class="updated-at" role="status"></span>
+          </div>
         </section>
       </div>
 
@@ -134,6 +139,7 @@
       </footer>
     </section>
   </main>
+  <script src="/js/admin-utils.js"></script>
   <script>
     const form = document.querySelector("#admin-form");
     const password = document.querySelector("#password");
@@ -157,6 +163,7 @@
     const metricFields = {
       active: document.querySelector("#active-participants"),
       capacity: document.querySelector("#capacity-detail"),
+      capacityMeter: document.querySelector("#capacity-meter"),
       peers: document.querySelector("#peer-connections"),
       reconnects: document.querySelector("#reconnect-count"),
       averageRtt: document.querySelector("#average-rtt"),
@@ -169,6 +176,9 @@
       failures: document.querySelector("#connection-failures"),
       network: document.querySelector("#network-detail")
     };
+    let latestMetrics = {};
+    let latestMetricsAt = null;
+    let settingsValues = {};
 
     function setServiceState(level, label, detail) {
       signalRail.className = `signal-rail ${level}`;
@@ -176,23 +186,20 @@
       serviceDetail.textContent = detail;
     }
 
-    function parseMetrics(body) {
-      return body.split("\n").reduce((values, line) => {
-        const match = line.match(/^lowmeet_([a-z0-9_]+)\s+([-+]?[0-9]*\.?[0-9]+)$/);
-        if (match) values[match[1]] = Number(match[2]);
-        return values;
-      }, {});
-    }
-
     function formatMetric(value, suffix = "") {
       return Number.isFinite(value) && value >= 0 ? `${value}${suffix}` : "No sample yet";
     }
 
     function renderMetrics(values) {
+      latestMetrics = values;
+      latestMetricsAt = new Date();
       const active = values.active_participants;
       const max = values.max_participants;
       metricFields.active.textContent = Number.isFinite(active) ? active : "—";
-      metricFields.capacity.textContent = Number.isFinite(max) ? `of ${max} allowed` : "Waiting for metrics";
+      const capacity = capacityState(active, max);
+      metricFields.capacity.textContent = capacity.label;
+      metricFields.capacityMeter.value = capacity.fraction;
+      metricFields.capacityMeter.setAttribute("aria-label", capacity.ariaLabel);
       metricFields.peers.textContent = Number.isFinite(values.peer_connections) ? values.peer_connections : "—";
       metricFields.reconnects.textContent = `${values.reconnects_total || 0} reconnects`;
       const hasSamples = values.network_samples_total > 0;
@@ -213,22 +220,31 @@
       }
     }
 
+    async function refreshHealth() {
+      const response = await fetch("/ready", {cache: "no-store"});
+      if (!response.ok) throw new Error("Service is not ready");
+      setServiceState("success", "Service ready", "Meeting path is available");
+    }
+
+    async function refreshMetrics() {
+      const response = await fetch("/metrics", {cache: "no-store"});
+      if (!response.ok) throw new Error(`Metrics unavailable (${response.status})`);
+      renderMetrics(parseMetrics(await response.text()));
+      updatedAt.textContent = `Updated ${latestMetricsAt.toLocaleTimeString()}`;
+    }
+
     async function refreshStatus() {
       refresh.disabled = true;
-      try {
-        const [readyResponse, metricsResponse] = await Promise.all([
-          fetch("/ready", {cache: "no-store"}),
-          fetch("/metrics", {cache: "no-store"})
-        ]);
-        if (!readyResponse.ok) throw new Error("Service is not ready");
-        renderMetrics(parseMetrics(await metricsResponse.text()));
-        updatedAt.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-      } catch (error) {
-        setServiceState("danger", "Service unavailable", error.message);
-        updatedAt.textContent = "Refresh failed";
-      } finally {
-        refresh.disabled = false;
+      const [healthResult, metricsResult] = await Promise.allSettled([refreshHealth(), refreshMetrics()]);
+      if (healthResult.status === "rejected") {
+        setServiceState("danger", "Service unavailable", healthResult.reason.message);
       }
+      if (metricsResult.status === "rejected") {
+        updatedAt.textContent = latestMetricsAt ?
+          `Stale · last updated ${latestMetricsAt.toLocaleTimeString()}` : "Metrics unavailable";
+        metricFields.network.textContent = "Metrics unavailable; retry refresh";
+      }
+      refresh.disabled = false;
     }
 
     async function loadSettings() {
@@ -241,6 +257,7 @@
         if (response.status === 401) {
           status.textContent = "Admin password rejected.";
           document.querySelector("#save-state").textContent = "Protected";
+          password.value = "";
           return;
         }
         if (!response.ok) {
@@ -248,9 +265,10 @@
           return;
         }
         const values = await response.json();
+        settingsValues = values;
         fields.max_participants.value = values.max_participants;
-      fields.default_video_quality.value = values.default_video_quality;
-      fields.max_video_quality.value = values.max_video_quality;
+        fields.default_video_quality.value = values.default_video_quality;
+        fields.max_video_quality.value = values.max_video_quality;
         fields.max_video_bitrate.value = values.max_video_bitrate;
         fields.max_video_fps.value = values.max_video_fps;
         fields.max_audio_bitrate.value = values.max_audio_bitrate;
@@ -301,6 +319,20 @@
     });
     password.addEventListener("change", loadSettings);
     refresh.addEventListener("click", refreshStatus);
+    document.querySelector("#copy-diagnostics").addEventListener("click", async () => {
+      const report = buildDiagnostics({
+        capturedAt: latestMetricsAt ? latestMetricsAt.toISOString() : null,
+        metrics: latestMetrics,
+        settings: settingsValues
+      });
+      try {
+        await navigator.clipboard.writeText(report);
+        document.querySelector("#diagnostics-status").textContent = "Diagnostics copied.";
+      } catch (_) {
+        document.querySelector("#diagnostics-status").textContent =
+          "Clipboard unavailable; select the metrics manually.";
+      }
+    });
     refreshStatus();
     setInterval(refreshStatus, 10000);
   </script>
