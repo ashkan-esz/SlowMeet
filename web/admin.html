@@ -6,23 +6,46 @@
   <title>LowMeet admin</title>
   <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
+<body class="admin-page">
   <main class="admin-shell">
     <aside class="signal-rail" aria-label="Service status">
       <span class="signal-dot" aria-hidden="true"></span>
       <span id="service-label">Checking service</span>
       <small id="service-detail">Waiting for readiness</small>
     </aside>
+    <nav class="admin-nav" aria-label="Admin navigation">
+      <a class="brand-mark" href="/" aria-label="LowMeet home">
+        <span class="brand-mark__dot" aria-hidden="true"></span>
+        <span>LowMeet</span>
+      </a>
+      <p class="nav-caption">Operations</p>
+      <a class="nav-link nav-link--active" href="#overview">Overview</a>
+      <a class="nav-link" href="#settings">Meeting settings</a>
+      <a class="nav-link" href="#network">Network health</a>
+      <a class="nav-link" href="#diagnostics">Diagnostics</a>
+      <p class="nav-footer">Single meeting<br>Self-hosted control room</p>
+    </nav>
     <section class="admin-main">
       <header class="admin-header">
         <div>
           <p class="eyebrow">LowMeet / Operations</p>
-          <h1>Meeting settings</h1>
-          <p class="admin-intro">A quiet control room for one meeting. Watch the live signal, then adjust the limits that protect audio continuity.</p>
+          <h1>Overview</h1>
+          <p class="admin-intro">A calm view of service readiness, meeting capacity, and the policies protecting audio continuity.</p>
         </div>
-        <button id="refresh" class="button-secondary" type="button">Refresh status</button>
+        <div class="header-actions">
+          <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
+          <button id="refresh" class="button-primary" type="button">Refresh status</button>
+        </div>
       </header>
 
+      <section id="overview" class="admin-section" aria-labelledby="overview-title">
+        <div class="section-heading section-heading--admin">
+          <div>
+            <p class="eyebrow">At a glance</p>
+            <h2 id="overview-title">Current meeting health</h2>
+          </div>
+          <a class="text-action" href="/">Open meeting</a>
+        </div>
       <section class="admin-summary" aria-label="Service summary">
         <article class="summary-card">
           <span class="summary-label">Active participants</span>
@@ -46,72 +69,94 @@
           <span id="network-detail" class="summary-detail">Audio is prioritized</span>
         </article>
       </section>
+      <section class="quick-actions" aria-label="Quick actions">
+        <a class="quick-action" href="#settings"><strong>Edit meeting policy</strong><span>Update capacity and media limits.</span></a>
+        <a class="quick-action" href="#network"><strong>Inspect network health</strong><span>Review the latest available sample.</span></a>
+        <a class="quick-action" href="#diagnostics"><strong>Prepare diagnostics</strong><span>Copy a redacted support snapshot.</span></a>
+      </section>
+      </section>
 
       <div class="admin-columns">
-        <section class="admin-card">
+        <section id="settings" class="admin-card settings-card" aria-labelledby="settings-title">
           <div class="card-heading">
             <div>
               <p class="eyebrow">Policy</p>
-              <h2>Meeting limits</h2>
+              <h2 id="settings-title">Meeting settings</h2>
             </div>
             <span id="save-state" class="status-chip">Protected</span>
           </div>
-          <p class="card-copy">Changes apply to the active meeting and are broadcast to connected clients.</p>
-          <form id="admin-form">
-            <label>Admin password<input id="password" type="password" autocomplete="current-password" required></label>
+          <p class="card-copy">Changes apply to the active meeting and media policy is broadcast to connected clients.</p>
+          <form id="admin-form" class="admin-form">
+            <div class="form-field">
+              <label for="password">Admin password</label>
+              <input id="password" type="password" autocomplete="current-password" required>
+              <span class="field-help">Used only to authenticate this request.</span>
+            </div>
             <fieldset>
               <legend>Capacity</legend>
-              <label>Maximum participants
-                <span class="field-help">1–100 people</span>
-                <input id="participants" type="number" min="1" max="100" value="5">
-              </label>
+              <div class="field-grid">
+                <div class="form-field">
+                  <label for="participants">Maximum participants</label>
+                  <input id="participants" type="number" min="1" max="100" value="5">
+                  <span class="field-help">1–100 people.</span>
+                </div>
+              </div>
             </fieldset>
             <fieldset>
               <legend>Video policy</legend>
-              <label>Default video quality
-                <select id="video-quality">
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
-              <label>Maximum video quality
-                <span class="field-help">Hard ceiling for participant profiles</span>
-                <select id="max-video-quality">
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
-              <label>Maximum video bitrate
-                <span class="field-help">bits per second</span>
-                <input id="video-bitrate" type="number" min="1" value="500000">
-              </label>
-              <label>Maximum video FPS
-                <span class="field-help">1–60 frames per second</span>
-                <input id="video-fps" type="number" min="1" max="60" value="30">
-              </label>
+              <div class="field-grid">
+                <div class="form-field">
+                  <label for="video-quality">Default video quality</label>
+                  <select id="video-quality">
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label for="max-video-quality">Maximum video quality</label>
+                  <select id="max-video-quality">
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                  <span class="field-help">Hard ceiling for participant profiles.</span>
+                </div>
+                <div class="form-field">
+                  <label for="video-bitrate">Maximum video bitrate</label>
+                  <input id="video-bitrate" type="number" min="1" value="500000">
+                  <span class="field-help">Bits per second.</span>
+                </div>
+                <div class="form-field">
+                  <label for="video-fps">Maximum video FPS</label>
+                  <input id="video-fps" type="number" min="1" max="60" value="30">
+                  <span class="field-help">1–60 frames per second.</span>
+                </div>
+              </div>
             </fieldset>
             <fieldset>
               <legend>Audio policy</legend>
-              <label>Maximum audio bitrate
-                <span class="field-help">bits per second</span>
-                <input id="audio-bitrate" type="number" min="1" value="64000">
-              </label>
+              <div class="field-grid">
+                <div class="form-field">
+                  <label for="audio-bitrate">Maximum audio bitrate</label>
+                  <input id="audio-bitrate" type="number" min="1" value="64000">
+                  <span class="field-help">Bits per second.</span>
+                </div>
+              </div>
             </fieldset>
-            <label class="checkbox-row"><input id="screen-share" type="checkbox" checked> <span>Enable screen sharing</span></label>
-            <button id="save" type="submit">Save settings</button>
+            <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span>Allow screen sharing</span></label>
+            <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>
           </form>
         </section>
 
-        <section class="admin-card">
+        <div class="admin-side-stack">
+        <section id="network" class="admin-card" aria-labelledby="network-title">
           <div class="card-heading">
             <div>
               <p class="eyebrow">Network watch</p>
-              <h2>Live signal</h2>
+              <h2 id="network-title">Latest signal</h2>
             </div>
-            <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
           </div>
           <p class="card-copy">These are the latest reported values, not historical trends.</p>
           <dl class="metric-list">
@@ -123,15 +168,49 @@
             <div><dt>Connection failures</dt><dd id="connection-failures">—</dd></div>
           </dl>
           <div class="policy-note">
-            <strong>Reliability first</strong>
+            <strong id="network-detail-title">Reliability first</strong>
             <span>When conditions worsen, video may reduce quality while audio remains available.</span>
           </div>
-          <div class="diagnostics-actions">
-            <button id="copy-diagnostics" class="button-secondary" type="button">Copy diagnostics</button>
-            <span id="diagnostics-status" class="updated-at" role="status"></span>
-          </div>
         </section>
+        <section class="admin-card policy-card" aria-labelledby="policy-title">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">Active policy</p>
+              <h2 id="policy-title">What the room allows</h2>
+            </div>
+          </div>
+          <dl id="policy-summary" class="policy-summary">
+            <div><dt>Video</dt><dd>Authenticate to view</dd></div>
+            <div><dt>Audio</dt><dd>Authenticate to view</dd></div>
+            <div><dt>Features</dt><dd>Authenticate to view</dd></div>
+          </dl>
+        </section>
+        </div>
       </div>
+
+      <section id="diagnostics" class="admin-card diagnostics-card" aria-labelledby="diagnostics-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">Support</p>
+            <h2 id="diagnostics-title">Diagnostics</h2>
+          </div>
+          <button id="copy-diagnostics" class="button-secondary" type="button">Copy diagnostics</button>
+        </div>
+        <p class="card-copy">A redacted snapshot of current service, network, and non-secret policy values.</p>
+        <p id="diagnostics-status" class="form-status" role="status"></p>
+      </section>
+      <section class="admin-card events-card" aria-labelledby="events-title">
+        <div class="card-heading">
+          <div>
+            <p class="eyebrow">This session</p>
+            <h2 id="events-title">Recent activity</h2>
+          </div>
+          <span class="updated-at">Not a durable audit log</span>
+        </div>
+        <ol id="recent-events" class="recent-events">
+          <li class="empty-event">No recent events.</li>
+        </ol>
+      </section>
 
       <footer class="admin-footer">
         <span id="endpoint-status">Endpoints: /health · /ready · /metrics · /ws</span>

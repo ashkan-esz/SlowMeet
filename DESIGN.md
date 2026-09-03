@@ -1,6 +1,6 @@
 ---
 name: LowMeet Operations Cockpit
-version: 1.0
+version: 1.1
 colors:
   canvas: '#eef2f5'
   surface: '#ffffff'
@@ -426,6 +426,67 @@ the server exposes them.
   considering information disclosure.
 - Respect the existing TLS and WebSocket deployment requirements. The admin
   page must work behind Caddy or Nginx without changing upgrade behavior.
+
+## Public meeting experience
+
+The public page has two intentional states:
+
+1. **Join:** a quiet welcome surface with one clear action, short explanations
+   of audio-first resilience, the name and optional meeting password fields,
+   and an optional temporary camera/microphone check.
+2. **Meeting:** a focused room shell with connection state, participant media,
+   bandwidth policy, diagnostics, and a persistent control area.
+
+The brand bar and welcome grid are join-only framing. After the server confirms
+the participant, hide both so the meeting shell can use the full public-page
+width. Restore them when the participant leaves.
+
+Meetings start with the microphone muted and camera off. The browser still
+requests the available tracks so controls can be enabled immediately, but
+their `enabled` state and the first `media_state` message must reflect the
+safe defaults. Missing devices disable only the affected control and leave the
+other media path usable.
+
+The pre-join device check uses a short-lived local stream, shows a temporary
+muted camera preview, reports camera and microphone readiness independently,
+and stops every test track before socket connection. It must not record,
+persist, or send the test stream.
+
+The meeting view should make the current call the visual priority. Participant
+tiles use the available video as the primary surface and expose media state as
+text. A muted microphone and camera-off state also receive distinct tile
+border treatments, while a speaking tile receives a success border and a
+visible “Speaking now” label. The client may use Web Audio RMS analysis of
+local and remote audio for this best-effort highlight; it must not claim that
+the server has authoritative speaker detection. If Web Audio is unavailable,
+media playback and the text media states remain fully usable.
+
+Controls retain stable verbs and `aria-pressed` state:
+
+- Mute or unmute microphone.
+- Turn camera on or off.
+- Pause or resume remote video.
+- Start or stop screen sharing.
+- Leave the meeting.
+
+The public page must remain useful when media is degraded. Keep connection
+state, audio availability, screen-share ownership, and effective bandwidth
+profile visible without turning every warning into a blocking modal.
+
+## Implementation constraints
+
+- Use the existing system font stack; LowMeet is self-hosted and optimized for
+  constrained networks.
+- Use CSS custom properties for semantic color, spacing, radii, and focus
+  treatments. Do not add one-off per-component colors.
+- Keep the existing WebSocket protocol and REST endpoints unchanged.
+- Preserve JavaScript-facing IDs in `web/index.html` and `web/admin.html`.
+- Use text labels alongside any decorative indicator. Never use emoji as a
+  structural control icon.
+- Do not add historical charts, per-participant network claims, moderation
+  controls, or credential-bearing diagnostics until the backend supports them.
+- Verify the public meeting shell at 375px, tablet, and desktop widths, with
+  keyboard focus and reduced motion enabled.
 
 ### Freshness and thresholds
 

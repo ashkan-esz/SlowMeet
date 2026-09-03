@@ -6,46 +6,137 @@
   <title>LowMeet</title>
   <link rel="stylesheet" href="/css/style.css">
 </head>
-<body>
-  <main class="shell">
-    <h1>LowMeet</h1>
-    <p>Simple, resilient video meetings.</p>
-    <form id="join-form">
-      <label for="name">Name</label>
-      <input id="name" name="name" maxlength="32" autocomplete="name" required>
-      <label for="password">Meeting password <span>(if required)</span></label>
-      <input id="password" name="password" type="password" autocomplete="off">
-      <button id="join" type="submit">Join meeting</button>
-      <p id="status" role="status"></p>
-    </form>
-    <section id="meeting" hidden>
-      <p id="connection" class="connection" aria-live="polite">● Connecting</p>
-      <h2>Participants</h2>
-      <ul id="participants"></ul>
-      <details>
-        <summary>Connection details</summary>
-        <button id="copy-diagnostics" type="button">Copy diagnostics</button>
-        <pre id="diagnostics">Waiting for media statistics…</pre>
-        <p id="diagnostics-status" role="status"></p>
-      </details>
-      <button id="enable-audio" type="button" hidden>Enable remote audio</button>
-      <label for="profile">Bandwidth profile</label>
-      <select id="profile">
-        <option value="auto">Auto</option>
-        <option value="very-slow">Very slow</option>
-        <option value="slow">Slow</option>
-        <option value="normal">Normal</option>
-        <option value="high">High</option>
-      </select>
-      <p id="effective-profile" class="setting-note">Effective profile: waiting for media</p>
-      <p id="screen-status" class="setting-note">No one is sharing their screen.</p>
-      <div class="controls">
-        <button id="mic" type="button" aria-pressed="true">Mute microphone</button>
-        <button id="camera" type="button" aria-pressed="true">Turn camera off</button>
-        <button id="receive-video" type="button" aria-pressed="true">Pause remote video</button>
-        <button id="screen" type="button" aria-pressed="false">Share screen</button>
-        <button id="leave" type="button">Leave</button>
+<body class="public-page">
+  <main class="public-shell">
+    <header class="brand-bar">
+      <a class="brand-mark" href="/" aria-label="LowMeet home">
+        <span class="brand-mark__dot" aria-hidden="true"></span>
+        <span>LowMeet</span>
+      </a>
+      <span class="page-context">Private, resilient meetings</span>
+    </header>
+
+    <section class="welcome-grid" aria-labelledby="welcome-title">
+      <div class="welcome-copy">
+        <p class="eyebrow">A calmer way to meet</p>
+        <h1 id="welcome-title">Stay present. Keep the call moving.</h1>
+        <p class="lead">LowMeet keeps audio useful and lets video adapt when the network gets difficult.</p>
+        <div class="principle-list" aria-label="LowMeet principles">
+          <div>
+            <span class="principle-mark" aria-hidden="true">01</span>
+            <span><strong>Audio first</strong><small>Stay connected when bandwidth is limited.</small></span>
+          </div>
+          <div>
+            <span class="principle-mark" aria-hidden="true">02</span>
+            <span><strong>Simple controls</strong><small>Adjust the room without leaving the conversation.</small></span>
+          </div>
+        </div>
       </div>
+
+      <form id="join-form" class="join-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Join the room</p>
+            <h2>Enter your details</h2>
+          </div>
+          <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
+        </div>
+        <p class="panel-copy">Use a name your teammates will recognize. A password is only needed when the room is protected.</p>
+        <div class="form-field">
+          <label for="name">Name</label>
+          <input id="name" name="name" maxlength="32" autocomplete="name" required>
+        </div>
+        <div class="form-field">
+          <label for="password">Meeting password <span>(if required)</span></label>
+          <input id="password" name="password" type="password" autocomplete="current-password">
+        </div>
+        <section class="device-test" aria-labelledby="device-test-title">
+          <div class="device-test-heading">
+            <div>
+              <p class="eyebrow">Before joining</p>
+              <h3 id="device-test-title">Check your setup</h3>
+            </div>
+            <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
+          </div>
+          <p class="device-test-copy">Preview your camera and confirm microphone access. The test stops before you enter the room.</p>
+          <button id="test-media" class="button-secondary" type="button">Test camera &amp; microphone</button>
+          <video id="device-preview" class="device-preview" autoplay muted playsinline hidden></video>
+          <div class="device-test-results" aria-live="polite">
+            <span id="test-camera" class="device-result">Camera not tested</span>
+            <span id="test-microphone" class="device-result">Microphone not tested</span>
+          </div>
+          <button id="stop-media-test" class="button-secondary" type="button" hidden>Stop test</button>
+          <p id="device-test-status" class="device-test-status" role="status"></p>
+        </section>
+        <button id="join" class="button-primary" type="submit">Join meeting</button>
+        <p id="status" class="status-message" role="status" aria-live="polite"></p>
+        <p class="form-note">Your name is stored only in this browser to make returning easier.</p>
+      </form>
+    </section>
+
+    <section id="meeting" class="meeting-shell" hidden aria-labelledby="meeting-title">
+      <header class="meeting-header">
+        <div>
+          <p class="eyebrow">Live room</p>
+          <h1 id="meeting-title">LowMeet meeting</h1>
+        </div>
+        <p id="connection" class="connection" aria-live="polite">● Connecting</p>
+      </header>
+
+      <div class="meeting-layout">
+        <section class="stage-panel" aria-labelledby="participants-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="participants-title">Participants</h2>
+              <p class="section-note">Video adapts automatically to protect audio.</p>
+            </div>
+            <div class="meeting-status">
+              <span class="live-label"><span class="live-label__dot" aria-hidden="true"></span>Live</span>
+              <span id="speaker-status" class="speaker-summary" role="status" aria-live="polite">No active speaker</span>
+            </div>
+          </div>
+          <ul id="participants" class="participant-grid"></ul>
+          <p id="screen-status" class="setting-note screen-status">No one is sharing their screen.</p>
+        </section>
+
+        <aside class="meeting-sidebar" aria-label="Meeting tools">
+          <section class="utility-card">
+            <div class="card-heading">
+              <div>
+                <p class="eyebrow">Media</p>
+                <h2>Bandwidth profile</h2>
+              </div>
+            </div>
+            <label for="profile">Choose a profile</label>
+            <select id="profile">
+              <option value="auto">Auto</option>
+              <option value="very-slow">Very slow</option>
+              <option value="slow">Slow</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+            </select>
+            <p id="effective-profile" class="setting-note">Effective profile: waiting for media</p>
+          </section>
+
+          <button id="enable-audio" class="button-secondary audio-prompt" type="button" hidden>Enable remote audio</button>
+
+          <details class="utility-card diagnostics-panel">
+            <summary>Connection details</summary>
+            <p class="setting-note">Share this redacted snapshot when troubleshooting.</p>
+            <button id="copy-diagnostics" class="button-secondary" type="button">Copy diagnostics</button>
+            <pre id="diagnostics">Waiting for media statistics…</pre>
+            <p id="diagnostics-status" class="status-message" role="status"></p>
+          </details>
+        </aside>
+      </div>
+
+      <nav class="controls" aria-label="Meeting controls">
+        <button id="mic" type="button" aria-pressed="false" class="control-button">Unmute microphone</button>
+        <button id="camera" type="button" aria-pressed="false" class="control-button">Turn camera on</button>
+        <button id="receive-video" type="button" aria-pressed="true" class="control-button">Pause remote video</button>
+        <button id="screen" type="button" aria-pressed="false" class="control-button">Share screen</button>
+        <button id="leave" class="control-button control-button--danger" type="button">Leave</button>
+      </nav>
     </section>
   </main>
   <script src="/js/adaptation-policy.js"></script>

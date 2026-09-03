@@ -51,6 +51,7 @@ if (isBelowBitrate(20, 40) !== true ||
 const fs = require("node:fs");
 const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
 if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers });\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
 }
@@ -58,7 +59,7 @@ if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
     !appSource.includes('setConnection("poor", "Connection lost");')) {
   throw new Error("signaling disconnects must be visible in the connection indicator");
 }
-if (!appSource.includes('mic.setAttribute("aria-pressed", String(track.enabled));') ||
+if (!appSource.includes('mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));') ||
     !appSource.includes('receiveVideo.setAttribute("aria-pressed", String(enabled));') ||
     !appSource.includes('screen.setAttribute("aria-pressed", String(Boolean(screenStream)));')) {
   throw new Error("meeting controls must expose their current toggle state");
@@ -67,7 +68,41 @@ if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther;"
     appSource.includes("screen.disabled = false;")) {
   throw new Error("disabled screen sharing must remain disabled after UI refresh");
 }
+if (!styleSource.includes(".participant-grid video.local-camera-preview") ||
+    !styleSource.includes("transform: scaleX(-1);") ||
+    !appSource.includes("setLocalVideoMirror(true);") ||
+    !appSource.includes("setLocalVideoMirror(false);")) {
+  throw new Error("only the local camera preview should be mirrored");
+}
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
+for (const behavior of [
+  'const brandBar = document.querySelector(".brand-bar");',
+  "brandBar.hidden = true;",
+  "brandBar.hidden = false;",
+  "let cameraRequested = false;",
+  "runDeviceTest",
+  "attachSpeakerAnalyzer",
+  "is-speaking"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`meeting media behavior is missing: ${behavior}`);
+  }
+}
+for (const element of [
+  'id="test-media"',
+  'id="device-preview"',
+  'id="test-camera"',
+  'id="test-microphone"',
+  'id="stop-media-test"'
+]) {
+  if (!indexSource.includes(element)) {
+    throw new Error(`device test element is missing: ${element}`);
+  }
+}
+if (!indexSource.includes('id="mic" type="button" aria-pressed="false"') ||
+    !indexSource.includes('id="camera" type="button" aria-pressed="false"')) {
+  throw new Error("microphone and camera must start disabled by default");
+}
 for (const control of ["mic", "camera", "receive-video", "screen"]) {
   if (!indexSource.includes(`id="${control}"`) ||
       !indexSource.includes(`id="${control}" type="button" aria-pressed="`)) {

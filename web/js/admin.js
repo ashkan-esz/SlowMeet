@@ -7,6 +7,8 @@ const serviceLabel = document.querySelector("#service-label");
 const serviceDetail = document.querySelector("#service-detail");
 const signalRail = document.querySelector(".signal-rail");
 const updatedAt = document.querySelector("#updated-at");
+const policySummary = document.querySelector("#policy-summary");
+const recentEvents = document.querySelector("#recent-events");
 const fields = {
   max_participants: document.querySelector("#participants"),
   default_video_quality: document.querySelector("#video-quality"),
@@ -36,11 +38,44 @@ const metricFields = {
 let latestMetrics = {};
 let latestMetricsAt = null;
 let settingsValues = {};
+let metricsStale = false;
+
+function recordEvent(label) {
+  if (!recentEvents) return;
+  recentEvents.querySelector(".empty-event")?.remove();
+  const item = document.createElement("li");
+  const eventLabel = document.createElement("strong");
+  const timestamp = document.createElement("time");
+  const now = new Date();
+  eventLabel.textContent = label;
+  timestamp.dateTime = now.toISOString();
+  timestamp.textContent = now.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  item.append(eventLabel, timestamp);
+  recentEvents.prepend(item);
+  while (recentEvents.children.length > 4) recentEvents.lastElementChild.remove();
+}
+
+function renderPolicySummary(values) {
+  if (!policySummary) return;
+  const summaryValues = policySummary.querySelectorAll("dd");
+  if (summaryValues.length < 3) return;
+  const videoQuality = values.default_video_quality || "unknown";
+  const maxVideoQuality = values.max_video_quality || "unknown";
+  const videoBitrate = Number.isFinite(values.max_video_bitrate) ?
+    `${Math.round(values.max_video_bitrate / 1000)} kbps max` : "bitrate unavailable";
+  const audioBitrate = Number.isFinite(values.max_audio_bitrate) ?
+    `${Math.round(values.max_audio_bitrate / 1000)} kbps max` : "bitrate unavailable";
+  summaryValues[0].textContent = `${videoQuality} default · ${maxVideoQuality} max · ${videoBitrate}`;
+  summaryValues[1].textContent = audioBitrate;
+  summaryValues[2].textContent = values.screen_share_enabled ? "Screen sharing allowed" : "Screen sharing disabled";
+}
 
 function setServiceState(level, label, detail) {
+  const changed = serviceLabel.textContent !== label || serviceDetail.textContent !== detail;
   signalRail.className = `signal-rail ${level}`;
   serviceLabel.textContent = label;
   serviceDetail.textContent = detail;
+  if (changed && label !== "Checking service") recordEvent(label);
 }
 
 function formatMetric(value, suffix = "") {
@@ -80,6 +115,7 @@ function renderMetrics(values) {
 async function refreshHealth() {
   const response = await fetch("/ready", {cache: "no-store"});
   if (!response.ok) throw new Error("Service is not ready");
+  if (signalRail.classList.contains("warning")) return;
   setServiceState("success", "Service ready", "Meeting path is available");
 }
 
@@ -100,6 +136,11 @@ async function refreshStatus() {
     updatedAt.textContent = latestMetricsAt ?
       `Stale · last updated ${latestMetricsAt.toLocaleTimeString()}` : "Metrics unavailable";
     metricFields.network.textContent = "Metrics unavailable; retry refresh";
+    if (!metricsStale) recordEvent("Metrics unavailable; showing last known values");
+    metricsStale = true;
+  } else if (metricsStale) {
+    recordEvent("Metrics recovered");
+    metricsStale = false;
   }
   refresh.disabled = false;
 }
@@ -130,8 +171,10 @@ async function loadSettings() {
     fields.max_video_fps.value = values.max_video_fps;
     fields.max_audio_bitrate.value = values.max_audio_bitrate;
     fields.screen_share_enabled.checked = values.screen_share_enabled;
+    renderPolicySummary(values);
     status.textContent = "Loaded.";
     document.querySelector("#save-state").textContent = "Authenticated";
+    recordEvent("Settings loaded");
   } catch (_) {
     status.textContent = "Could not reach the service. Settings were not loaded.";
   }
@@ -166,8 +209,11 @@ form.addEventListener("submit", async (event) => {
     } else if (!response.ok) {
       status.textContent = `Could not save settings (${response.status}).`;
     } else {
+      settingsValues = body;
+      renderPolicySummary(body);
       status.textContent = "Settings saved. Changes are live.";
       document.querySelector("#save-state").textContent = "Saved";
+      recordEvent("Settings saved");
       await refreshStatus();
     }
   } catch (_) {

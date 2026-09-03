@@ -3,6 +3,8 @@ const nameInput = document.querySelector("#name");
 const passwordInput = document.querySelector("#password");
 const joinButton = document.querySelector("#join");
 const status = document.querySelector("#status");
+const brandBar = document.querySelector(".brand-bar");
+const welcomeGrid = document.querySelector(".welcome-grid");
 const meeting = document.querySelector("#meeting");
 const participants = document.querySelector("#participants");
 const mic = document.querySelector("#mic");
@@ -12,12 +14,19 @@ const screen = document.querySelector("#screen");
 const screenStatus = document.querySelector("#screen-status");
 const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
+const speakerStatus = document.querySelector("#speaker-status");
 const diagnostics = document.querySelector("#diagnostics");
 const copyDiagnostics = document.querySelector("#copy-diagnostics");
 const diagnosticsStatus = document.querySelector("#diagnostics-status");
 const enableAudio = document.querySelector("#enable-audio");
 const profile = document.querySelector("#profile");
 const effectiveProfile = document.querySelector("#effective-profile");
+const testMedia = document.querySelector("#test-media");
+const devicePreview = document.querySelector("#device-preview");
+const testCamera = document.querySelector("#test-camera");
+const testMicrophone = document.querySelector("#test-microphone");
+const stopMediaTest = document.querySelector("#stop-media-test");
+const deviceTestStatus = document.querySelector("#device-test-status");
 function readStoredValue(key) {
   try {
     return localStorage.getItem(key);
@@ -66,8 +75,13 @@ let goodSamples = 0;
 let criticalSamples = 0;
 let recoverySamples = 0;
 let videoSuspended = false;
-let cameraRequested = true;
+let cameraRequested = false;
 let receiveVideoEnabled = true;
+let mediaTestStream;
+let audioContext;
+let speakerAnimationFrame;
+const speakerAnalyzers = new Map();
+const activeSpeakers = new Set();
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
@@ -109,6 +123,232 @@ const profiles = [
   { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000, audioBitrate: 48000 },
   { name: "high", width: 854, height: 480, fps: 24, bitrate: 650000, audioBitrate: 64000 }
 ];
+const cameraConstraints = {
+  width: { ideal: 360, max: 640 },
+  height: { ideal: 240, max: 360 },
+  frameRate: { ideal: 15, max: 30 }
+};
+
+function setDeviceResult(element, state, label) {
+  element.className = `device-result device-result--${state}`;
+  element.textContent = label;
+}
+
+function stopDeviceTest() {
+  mediaTestStream?.getTracks().forEach((track) => track.stop());
+  mediaTestStream = undefined;
+  devicePreview.srcObject = null;
+  devicePreview.hidden = true;
+  stopMediaTest.hidden = true;
+  testMedia.disabled = false;
+}
+
+async function runDeviceTest() {
+  stopDeviceTest();
+  setDeviceResult(testCamera, "pending", "Checking camera…");
+  setDeviceResult(testMicrophone, "pending", "Checking microphone…");
+  deviceTestStatus.textContent = "Requesting temporary access. Nothing is recorded.";
+  testMedia.disabled = true;
+  stopMediaTest.hidden = false;
+  const testStream = new MediaStream();
+  mediaTestStream = testStream;
+  let cameraReady = false;
+  let microphoneReady = false;
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setDeviceResult(testCamera, "error", "Camera unavailable");
+    setDeviceResult(testMicrophone, "error", "Microphone unavailable");
+    deviceTestStatus.textContent = "This browser does not support camera and microphone checks.";
+    stopMediaTest.hidden = true;
+    testMedia.disabled = false;
+    return;
+  }
+
+  try {
+    const videoStream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints });
+    if (mediaTestStream !== testStream) {
+      videoStream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    videoStream.getTracks().forEach((track) => testStream.addTrack(track));
+    cameraReady = videoStream.getVideoTracks().length > 0;
+    setDeviceResult(testCamera, cameraReady ? "ready" : "error",
+      cameraReady ? "Camera ready" : "Camera unavailable");
+  } catch (_) {
+    setDeviceResult(testCamera, "error", "Camera unavailable");
+  }
+
+  try {
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (mediaTestStream !== testStream) {
+      audioStream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    audioStream.getTracks().forEach((track) => testStream.addTrack(track));
+    microphoneReady = audioStream.getAudioTracks().length > 0;
+    setDeviceResult(testMicrophone, microphoneReady ? "ready" : "error",
+      microphoneReady ? "Microphone ready" : "Microphone unavailable");
+  } catch (_) {
+    setDeviceResult(testMicrophone, "error", "Microphone unavailable");
+  }
+
+  if (mediaTestStream !== testStream) {
+    testStream.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  devicePreview.srcObject = testStream;
+  devicePreview.hidden = !cameraReady;
+  deviceTestStatus.textContent = cameraReady && microphoneReady
+    ? "Your devices are ready. The test will stop when you join."
+    : "Some devices need attention. You can still join and use the available media.";
+}
+
+testMedia.addEventListener("click", runDeviceTest);
+stopMediaTest.addEventListener("click", () => {
+  stopDeviceTest();
+  deviceTestStatus.textContent = "Device test stopped.";
+});
+
+function setLocalMediaControls() {
+  const audioTrack = localStream?.getAudioTracks()[0];
+  const videoTrack = localStream?.getVideoTracks()[0];
+  const audioAvailable = Boolean(audioTrack);
+  const videoAvailable = Boolean(videoTrack);
+  mic.disabled = !audioAvailable;
+  camera.disabled = !videoAvailable;
+  mic.textContent = audioAvailable && audioTrack.enabled ? "Mute microphone" : "Unmute microphone";
+  mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));
+  camera.textContent = videoAvailable && cameraRequested && !videoSuspended
+    ? "Turn camera off" : "Turn camera on";
+  camera.setAttribute("aria-pressed", String(videoAvailable && cameraRequested && !videoSuspended));
+  if (!audioAvailable) mic.textContent = "Microphone unavailable";
+  if (!videoAvailable) camera.textContent = "Camera unavailable";
+}
+
+function setLocalVideoMirror(enabled) {
+  const local = participantElements.get(localParticipantID);
+  if (local) local.video.classList.toggle("local-camera-preview", enabled);
+}
+
+function ensureAudioContext() {
+  if (!audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return undefined;
+    audioContext = new AudioContextClass();
+  }
+  audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+function updateSpeakerSummary() {
+  const names = [...activeSpeakers]
+    .map((participantID) => participantElements.get(participantID)?.name?.textContent)
+    .filter(Boolean);
+  speakerStatus.textContent = names.length === 0
+    ? "No active speaker"
+    : names.length === 1 ? `${names[0]} is speaking` : `${names.join(", ")} are speaking`;
+}
+
+function setSpeakerState(participantID, speaking) {
+  const element = participantElements.get(participantID);
+  if (!element) return;
+  element.item.classList.toggle("is-speaking", speaking);
+  element.speaker.hidden = !speaking;
+  element.speaker.textContent = speaking ? "Speaking now" : "";
+  if (speaking) activeSpeakers.add(participantID);
+  else activeSpeakers.delete(participantID);
+  updateSpeakerSummary();
+}
+
+function runSpeakerDetection() {
+  speakerAnalyzers.forEach((entry, participantID) => {
+    entry.analyser.getByteTimeDomainData(entry.data);
+    let total = 0;
+    for (const value of entry.data) {
+      const normalized = (value - 128) / 128;
+      total += normalized * normalized;
+    }
+    const rms = Math.sqrt(total / entry.data.length);
+    entry.level = entry.level * 0.78 + rms * 0.22;
+    const speaking = entry.speaking
+      ? entry.level >= 0.035
+      : entry.level >= 0.06;
+    entry.quietFrames = speaking ? 0 : entry.quietFrames + 1;
+    const stableSpeaking = entry.speaking
+      ? entry.quietFrames < 12
+      : speaking;
+    if (stableSpeaking !== entry.speaking) {
+      entry.speaking = stableSpeaking;
+      setSpeakerState(participantID, stableSpeaking);
+    }
+  });
+  speakerAnimationFrame = speakerAnalyzers.size > 0
+    ? requestAnimationFrame(runSpeakerDetection) : undefined;
+}
+
+function attachSpeakerAnalyzer(participantID, source, preserveOutput = false) {
+  const context = ensureAudioContext();
+  if (!context || !source || speakerAnalyzers.has(participantID)) return;
+  try {
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    const sourceNode = source instanceof MediaStream
+      ? context.createMediaStreamSource(source)
+      : context.createMediaElementSource(source);
+    sourceNode.connect(analyser);
+    if (preserveOutput) analyser.connect(context.destination);
+    speakerAnalyzers.set(participantID, {
+      analyser,
+      data: new Uint8Array(analyser.fftSize),
+      level: 0,
+      speaking: false,
+      quietFrames: 0,
+      sourceNode
+    });
+    if (!speakerAnimationFrame) speakerAnimationFrame = requestAnimationFrame(runSpeakerDetection);
+  } catch (_) {
+    // Audio analysis is a visual enhancement; media playback must continue if it is unavailable.
+  }
+}
+
+function removeSpeakerAnalyzer(participantID) {
+  const entry = speakerAnalyzers.get(participantID);
+  if (!entry) return;
+  try {
+    entry.sourceNode.disconnect();
+    entry.analyser.disconnect();
+  } catch (_) {}
+  speakerAnalyzers.delete(participantID);
+  setSpeakerState(participantID, false);
+  if (speakerAnalyzers.size === 0 && speakerAnimationFrame) {
+    cancelAnimationFrame(speakerAnimationFrame);
+    speakerAnimationFrame = undefined;
+  }
+}
+
+function resetSpeakerDetection() {
+  if (speakerAnimationFrame) cancelAnimationFrame(speakerAnimationFrame);
+  speakerAnimationFrame = undefined;
+  for (const entry of speakerAnalyzers.values()) {
+    try {
+      entry.sourceNode.disconnect();
+      entry.analyser.disconnect();
+    } catch (_) {}
+  }
+  speakerAnalyzers.clear();
+  activeSpeakers.clear();
+  participantElements.forEach((element) => {
+    element.item.classList.remove("is-speaking");
+    element.speaker.hidden = true;
+    element.speaker.textContent = "";
+  });
+  updateSpeakerSummary();
+  if (audioContext) {
+    audioContext.close().catch(() => {});
+    audioContext = undefined;
+  }
+}
 copyDiagnostics.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(diagnostics.textContent || "");
@@ -118,6 +358,7 @@ copyDiagnostics.addEventListener("click", async () => {
   }
 });
 enableAudio.addEventListener("click", async () => {
+  audioContext?.resume().catch(() => {});
   let blocked = false;
   for (const audio of remoteAudioElements) {
     try {
@@ -158,6 +399,8 @@ form.addEventListener("submit", (event) => {
   if (joinButton.disabled) return;
   const name = nameInput.value.trim();
   writeStoredValue("meeting.displayName", name);
+  stopDeviceTest();
+  deviceTestStatus.textContent = "";
   intentionalClose = false;
   joinButton.disabled = true;
   connectSocket(name, passwordInput.value);
@@ -244,6 +487,8 @@ function connectSocket(name, password) {
       if (message.type === "participant") {
         localParticipantID = participant.id;
         reconnectToken = message.reconnect_token;
+        brandBar.hidden = true;
+        welcomeGrid.hidden = true;
         form.hidden = true;
         meeting.hidden = false;
         status.textContent = "";
@@ -254,6 +499,7 @@ function connectSocket(name, password) {
       const element = participantElements.get(message.participant.id);
       if (element) {
         remoteAudioElements.delete(element.audio);
+        removeSpeakerAnalyzer(message.participant.id);
         element.item.remove();
       }
       participantElements.delete(message.participant.id);
@@ -286,6 +532,7 @@ function connectSocket(name, password) {
 }
 
 function resetMediaConnection() {
+  resetSpeakerDetection();
   participants.replaceChildren();
   participantElements.clear();
   remoteAudioElements.clear();
@@ -301,6 +548,7 @@ function resetMediaConnection() {
   screenStream = undefined;
   cameraTrack = undefined;
   screenShareOwner = undefined;
+  setLocalMediaControls();
   if (screenShareRequest) {
     clearTimeout(screenShareRequest.timer);
     screenShareRequest.reject(new Error("signaling connection closed"));
@@ -371,6 +619,7 @@ async function startWebRTC() {
       element.audio.srcObject = streams[0];
       element.audio.autoplay = true;
       remoteAudioElements.add(element.audio);
+      attachSpeakerAnalyzer(participantID, element.audio, true);
       Promise.resolve(element.audio.play()).then(() => {
         if (remoteAudioElements.size > 0) enableAudio.hidden = true;
       }).catch(() => {
@@ -387,6 +636,8 @@ async function startWebRTC() {
   };
   try {
     const setupStream = new MediaStream();
+    mic.disabled = true;
+    camera.disabled = true;
     const abortIfStale = () => {
       if (isCurrentWebRTC(generation, currentPeer, currentSocket)) return false;
       setupStream.getTracks().forEach((track) => track.stop());
@@ -395,39 +646,38 @@ async function startWebRTC() {
     };
     try {
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStream.getAudioTracks().forEach((track) => setupStream.addTrack(track));
+      audioStream.getAudioTracks().forEach((track) => {
+        track.enabled = false;
+        setupStream.addTrack(track);
+      });
       if (abortIfStale()) return;
     } catch (_) {
       status.textContent = "Microphone unavailable; continuing without audio.";
     }
     try {
-      const videoStream = await navigator.mediaDevices.getUserMedia({ video: {
-        width: { ideal: 360, max: 640 },
-        height: { ideal: 240, max: 360 },
-        frameRate: { ideal: 15, max: 30 }
-      }});
-      videoStream.getVideoTracks().forEach((track) => setupStream.addTrack(track));
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints });
+      videoStream.getVideoTracks().forEach((track) => {
+        track.enabled = cameraRequested && !videoSuspended;
+        setupStream.addTrack(track);
+      });
       if (abortIfStale()) return;
-      camera.disabled = false;
-      camera.textContent = cameraRequested ? "Turn camera off" : "Turn camera on";
-      camera.setAttribute("aria-pressed", String(cameraRequested && !videoSuspended));
     } catch (_) {
       cameraRequested = false;
-      camera.disabled = true;
-      camera.textContent = "Camera unavailable";
-      camera.setAttribute("aria-pressed", "false");
       status.textContent = "Camera unavailable; continuing audio-only.";
     }
     if (abortIfStale()) return;
     if (setupStream.getTracks().length === 0) throw new Error("No microphone or camera is available");
     localStream = setupStream;
     cameraTrack = setupStream.getVideoTracks()[0];
+    setLocalMediaControls();
+    attachSpeakerAnalyzer(localParticipantID, localStream);
     const local = participantElements.get(localParticipantID);
     if (local) {
       local.video.srcObject = localStream;
       local.video.autoplay = true;
       local.video.muted = true;
     }
+    setLocalVideoMirror(true);
     sendMediaState();
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     for (const track of localStream.getTracks()) currentPeer.addTrack(track, localStream);
@@ -655,17 +905,24 @@ profile.addEventListener("change", async () => {
 function addParticipant(participant) {
   if (participantElements.has(participant.id)) return;
   const item = document.createElement("li");
+  item.dataset.participantId = participant.id;
   const name = document.createElement("strong");
   name.textContent = participant.name;
   const state = document.createElement("small");
   state.className = "media-state";
-  state.textContent = "Mic on · Camera on";
+  state.textContent = "Mic status unknown · Camera status unknown";
+  const speaker = document.createElement("span");
+  speaker.className = "speaker-badge";
+  speaker.hidden = true;
+  speaker.setAttribute("aria-live", "polite");
   const video = document.createElement("video");
   const audio = document.createElement("audio");
   video.playsInline = true;
-  item.append(name, state, video, audio);
+  item.append(name, state, speaker, video, audio);
   participants.append(item);
-  participantElements.set(participant.id, { item, name, state, video, audio });
+  participantElements.set(participant.id, { item, name, state, speaker, video, audio });
+  item.dataset.mic = "unknown";
+  item.dataset.camera = "unknown";
 }
 
 function updateMediaState(message) {
@@ -674,11 +931,19 @@ function updateMediaState(message) {
   const audioOn = message.audio_enabled !== false;
   const videoOn = message.video_enabled !== false;
   element.state.textContent = `${audioOn ? "Mic on" : "Mic off"} · ${videoOn ? "Camera on" : "Camera off"}`;
+  element.item.classList.toggle("media-muted", !audioOn);
+  element.item.classList.toggle("camera-off", !videoOn);
+  element.item.dataset.mic = audioOn ? "on" : "off";
+  element.item.dataset.camera = videoOn ? "on" : "off";
+  element.state.setAttribute("aria-label",
+    `Microphone ${audioOn ? "on" : "off"}; camera ${videoOn ? "on" : "off"}`);
 }
 
 function sendMediaState() {
   const audioEnabled = localStream?.getAudioTracks()[0]?.enabled === true;
-  const videoEnabled = localStream?.getVideoTracks()[0]?.enabled === true && cameraRequested;
+  const videoTrack = screenStream?.getVideoTracks()[0] || localStream?.getVideoTracks()[0];
+  const videoEnabled = videoTrack?.enabled === true &&
+    (Boolean(screenStream) || (cameraRequested && !videoSuspended));
   const message = {
     version: 1, type: "media_state", participant_id: localParticipantID,
     audio_enabled: audioEnabled, video_enabled: videoEnabled
@@ -700,8 +965,7 @@ async function setVideoSending(enabled) {
   }
   const track = localStream?.getVideoTracks()[0];
   if (track) track.enabled = enabled && cameraRequested;
-  camera.textContent = enabled && cameraRequested ? "Turn camera off" : "Turn camera on";
-  camera.setAttribute("aria-pressed", String(enabled && cameraRequested));
+  setLocalMediaControls();
   if (!enabled) setConnection("poor", "Audio only");
   sendMediaState();
 }
@@ -816,6 +1080,8 @@ async function toggleScreenShare() {
     await applyProfile(profile.value, peer, screenStream);
     const local = participantElements.get(localParticipantID);
     if (local) local.video.srcObject = screenStream;
+    setLocalVideoMirror(false);
+    sendMediaState();
     updateScreenShareUI();
     screenTrack.addEventListener("ended", stopScreenShare, { once: true });
   } catch (error) {
@@ -848,6 +1114,8 @@ async function stopScreenShare() {
   await applyProfile(profile.value);
   const local = participantElements.get(localParticipantID);
   if (local && localStream) local.video.srcObject = localStream;
+  setLocalVideoMirror(true);
+  sendMediaState();
   updateScreenShareUI();
 }
 
@@ -925,20 +1193,20 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
 }
 
 mic.addEventListener("click", () => {
+  audioContext?.resume().catch(() => {});
   const track = localStream?.getAudioTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
-  mic.textContent = track.enabled ? "Mute microphone" : "Unmute microphone";
-  mic.setAttribute("aria-pressed", String(track.enabled));
+  setLocalMediaControls();
   sendMediaState();
 });
 
 camera.addEventListener("click", () => {
+  audioContext?.resume().catch(() => {});
   const track = localStream?.getVideoTracks()[0];
   if (!track) return;
   cameraRequested = !cameraRequested;
-  setVideoSending(!videoSuspended);
-  sendMediaState();
+  setVideoSending(!videoSuspended).catch(() => {});
 });
 
 screen.addEventListener("click", toggleScreenShare);
@@ -966,6 +1234,7 @@ leave.addEventListener("click", () => {
   remoteAudioElements.clear();
   enableAudio.hidden = true;
   peer?.close();
+  resetSpeakerDetection();
   localStream = undefined;
   screenStream = undefined;
   cameraTrack = undefined;
@@ -975,7 +1244,7 @@ leave.addEventListener("click", () => {
   remoteDescriptionSet = false;
   criticalSamples = 0;
   videoSuspended = false;
-  cameraRequested = true;
+  cameraRequested = false;
   previousStats = undefined;
   criticalSamples = 0;
   recoverySamples = 0;
@@ -984,10 +1253,11 @@ leave.addEventListener("click", () => {
   goodSamples = 0;
   profile.value = "auto";
   pendingCandidates.splice(0);
-  mic.textContent = "Mute microphone";
-  mic.setAttribute("aria-pressed", "true");
-  camera.textContent = "Turn camera off";
-  camera.setAttribute("aria-pressed", "true");
+  mic.textContent = "Unmute microphone";
+  mic.setAttribute("aria-pressed", "false");
+  camera.textContent = "Turn camera on";
+  camera.setAttribute("aria-pressed", "false");
+  mic.disabled = false;
   camera.disabled = false;
   receiveVideoEnabled = true;
   receiveVideo.textContent = "Pause remote video";
@@ -1001,6 +1271,8 @@ leave.addEventListener("click", () => {
   diagnostics.textContent = "Waiting for media statistics…";
   participantElements.clear();
   participants.replaceChildren();
+  brandBar.hidden = false;
+  welcomeGrid.hidden = false;
   meeting.hidden = true;
   form.hidden = false;
   joinButton.disabled = false;

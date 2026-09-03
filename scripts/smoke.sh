@@ -39,6 +39,6 @@ curl -fsS "http://127.0.0.1:${port}/health" | grep -q '"status":"ok"'
 curl -fsS "http://127.0.0.1:${port}/ready" | grep -q '"status":"ready"'
 curl -fsS "http://127.0.0.1:${port}/config" | grep -q '"max_video_bitrate"'
 curl -fsS "http://127.0.0.1:${port}/" | grep -q 'LowMeet'
-curl -fsS "http://127.0.0.1:${port}/admin.html" | grep -q 'Live signal'
+curl -fsS "http://127.0.0.1:${port}/admin.html" | grep -q 'Latest signal'
 curl -fsS -I "http://127.0.0.1:${port}/admin" | grep -q '302'
 echo "LowMeet smoke test passed"
