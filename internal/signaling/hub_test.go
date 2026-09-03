@@ -489,6 +489,43 @@ func TestHubReconnectExpiryReleasesParticipantSlot(t *testing.T) {
 	}
 }
 
+func TestHubLimitsJoinAttemptsPerConnection(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MeetingPassword: "secret", MaxParticipants: 1,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}
+	hub := NewHub(meeting.New(1), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	conn := dialTestSocket(t, socketURL)
+	defer conn.Close()
+	for attempt := 0; attempt < maxJoinAttempts; attempt++ {
+		writeTestMessage(t, conn, Message{
+			Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", Password: "wrong",
+		})
+		var response Message
+		readTestMessage(t, conn, &response)
+		if response.Type != TypeError || response.Error != "invalid meeting password" {
+			t.Fatalf("attempt %d response = %+v", attempt+1, response)
+		}
+	}
+
+	writeTestMessage(t, conn, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", Password: "wrong",
+	})
+	var response Message
+	readTestMessage(t, conn, &response)
+	if response.Type != TypeError || response.Error != "too many join attempts" {
+		t.Fatalf("limit response = %+v", response)
+	}
+	if _, _, err := conn.NextReader(); err == nil {
+		t.Fatal("connection remained open after join-attempt limit")
+	}
+}
+
 func dialTestSocket(t *testing.T, url string) *websocket.Conn {
 	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)

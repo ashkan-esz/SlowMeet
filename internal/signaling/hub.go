@@ -25,6 +25,7 @@ const (
 	websocketPongWait   = 60 * time.Second
 	websocketPingPeriod = (websocketPongWait * 9) / 10
 	websocketWriteWait  = 10 * time.Second
+	maxJoinAttempts     = 5
 )
 
 type client struct {
@@ -33,6 +34,7 @@ type client struct {
 	participant       meeting.Participant
 	reconnectToken    string
 	intentionalLeave  bool
+	joinAttempts      int
 	peer              *webrtc.Peer
 	negotiationMu     sync.Mutex
 	negotiationReady  bool
@@ -333,6 +335,16 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var msg Message
 		if err := readMessage(conn, &msg); err != nil {
 			return
+		}
+		if msg.Type == TypeJoin && c.participant.ID == "" {
+			c.joinAttempts++
+			if c.joinAttempts > maxJoinAttempts {
+				_ = c.write(Message{
+					Version: ProtocolVersion, Type: TypeError,
+					Error: "too many join attempts",
+				})
+				return
+			}
 		}
 		if err := msg.Validate(); err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})

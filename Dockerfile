@@ -10,7 +10,6 @@ FROM alpine:3.20
 RUN adduser -D -H -u 10001 lowmeet
 WORKDIR /app
 COPY --from=build /out/lowmeet /app/lowmeet
-COPY web /app/web
 RUN mkdir -p /app/data && chown -R lowmeet:lowmeet /app
 USER lowmeet
 EXPOSE 8080

@@ -48,4 +48,13 @@ if (isBelowBitrate(20, 40) !== true ||
   throw new Error("missing inbound video bitrate must not be treated as critical");
 }
 
+const appSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "web/js/app.js"), "utf8");
+if (!appSource.includes("const currentPeer = new RTCPeerConnection();\n  restartRequested = false;")) {
+  throw new Error("new WebRTC generations must reset ICE restart state");
+}
+if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
+    !appSource.includes('setConnection("poor", "Connection lost");')) {
+  throw new Error("signaling disconnects must be visible in the connection indicator");
+}
+
 console.log("Adaptation tests passed");

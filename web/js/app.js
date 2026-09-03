@@ -57,6 +57,7 @@ let reconnectTimer;
 let intentionalClose = false;
 let restartRequested = false;
 let reconnectAttempts = 0;
+const maxReconnectAttempts = 5;
 let statsTimer;
 let previousStats;
 let adaptationLevel = 2;
@@ -244,36 +245,17 @@ function connectSocket(name, password) {
       return;
     }
     reconnectAttempts++;
+    setConnection("fair", "Reconnecting");
+    if (reconnectAttempts > maxReconnectAttempts) {
+      resetMediaConnection();
+      setConnection("poor", "Connection lost");
+      status.textContent = "Connection lost. Select Leave to try again.";
+      return;
+    }
     const delay = Math.min(30000, 2000 * 2 ** Math.min(reconnectAttempts - 1, 4));
     status.textContent = `Reconnecting in ${Math.ceil(delay / 1000)}s...`;
     reconnectTimer = setTimeout(() => {
-      participants.replaceChildren();
-      participantElements.clear();
-      remoteAudioElements.clear();
-      enableAudio.hidden = true;
-      peer?.close();
-      peer = undefined;
-      videoTransceiver = undefined;
-      clearInterval(statsTimer);
-      statsTimer = undefined;
-      localStream?.getTracks().forEach((track) => track.stop());
-      screenStream?.getTracks().forEach((track) => track.stop());
-      localStream = undefined;
-      screenStream = undefined;
-      cameraTrack = undefined;
-      screenShareOwner = undefined;
-      if (screenShareRequest) {
-        clearTimeout(screenShareRequest.timer);
-        screenShareRequest.reject(new Error("signaling connection closed"));
-        screenShareRequest = undefined;
-      }
-      updateScreenShareUI();
-      remoteDescriptionSet = false;
-      pendingCandidates.splice(0);
-      renegotiationPending = false;
-      previousStats = undefined;
-      criticalSamples = 0;
-      recoverySamples = 0;
+      resetMediaConnection();
       connectSocket(nameInput.value.trim(), passwordInput.value);
     }, delay);
   });
@@ -282,10 +264,42 @@ function connectSocket(name, password) {
   });
 }
 
+function resetMediaConnection() {
+  participants.replaceChildren();
+  participantElements.clear();
+  remoteAudioElements.clear();
+  enableAudio.hidden = true;
+  peer?.close();
+  peer = undefined;
+  videoTransceiver = undefined;
+  clearInterval(statsTimer);
+  statsTimer = undefined;
+  localStream?.getTracks().forEach((track) => track.stop());
+  screenStream?.getTracks().forEach((track) => track.stop());
+  localStream = undefined;
+  screenStream = undefined;
+  cameraTrack = undefined;
+  screenShareOwner = undefined;
+  if (screenShareRequest) {
+    clearTimeout(screenShareRequest.timer);
+    screenShareRequest.reject(new Error("signaling connection closed"));
+    screenShareRequest = undefined;
+  }
+  updateScreenShareUI();
+  remoteDescriptionSet = false;
+  pendingCandidates.splice(0);
+  renegotiationPending = false;
+  restartRequested = false;
+  previousStats = undefined;
+  criticalSamples = 0;
+  recoverySamples = 0;
+}
+
 async function startWebRTC() {
   const generation = socketGeneration;
   const currentSocket = socket;
   const currentPeer = new RTCPeerConnection();
+  restartRequested = false;
   peer = currentPeer;
   currentPeer.oniceconnectionstatechange = () => {
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;

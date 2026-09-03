@@ -32,6 +32,7 @@ Run tests and build:
 ```sh
 go test ./...
 go build ./...
+node scripts/test-admin.js
 ```
 
 Run the local HTTP smoke test:
@@ -47,6 +48,9 @@ The complete starter configuration is in `.env.example`.
 Set `MEETING_PASSWORD` to require a password at join time. Set
 `ADMIN_PASSWORD` separately to enable `/admin` and protect runtime settings.
 Passwords are never sent to the frontend or written to logs.
+Each WebSocket connection is limited to five join attempts to bound password
+guessing and malformed join abuse; reconnecting clients can open a fresh
+connection when needed.
 
 Open `/admin` to use the protected operations cockpit. It shows readiness,
 active participants, peer connections, reconnects, RTT, packet loss, jitter,
@@ -73,6 +77,9 @@ docker compose up -d --build
 
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.
+
+Frontend assets are embedded in the Go binary, so the container and systemd
+service do not need a separate runtime `web/` directory.
 
 The Compose example publishes the configured `ICE_UDP_PORT_MIN` through
 `ICE_UDP_PORT_MAX` range (default `50000-50100`) for direct ICE media

@@ -111,7 +111,7 @@
               <p class="eyebrow">Network watch</p>
               <h2>Live signal</h2>
             </div>
-          <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
+            <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
           </div>
           <p class="card-copy">These are the latest reported values, not historical trends.</p>
           <dl class="metric-list">
@@ -301,6 +301,8 @@
         });
         if (response.status === 401) {
           status.textContent = "Admin password rejected.";
+          password.value = "";
+          document.querySelector("#save-state").textContent = "Protected";
         } else if (response.status === 400) {
           status.textContent = `Settings rejected: ${await response.text()}`;
         } else if (!response.ok) {

@@ -287,6 +287,20 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 	}
 }
 
+func TestFrontendAssetsAreEmbeddedAndServed(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	for _, path := range []string{"/", "/admin.html", "/js/admin-utils.js"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, response.Code)
+		}
+		if response.Body.Len() == 0 {
+			t.Fatalf("%s returned an empty body", path)
+		}
+	}
+}
+
 func TestCloseMarksServerNotReady(t *testing.T) {
 	server := New(testConfig(t), NewLogger("error"))
 	defer server.Close()

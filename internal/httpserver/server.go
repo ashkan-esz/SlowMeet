@@ -12,6 +12,7 @@ import (
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/meeting"
 	"SlowMeet/internal/signaling"
+	webassets "SlowMeet/web"
 )
 
 type Server struct {
@@ -127,7 +128,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	})
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
-	mux.Handle("/", http.FileServer(http.Dir("web")))
+	mux.Handle("/", http.FileServer(http.FS(webassets.Files)))
 	app.handler = withSecurityHeaders(mux)
 	app.ready.Store(true)
 	return app
