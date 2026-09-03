@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,7 +41,11 @@ func TestEmptyAdminPasswordOnlyAcceptsEmptyCandidate(t *testing.T) {
 
 func TestStorePersistsAdminUpdate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	cfg := Config{ConfigFile: path, MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
+	cfg := Config{
+		ConfigFile:      path,
+		MeetingPassword: "meeting-secret",
+		AdminPassword:   "admin-secret",
+		MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
 		DefaultVideoQuality: "low", HTTPAddr: ":8080"}
 	store, err := LoadStore(cfg)
@@ -68,6 +73,16 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 	}
 	if string(data) == "" {
 		t.Fatal("persisted config is empty")
+	}
+	if strings.Contains(string(data), "meeting-secret") || strings.Contains(string(data), "admin-secret") {
+		t.Fatal("persisted config contains a secret")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("persisted config mode = %04o, want 0600", got)
 	}
 }
 

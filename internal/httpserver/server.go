@@ -175,7 +175,7 @@ func boolMetric(value bool) int {
 func withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+			"default-src 'self'; script-src 'self'; style-src 'self'; "+
 				"connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; "+
 				"frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self)")

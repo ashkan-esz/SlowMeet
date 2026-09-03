@@ -281,6 +281,9 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 		if response.Header().Get("Content-Security-Policy") == "" {
 			t.Errorf("%s missing CSP header", path)
 		}
+		if strings.Contains(response.Header().Get("Content-Security-Policy"), "'unsafe-inline'") {
+			t.Errorf("%s CSP allows unsafe inline content", path)
+		}
 		if response.Header().Get("Permissions-Policy") == "" {
 			t.Errorf("%s missing permissions policy", path)
 		}

@@ -387,10 +387,12 @@ async function startWebRTC() {
       if (abortIfStale()) return;
       camera.disabled = false;
       camera.textContent = cameraRequested ? "Turn camera off" : "Turn camera on";
+      camera.setAttribute("aria-pressed", String(cameraRequested && !videoSuspended));
     } catch (_) {
       cameraRequested = false;
       camera.disabled = true;
       camera.textContent = "Camera unavailable";
+      camera.setAttribute("aria-pressed", "false");
       status.textContent = "Camera unavailable; continuing audio-only.";
     }
     if (abortIfStale()) return;
@@ -659,6 +661,7 @@ async function setVideoSending(enabled) {
   const track = localStream?.getVideoTracks()[0];
   if (track) track.enabled = enabled && cameraRequested;
   camera.textContent = enabled && cameraRequested ? "Turn camera off" : "Turn camera on";
+  camera.setAttribute("aria-pressed", String(enabled && cameraRequested));
   if (!enabled) setConnection("poor", "Audio only");
   sendMediaState();
 }
@@ -676,6 +679,7 @@ async function setVideoSenderActive(enabled) {
 function setReceiveVideo(enabled) {
   receiveVideoEnabled = enabled;
   receiveVideo.textContent = enabled ? "Pause remote video" : "Resume remote video";
+  receiveVideo.setAttribute("aria-pressed", String(enabled));
   for (const [participantID, element] of participantElements) {
     if (participantID !== localParticipantID) element.video.hidden = !enabled;
   }
@@ -715,6 +719,7 @@ function updateScreenShareUI() {
   const ownerName = owner?.name?.textContent || "Someone";
   const ownedByOther = Boolean(screenShareOwner && screenShareOwner !== localParticipantID);
   screen.disabled = !screenShareEnabled || ownedByOther;
+  screen.setAttribute("aria-pressed", String(Boolean(screenStream)));
   if (ownedByOther) {
     screen.textContent = "Screen share in use";
     screenStatus.textContent = `${ownerName} is sharing their screen.`;
@@ -722,7 +727,6 @@ function updateScreenShareUI() {
     screen.textContent = "Stop sharing";
     screenStatus.textContent = "You are sharing your screen.";
   } else {
-    screen.disabled = false;
     screen.textContent = "Share screen";
     screenStatus.textContent = "No one is sharing their screen.";
   }
@@ -885,6 +889,7 @@ mic.addEventListener("click", () => {
   if (!track) return;
   track.enabled = !track.enabled;
   mic.textContent = track.enabled ? "Mute microphone" : "Unmute microphone";
+  mic.setAttribute("aria-pressed", String(track.enabled));
   sendMediaState();
 });
 
@@ -940,9 +945,15 @@ leave.addEventListener("click", () => {
   profile.value = "auto";
   pendingCandidates.splice(0);
   mic.textContent = "Mute microphone";
+  mic.setAttribute("aria-pressed", "true");
   camera.textContent = "Turn camera off";
+  camera.setAttribute("aria-pressed", "true");
   camera.disabled = false;
+  receiveVideoEnabled = true;
+  receiveVideo.textContent = "Pause remote video";
+  receiveVideo.setAttribute("aria-pressed", "true");
   screen.textContent = "Share screen";
+  screen.setAttribute("aria-pressed", "false");
   screenShareOwner = undefined;
   screenShareEnabled = true;
   updateScreenShareUI();

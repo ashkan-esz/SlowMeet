@@ -49,7 +49,7 @@ Set `MEETING_PASSWORD` to require a password at join time. Set
 `ADMIN_PASSWORD` separately to enable `/admin` and protect runtime settings.
 Passwords are never sent to the frontend or written to logs.
 Each WebSocket connection is limited to five join attempts to bound password
-guessing and malformed join abuse; reconnecting clients can open a fresh
+guessing and repeated join retries; reconnecting clients can open a fresh
 connection when needed.
 
 Open `/admin` to use the protected operations cockpit. It shows readiness,

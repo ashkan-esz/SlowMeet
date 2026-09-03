@@ -48,13 +48,31 @@ if (isBelowBitrate(20, 40) !== true ||
   throw new Error("missing inbound video bitrate must not be treated as critical");
 }
 
-const appSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "web/js/app.js"), "utf8");
+const fs = require("node:fs");
+const path = require("node:path");
+const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 if (!appSource.includes("const currentPeer = new RTCPeerConnection();\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
 }
 if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
     !appSource.includes('setConnection("poor", "Connection lost");')) {
   throw new Error("signaling disconnects must be visible in the connection indicator");
+}
+if (!appSource.includes('mic.setAttribute("aria-pressed", String(track.enabled));') ||
+    !appSource.includes('receiveVideo.setAttribute("aria-pressed", String(enabled));') ||
+    !appSource.includes('screen.setAttribute("aria-pressed", String(Boolean(screenStream)));')) {
+  throw new Error("meeting controls must expose their current toggle state");
+}
+if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther;") ||
+    appSource.includes("screen.disabled = false;")) {
+  throw new Error("disabled screen sharing must remain disabled after UI refresh");
+}
+const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
+for (const control of ["mic", "camera", "receive-video", "screen"]) {
+  if (!indexSource.includes(`id="${control}"`) ||
+      !indexSource.includes(`id="${control}" type="button" aria-pressed="`)) {
+    throw new Error(`${control} control must declare an initial pressed state`);
+  }
 }
 
 console.log("Adaptation tests passed");
