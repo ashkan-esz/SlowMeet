@@ -84,21 +84,6 @@
       </header>
 
       <div class="meeting-layout">
-        <section class="stage-panel" aria-labelledby="participants-title">
-          <div class="section-heading">
-            <div>
-              <h2 id="participants-title">Participants</h2>
-              <p class="section-note">Video adapts automatically to protect audio.</p>
-            </div>
-            <div class="meeting-status">
-              <span class="live-label"><span class="live-label__dot" aria-hidden="true"></span>Live</span>
-              <span id="speaker-status" class="speaker-summary" role="status" aria-live="polite">No active speaker</span>
-            </div>
-          </div>
-          <ul id="participants" class="participant-grid"></ul>
-          <p id="screen-status" class="setting-note screen-status">No one is sharing their screen.</p>
-        </section>
-
         <aside class="meeting-sidebar" aria-label="Meeting tools">
           <section class="utility-card">
             <div class="card-heading">
@@ -128,10 +113,25 @@
             <p id="diagnostics-status" class="status-message" role="status"></p>
           </details>
         </aside>
+
+        <section class="stage-panel" aria-labelledby="participants-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="participants-title">Participants</h2>
+              <p class="section-note">Video adapts automatically to protect audio.</p>
+            </div>
+            <div class="meeting-status">
+              <span class="live-label"><span class="live-label__dot" aria-hidden="true"></span>Live</span>
+              <span id="speaker-status" class="speaker-summary" role="status" aria-live="polite">No active speaker</span>
+            </div>
+          </div>
+          <ul id="participants" class="participant-grid"></ul>
+          <p id="screen-status" class="setting-note screen-status">No one is sharing their screen.</p>
+        </section>
       </div>
 
       <nav class="controls" aria-label="Meeting controls">
-        <button id="mic" type="button" aria-pressed="false" class="control-button">Unmute microphone</button>
+        <button id="mic" type="button" aria-pressed="false" class="control-button">Unmute</button>
         <button id="camera" type="button" aria-pressed="false" class="control-button">Turn camera on</button>
         <button id="receive-video" type="button" aria-pressed="true" class="control-button">Pause remote video</button>
         <button id="screen" type="button" aria-pressed="false" class="control-button">Share screen</button>

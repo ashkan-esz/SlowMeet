@@ -27,6 +27,7 @@ const testCamera = document.querySelector("#test-camera");
 const testMicrophone = document.querySelector("#test-microphone");
 const stopMediaTest = document.querySelector("#stop-media-test");
 const deviceTestStatus = document.querySelector("#device-test-status");
+
 function readStoredValue(key) {
   try {
     return localStorage.getItem(key);
@@ -216,7 +217,7 @@ function setLocalMediaControls() {
   const videoAvailable = Boolean(videoTrack);
   mic.disabled = !audioAvailable;
   camera.disabled = !videoAvailable;
-  mic.textContent = audioAvailable && audioTrack.enabled ? "Mute microphone" : "Unmute microphone";
+  mic.textContent = audioAvailable && audioTrack.enabled ? "Mute" : "Unmute";
   mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));
   camera.textContent = videoAvailable && cameraRequested && !videoSuspended
     ? "Turn camera off" : "Turn camera on";
@@ -1289,7 +1290,7 @@ leave.addEventListener("click", () => {
   goodSamples = 0;
   profile.value = "auto";
   pendingCandidates.splice(0);
-  mic.textContent = "Unmute microphone";
+  mic.textContent = "Unmute";
   mic.setAttribute("aria-pressed", "false");
   camera.textContent = "Turn camera on";
   camera.setAttribute("aria-pressed", "false");

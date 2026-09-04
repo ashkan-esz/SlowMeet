@@ -85,6 +85,11 @@ if (!appSource.includes('const streamPrefix = "lowmeet-";') ||
   throw new Error("remote video tracks must resolve and start playback");
 }
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
+const sidebarPosition = indexSource.indexOf('<aside class="meeting-sidebar"');
+const stagePosition = indexSource.indexOf('<section class="stage-panel"');
+if (sidebarPosition < 0 || stagePosition < 0 || sidebarPosition > stagePosition) {
+  throw new Error("meeting sidebar must precede the participant stage");
+}
 for (const behavior of [
   'const brandBar = document.querySelector(".brand-bar");',
   "brandBar.hidden = true;",
@@ -113,11 +118,32 @@ if (!indexSource.includes('id="mic" type="button" aria-pressed="false"') ||
     !indexSource.includes('id="camera" type="button" aria-pressed="false"')) {
   throw new Error("microphone and camera must start disabled by default");
 }
+for (const style of [
+  "grid-template-columns: 18rem minmax(0, 1fr)",
+  "position: fixed",
+  "bottom: max(.75rem, env(safe-area-inset-bottom))",
+  "z-index: 20",
+  "padding: 1rem 0 calc(5rem + env(safe-area-inset-bottom))",
+  "width: min(calc(100% - 2rem), 760px)",
+  "margin: 0 0 8px",
+  "min-height: 44px",
+  '.control-button[aria-pressed="true"] {\n  color: var(--primary);',
+  '.control-button[aria-pressed="false"] {\n  color: var(--text);',
+  "button.control-button:disabled"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`compact meeting layout style is missing: ${style}`);
+  }
+}
 for (const control of ["mic", "camera", "receive-video", "screen"]) {
   if (!indexSource.includes(`id="${control}"`) ||
       !indexSource.includes(`id="${control}" type="button" aria-pressed="`)) {
     throw new Error(`${control} control must declare an initial pressed state`);
   }
+}
+if (indexSource.includes("control-button__label") ||
+    appSource.includes("setControlLabel")) {
+  throw new Error("meeting controls should use their direct button labels");
 }
 
 console.log("Adaptation tests passed");

@@ -463,7 +463,7 @@ media playback and the text media states remain fully usable.
 
 Controls retain stable verbs and `aria-pressed` state:
 
-- Mute or unmute microphone.
+- Mute or unmute.
 - Turn camera on or off.
 - Pause or resume remote video.
 - Start or stop screen sharing.

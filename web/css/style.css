@@ -237,7 +237,7 @@ input:hover, select:hover { border-color: var(--primary); }
 .device-test-status { min-height: 1.2rem; margin: .7rem 0 0; color: var(--text-muted); font-size: .76rem; line-height: 1.4; }
 .device-test #stop-media-test { margin-top: .65rem; }
 
-.meeting-shell { padding: 1rem 0 0; }
+.meeting-shell { padding: 1rem 0 calc(5rem + env(safe-area-inset-bottom)); }
 .meeting-header { align-items: center; margin-bottom: 1rem; }
 .meeting-header h1 { margin: .35rem 0 0; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.04em; }
 .connection {
@@ -254,8 +254,8 @@ input:hover, select:hover { border-color: var(--primary); }
 }
 .connection.good { color: var(--success); background: var(--success-soft); }
 .connection.fair, .connection.poor { color: var(--warning); background: var(--warning-soft); }
-.meeting-layout { display: grid; grid-template-columns: minmax(0, 1fr) 19rem; gap: 1rem; }
-.stage-panel { min-width: 0; padding: clamp(1rem, 3vw, 1.5rem); }
+.meeting-layout { display: grid; grid-template-columns: 18rem minmax(0, 1fr); gap: 1rem; align-items: start; }
+.stage-panel { min-width: 0; padding: clamp(.85rem, 2.5vw, 1.25rem); }
 .section-heading { align-items: center; margin-bottom: 1rem; }
 .section-heading h2 { margin: .25rem 0 0; font-size: 1.2rem; letter-spacing: -.025em; }
 .section-note, .setting-note { margin: .3rem 0 0; color: var(--text-muted); font-size: .8rem; line-height: 1.45; }
@@ -326,8 +326,8 @@ input:hover, select:hover { border-color: var(--primary); }
 .participant-grid video.remote-camera-preview { transform: scaleX(-1); }
 .participant-grid audio { display: none; }
 .screen-status { margin-top: 1rem; padding: .7rem .8rem; background: var(--surface-raised); border-radius: var(--radius-control); }
-.meeting-sidebar { display: grid; align-content: start; gap: 1rem; min-width: 0; }
-.utility-card { padding: 1rem; box-shadow: none; }
+.meeting-sidebar { display: grid; align-content: start; gap: .75rem; min-width: 0; }
+.utility-card { padding: .85rem; box-shadow: none; }
 .utility-card label { display: block; margin-top: 1rem; }
 .audio-prompt { width: 100%; }
 .diagnostics-panel summary { cursor: pointer; color: var(--text); font-size: .9rem; font-weight: 800; }
@@ -346,11 +346,17 @@ input:hover, select:hover { border-color: var(--primary); }
   white-space: pre-wrap;
 }
 .controls {
+  position: fixed;
+  left: 50%;
+  bottom: max(.75rem, env(safe-area-inset-bottom));
+  z-index: 20;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: .6rem;
-  margin-top: 1rem;
-  padding: .75rem;
+  gap: .5rem;
+  width: min(calc(100% - 2rem), 760px);
+  margin: 0 0 8px;
+  padding: .5rem;
+  transform: translateX(-50%);
   background: var(--surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-panel);
@@ -358,14 +364,38 @@ input:hover, select:hover { border-color: var(--primary); }
 }
 .control-button {
   width: 100%;
-  padding: .65rem .75rem;
+  min-width: 0;
+  overflow: hidden;
+  padding: .5rem .6rem;
+  color: var(--text);
+  background: var(--surface-raised);
+  border-color: var(--border-subtle);
+  border-radius: var(--radius-control);
+  font-size: .8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.control-button[aria-pressed="true"] {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: #a9cfe8;
+}
+.control-button[aria-pressed="false"] {
   color: var(--text);
   background: var(--surface-raised);
   border-color: var(--border-subtle);
 }
-.control-button:hover { color: var(--primary); border-color: #b8d8ec; background: var(--primary-soft); }
+.control-button:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.control-button[aria-pressed="true"]:hover { background: #d4e9f7; }
+.control-button[aria-pressed="false"]:hover { background: #e5f1fa; }
 .control-button--danger { color: var(--danger); background: var(--danger-soft); border-color: #efc0bd; }
 .control-button--danger:hover { background: #f8d8d5; }
+button.control-button:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  border-color: var(--border-subtle);
+}
 
 .admin-page { background: var(--canvas); }
 .admin-shell {
@@ -517,6 +547,7 @@ fieldset legend { margin-bottom: .75rem; }
   .welcome-copy h1 { max-width: 15ch; }
   .join-panel { max-width: 34rem; }
   .meeting-layout, .admin-columns { grid-template-columns: 1fr; }
+  .meeting-sidebar { order: -1; }
   .admin-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .admin-side-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -527,7 +558,9 @@ fieldset legend { margin-bottom: .75rem; }
   .welcome-copy h1 { font-size: clamp(2.45rem, 14vw, 3.8rem); }
   .meeting-header { display: block; }
   .meeting-header .connection { margin-top: .85rem; }
+  .meeting-shell { padding-bottom: calc(9rem + env(safe-area-inset-bottom)); }
   .participant-grid { grid-template-columns: 1fr; }
+  .controls { width: calc(100% - 1rem); }
   .controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .controls #leave { grid-column: 1 / -1; }
   .admin-shell { display: block; width: min(100% - 1rem, 36rem); padding-top: .5rem; }
