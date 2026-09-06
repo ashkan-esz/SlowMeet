@@ -64,7 +64,7 @@ if (!appSource.includes('mic.setAttribute("aria-pressed", String(audioAvailable 
     !appSource.includes('screen.setAttribute("aria-pressed", String(Boolean(screenStream)));')) {
   throw new Error("meeting controls must expose their current toggle state");
 }
-if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther;") ||
+if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther || Boolean(audioOnly?.checked);") ||
     appSource.includes("screen.disabled = false;")) {
   throw new Error("disabled screen sharing must remain disabled after UI refresh");
 }
@@ -85,7 +85,7 @@ if (!appSource.includes('const streamPrefix = "lowmeet-";') ||
   throw new Error("remote video tracks must resolve and start playback");
 }
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
-const sidebarPosition = indexSource.indexOf('<aside class="meeting-sidebar"');
+const sidebarPosition = indexSource.indexOf('id="meeting-sidebar"');
 const stagePosition = indexSource.indexOf('<section class="stage-panel"');
 if (sidebarPosition < 0 || stagePosition < 0 || sidebarPosition > stagePosition) {
   throw new Error("meeting sidebar must precede the participant stage");
@@ -119,7 +119,7 @@ if (!indexSource.includes('id="mic" type="button" aria-pressed="false"') ||
   throw new Error("microphone and camera must start disabled by default");
 }
 for (const style of [
-  "grid-template-columns: 18rem minmax(0, 1fr)",
+  "meeting-layout { display: block; }",
   "position: fixed",
   "bottom: max(.75rem, env(safe-area-inset-bottom))",
   "z-index: 20",
@@ -133,6 +133,189 @@ for (const style of [
 ]) {
   if (!styleSource.includes(style)) {
     throw new Error(`compact meeting layout style is missing: ${style}`);
+  }
+}
+for (const style of [
+  ".meeting-shell.sidebar-open .meeting-sidebar",
+  ".sidebar-backdrop",
+  ".participant-grid li.is-speaking",
+  ".participant-grid li.is-disconnected",
+  ".participant-grid li[data-sharing=\"true\"]",
+  ".participant-mic",
+  "aspect-ratio: 16 / 9",
+  "background: rgba(0,0,0,.6)",
+  "backdrop-filter: blur(8px)",
+  "inset-inline-start: 12px",
+  "inset-block-end: 12px",
+  "#EC4899",
+  "#F43F5E"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`meeting state style is missing: ${style}`);
+  }
+}
+for (const behavior of [
+  "video.hidden = true",
+  "updateParticipantVideoVisibility(element)",
+  "element.micIndicator.hidden = audioOn",
+  "element.pausedChip.hidden = !videoPaused",
+  "videoStage.append(avatar, video, pausedChip, quality)",
+  "video_paused: videoPaused"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`self-contained participant tile behavior is missing: ${behavior}`);
+  }
+}
+for (const behavior of [
+  "video_paused",
+  "videoSuspendedAutomatically",
+  "setVideoSending(false, true)",
+  "participantForInboundStat",
+  "setParticipantQuality(element, classifyParticipantQuality",
+  "trackIdentifier",
+  "packetsLost"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`bandwidth status behavior is missing: ${behavior}`);
+  }
+}
+for (const style of [
+  ".participant-video-paused",
+  "rgba(251,191,36,.9)",
+  ".participant-quality",
+  'data-quality="good"',
+  'data-quality="degraded"',
+  'data-quality="poor"'
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`bandwidth status style is missing: ${style}`);
+  }
+}
+for (const behavior of [
+  "remoteParticipantCount",
+  "participantPageSize = 9",
+  "updateParticipantPagination",
+  "participantPagePrevious",
+  "dataset.remoteCount",
+  "setPipPosition",
+  "pipPositionForPoint",
+  "pointerdown",
+  "ArrowUp",
+  "meeting.pipPosition"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`self-view PiP behavior is missing: ${behavior}`);
+  }
+}
+for (const behavior of [
+  "cameraQualityPresets",
+  "meeting.cameraQuality",
+  "cameraConstraintsForQuality",
+  "selectedCameraQuality",
+  "updateParticipantAriaLabel",
+  "item.tabIndex = 0",
+  "participantFocusStatus"
+]) {
+  if (!appSource.includes(behavior) && !indexSource.includes(behavior)) {
+    throw new Error(`production edge-case behavior is missing: ${behavior}`);
+  }
+}
+for (const behavior of [
+  "const isFormField = event.target.matches(\"input, textarea, select\");",
+  "if (event.key === \"Escape\")",
+  "if (event.key === \"Tab\" && meeting.classList.contains(\"sidebar-open\"))",
+  "connection.setAttribute(\"aria-expanded\", String(open));",
+  "cameraRequested = false;",
+  "!audioOnly?.checked",
+  "preserveAutomaticSuspension",
+  "sharingLocal"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`interaction hardening behavior is missing: ${behavior}`);
+  }
+}
+for (const element of [
+  'id="camera-quality"',
+  'id="participant-pagination"',
+  'id="participant-page-previous"',
+  'id="participant-page-next"',
+  'id="participant-focus-status"',
+  'id="participants" class="participant-grid" data-count="0" tabindex="-1"'
+]) {
+  if (!indexSource.includes(element)) {
+    throw new Error(`production edge-case element is missing: ${element}`);
+  }
+}
+if (!indexSource.includes('id="chat" type="button" aria-controls="chat-rail"')) {
+  throw new Error("chat toggle must identify the controlled rail");
+}
+for (const behavior of [
+  "speakerThresholdDb = -50",
+  "speakerStartHoldMs = 200",
+  "speakerStopHoldMs = 300",
+  "pendingSpeakerStates",
+  "flushSpeakerStates",
+  "setSpeakerState(participantID, false, true)"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`active-speaker smoothing is missing: ${behavior}`);
+  }
+}
+for (const style of [
+  "transition: box-shadow 150ms ease",
+  "participant-grid li.participant-tile { transition: none !important; }"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`active-speaker motion style is missing: ${style}`);
+  }
+}
+for (const style of [
+  ".participant-grid.has-remote .participant-tile.is-local",
+  "width: 160px",
+  "height: 90px",
+  "cursor: grab",
+  "touch-action: none",
+  "data-pip-position=\"top-left\"",
+  "data-pip-position=\"bottom-right\""
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`self-view PiP style is missing: ${style}`);
+  }
+}
+for (const style of [
+  ".participant-pagination",
+  ".participant-tile[hidden]",
+  ".participant-tile.is-focused",
+  "env(safe-area-inset-bottom)",
+  "min-width: 44px",
+  "@media (max-width: 400px)",
+  ".participant-grid[data-count=\"7\"]",
+  "min-height: 0"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`production edge-case style is missing: ${style}`);
+  }
+}
+for (const behavior of [
+  "sendChatMessage",
+  "message.type === \"chat_message\"",
+  "chat-message--own",
+  "chat-message__meta",
+  "unreadMessages"
+]) {
+  if (!appSource.includes(behavior) && !indexSource.includes(behavior)) {
+    throw new Error(`chat behavior is missing: ${behavior}`);
+  }
+}
+for (const style of [
+  ".chat-rail.is-open",
+  "width: 100%; height: 60dvh",
+  "background: rgba(59,130,246,.12)",
+  "background: rgba(255,255,255,.06)",
+  "max-width: 280px"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`chat rail style is missing: ${style}`);
   }
 }
 for (const control of ["mic", "camera", "receive-video", "screen"]) {

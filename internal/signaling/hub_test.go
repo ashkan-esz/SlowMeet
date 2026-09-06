@@ -63,6 +63,16 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	if firstSeesSecond.Type != TypeJoined || firstSeesSecond.Participant.Name != "Ali" {
 		t.Fatalf("participant broadcast = %+v", firstSeesSecond)
 	}
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeChat,
+		ParticipantID: firstJoined.Participant.ID, ChatText: "Hello room",
+	})
+	var secondSeesChat Message
+	readTestMessage(t, second, &secondSeesChat)
+	if secondSeesChat.Type != TypeChat || secondSeesChat.ParticipantID != firstJoined.Participant.ID ||
+		secondSeesChat.Name != "Ashkan" || secondSeesChat.ChatText != "Hello room" {
+		t.Fatalf("chat broadcast = %+v", secondSeesChat)
+	}
 
 	hub.BroadcastConfig(config.Config{
 		MaxVideoBitrate:   250000,

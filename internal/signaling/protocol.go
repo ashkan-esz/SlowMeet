@@ -2,6 +2,7 @@ package signaling
 
 import (
 	"fmt"
+	"strings"
 
 	"SlowMeet/internal/meeting"
 )
@@ -22,6 +23,7 @@ const (
 	TypeScreenShare  = "screen_share"
 	TypeScreenState  = "screen_share_state"
 	TypeConfigUpdate = "config_update"
+	TypeChat         = "chat_message"
 	TypeError        = "error"
 )
 
@@ -41,6 +43,7 @@ type Message struct {
 	SDPMLineIndex      *uint16              `json:"sdp_mline_index,omitempty"`
 	AudioEnabled       *bool                `json:"audio_enabled,omitempty"`
 	VideoEnabled       *bool                `json:"video_enabled,omitempty"`
+	VideoPaused        *bool                `json:"video_paused,omitempty"`
 	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
 	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
 	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
@@ -53,6 +56,7 @@ type Message struct {
 	AudioKbps          int                  `json:"audio_kbps,omitempty"`
 	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
 	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
+	ChatText           string               `json:"text,omitempty"`
 }
 
 func (m Message) Validate() error {
@@ -96,6 +100,14 @@ func (m Message) Validate() error {
 	case TypeScreenShare:
 		if m.ParticipantID == "" || m.ScreenShareActive == nil {
 			return fmt.Errorf("screen share requires participant_id and state")
+		}
+	case TypeChat:
+		text := strings.TrimSpace(m.ChatText)
+		if m.ParticipantID == "" || text == "" {
+			return fmt.Errorf("chat message requires participant_id and text")
+		}
+		if len([]rune(text)) > 500 {
+			return fmt.Errorf("chat message is too long")
 		}
 	default:
 		return fmt.Errorf("unknown message type %q", m.Type)

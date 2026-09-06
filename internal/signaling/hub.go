@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -378,6 +379,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if err := h.requestScreenShare(c, *msg.ScreenShareActive); err != nil {
 					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				}
+				continue
+			}
+			if msg.Type == TypeChat {
+				msg.ParticipantID = c.participant.ID
+				msg.Name = c.participant.Name
+				msg.ChatText = strings.TrimSpace(msg.ChatText)
+				h.broadcastExcept(c, msg)
 				continue
 			}
 			h.handleWebRTCMessage(c, msg)

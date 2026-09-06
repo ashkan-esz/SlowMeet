@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -47,6 +48,26 @@ func TestValidateMediaStateRequiresParticipantAndState(t *testing.T) {
 	}
 }
 
+func TestMediaStateCarriesVideoPaused(t *testing.T) {
+	videoEnabled := false
+	paused := true
+	original := Message{
+		Version: ProtocolVersion, Type: TypeMediaState,
+		ParticipantID: "participant-1", VideoEnabled: &videoEnabled, VideoPaused: &paused,
+	}
+	payload, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal media state: %v", err)
+	}
+	var decoded Message
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal media state: %v", err)
+	}
+	if decoded.VideoPaused == nil || !*decoded.VideoPaused {
+		t.Fatalf("video_paused was not preserved: %+v", decoded)
+	}
+}
+
 func TestValidateNetworkState(t *testing.T) {
 	valid := Message{
 		Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: "p1",
@@ -78,6 +99,25 @@ func TestValidateScreenShareRequest(t *testing.T) {
 	}
 	if err := (Message{Version: ProtocolVersion, Type: TypeScreenShare, ParticipantID: "p1"}).Validate(); err == nil {
 		t.Fatal("screen-share request without state was accepted")
+	}
+}
+
+func TestValidateChatMessage(t *testing.T) {
+	valid := Message{
+		Version: ProtocolVersion, Type: TypeChat,
+		ParticipantID: "p1", ChatText: "Hello room",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid chat message rejected: %v", err)
+	}
+	for _, invalid := range []Message{
+		{Version: ProtocolVersion, Type: TypeChat, ChatText: "Hello room"},
+		{Version: ProtocolVersion, Type: TypeChat, ParticipantID: "p1", ChatText: "   "},
+		{Version: ProtocolVersion, Type: TypeChat, ParticipantID: "p1", ChatText: string(make([]rune, 501))},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Errorf("Validate(%+v) succeeded, want error", invalid)
+		}
 	}
 }
 
