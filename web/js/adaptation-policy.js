@@ -38,6 +38,51 @@ function isBelowBitrate(value, threshold) {
   return Number.isFinite(value) && value >= 0 && value < threshold;
 }
 
+function chooseParticipantLayout({
+  width,
+  height,
+  count,
+  gap = 12,
+  aspectRatio = 16 / 9,
+  minTileWidth = 144,
+  minTileHeight = 88,
+  maxTileWidth = 720,
+  preferredColumns = 0
+}) {
+  const participantCount = Math.max(0, Math.floor(Number(count) || 0));
+  const stageWidth = Math.max(0, Number(width) || 0);
+  const stageHeight = Math.max(0, Number(height) || 0);
+  if (participantCount === 0 || stageWidth === 0 || stageHeight === 0) {
+    return { columns: 1, rows: 0, tileWidth: 0, tileHeight: 0 };
+  }
+
+  const candidates = [];
+  for (let columns = 1; columns <= participantCount; columns += 1) {
+    const rows = Math.ceil(participantCount / columns);
+    const availableWidth = (stageWidth - gap * (columns - 1)) / columns;
+    const availableHeight = (stageHeight - gap * (rows - 1)) / rows;
+    if (availableWidth <= 0 || availableHeight <= 0) continue;
+    const tileWidth = Math.min(availableWidth, availableHeight * aspectRatio, maxTileWidth);
+    const tileHeight = tileWidth / aspectRatio;
+    const belowMinimum = tileWidth < minTileWidth || tileHeight < minTileHeight;
+    const area = tileWidth * tileHeight * participantCount;
+    const wastedWidth = Math.max(0, stageWidth - (tileWidth * columns + gap * (columns - 1)));
+    const wastedHeight = Math.max(0, stageHeight - (tileHeight * rows + gap * (rows - 1)));
+    const stabilityBonus = preferredColumns === columns ? 0.06 : 0;
+    candidates.push({
+      columns,
+      rows,
+      tileWidth,
+      tileHeight,
+      score: (belowMinimum ? area * 0.2 : area) -
+        (wastedWidth * wastedHeight * 0.08) + area * stabilityBonus
+    });
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+  return candidates[0] || { columns: 1, rows: participantCount, tileWidth: 0, tileHeight: 0 };
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     chooseAdaptationLevel,
@@ -45,6 +90,7 @@ if (typeof module !== "undefined") {
     applyServerDefaults,
     resolveCodecName,
     profileNameForQuality,
-    isBelowBitrate
+    isBelowBitrate,
+    chooseParticipantLayout
   };
 }

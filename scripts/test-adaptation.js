@@ -4,7 +4,8 @@ const {
   applyServerDefaults,
   resolveCodecName,
   profileNameForQuality,
-  isBelowBitrate
+  isBelowBitrate,
+  chooseParticipantLayout
 } = require("../web/js/adaptation-policy.js");
 
 const transition = (level, poor, good) =>
@@ -46,6 +47,19 @@ if (isBelowBitrate(20, 40) !== true ||
     isBelowBitrate(null, 40) !== false ||
     isBelowBitrate(undefined, 40) !== false) {
   throw new Error("missing inbound video bitrate must not be treated as critical");
+}
+const sixPersonLayout = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
+if (sixPersonLayout.columns !== 3 || sixPersonLayout.rows !== 2 ||
+    sixPersonLayout.tileWidth < 300 || sixPersonLayout.tileHeight < 160) {
+  throw new Error("six participants should use a compact three-by-two layout");
+}
+const mobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
+if (mobileLayout.columns !== 2 || mobileLayout.rows !== 3 || mobileLayout.tileWidth < 140) {
+  throw new Error("mobile participant layout should preserve usable tile width");
+}
+const singleLayout = chooseParticipantLayout({ width: 1600, height: 800, count: 1 });
+if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWidth > 720) {
+  throw new Error("single participant layout should have a sensible maximum size");
 }
 
 const fs = require("node:fs");
@@ -205,6 +219,20 @@ for (const behavior of [
 ]) {
   if (!appSource.includes(behavior)) {
     throw new Error(`self-view PiP behavior is missing: ${behavior}`);
+  }
+}
+for (const behavior of [
+  "id=\"participant-menu\"",
+  "participant-menu-trigger",
+  "setPinnedParticipant",
+  "data-action=\"pin\"",
+  "data-action=\"self-view\"",
+  "ArrowDown",
+  "Home",
+  "Participant actions"
+]) {
+  if (!appSource.includes(behavior) && !indexSource.includes(behavior)) {
+    throw new Error(`participant tile menu behavior is missing: ${behavior}`);
   }
 }
 for (const behavior of [

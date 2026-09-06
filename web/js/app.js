@@ -6,7 +6,10 @@ const status = document.querySelector("#status");
 const brandBar = document.querySelector(".brand-bar");
 const welcomeGrid = document.querySelector(".welcome-grid");
 const meeting = document.querySelector("#meeting");
+const meetingEnded = document.querySelector("#meeting-ended");
+const rejoin = document.querySelector("#rejoin");
 const participants = document.querySelector("#participants");
+const stagePanel = document.querySelector(".stage-panel");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
 const receiveVideo = document.querySelector("#receive-video");
@@ -25,6 +28,18 @@ const enableAudio = document.querySelector("#enable-audio");
 const profile = document.querySelector("#profile");
 const cameraQuality = document.querySelector("#camera-quality");
 const effectiveProfile = document.querySelector("#effective-profile");
+const settingsMic = document.querySelector("#settings-mic");
+const settingsCamera = document.querySelector("#settings-camera");
+const settingsSpeaker = document.querySelector("#settings-speaker");
+const settingsPreview = document.querySelector("#settings-preview");
+const micLevelMeter = document.querySelector("#mic-level-meter");
+const peopleList = document.querySelector("#people-list");
+const peopleCount = document.querySelector("#people-count");
+const selfView = document.querySelector("#self-view");
+const connectionSummaryTitle = document.querySelector("#connection-summary-title");
+const connectionSummaryCopy = document.querySelector("#connection-summary-copy");
+const connectionPreference = document.querySelector("#connection-preference");
+const meetingAlert = document.querySelector("#meeting-alert");
 const testMedia = document.querySelector("#test-media");
 const devicePreview = document.querySelector("#device-preview");
 const testCamera = document.querySelector("#test-camera");
@@ -32,6 +47,7 @@ const testMicrophone = document.querySelector("#test-microphone");
 const stopMediaTest = document.querySelector("#stop-media-test");
 const deviceTestStatus = document.querySelector("#device-test-status");
 const chatToggle = document.querySelector("#chat");
+const participantsButton = document.querySelector("#participants-button");
 const chatRail = document.querySelector("#chat-rail");
 const closeChat = document.querySelector("#close-chat");
 const chatMessages = document.querySelector("#chat-messages");
@@ -50,17 +66,24 @@ const participantPagePrevious = document.querySelector("#participant-page-previo
 const participantPageNext = document.querySelector("#participant-page-next");
 const participantPageStatus = document.querySelector("#participant-page-status");
 const participantFocusStatus = document.querySelector("#participant-focus-status");
+const participantMenu = document.querySelector("#participant-menu");
+const participantMenuPin = document.querySelector("#participant-menu-pin");
+const participantMenuSelfView = document.querySelector("#participant-menu-self-view");
 const networkLabel = document.querySelector("[data-network-label]");
 const statRTT = document.querySelector("#stat-rtt");
 const statJitter = document.querySelector("#stat-jitter");
 const statLoss = document.querySelector("#stat-loss");
 const statBitrate = document.querySelector("#stat-bitrate");
 const statResolution = document.querySelector("#stat-resolution");
+const moreReceiveVideo = document.querySelector("#more-receive-video");
+const moreChat = document.querySelector("#more-chat");
+const morePeople = document.querySelector("#more-people");
+const moreScreen = document.querySelector("#more-screen");
 
 function updateControlLabel(button, label) {
-  const target = button?.querySelector("[data-control-label]");
-  if (target) target.textContent = label;
-  else if (button) button.textContent = label;
+  if (!button) return;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
 }
 
 function hashName(value) {
@@ -78,6 +101,53 @@ const participantPageSize = 9;
 let participantPage = 0;
 let focusedParticipantID;
 let pipDragState;
+let pinnedParticipantID;
+let participantMenuOwner;
+let layoutFrame;
+let preferredLayoutColumns = 0;
+let participantResizeObserver;
+
+function requestParticipantLayout() {
+  if (layoutFrame || typeof requestAnimationFrame !== "function") return;
+  layoutFrame = requestAnimationFrame(() => {
+    layoutFrame = undefined;
+    updateParticipantLayout();
+  });
+}
+
+function updateParticipantLayout() {
+  if (!participants || participants.hidden) return;
+  const visibleItems = [...participants.children].filter((item) => !item.hidden);
+  if (visibleItems.length === 0) {
+    participants.style.removeProperty("--tile-width");
+    participants.style.removeProperty("--tile-height");
+    return;
+  }
+  const bounds = participants.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0 || typeof chooseParticipantLayout !== "function") return;
+  const computed = getComputedStyle(participants);
+  const gap = parseFloat(computed.columnGap) || 12;
+  const layout = chooseParticipantLayout({
+    width: bounds.width,
+    height: bounds.height,
+    count: visibleItems.length,
+    gap,
+    preferredColumns: preferredLayoutColumns,
+    minTileWidth: Math.min(180, Math.max(132, bounds.width / 2.6)),
+    minTileHeight: 82
+  });
+  preferredLayoutColumns = layout.columns;
+  participants.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);
+  participants.style.setProperty("--tile-height", `${Math.floor(layout.tileHeight)}px`);
+  participants.dataset.columns = String(layout.columns);
+  participants.dataset.rows = String(layout.rows);
+  positionParticipantMenu();
+}
+
+if (typeof ResizeObserver !== "undefined" && stagePanel) {
+  participantResizeObserver = new ResizeObserver(requestParticipantLayout);
+  participantResizeObserver.observe(stagePanel);
+}
 
 function remoteParticipantCount() {
   let count = 0;
@@ -87,24 +157,80 @@ function remoteParticipantCount() {
   return count;
 }
 
+function participantCameraLabel(element) {
+  if (!element?.item) return "unknown";
+  const cameraState = element.item.dataset.camera || "unknown";
+  if (cameraState === "on" && !element.item.classList.contains("is-local") && !receiveVideoEnabled) {
+    return "incoming video off";
+  }
+  if (cameraState === "paused") return "video paused";
+  return cameraState;
+}
+
+function updateParticipantTileState(element) {
+  if (!element?.state) return;
+  const cameraState = element.item.dataset.camera || "unknown";
+  const connectionState = element.item.dataset.connection || "connected";
+  let label = "";
+  if (connectionState === "left") label = "Participant left";
+  else if (connectionState === "disconnected") label = "Reconnecting…";
+  else if (cameraState === "paused") label = "Video paused to protect audio";
+  else if (cameraState === "on" && !element.item.classList.contains("is-local") && !receiveVideoEnabled) {
+    label = "Incoming video off for you";
+  } else if (cameraState === "off") {
+    label = "Camera off";
+  } else if (cameraState === "unknown") {
+    label = "Connecting…";
+  }
+  element.state.textContent = label;
+  element.state.hidden = !label;
+}
+
+function renderPeopleList() {
+  if (!peopleList) return;
+  peopleList.replaceChildren();
+  participantElements.forEach((element, participantID) => {
+    const row = document.createElement("li");
+    row.className = "people-list__item";
+    const name = document.createElement("span");
+    name.className = "people-list__name";
+    name.textContent = element.name.textContent;
+    if (participantID === localParticipantID) {
+      const you = document.createElement("small");
+      you.textContent = "You";
+      name.append(" ", you);
+    }
+    const state = document.createElement("span");
+    state.className = "people-list__state";
+    state.textContent = element.item.dataset.connection === "left" ? "Left" :
+      element.item.dataset.mic === "off" ? "Muted" :
+        participantCameraLabel(element) === "off" ? "Camera off" : "Connected";
+    row.append(name, state);
+    peopleList.append(row);
+  });
+  if (peopleCount) peopleCount.textContent = String(participantElements.size);
+}
+
 function updateParticipantCount() {
   const count = participantElements.size;
   updateParticipantPagination();
   if (participantCount) participantCount.textContent = `${count} participant${count === 1 ? "" : "s"}`;
   if (participantCountBadge) participantCountBadge.textContent = String(count);
+  renderPeopleList();
 }
 
 function updateParticipantAriaLabel(element) {
   if (!element?.item) return;
-  const cameraState = element.item.dataset.camera || "unknown";
+  const cameraState = participantCameraLabel(element);
   const microphoneState = element.item.dataset.mic || "unknown";
   const qualityState = participantQualityLabels[element.item.dataset.quality] || "unknown";
-  const selfView = element.item.classList.contains("is-local")
+  const pinnedState = element.item.classList.contains("is-pinned") ? " Pinned." : "";
+  const selfView = element.item.classList.contains("is-local") && participants.classList.contains("is-pip-mode")
     ? " Self-view. Use arrow keys to move it between corners."
     : "";
   element.item.setAttribute("aria-label",
     `${element.name.textContent}: camera ${cameraState}; microphone ${microphoneState}; ` +
-    `connection quality ${qualityState}.${selfView}`);
+    `connection quality ${qualityState}.${pinnedState}${selfView}`);
 }
 
 function updateParticipantVideoVisibility(element) {
@@ -115,6 +241,7 @@ function updateParticipantVideoVisibility(element) {
   element.item.dataset.receiveVideo = String(visible);
   element.avatar.hidden = visible;
   element.video.hidden = !visible;
+  updateParticipantTileState(element);
 }
 
 function updateParticipantPagination() {
@@ -128,13 +255,20 @@ function updateParticipantPagination() {
       participantPage = Math.floor(ownerIndex / participantPageSize);
     }
   }
+  if (pinnedParticipantID && pinnedParticipantID !== localParticipantID && remoteEntries.length > participantPageSize) {
+    const pinnedIndex = remoteEntries.findIndex(([participantID]) => participantID === pinnedParticipantID);
+    if (pinnedIndex >= 0 && Math.floor(pinnedIndex / participantPageSize) !== participantPage) {
+      participantPage = Math.floor(pinnedIndex / participantPageSize);
+    }
+  }
   participantPage = Math.min(Math.max(participantPage, 0), pageCount - 1);
   const first = participantPage * participantPageSize;
   const visibleEntries = remoteEntries.slice(first, first + participantPageSize);
   const visibleRemoteIDs = new Set(visibleEntries.map(([participantID]) => participantID));
   participantElements.forEach((element, participantID) => {
-    const visible = participantID === localParticipantID ||
-      (remoteEntries.length === 0 || visibleRemoteIDs.has(participantID));
+    const localVisible = participantID === localParticipantID && selfViewVisible;
+    const visible = localVisible || (participantID !== localParticipantID &&
+      (remoteEntries.length === 0 || visibleRemoteIDs.has(participantID)));
     element.item.hidden = !visible;
     if (!visible && participantID === focusedParticipantID) {
       element.item.classList.remove("is-focused");
@@ -142,10 +276,15 @@ function updateParticipantPagination() {
     }
     updateParticipantAriaLabel(element);
   });
-  const visibleCount = remoteEntries.length > 0 ? visibleEntries.length : participantElements.size;
-  participants.dataset.count = String(Math.min(visibleCount, participantPageSize));
-  participants.dataset.remoteCount = String(Math.min(remoteEntries.length, participantPageSize));
+  const visibleCount = [...participantElements.values()].filter((element) => !element.item.hidden).length;
+  participants.dataset.count = String(visibleCount);
+  participants.dataset.remoteCount = String(visibleEntries.length);
   participants.classList.toggle("has-remote", remoteEntries.length > 0);
+  const pinnedIsVisible = pinnedParticipantID && participantElements.get(pinnedParticipantID) &&
+    !participantElements.get(pinnedParticipantID).item.hidden;
+  participants.classList.toggle("has-pinned", Boolean(pinnedIsVisible));
+  participants.dataset.pinned = pinnedIsVisible ? "true" : "false";
+  if (participantMenuOwner?.item.hidden) closeParticipantMenu(false);
   const paginated = remoteEntries.length > participantPageSize;
   if (participantPagination) participantPagination.hidden = !paginated;
   if (participantPageStatus) {
@@ -155,6 +294,7 @@ function updateParticipantPagination() {
   }
   if (participantPagePrevious) participantPagePrevious.disabled = !paginated || participantPage === 0;
   if (participantPageNext) participantPageNext.disabled = !paginated || participantPage >= pageCount - 1;
+  requestParticipantLayout();
 }
 
 function setParticipantPage(delta) {
@@ -198,9 +338,80 @@ function pipPositionForKey(position, key) {
   return undefined;
 }
 
+function closeParticipantMenu(restoreFocus = true) {
+  if (!participantMenu) return;
+  const owner = participantMenuOwner;
+  participantMenu.hidden = true;
+  participantMenuOwner = undefined;
+  if (!owner?.trigger) return;
+  owner.trigger.setAttribute("aria-expanded", "false");
+  if (!restoreFocus) return;
+  if (owner.trigger.isConnected && !owner.item.hidden) owner.trigger.focus();
+  else if (owner.participantID === localParticipantID) toggleSidebar?.focus();
+}
+
+function positionParticipantMenu() {
+  if (!participantMenu || participantMenu.hidden || !participantMenuOwner?.trigger || !stagePanel) return;
+  const stageBounds = stagePanel.getBoundingClientRect();
+  const triggerBounds = participantMenuOwner.trigger.getBoundingClientRect();
+  if (stageBounds.width <= 0 || stageBounds.height <= 0) return;
+  const padding = 8;
+  const menuWidth = participantMenu.offsetWidth;
+  const menuHeight = participantMenu.offsetHeight;
+  const triggerLeft = triggerBounds.left - stageBounds.left;
+  const triggerTop = triggerBounds.top - stageBounds.top;
+  let left = triggerLeft + triggerBounds.width - menuWidth;
+  let top = triggerTop + triggerBounds.height + 6;
+  if (top + menuHeight > stageBounds.height - padding) {
+    top = triggerTop - menuHeight - 6;
+  }
+  left = Math.max(padding, Math.min(left, stageBounds.width - menuWidth - padding));
+  top = Math.max(padding, Math.min(top, stageBounds.height - menuHeight - padding));
+  participantMenu.style.insetInlineStart = `${left}px`;
+  participantMenu.style.insetBlockStart = `${top}px`;
+}
+
+function setPinnedParticipant(participantID) {
+  const nextID = participantID && participantElements.has(participantID) &&
+    (participantID !== localParticipantID || selfViewVisible) ? participantID : undefined;
+  pinnedParticipantID = nextID;
+  participantElements.forEach((element, currentID) => {
+    element.item.classList.toggle("is-pinned", currentID === pinnedParticipantID);
+    updateParticipantAriaLabel(element);
+  });
+  participants.classList.toggle("has-pinned", Boolean(pinnedParticipantID));
+  participants.dataset.pinned = pinnedParticipantID ? "true" : "false";
+  updateParticipantPagination();
+}
+
+function openParticipantMenu(participantID, trigger) {
+  const element = participantElements.get(participantID);
+  if (!element || !participantMenu || !participantMenuPin || !participantMenuSelfView) return;
+  if (participantMenuOwner?.trigger === trigger) {
+    closeParticipantMenu(false);
+    return;
+  }
+  closeParticipantMenu(false);
+  participantMenuOwner = { participantID, trigger, item: element.item };
+  participantMenu.setAttribute("aria-label", `${element.name.textContent} actions`);
+  participantMenuPin.textContent = pinnedParticipantID === participantID
+    ? "Unpin participant" : "Pin participant";
+  participantMenuSelfView.hidden = participantID !== localParticipantID;
+  participantMenuSelfView.textContent = selfViewVisible ? "Hide self-view" : "Show self-view";
+  participantMenu.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => {
+    positionParticipantMenu();
+    const firstItem = [...participantMenu.querySelectorAll('[role="menuitem"]')]
+      .find((item) => !item.hidden && !item.disabled);
+    firstItem?.focus();
+  });
+}
+
 function pipTileFromEvent(event) {
   const tile = event.target.closest?.(".participant-tile.is-local");
-  return tile && participants?.contains(tile) && participants.classList.contains("has-remote") ? tile : undefined;
+  return tile && participants?.contains(tile) && participants.classList.contains("has-remote") &&
+    participants.classList.contains("is-pip-mode") ? tile : undefined;
 }
 
 function finishPipDrag() {
@@ -262,6 +473,67 @@ participants.addEventListener("keydown", (event) => {
   if (!position) return;
   event.preventDefault();
   setPipPosition(item, position);
+});
+
+participants.addEventListener("click", (event) => {
+  const trigger = event.target.closest?.(".participant-menu-trigger");
+  if (!trigger) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openParticipantMenu(trigger.dataset.participantId, trigger);
+});
+
+participantMenu?.addEventListener("click", (event) => {
+  const action = event.target.closest?.("[data-action]")?.dataset.action;
+  const owner = participantMenuOwner;
+  if (!action || !owner) return;
+  if (action === "pin") {
+    const shouldPin = pinnedParticipantID !== owner.participantID;
+    setPinnedParticipant(shouldPin ? owner.participantID : undefined);
+    if (participantFocusStatus) participantFocusStatus.textContent = shouldPin
+      ? `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} pinned.`
+      : `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} unpinned.`;
+  } else if (action === "self-view" && owner.participantID === localParticipantID) {
+    setSelfViewVisibility(false);
+  }
+  closeParticipantMenu(true);
+});
+
+participantMenu?.addEventListener("keydown", (event) => {
+  const items = [...participantMenu.querySelectorAll('[role="menuitem"]')]
+    .filter((item) => !item.hidden && !item.disabled);
+  if (!items.length) return;
+  const currentIndex = items.indexOf(document.activeElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    event.stopPropagation();
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    items[(currentIndex + delta + items.length) % items.length].focus();
+  } else if (event.key === "Home" || event.key === "End") {
+    event.preventDefault();
+    event.stopPropagation();
+    items[event.key === "Home" ? 0 : items.length - 1].focus();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeParticipantMenu(true);
+  } else if (event.key === "Tab") {
+    closeParticipantMenu(false);
+  } else if (event.key.length === 1 && /\S/.test(event.key)) {
+    const match = items.find((item) => item.textContent.trim().toLowerCase()
+      .startsWith(event.key.toLowerCase()));
+    if (match) {
+      event.preventDefault();
+      event.stopPropagation();
+      match.focus();
+    }
+  }
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!participantMenu || participantMenu.hidden) return;
+  if (participantMenu.contains(event.target) || event.target.closest?.(".participant-menu-trigger")) return;
+  closeParticipantMenu(false);
 });
 
 participantPagePrevious?.addEventListener("click", () => setParticipantPage(-1));
@@ -399,24 +671,49 @@ chatForm?.addEventListener("submit", (event) => {
 
 audioOnly?.addEventListener("change", () => {
   if (audioOnly.checked) {
+    cameraBeforeAudioOnly = cameraRequested;
     cameraRequested = false;
     const videoStop = screenStream ? stopScreenShare() : setVideoSending(false);
     videoStop.catch(() => {});
     showToast("Video paused to protect audio");
   } else {
-    cameraRequested = selectedCameraQuality !== "off";
+    cameraRequested = cameraBeforeAudioOnly && selectedCameraQuality !== "off";
     setVideoSending(cameraRequested).catch(() => {});
   }
+  updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
 });
 
 pauseAll?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
+function setSelfViewVisibility(visible, notify = true) {
+  selfViewVisible = Boolean(visible);
+  if (selfView) selfView.checked = selfViewVisible;
+  writeStoredValue("meeting.showSelfView", String(selfViewVisible));
+  if (!selfViewVisible && pinnedParticipantID === localParticipantID) setPinnedParticipant();
+  updateParticipantPagination();
+  if (notify) showToast(selfViewVisible ? "Self-view shown" : "Self-view hidden; your camera is still on");
+}
+selfView?.addEventListener("change", () => setSelfViewVisibility(selfView.checked));
 document.querySelector("#more")?.addEventListener("click", () => setSidebarOpen(true));
-document.querySelector("#participants-button")?.addEventListener("click", () => {
-  if (window.matchMedia("(max-width: 900px)").matches) setChatOpen(false);
-  const firstVisibleTile = [...participants.querySelectorAll(".participant-tile")]
-    .find((item) => !item.hidden);
-  (firstVisibleTile || participants)?.focus({ preventScroll: true });
+moreReceiveVideo?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
+moreChat?.addEventListener("click", () => {
+  setSidebarOpen(false);
+  setChatOpen(true);
 });
+moreScreen?.addEventListener("click", () => {
+  setSidebarOpen(false);
+  screen.click();
+});
+function openPeoplePanel() {
+  setChatOpen(false);
+  setSidebarOpen(true);
+  requestAnimationFrame(() => {
+    if (!peopleList) return;
+    peopleList.tabIndex = -1;
+    peopleList.focus({ preventScroll: true });
+  });
+}
+participantsButton?.addEventListener("click", openPeoplePanel);
+morePeople?.addEventListener("click", openPeoplePanel);
 document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
@@ -429,7 +726,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Tab" && meeting.classList.contains("sidebar-open")) {
-    const focusable = [...meetingSidebar.querySelectorAll("button, select, input, summary, textarea")].filter((element) => !element.disabled && element.offsetParent !== null);
+    const focusable = [...meetingSidebar.querySelectorAll("button, select, input, summary, textarea, [tabindex]")].filter((element) => !element.disabled && element.offsetParent !== null);
     if (!focusable.length) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -530,11 +827,18 @@ let videoSuspended = false;
 let videoSuspendedAutomatically = false;
 let cameraRequested = false;
 let receiveVideoEnabled = true;
+let selfViewVisible = readStoredValue("meeting.showSelfView") !== "false";
+let cameraBeforeAudioOnly = false;
+const selectedDeviceIDs = { audio: "", video: "", speaker: "" };
+if (selfView) selfView.checked = selfViewVisible;
 let mediaTestStream;
 let audioContext;
 let speakerAnimationFrame;
 let speakerUpdateTimer;
 let lastSpeakerUpdateAt = 0;
+let lastConnectionLevel = "";
+let pendingConnectionLevel = "";
+let pendingConnectionSamples = 0;
 const speakerAnalyzers = new Map();
 const activeSpeakers = new Set();
 const pendingSpeakerStates = new Map();
@@ -574,6 +878,7 @@ const iceConfigReady = fetch("/ice-config", { cache: "no-store" })
   });
 const pendingCandidates = [];
 const participantElements = new Map();
+const participantRemovalTimers = new Map();
 const remoteAudioElements = new Set();
 const remoteTrackOwners = new Map();
 const remoteReceiverOwners = new Map();
@@ -621,6 +926,101 @@ function stopDeviceTest() {
   devicePreview.hidden = true;
   stopMediaTest.hidden = true;
   testMedia.disabled = false;
+}
+
+function setDeviceOptions(select, devices, defaultLabel) {
+  if (!select) return;
+  const previous = select.value;
+  select.replaceChildren(new Option(defaultLabel, ""));
+  devices.forEach((device, index) => {
+    const option = new Option(device.label || `${defaultLabel.replace("System ", "")} ${index + 1}`, device.deviceId);
+    select.append(option);
+  });
+  if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+}
+
+async function refreshDeviceSelectors() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  setDeviceOptions(settingsMic, devices.filter((device) => device.kind === "audioinput"), "System default");
+  setDeviceOptions(settingsCamera, devices.filter((device) => device.kind === "videoinput"), "System default");
+  setDeviceOptions(settingsSpeaker, devices.filter((device) => device.kind === "audiooutput"), "System default");
+  if (settingsMic) settingsMic.value = selectedDeviceIDs.audio || settingsMic.value;
+  if (settingsCamera) settingsCamera.value = selectedDeviceIDs.video || settingsCamera.value;
+  if (settingsSpeaker) settingsSpeaker.value = selectedDeviceIDs.speaker || settingsSpeaker.value;
+}
+
+async function setSpeakerOutput(deviceID) {
+  selectedDeviceIDs.speaker = deviceID;
+  let unsupported = false;
+  for (const audio of remoteAudioElements) {
+    if (typeof audio.setSinkId !== "function") {
+      unsupported = true;
+      continue;
+    }
+    await audio.setSinkId(deviceID || "").catch(() => { unsupported = true; });
+  }
+  if (unsupported && deviceID) showToast("This browser cannot change the speaker output.");
+}
+
+async function replaceLocalDevice(kind, deviceID) {
+  selectedDeviceIDs[kind] = deviceID;
+  if (!localStream || !navigator.mediaDevices?.getUserMedia) return;
+  const targetStream = localStream;
+  const targetPeer = peer;
+  const targetParticipantID = localParticipantID;
+  if (kind === "video" && screenStream) {
+    showToast("The camera will switch after screen sharing stops.");
+  }
+  const constraints = kind === "audio"
+    ? { audio: deviceID ? { deviceId: { exact: deviceID } } : true }
+    : { video: { ...cameraConstraints, ...(deviceID ? { deviceId: { exact: deviceID } } : {}) } };
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (localStream !== targetStream || peer !== targetPeer ||
+        localParticipantID !== targetParticipantID || meeting.hidden) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    const nextTrack = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
+    if (!nextTrack) throw new Error(`${kind} device is unavailable`);
+    const previousTrack = kind === "audio"
+      ? localStream.getAudioTracks()[0]
+      : localStream.getVideoTracks()[0];
+    const sender = peer?.getSenders().find((item) => item.track?.kind === kind);
+    if (kind === "audio" && sender) await sender.replaceTrack(nextTrack);
+    if (kind === "video") {
+      cameraTrack = nextTrack;
+      if (sender && !screenStream) await sender.replaceTrack(nextTrack);
+    }
+    if (previousTrack) {
+      localStream.removeTrack(previousTrack);
+      previousTrack.stop();
+    }
+    localStream.addTrack(nextTrack);
+    nextTrack.enabled = kind === "audio"
+      ? localStream.getAudioTracks()[0] === nextTrack && previousTrack?.enabled !== false
+      : cameraRequested && !videoSuspended && !audioOnly?.checked;
+    if (kind === "audio") {
+      removeSpeakerAnalyzer(localParticipantID);
+      attachSpeakerAnalyzer(localParticipantID, localStream);
+    } else {
+      const local = participantElements.get(localParticipantID);
+      if (local && !screenStream) local.video.srcObject = localStream;
+      if (!screenStream) setLocalVideoMirror(true);
+      await applyProfile(profile.value, peer, screenStream || localStream);
+    }
+    if (settingsPreview) {
+      settingsPreview.srcObject = localStream;
+      settingsPreview.hidden = !localStream.getVideoTracks().length;
+    }
+    setLocalMediaControls();
+    sendMediaState();
+    await refreshDeviceSelectors();
+  } catch (error) {
+    showToast(`${kind === "audio" ? "Microphone" : "Camera"} unavailable: ${error.message}`);
+    await refreshDeviceSelectors();
+  }
 }
 
 async function runDeviceTest() {
@@ -678,6 +1078,7 @@ async function runDeviceTest() {
   }
   devicePreview.srcObject = testStream;
   devicePreview.hidden = !cameraReady;
+  await refreshDeviceSelectors();
   deviceTestStatus.textContent = cameraReady && microphoneReady
     ? "Your devices are ready. The test will stop when you join."
     : "Some devices need attention. You can still join and use the available media.";
@@ -688,6 +1089,10 @@ stopMediaTest.addEventListener("click", () => {
   stopDeviceTest();
   deviceTestStatus.textContent = "Device test stopped.";
 });
+settingsMic?.addEventListener("change", () => replaceLocalDevice("audio", settingsMic.value));
+settingsCamera?.addEventListener("change", () => replaceLocalDevice("video", settingsCamera.value));
+settingsSpeaker?.addEventListener("change", () => setSpeakerOutput(settingsSpeaker.value));
+navigator.mediaDevices?.addEventListener?.("devicechange", refreshDeviceSelectors);
 
 function setLocalMediaControls() {
   const audioTrack = localStream?.getAudioTracks()[0];
@@ -698,11 +1103,11 @@ function setLocalMediaControls() {
   const cameraOn = videoAvailable && cameraRequested && !videoSuspended && !audioOnly?.checked;
   mic.disabled = !audioAvailable;
   camera.disabled = !videoAvailable;
-  updateControlLabel(mic, audioOn ? "Mic on" : "Muted");
+  updateControlLabel(mic, audioOn ? "Mute microphone" : "Unmute microphone");
   mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));
-  updateControlLabel(camera, cameraOn ? "Camera on" : "Camera off");
+  updateControlLabel(camera, cameraOn ? "Turn camera off" : "Turn camera on");
   camera.setAttribute("aria-pressed", String(cameraOn));
-  if (!audioAvailable) updateControlLabel(mic, "Mic unavailable");
+  if (!audioAvailable) updateControlLabel(mic, "Microphone unavailable");
   if (!videoAvailable) updateControlLabel(camera, "Camera unavailable");
   const local = participantElements.get(localParticipantID);
   if (local) {
@@ -713,20 +1118,29 @@ function setLocalMediaControls() {
     local.micIndicator.hidden = audioOn;
     local.micIndicator.classList.toggle("is-on", audioOn);
     local.micIndicator.classList.toggle("is-off", !audioOn);
+    updateParticipantTileState(local);
     updateParticipantAriaLabel(local);
   }
+  if (settingsPreview) {
+    settingsPreview.srcObject = localStream || null;
+    settingsPreview.hidden = !videoAvailable;
+  }
+  renderPeopleList();
 }
 
 function setSidebarOpen(open) {
+  closeParticipantMenu(false);
   if (open && chatRail && !chatRail.hidden) setChatOpen(false);
   meeting.classList.toggle("sidebar-open", open);
   toggleSidebar.setAttribute("aria-expanded", String(open));
   connection.setAttribute("aria-expanded", String(open));
+  participantsButton?.setAttribute("aria-pressed", String(open));
   toggleSidebar.setAttribute("aria-label", open ? "Close meeting settings" : "Open meeting settings");
   toggleSidebarLabel.textContent = open ? "Hide tools" : "Show tools";
   meetingSidebar.setAttribute("aria-hidden", String(!open));
   meeting.classList.toggle("has-rail", open || !chatRail?.hidden);
   sidebarBackdrop.hidden = !open;
+  requestParticipantLayout();
   if (open) closeSidebar.focus();
 }
 
@@ -877,14 +1291,21 @@ function setParticipantConnectionState(state) {
       updateParticipantAriaLabel(element);
     } else {
       setParticipantQuality(element, "unknown");
-      updateMediaState({
-        participant_id: participantID,
-        audio_enabled: element.item.dataset.mic !== "off",
-        video_enabled: element.item.dataset.camera === "on",
-        video_paused: element.item.dataset.camera === "paused"
-      });
+      if (element.item.dataset.camera !== "unknown" || element.item.dataset.mic !== "unknown") {
+        updateMediaState({
+          participant_id: participantID,
+          audio_enabled: element.item.dataset.mic !== "off",
+          video_enabled: element.item.dataset.camera === "on",
+          video_paused: element.item.dataset.camera === "paused"
+        });
+      } else {
+        updateParticipantTileState(element);
+        updateParticipantAriaLabel(element);
+      }
     }
+    updateParticipantTileState(element);
   });
+  renderPeopleList();
 }
 
 function runSpeakerDetection(timestamp) {
@@ -899,6 +1320,11 @@ function runSpeakerDetection(timestamp) {
     const rms = Math.sqrt(total / entry.data.length);
     entry.level = entry.level * 0.78 + rms * 0.22;
     const levelDb = 20 * Math.log10(Math.max(entry.level, 0.000001));
+    if (participantID === localParticipantID && micLevelMeter) {
+      const level = Math.max(0, Math.min(100, Math.round(((levelDb + 60) / 60) * 100)));
+      micLevelMeter.setAttribute("aria-valuenow", String(level));
+      micLevelMeter.firstElementChild.style.width = `${level}%`;
+    }
     const aboveThreshold = levelDb > speakerThresholdDb;
     if (aboveThreshold) {
       entry.quietSince = 0;
@@ -980,6 +1406,10 @@ function resetSpeakerDetection() {
   participantElements.forEach((element) => {
     element.item.classList.remove("is-speaking");
   });
+  if (micLevelMeter) {
+    micLevelMeter.setAttribute("aria-valuenow", "0");
+    if (micLevelMeter.firstElementChild) micLevelMeter.firstElementChild.style.width = "0%";
+  }
   if (audioContext) {
     audioContext.close().catch(() => {});
     audioContext = undefined;
@@ -1137,6 +1567,7 @@ function connectSocket(name, password) {
         welcomeGrid.hidden = true;
         form.hidden = true;
         meeting.hidden = false;
+        if (meetingEnded) meetingEnded.hidden = true;
         status.textContent = "";
         startWebRTC();
       }
@@ -1145,20 +1576,28 @@ function connectSocket(name, password) {
       addChatSystem(`${message.participant.name} left the room`);
       const element = participantElements.get(message.participant.id);
       if (element) {
+        if (participantMenuOwner?.participantID === message.participant.id) closeParticipantMenu(false);
+        if (pinnedParticipantID === message.participant.id) setPinnedParticipant();
         remoteAudioElements.delete(element.audio);
         removeSpeakerAnalyzer(message.participant.id);
         forgetRemoteTracks(element, message.participant.id);
         element.item.classList.remove("is-speaking");
         element.item.classList.add("is-disconnected");
-        element.item.dataset.connection = "disconnected";
+        element.item.dataset.connection = "left";
         element.micIndicator.setAttribute("aria-label", `${message.participant.name} disconnected`);
-        setTimeout(() => {
+        updateParticipantTileState(element);
+        renderPeopleList();
+        const removalTimer = setTimeout(() => {
+          participantRemovalTimers.delete(message.participant.id);
           if (participantElements.get(message.participant.id)?.item === element.item) {
             element.item.remove();
             participantElements.delete(message.participant.id);
             updateParticipantCount();
           }
         }, 1200);
+        const previousRemovalTimer = participantRemovalTimers.get(message.participant.id);
+        if (previousRemovalTimer) clearTimeout(previousRemovalTimer);
+        participantRemovalTimers.set(message.participant.id, removalTimer);
       }
     if (message.participant.id === screenShareOwner) {
         screenShareOwner = undefined;
@@ -1196,6 +1635,12 @@ function resetMediaConnection() {
   const preserveVideoSuspension = videoSuspended;
   const preserveAutomaticSuspension = videoSuspendedAutomatically;
   resetSpeakerDetection();
+  closeParticipantMenu(false);
+  pinnedParticipantID = undefined;
+  participants.classList.remove("has-pinned");
+  participants.dataset.pinned = "false";
+  for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
+  participantRemovalTimers.clear();
   participants.replaceChildren();
   participantElements.clear();
   participantPage = 0;
@@ -1298,6 +1743,9 @@ async function startWebRTC() {
       element.audio.srcObject = stream;
       element.audio.autoplay = true;
       remoteAudioElements.add(element.audio);
+      if (selectedDeviceIDs.speaker && typeof element.audio.setSinkId === "function") {
+        element.audio.setSinkId(selectedDeviceIDs.speaker).catch(() => {});
+      }
       attachSpeakerAnalyzer(participantID, element.audio, true);
       Promise.resolve(element.audio.play()).then(() => {
         if (remoteAudioElements.size > 0) enableAudio.hidden = true;
@@ -1324,7 +1772,9 @@ async function startWebRTC() {
       return true;
     };
     try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedDeviceIDs.audio ? { deviceId: { exact: selectedDeviceIDs.audio } } : true
+      });
       audioStream.getAudioTracks().forEach((track) => {
         track.enabled = false;
         setupStream.addTrack(track);
@@ -1334,7 +1784,12 @@ async function startWebRTC() {
       status.textContent = "Microphone unavailable; continuing without audio.";
     }
     try {
-      const videoStream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints });
+      const videoStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          ...cameraConstraints,
+          ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
+        }
+      });
       videoStream.getVideoTracks().forEach((track) => {
         track.enabled = cameraRequested && !videoSuspended && !audioOnly?.checked;
         setupStream.addTrack(track);
@@ -1356,6 +1811,11 @@ async function startWebRTC() {
       local.video.autoplay = true;
       local.video.muted = true;
     }
+    if (settingsPreview) {
+      settingsPreview.srcObject = localStream;
+      settingsPreview.hidden = !localStream.getVideoTracks().length;
+    }
+    await refreshDeviceSelectors();
     mountDebugParticipants();
     setLocalVideoMirror(true);
     sendMediaState();
@@ -1378,11 +1838,64 @@ async function startWebRTC() {
   }
 }
 
+function updateConnectionSummary(level, label) {
+  if (connectionSummaryTitle) connectionSummaryTitle.textContent = label;
+  if (connectionSummaryCopy) {
+    const audioAvailable = Boolean(localStream?.getAudioTracks().length);
+    const mediaConnected = peer?.connectionState === "connected" ||
+      peer?.iceConnectionState === "connected" || peer?.iceConnectionState === "completed";
+    const audioText = !audioAvailable
+      ? "Audio is not available yet."
+      : mediaConnected ? "Audio is connected." : "Audio is ready on this device.";
+    const videoText = receiveVideoEnabled
+      ? "Incoming video is on for this device."
+      : "Incoming video is off for this device.";
+    connectionSummaryCopy.textContent = `${audioText} ${videoText}`;
+  }
+  if (connectionPreference) {
+    connectionPreference.textContent = `Data preference: ${audioOnly?.checked ? "Protect audio" : "Automatic"}`;
+  }
+  if (!meetingAlert) return;
+  const shouldAlert = level === "fair" || level === "poor";
+  meetingAlert.hidden = !shouldAlert;
+  meetingAlert.dataset.level = level || "connecting";
+  if (shouldAlert) {
+    meetingAlert.textContent = label === "Reconnecting"
+      ? "Reconnecting media…"
+      : label === "Audio only"
+        ? "Your camera was paused to protect audio."
+        : level === "poor"
+          ? "Connection unstable. Video may be reduced to keep audio connected."
+          : "Connection unstable. Audio is prioritized.";
+  }
+}
+
 function setConnection(level, label) {
-  connection.className = `network-chip connection ${level}`;
-  connection.setAttribute("aria-label", `Network status: ${label}`);
-  if (networkLabel) networkLabel.textContent = label;
-  if (connectionMessage) connectionMessage.textContent = label;
+  const normalizedLevel = level || "connecting";
+  const normalizedLabel = label || "Connecting";
+  connection.className = `network-chip connection ${normalizedLevel}`;
+  connection.setAttribute("aria-label", `Connection status: ${normalizedLabel}`);
+  if (networkLabel) networkLabel.textContent = normalizedLabel;
+  if (connectionMessage) connectionMessage.textContent = normalizedLabel;
+  updateConnectionSummary(normalizedLevel, normalizedLabel);
+  lastConnectionLevel = normalizedLevel;
+  pendingConnectionLevel = "";
+  pendingConnectionSamples = 0;
+}
+
+function setMeasuredConnection(level, label) {
+  if (level === lastConnectionLevel) {
+    pendingConnectionLevel = "";
+    pendingConnectionSamples = 0;
+    updateConnectionSummary(level, networkLabel?.textContent || label);
+    return;
+  }
+  if (pendingConnectionLevel === level) pendingConnectionSamples += 1;
+  else {
+    pendingConnectionLevel = level;
+    pendingConnectionSamples = 1;
+  }
+  if (pendingConnectionSamples >= 2) setConnection(level, label);
 }
 
 async function updateDiagnostics() {
@@ -1393,14 +1906,14 @@ async function updateDiagnostics() {
   const values = {
     rttMs: null,
     jitterMs: null,
-    packetLoss: 0,
-    outboundKbps: 0,
+    packetLoss: null,
+    outboundKbps: null,
     inboundKbps: null,
-    outboundAudioKbps: 0,
-    inboundAudioKbps: 0,
+    outboundAudioKbps: null,
+    inboundAudioKbps: null,
     sentFps: null,
     receivedFps: null,
-    framesDropped: 0,
+    framesDropped: null,
     resolution: null,
     codec: null,
     ice: currentPeer.iceConnectionState,
@@ -1413,6 +1926,7 @@ async function updateDiagnostics() {
   let sentAudioBytes = 0;
   let receivedAudioBytes = 0;
   let framesDropped = 0;
+  let hasFrameDropStats = false;
   let totalLost = 0;
   let totalReceived = 0;
   let timestamp = 0;
@@ -1446,7 +1960,10 @@ async function updateDiagnostics() {
     if (stat.type === "outbound-rtp" && stat.kind === "video") {
       sentBytes += stat.bytesSent || 0;
       values.sentFps = stat.framesPerSecond ?? null;
-      framesDropped += stat.framesDropped || 0;
+      if (stat.framesDropped != null) {
+        hasFrameDropStats = true;
+        framesDropped += stat.framesDropped;
+      }
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       values.codec = resolveCodecName(codecById, stat.codecId) || values.codec;
     }
@@ -1457,7 +1974,10 @@ async function updateDiagnostics() {
       hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
-      framesDropped += stat.framesDropped || 0;
+      if (stat.framesDropped != null) {
+        hasFrameDropStats = true;
+        framesDropped += stat.framesDropped;
+      }
       if (stat.jitter != null) values.jitterMs = Math.round(stat.jitter * 1000);
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       totalLost += stat.packetsLost || 0;
@@ -1516,16 +2036,26 @@ async function updateDiagnostics() {
   if (totalLost + totalReceived > 0) {
     values.packetLoss = Number((totalLost / (totalLost + totalReceived) * 100).toFixed(1));
   }
-  values.framesDropped = framesDropped;
+  values.framesDropped = hasFrameDropStats ? framesDropped : null;
   previousStats = { timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes };
-  if (values.rttMs != null && values.rttMs > 250) setConnection("poor", "Poor");
-  else if (values.rttMs != null && values.rttMs > 120) setConnection("fair", "Fair");
-  else setConnection("good", "Good");
-  if (statRTT) statRTT.textContent = values.rttMs == null ? "—" : `${values.rttMs} ms`;
-  if (statJitter) statJitter.textContent = values.jitterMs == null ? "—" : `${values.jitterMs} ms`;
-  if (statLoss) statLoss.textContent = `${values.packetLoss.toFixed(1)}%`;
-  if (statBitrate) statBitrate.textContent = `${values.inboundKbps ?? 0} / ${values.outboundKbps} kbps`;
-  if (statResolution) statResolution.textContent = values.resolution || "—";
+  const lossKnown = values.packetLoss != null;
+  const connectionHasMetrics = values.rttMs != null || lossKnown;
+  if (connectionHasMetrics) {
+    if ((values.rttMs != null && values.rttMs > 250) || (lossKnown && values.packetLoss > 5)) {
+      setMeasuredConnection("poor", "Connection poor");
+    } else if ((values.rttMs != null && values.rttMs > 120) || (lossKnown && values.packetLoss >= 2)) {
+      setMeasuredConnection("fair", "Connection unstable");
+    } else {
+      setMeasuredConnection("good", "Connection good");
+    }
+  }
+  if (statRTT) statRTT.textContent = values.rttMs == null ? "Unavailable" : `${values.rttMs} ms`;
+  if (statJitter) statJitter.textContent = values.jitterMs == null ? "Unavailable" : `${values.jitterMs} ms`;
+  if (statLoss) statLoss.textContent = values.packetLoss == null ? "Unavailable" : `${values.packetLoss.toFixed(1)}%`;
+  if (statBitrate) statBitrate.textContent = values.inboundKbps == null && values.outboundKbps == null
+    ? "Unavailable"
+    : `${values.inboundKbps == null ? "Unavailable" : values.inboundKbps} / ${values.outboundKbps == null ? "Unavailable" : values.outboundKbps} kbps`;
+  if (statResolution) statResolution.textContent = values.resolution || "Unavailable";
   participantElements.forEach((element, id) => {
     if (id === localParticipantID) {
       const localStats = {
@@ -1538,18 +2068,19 @@ async function updateDiagnostics() {
       return;
     }
     const remoteStats = participantStats.get(id) || {
-      hasData: values.rttMs != null,
+      hasData: values.rttMs != null || values.packetLoss != null,
       lostPackets: 0,
       receivedPackets: 0,
       totalPackets: 0
     };
     setParticipantQuality(element, classifyParticipantQuality(remoteStats, values.rttMs));
   });
-  const poor = (values.rttMs != null && values.rttMs > 250) || values.packetLoss > 5 ||
+  const packetLoss = values.packetLoss ?? 0;
+  const poor = (values.rttMs != null && values.rttMs > 250) || (lossKnown && packetLoss > 5) ||
     isBelowBitrate(values.inboundKbps, 80);
-  const critical = (values.rttMs != null && values.rttMs > 500) || values.packetLoss > 10 ||
+  const critical = (values.rttMs != null && values.rttMs > 500) || (lossKnown && packetLoss > 10) ||
     isBelowBitrate(values.inboundKbps, 40);
-  const good = (values.rttMs == null || values.rttMs < 120) && values.packetLoss < 1;
+  const good = (values.rttMs == null || values.rttMs < 120) && (!lossKnown || packetLoss < 1);
   criticalSamples = critical ? criticalSamples + 1 : 0;
   recoverySamples = good ? recoverySamples + 1 : 0;
   if (criticalSamples >= 2) {
@@ -1585,10 +2116,10 @@ async function updateDiagnostics() {
       type: "network_state",
       participant_id: localParticipantID,
       rtt_ms: values.rttMs ?? -1,
-      packet_loss10: Math.round(values.packetLoss * 10),
+      packet_loss10: Math.round(packetLoss * 10),
       jitter_ms: values.jitterMs ?? -1,
-      video_kbps: values.outboundKbps,
-      audio_kbps: values.outboundAudioKbps
+      video_kbps: Math.max(0, values.outboundKbps ?? 0),
+      audio_kbps: Math.max(0, values.outboundAudioKbps ?? 0)
     }));
   }
 }
@@ -1654,7 +2185,7 @@ cameraQuality?.addEventListener("change", async () => {
   selectedCameraQuality = value;
   cameraConstraints = cameraConstraintsForQuality(value);
   writeStoredValue("meeting.cameraQuality", value);
-  cameraRequested = value !== "off" && !audioOnly?.checked;
+  if (value === "off") cameraRequested = false;
   if (!screenStream) {
     await setVideoSending(cameraRequested);
   }
@@ -1663,7 +2194,31 @@ cameraQuality?.addEventListener("change", async () => {
 });
 
 function addParticipant(participant) {
-  if (participantElements.has(participant.id)) return;
+  const existing = participantElements.get(participant.id);
+  if (existing) {
+    const removalTimer = participantRemovalTimers.get(participant.id);
+    if (removalTimer) {
+      clearTimeout(removalTimer);
+      participantRemovalTimers.delete(participant.id);
+      if (participantMenuOwner?.participantID === participant.id) closeParticipantMenu(false);
+      existing.item.classList.remove("is-disconnected");
+      existing.item.dataset.connection = "connected";
+      existing.item.dataset.camera = "unknown";
+      existing.item.dataset.mic = "unknown";
+      existing.video.srcObject = null;
+      existing.audio.srcObject = null;
+      existing.item.dataset.receiveVideo = "false";
+      existing.video.hidden = true;
+      existing.avatar.hidden = false;
+      existing.pausedChip.hidden = true;
+      existing.quality.hidden = true;
+      existing.menuTrigger.setAttribute("aria-expanded", "false");
+      updateParticipantTileState(existing);
+      updateParticipantAriaLabel(existing);
+      updateParticipantCount();
+    }
+    return;
+  }
   const item = document.createElement("li");
   item.className = "participant-tile";
   item.tabIndex = 0;
@@ -1672,7 +2227,7 @@ function addParticipant(participant) {
   item.dataset.participantId = participant.id;
   item.dataset.connection = "connected";
   item.dataset.sharing = "false";
-  item.dataset.camera = "off";
+  item.dataset.camera = "unknown";
   item.dataset.quality = "unknown";
   const avatarSeed = hashName(participant.name);
   item.style.setProperty("--avatar-angle", `${120 + avatarSeed % 121}deg`);
@@ -1683,6 +2238,16 @@ function addParticipant(participant) {
   const name = document.createElement("strong");
   name.className = "participant-name";
   name.textContent = participant.name;
+  name.title = participant.name;
+  const menuTrigger = document.createElement("button");
+  menuTrigger.type = "button";
+  menuTrigger.className = "participant-menu-trigger";
+  menuTrigger.dataset.participantId = participant.id;
+  menuTrigger.setAttribute("aria-haspopup", "menu");
+  menuTrigger.setAttribute("aria-expanded", "false");
+  menuTrigger.setAttribute("aria-label", `${participant.name} participant actions`);
+  menuTrigger.title = `Participant actions for ${participant.name}`;
+  menuTrigger.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>';
   const meta = document.createElement("div");
   meta.className = "participant-meta";
   const videoStage = document.createElement("div");
@@ -1698,6 +2263,14 @@ function addParticipant(participant) {
   quality.setAttribute("role", "img");
   quality.setAttribute("aria-label", `${participant.name} connection quality: unknown`);
   quality.title = "Connection quality: unknown";
+  const state = document.createElement("span");
+  state.className = "participant-state";
+  state.hidden = true;
+  state.setAttribute("role", "status");
+  const shareLabel = document.createElement("span");
+  shareLabel.className = "participant-share-label";
+  shareLabel.hidden = true;
+  shareLabel.textContent = "Screen sharing";
   const video = document.createElement("video");
   const audio = document.createElement("audio");
   const micIndicator = document.createElement("span");
@@ -1709,15 +2282,19 @@ function addParticipant(participant) {
   micIndicator.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>';
   video.playsInline = true;
   video.hidden = true;
-  videoStage.append(avatar, video, pausedChip, quality);
   meta.append(name, micIndicator);
-  item.append(videoStage, meta, audio);
+  videoStage.append(avatar, video, pausedChip, quality);
+  videoStage.append(state, shareLabel, meta);
+  videoStage.append(menuTrigger);
+  item.append(videoStage, audio);
   participants.append(item);
   participantElements.set(participant.id, {
-    item, name, video, audio, micIndicator, avatar, pausedChip, quality, trackIDs: new Set()
+    item, name, video, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
+    trackIDs: new Set()
   });
   item.dataset.mic = "unknown";
   setParticipantQuality(participantElements.get(participant.id), "unknown");
+  updateParticipantTileState(participantElements.get(participant.id));
   updateParticipantAriaLabel(participantElements.get(participant.id));
   updateParticipantCount();
   updateScreenShareUI();
@@ -1743,7 +2320,9 @@ function updateMediaState(message) {
   element.micIndicator.setAttribute("aria-label",
     `${element.name.textContent}: microphone ${audioOn ? "on" : "off"}; camera ${cameraStatus}`);
   element.micIndicator.title = `Microphone ${audioOn ? "on" : "off"} · Camera ${cameraStatus}`;
+  updateParticipantTileState(element);
   updateParticipantAriaLabel(element);
+  renderPeopleList();
 }
 
 function sendMediaState() {
@@ -1776,7 +2355,7 @@ async function setVideoSending(enabled, automatic = false) {
   const track = localStream?.getVideoTracks()[0];
   if (track) track.enabled = sendingEnabled && cameraRequested;
   setLocalMediaControls();
-  if (!sendingEnabled && automatic) setConnection("poor", "Audio only");
+  if (!sendingEnabled && automatic) setConnection("poor", "Connection poor");
   sendMediaState();
 }
 
@@ -1790,17 +2369,37 @@ async function setVideoSenderActive(enabled) {
   }
 }
 
+function setReceiveVideoControlLabel(button, enabled) {
+  if (!button) return;
+  const label = enabled ? "Incoming video" : "Incoming video off";
+  const target = button.querySelector("[data-control-label]") || button.querySelector("span:not(.control-icon)");
+  if (target) target.textContent = label;
+  else button.textContent = label;
+  updateControlLabel(button, enabled
+    ? "Turn off incoming video for this device"
+    : "Turn on incoming video for this device");
+  button.setAttribute("aria-pressed", String(enabled));
+}
+
 function setReceiveVideo(enabled) {
   receiveVideoEnabled = enabled;
-  updateControlLabel(receiveVideo, enabled ? "Pause all" : "Resume all");
+  setReceiveVideoControlLabel(receiveVideo, enabled);
+  receiveVideo.setAttribute("aria-pressed", String(enabled));
   if (pauseAll) {
     const pauseLabel = pauseAll.querySelector("span");
-    if (pauseLabel) pauseLabel.textContent = enabled ? "Pause remote video" : "Resume remote video";
+    if (pauseLabel) pauseLabel.textContent = enabled
+      ? "Turn off incoming video"
+      : "Turn on incoming video";
+    updateControlLabel(pauseAll, enabled
+      ? "Turn off incoming video for this device"
+      : "Turn on incoming video for this device");
   }
-  receiveVideo.setAttribute("aria-pressed", String(enabled));
+  setReceiveVideoControlLabel(moreReceiveVideo, enabled);
   for (const [participantID, element] of participantElements) {
     if (participantID !== localParticipantID) updateParticipantVideoVisibility(element);
   }
+  renderPeopleList();
+  updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
   const targetPeer = peer;
   const targetSocket = socket;
   const targetTransceiver = videoTransceiver;
@@ -1835,6 +2434,7 @@ async function createAndSendLocalOffer(targetPeer, targetSocket, generation) {
 function updateScreenShareUI() {
   participantElements.forEach((element, participantID) => {
     element.item.dataset.sharing = String(participantID === screenShareOwner);
+    if (element.shareLabel) element.shareLabel.hidden = participantID !== screenShareOwner;
   });
   updateParticipantPagination();
   if (participants) {
@@ -1843,6 +2443,7 @@ function updateScreenShareUI() {
   }
   const ownedByOther = Boolean(screenShareOwner && screenShareOwner !== localParticipantID);
   screen.disabled = !screenShareEnabled || ownedByOther || Boolean(audioOnly?.checked);
+  if (moreScreen) moreScreen.disabled = screen.disabled;
   screen.setAttribute("aria-pressed", String(Boolean(screenStream)));
   if (ownedByOther) {
     updateControlLabel(screen, "In use");
@@ -1851,6 +2452,7 @@ function updateScreenShareUI() {
   } else {
     updateControlLabel(screen, "Share screen");
   }
+  if (moreScreen) moreScreen.textContent = screenStream ? "Stop sharing" : "Share screen";
 }
 
 function requestScreenShare(active) {
@@ -2024,7 +2626,7 @@ camera.addEventListener("click", () => {
   const track = localStream?.getVideoTracks()[0];
   if (!track) return;
   if (audioOnly?.checked) {
-    showToast("Turn off Audio only before enabling the camera");
+    showToast("Turn off Protect audio before enabling the camera");
     return;
   }
   if (!cameraRequested && selectedCameraQuality === "off") {
@@ -2062,6 +2664,12 @@ leave.addEventListener("click", () => {
   enableAudio.hidden = true;
   peer?.close();
   resetSpeakerDetection();
+  closeParticipantMenu(false);
+  pinnedParticipantID = undefined;
+  participants.classList.remove("has-pinned");
+  participants.dataset.pinned = "false";
+  for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
+  participantRemovalTimers.clear();
   localStream = undefined;
   screenStream = undefined;
   cameraTrack = undefined;
@@ -2084,30 +2692,56 @@ leave.addEventListener("click", () => {
   participantPage = 0;
   focusedParticipantID = undefined;
   profile.value = "auto";
+  cameraQuality.value = selectedCameraQuality;
+  audioOnly.checked = false;
+  cameraBeforeAudioOnly = false;
   pendingCandidates.splice(0);
-  mic.textContent = "Unmute";
+  updateControlLabel(mic, "Unmute microphone");
   mic.setAttribute("aria-pressed", "false");
-  camera.textContent = "Turn camera on";
+  updateControlLabel(camera, "Turn camera on");
   camera.setAttribute("aria-pressed", "false");
   mic.disabled = false;
   camera.disabled = false;
   receiveVideoEnabled = true;
-  updateControlLabel(receiveVideo, "Pause all");
-  receiveVideo.setAttribute("aria-pressed", "true");
+  setReceiveVideoControlLabel(receiveVideo, true);
+  setReceiveVideoControlLabel(moreReceiveVideo, true);
+  if (pauseAll) {
+    const pauseLabel = pauseAll.querySelector("span");
+    if (pauseLabel) pauseLabel.textContent = "Turn off incoming video";
+  }
   updateControlLabel(screen, "Share screen");
   screen.setAttribute("aria-pressed", "false");
   screenShareOwner = undefined;
   screenShareEnabled = true;
   updateScreenShareUI();
+  setChatOpen(false);
   setSidebarOpen(false);
   setConnection("", "Connecting");
+  lastConnectionLevel = "";
+  pendingConnectionLevel = "";
+  pendingConnectionSamples = 0;
   diagnostics.textContent = "Waiting for media statistics…";
+  if (settingsPreview) {
+    settingsPreview.srcObject = null;
+    settingsPreview.hidden = true;
+  }
+  if (meetingAlert) meetingAlert.hidden = true;
+  if (selfView) selfView.checked = selfViewVisible;
   participantElements.clear();
   participants.replaceChildren();
   updateParticipantPagination();
   brandBar.hidden = false;
-  welcomeGrid.hidden = false;
+  welcomeGrid.hidden = true;
   meeting.hidden = true;
+  form.hidden = true;
+  if (meetingEnded) meetingEnded.hidden = false;
+  joinButton.disabled = false;
+});
+
+rejoin?.addEventListener("click", () => {
+  meetingEnded.hidden = true;
+  welcomeGrid.hidden = false;
   form.hidden = false;
   joinButton.disabled = false;
+  nameInput.focus();
 });
