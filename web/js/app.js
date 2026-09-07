@@ -36,6 +36,7 @@ const micLevelMeter = document.querySelector("#mic-level-meter");
 const peopleList = document.querySelector("#people-list");
 const peopleCount = document.querySelector("#people-count");
 const selfView = document.querySelector("#self-view");
+const connectionSummary = document.querySelector("#connection-summary");
 const connectionSummaryTitle = document.querySelector("#connection-summary-title");
 const connectionSummaryCopy = document.querySelector("#connection-summary-copy");
 const connectionPreference = document.querySelector("#connection-preference");
@@ -79,11 +80,25 @@ const moreReceiveVideo = document.querySelector("#more-receive-video");
 const moreChat = document.querySelector("#more-chat");
 const morePeople = document.querySelector("#more-people");
 const moreScreen = document.querySelector("#more-screen");
+const more = document.querySelector("#more");
+const moreStateBadge = document.querySelector("#more-state-badge");
 
 function updateControlLabel(button, label) {
   if (!button) return;
   button.setAttribute("aria-label", label);
   button.setAttribute("title", label);
+}
+
+function mediaAccessMessage(kind, error) {
+  const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+  if (kind === "audio") {
+    return denied
+      ? "Microphone access was denied. Check your browser permissions or join muted."
+      : "Microphone unavailable; continuing without audio.";
+  }
+  return denied
+    ? "Camera access was denied. You can still join without video."
+    : "Camera unavailable; continuing audio-only.";
 }
 
 function hashName(value) {
@@ -202,9 +217,14 @@ function renderPeopleList() {
     }
     const state = document.createElement("span");
     state.className = "people-list__state";
+    const cameraState = participantCameraLabel(element);
     state.textContent = element.item.dataset.connection === "left" ? "Left" :
-      element.item.dataset.mic === "off" ? "Muted" :
-        participantCameraLabel(element) === "off" ? "Camera off" : "Connected";
+      element.item.dataset.connection === "disconnected" ? "Reconnecting" :
+        element.item.dataset.mic === "off" ? "Muted" :
+          cameraState === "incoming video off" ? "Incoming video off" :
+            cameraState === "video paused" ? "Video paused" :
+              cameraState === "off" ? "Camera off" :
+                cameraState === "unknown" ? "Connecting" : "Connected";
     row.append(name, state);
     peopleList.append(row);
   });
@@ -225,11 +245,12 @@ function updateParticipantAriaLabel(element) {
   const microphoneState = element.item.dataset.mic || "unknown";
   const qualityState = participantQualityLabels[element.item.dataset.quality] || "unknown";
   const pinnedState = element.item.classList.contains("is-pinned") ? " Pinned." : "";
+  const localState = element.item.classList.contains("is-local") ? " (You)" : "";
   const selfView = element.item.classList.contains("is-local") && participants.classList.contains("is-pip-mode")
     ? " Self-view. Use arrow keys to move it between corners."
     : "";
   element.item.setAttribute("aria-label",
-    `${element.name.textContent}: camera ${cameraState}; microphone ${microphoneState}; ` +
+    `${element.name.textContent}${localState}: camera ${cameraState}; microphone ${microphoneState}; ` +
     `connection quality ${qualityState}.${pinnedState}${selfView}`);
 }
 
@@ -241,6 +262,8 @@ function updateParticipantVideoVisibility(element) {
   element.item.dataset.receiveVideo = String(visible);
   element.avatar.hidden = visible;
   element.video.hidden = !visible;
+  if (visible) element.video.play().catch(() => {});
+  else element.video.pause();
   updateParticipantTileState(element);
 }
 
@@ -314,6 +337,7 @@ function markLocalParticipant(participantID) {
   const element = participantElements.get(participantID);
   if (!element) return;
   element.item.classList.add("is-local");
+  if (element.youBadge) element.youBadge.hidden = false;
   element.item.tabIndex = 0;
   element.item.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown ArrowLeft ArrowRight");
   setPipPosition(element.item, readStoredValue("meeting.pipPosition") || "bottom-right", false);
@@ -600,12 +624,17 @@ function sendChatMessage(body) {
     addChatSystem("Chat is unavailable while the meeting reconnects.");
     return false;
   }
-  socket.send(JSON.stringify({
-    version: 1,
-    type: "chat_message",
-    participant_id: localParticipantID,
-    text
-  }));
+  try {
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "chat_message",
+      participant_id: localParticipantID,
+      text
+    }));
+  } catch (_) {
+    addChatSystem("Message could not be sent. Try again.");
+    return false;
+  }
   return true;
 }
 
@@ -615,6 +644,7 @@ function setChatOpen(open) {
   if (open) {
     setSidebarOpen(false);
     chatRail.hidden = false;
+    chatRail.setAttribute("aria-hidden", "false");
     meeting.classList.add("has-rail");
     requestAnimationFrame(() => chatRail.classList.add("is-open"));
   } else {
@@ -623,11 +653,16 @@ function setChatOpen(open) {
     const closeDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180;
     chatCloseTimer = setTimeout(() => {
       chatRail.hidden = true;
+      chatRail.setAttribute("aria-hidden", "true");
       meeting.classList.toggle("has-rail", meeting.classList.contains("sidebar-open"));
       if (restoreFocus && chatRail.contains(document.activeElement)) chatToggle?.focus();
     }, closeDelay);
   }
   chatToggle?.setAttribute("aria-pressed", String(open));
+  if (chatToggle) {
+    updateControlLabel(chatToggle, open ? "Close chat" : "Open chat");
+    chatToggle.title = `${open ? "Close" : "Open"} chat (C)`;
+  }
   if (open) {
     unreadMessages = 0;
     if (chatBadge) chatBadge.hidden = true;
@@ -693,7 +728,7 @@ function setSelfViewVisibility(visible, notify = true) {
   if (notify) showToast(selfViewVisible ? "Self-view shown" : "Self-view hidden; your camera is still on");
 }
 selfView?.addEventListener("change", () => setSelfViewVisibility(selfView.checked));
-document.querySelector("#more")?.addEventListener("click", () => setSidebarOpen(true));
+more?.addEventListener("click", () => setSidebarOpen(true));
 moreReceiveVideo?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 moreChat?.addEventListener("click", () => {
   setSidebarOpen(false);
@@ -1018,7 +1053,7 @@ async function replaceLocalDevice(kind, deviceID) {
     sendMediaState();
     await refreshDeviceSelectors();
   } catch (error) {
-    showToast(`${kind === "audio" ? "Microphone" : "Camera"} unavailable: ${error.message}`);
+    showToast(mediaAccessMessage(kind, error));
     await refreshDeviceSelectors();
   }
 }
@@ -1034,6 +1069,8 @@ async function runDeviceTest() {
   mediaTestStream = testStream;
   let cameraReady = false;
   let microphoneReady = false;
+  let cameraDenied = false;
+  let microphoneDenied = false;
 
   if (!navigator.mediaDevices?.getUserMedia) {
     setDeviceResult(testCamera, "error", "Camera unavailable");
@@ -1054,8 +1091,9 @@ async function runDeviceTest() {
     cameraReady = videoStream.getVideoTracks().length > 0;
     setDeviceResult(testCamera, cameraReady ? "ready" : "error",
       cameraReady ? "Camera ready" : "Camera unavailable");
-  } catch (_) {
-    setDeviceResult(testCamera, "error", "Camera unavailable");
+  } catch (error) {
+    cameraDenied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+    setDeviceResult(testCamera, "error", cameraDenied ? "Camera access denied" : "Camera unavailable");
   }
 
   try {
@@ -1068,8 +1106,9 @@ async function runDeviceTest() {
     microphoneReady = audioStream.getAudioTracks().length > 0;
     setDeviceResult(testMicrophone, microphoneReady ? "ready" : "error",
       microphoneReady ? "Microphone ready" : "Microphone unavailable");
-  } catch (_) {
-    setDeviceResult(testMicrophone, "error", "Microphone unavailable");
+  } catch (error) {
+    microphoneDenied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+    setDeviceResult(testMicrophone, "error", microphoneDenied ? "Microphone access denied" : "Microphone unavailable");
   }
 
   if (mediaTestStream !== testStream) {
@@ -1079,9 +1118,16 @@ async function runDeviceTest() {
   devicePreview.srcObject = testStream;
   devicePreview.hidden = !cameraReady;
   await refreshDeviceSelectors();
-  deviceTestStatus.textContent = cameraReady && microphoneReady
-    ? "Your devices are ready. The test will stop when you join."
-    : "Some devices need attention. You can still join and use the available media.";
+  if (cameraDenied || microphoneDenied) {
+    const messages = [];
+    if (cameraDenied) messages.push("Camera access was denied. You can still join without video.");
+    if (microphoneDenied) messages.push("Microphone access was denied. Check your browser permissions or join muted.");
+    deviceTestStatus.textContent = messages.join(" ");
+  } else {
+    deviceTestStatus.textContent = cameraReady && microphoneReady
+      ? "Your devices are ready. The test will stop when you join."
+      : "Some devices need attention. You can still join and use the available media.";
+  }
 }
 
 testMedia.addEventListener("click", runDeviceTest);
@@ -1134,9 +1180,21 @@ function setSidebarOpen(open) {
   meeting.classList.toggle("sidebar-open", open);
   toggleSidebar.setAttribute("aria-expanded", String(open));
   connection.setAttribute("aria-expanded", String(open));
-  participantsButton?.setAttribute("aria-pressed", String(open));
-  toggleSidebar.setAttribute("aria-label", open ? "Close meeting settings" : "Open meeting settings");
-  toggleSidebarLabel.textContent = open ? "Hide tools" : "Show tools";
+  participantsButton?.setAttribute("aria-expanded", String(open));
+  if (participantsButton) updateControlLabel(participantsButton, open ? "Close meeting controls" : "Open participants");
+  more?.setAttribute("aria-expanded", String(open));
+  if (more) {
+    const moreLabel = open
+      ? "Close meeting controls"
+      : moreStateBadge?.hidden === false
+        ? "Open more meeting controls. Incoming video is off."
+        : "Open more meeting controls";
+    updateControlLabel(more, moreLabel);
+  }
+  const sidebarLabel = open ? "Close meeting controls" : "Open meeting controls";
+  toggleSidebar.setAttribute("aria-label", sidebarLabel);
+  toggleSidebar.title = sidebarLabel;
+  toggleSidebarLabel.textContent = sidebarLabel;
   meetingSidebar.setAttribute("aria-hidden", String(!open));
   meeting.classList.toggle("has-rail", open || !chatRail?.hidden);
   sidebarBackdrop.hidden = !open;
@@ -1478,7 +1536,7 @@ function connectSocket(name, password) {
   if (socket && socket.readyState !== WebSocket.CLOSED) {
     socket.close();
   }
-  status.textContent = "Connecting...";
+  status.textContent = "Joining meeting…";
   const currentSocket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   socket = currentSocket;
   currentSocket.addEventListener("open", () => {
@@ -1615,8 +1673,8 @@ function connectSocket(name, password) {
     setConnection("fair", "Reconnecting");
     if (reconnectAttempts > maxReconnectAttempts) {
       resetMediaConnection();
-      setConnection("poor", "Connection lost");
-      status.textContent = "Connection lost. Select Leave to try again.";
+      setConnection("poor", "Offline");
+      status.textContent = "Offline. Select Leave to try again.";
       return;
     }
     const delay = Math.min(30000, 2000 * 2 ** Math.min(reconnectAttempts - 1, 4));
@@ -1701,7 +1759,7 @@ async function startWebRTC() {
       setConnection("fair", "Reconnecting");
       setParticipantConnectionState("disconnected");
     } else if (currentPeer.iceConnectionState === "failed") {
-      setConnection("poor", "Poor");
+      setConnection("poor", "Offline");
       setParticipantConnectionState("disconnected");
     }
   };
@@ -1780,8 +1838,8 @@ async function startWebRTC() {
         setupStream.addTrack(track);
       });
       if (abortIfStale()) return;
-    } catch (_) {
-      status.textContent = "Microphone unavailable; continuing without audio.";
+    } catch (error) {
+      status.textContent = mediaAccessMessage("audio", error);
     }
     try {
       const videoStream = await navigator.mediaDevices.getUserMedia({
@@ -1795,9 +1853,9 @@ async function startWebRTC() {
         setupStream.addTrack(track);
       });
       if (abortIfStale()) return;
-    } catch (_) {
+    } catch (error) {
       cameraRequested = false;
-      status.textContent = "Camera unavailable; continuing audio-only.";
+      status.textContent = mediaAccessMessage("video", error);
     }
     if (abortIfStale()) return;
     if (setupStream.getTracks().length === 0) throw new Error("No microphone or camera is available");
@@ -1860,13 +1918,13 @@ function updateConnectionSummary(level, label) {
   meetingAlert.hidden = !shouldAlert;
   meetingAlert.dataset.level = level || "connecting";
   if (shouldAlert) {
-    meetingAlert.textContent = label === "Reconnecting"
+    meetingAlert.textContent = videoSuspendedAutomatically && !audioOnly?.checked
+      ? "Your camera was paused to keep audio connected."
+      : label === "Reconnecting"
       ? "Reconnecting media…"
-      : label === "Audio only"
-        ? "Your camera was paused to protect audio."
-        : level === "poor"
-          ? "Connection unstable. Video may be reduced to keep audio connected."
-          : "Connection unstable. Audio is prioritized.";
+      : level === "poor"
+        ? "Connection unstable. Video may be reduced to keep audio connected."
+        : "Connection unstable. Audio is prioritized.";
   }
 }
 
@@ -1874,6 +1932,7 @@ function setConnection(level, label) {
   const normalizedLevel = level || "connecting";
   const normalizedLabel = label || "Connecting";
   connection.className = `network-chip connection ${normalizedLevel}`;
+  connectionSummary?.setAttribute("data-level", normalizedLevel);
   connection.setAttribute("aria-label", `Connection status: ${normalizedLabel}`);
   if (networkLabel) networkLabel.textContent = normalizedLabel;
   if (connectionMessage) connectionMessage.textContent = normalizedLabel;
@@ -1896,6 +1955,14 @@ function setMeasuredConnection(level, label) {
     pendingConnectionSamples = 1;
   }
   if (pendingConnectionSamples >= 2) setConnection(level, label);
+}
+
+function setStatValue(element, value) {
+  if (!element) return;
+  const available = value !== null && value !== undefined && value !== "";
+  const row = element.closest("div");
+  if (row) row.hidden = !available;
+  if (available) element.textContent = value;
 }
 
 async function updateDiagnostics() {
@@ -2042,20 +2109,20 @@ async function updateDiagnostics() {
   const connectionHasMetrics = values.rttMs != null || lossKnown;
   if (connectionHasMetrics) {
     if ((values.rttMs != null && values.rttMs > 250) || (lossKnown && values.packetLoss > 5)) {
-      setMeasuredConnection("poor", "Connection poor");
+      setMeasuredConnection("poor", "Unstable connection");
     } else if ((values.rttMs != null && values.rttMs > 120) || (lossKnown && values.packetLoss >= 2)) {
-      setMeasuredConnection("fair", "Connection unstable");
+      setMeasuredConnection("fair", "Unstable connection");
     } else {
-      setMeasuredConnection("good", "Connection good");
+      setMeasuredConnection("good", "Connected");
     }
   }
-  if (statRTT) statRTT.textContent = values.rttMs == null ? "Unavailable" : `${values.rttMs} ms`;
-  if (statJitter) statJitter.textContent = values.jitterMs == null ? "Unavailable" : `${values.jitterMs} ms`;
-  if (statLoss) statLoss.textContent = values.packetLoss == null ? "Unavailable" : `${values.packetLoss.toFixed(1)}%`;
-  if (statBitrate) statBitrate.textContent = values.inboundKbps == null && values.outboundKbps == null
-    ? "Unavailable"
-    : `${values.inboundKbps == null ? "Unavailable" : values.inboundKbps} / ${values.outboundKbps == null ? "Unavailable" : values.outboundKbps} kbps`;
-  if (statResolution) statResolution.textContent = values.resolution || "Unavailable";
+  setStatValue(statRTT, values.rttMs == null ? null : `${values.rttMs} ms`);
+  setStatValue(statJitter, values.jitterMs == null ? null : `${values.jitterMs} ms`);
+  setStatValue(statLoss, values.packetLoss == null ? null : `${values.packetLoss.toFixed(1)}%`);
+  setStatValue(statBitrate, values.inboundKbps == null && values.outboundKbps == null
+    ? null
+    : `${values.inboundKbps == null ? "-" : values.inboundKbps} / ${values.outboundKbps == null ? "-" : values.outboundKbps} kbps`);
+  setStatValue(statResolution, values.resolution || null);
   participantElements.forEach((element, id) => {
     if (id === localParticipantID) {
       const localStats = {
@@ -2239,6 +2306,10 @@ function addParticipant(participant) {
   name.className = "participant-name";
   name.textContent = participant.name;
   name.title = participant.name;
+  const youBadge = document.createElement("span");
+  youBadge.className = "participant-you";
+  youBadge.textContent = "You";
+  youBadge.hidden = participant.id !== localParticipantID;
   const menuTrigger = document.createElement("button");
   menuTrigger.type = "button";
   menuTrigger.className = "participant-menu-trigger";
@@ -2282,14 +2353,14 @@ function addParticipant(participant) {
   micIndicator.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>';
   video.playsInline = true;
   video.hidden = true;
-  meta.append(name, micIndicator);
+  meta.append(name, youBadge, micIndicator);
   videoStage.append(avatar, video, pausedChip, quality);
   videoStage.append(state, shareLabel, meta);
   videoStage.append(menuTrigger);
   item.append(videoStage, audio);
   participants.append(item);
   participantElements.set(participant.id, {
-    item, name, video, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
+    item, name, youBadge, video, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
     trackIDs: new Set()
   });
   item.dataset.mic = "unknown";
@@ -2355,7 +2426,7 @@ async function setVideoSending(enabled, automatic = false) {
   const track = localStream?.getVideoTracks()[0];
   if (track) track.enabled = sendingEnabled && cameraRequested;
   setLocalMediaControls();
-  if (!sendingEnabled && automatic) setConnection("poor", "Connection poor");
+  if (!sendingEnabled && automatic) setConnection("poor", "Unstable connection");
   sendMediaState();
 }
 
@@ -2372,13 +2443,30 @@ async function setVideoSenderActive(enabled) {
 function setReceiveVideoControlLabel(button, enabled) {
   if (!button) return;
   const label = enabled ? "Incoming video" : "Incoming video off";
+  const tooltip = enabled
+    ? "Turn off video received by this device. Other participants can still see your camera."
+    : "Turn on video received by this device.";
   const target = button.querySelector("[data-control-label]") || button.querySelector("span:not(.control-icon)");
   if (target) target.textContent = label;
   else button.textContent = label;
-  updateControlLabel(button, enabled
-    ? "Turn off incoming video for this device"
-    : "Turn on incoming video for this device");
+  updateControlLabel(button, enabled ? "Turn off incoming video" : "Turn on incoming video");
+  button.dataset.tooltip = tooltip;
   button.setAttribute("aria-pressed", String(enabled));
+  button.dataset.receiveVideo = enabled ? "on" : "off";
+}
+
+function setMoreIncomingVideoState(enabled) {
+  if (moreStateBadge) moreStateBadge.hidden = enabled;
+  if (!more) return;
+  const label = meeting?.classList.contains("sidebar-open")
+    ? "Close meeting controls"
+    : enabled
+      ? "Open more meeting controls"
+      : "Open more meeting controls. Incoming video is off.";
+  updateControlLabel(more, label);
+  more.title = meeting?.classList.contains("sidebar-open")
+    ? "Close meeting controls"
+    : enabled ? "More controls" : "More controls. Incoming video is off";
 }
 
 function setReceiveVideo(enabled) {
@@ -2390,16 +2478,21 @@ function setReceiveVideo(enabled) {
     if (pauseLabel) pauseLabel.textContent = enabled
       ? "Turn off incoming video"
       : "Turn on incoming video";
-    updateControlLabel(pauseAll, enabled
-      ? "Turn off incoming video for this device"
-      : "Turn on incoming video for this device");
+    updateControlLabel(pauseAll, enabled ? "Turn off incoming video" : "Turn on incoming video");
+    if (pauseAll.hasAttribute("data-tooltip")) {
+      pauseAll.dataset.tooltip = enabled
+        ? "Turn off video received by this device. Other participants can still see your camera."
+        : "Turn on video received by this device.";
+    }
   }
   setReceiveVideoControlLabel(moreReceiveVideo, enabled);
+  setMoreIncomingVideoState(enabled);
   for (const [participantID, element] of participantElements) {
     if (participantID !== localParticipantID) updateParticipantVideoVisibility(element);
   }
   renderPeopleList();
   updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
+  showToast(enabled ? "Incoming video is on for this device." : "Incoming video is off for this device.");
   const targetPeer = peer;
   const targetSocket = socket;
   const targetTransceiver = videoTransceiver;
@@ -2705,6 +2798,7 @@ leave.addEventListener("click", () => {
   receiveVideoEnabled = true;
   setReceiveVideoControlLabel(receiveVideo, true);
   setReceiveVideoControlLabel(moreReceiveVideo, true);
+  setMoreIncomingVideoState(true);
   if (pauseAll) {
     const pauseLabel = pauseAll.querySelector("span");
     if (pauseLabel) pauseLabel.textContent = "Turn off incoming video";

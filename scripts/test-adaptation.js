@@ -70,7 +70,7 @@ if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers 
   throw new Error("new WebRTC generations must reset ICE restart state");
 }
 if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
-    !appSource.includes('setConnection("poor", "Connection lost");')) {
+    !appSource.includes('setConnection("poor", "Offline");')) {
   throw new Error("signaling disconnects must be visible in the connection indicator");
 }
 if (!appSource.includes('mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));') ||
@@ -133,20 +133,27 @@ if (!indexSource.includes('id="mic" type="button" aria-pressed="false"') ||
   throw new Error("microphone and camera must start disabled by default");
 }
 for (const style of [
-  "meeting-layout { display: block; }",
-  "position: fixed",
-  "bottom: max(.75rem, env(safe-area-inset-bottom))",
-  "z-index: 20",
-  "padding: 1rem 0 calc(5rem + env(safe-area-inset-bottom))",
-  "width: min(calc(100% - 2rem), 760px)",
-  "margin: 0 0 8px",
-  "min-height: 44px",
-  '.control-button[aria-pressed="true"] {\n  color: var(--primary);',
-  '.control-button[aria-pressed="false"] {\n  color: var(--text);',
-  "button.control-button:disabled"
+  "--lm-header: #151b22",
+  "--lm-stage: #0b0f13",
+  "--lm-surface-hover: #27313d",
+  "--lm-control-size: 52px",
+  "--lm-toolbar-height: 72px",
+  ".meeting-toolbar",
+  ".toolbar-primary",
+  ".toolbar-secondary",
+  ".toolbar-spacer { flex: 1 1 8px; min-width: 8px; }",
+  ".toolbar-session",
+  "overflow: visible",
+  "--lm-z-backdrop: 1200",
+  "--lm-z-rail: 1300",
+  "[data-tooltip]::after",
+  "@container toolbar (max-width: 760px)",
+  "@media (max-width: 680px)",
+  "max-height: calc(100dvh - 52px - var(--lm-toolbar-height))",
+  "transform: translateY(100%)"
 ]) {
   if (!styleSource.includes(style)) {
-    throw new Error(`compact meeting layout style is missing: ${style}`);
+    throw new Error(`responsive meeting layout style is missing: ${style}`);
   }
 }
 for (const style of [
@@ -156,13 +163,15 @@ for (const style of [
   ".participant-grid li.is-disconnected",
   ".participant-grid li[data-sharing=\"true\"]",
   ".participant-mic",
+  ".chat-messages:empty::before",
   "aspect-ratio: 16 / 9",
-  "background: rgba(0,0,0,.6)",
-  "backdrop-filter: blur(8px)",
+  "background: rgba(13, 16, 20, .84)",
+  "backdrop-filter: none",
   "inset-inline-start: 12px",
   "inset-block-end: 12px",
-  "#EC4899",
-  "#F43F5E"
+  ".participant-you",
+  ".participant-menu-trigger",
+  "z-index: var(--lm-z-menu)"
 ]) {
   if (!styleSource.includes(style)) {
     throw new Error(`meeting state style is missing: ${style}`);
@@ -276,6 +285,41 @@ for (const element of [
 }
 if (!indexSource.includes('id="chat" type="button" aria-controls="chat-rail"')) {
   throw new Error("chat toggle must identify the controlled rail");
+}
+for (const element of [
+  'class="controls meeting-toolbar"',
+  'class="toolbar-primary"',
+  'class="toolbar-secondary"',
+  'class="toolbar-spacer"',
+  'class="toolbar-session"',
+  'aria-label="Turn off incoming video"',
+  'aria-describedby="incoming-video-help"',
+  'id="incoming-video-help"',
+  'id="more-state-badge"'
+]) {
+  if (!indexSource.includes(element)) {
+    throw new Error(`meeting UI accessibility or priority structure is missing: ${element}`);
+  }
+}
+for (const behavior of [
+  "participant-you",
+  "element.youBadge.hidden = false",
+  "(You)",
+  'setMeasuredConnection("fair", "Unstable connection")',
+  'setMeasuredConnection("poor", "Unstable connection")',
+  'button.dataset.receiveVideo = enabled ? "on" : "off"',
+  "setMoreIncomingVideoState(enabled)",
+  'updateControlLabel(chatToggle, open ? "Close chat" : "Open chat")',
+  'chatRail.setAttribute("aria-hidden", "false")',
+  'chatRail.setAttribute("aria-hidden", "true")',
+  "function setStatValue(element, value)",
+  "function mediaAccessMessage(kind, error)",
+  'status.textContent = "Joining meeting…"',
+  'addChatSystem("Message could not be sent. Try again.")'
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`meeting state semantics are missing: ${behavior}`);
+  }
 }
 for (const behavior of [
   "speakerThresholdDb = -50",
