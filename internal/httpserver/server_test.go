@@ -69,9 +69,21 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	metrics := httptest.NewRecorder()
 	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "lowmeet_peer_connections 0") ||
-		!strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms 0.0") ||
+		strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms") ||
+		strings.Contains(metrics.Body.String(), "lowmeet_last_network_sample_timestamp_seconds") ||
+		strings.Contains(metrics.Body.String(), "lowmeet_last_video_kbps") ||
 		!strings.Contains(metrics.Body.String(), "lowmeet_network_sample_available 0") {
 		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
+	}
+
+	handler.hub.Metrics().ObserveNetwork(84, 4, 8, 521, 32)
+	withSample := httptest.NewRecorder()
+	handler.ServeHTTP(withSample, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := withSample.Body.String()
+	if !strings.Contains(body, "lowmeet_last_network_sample_timestamp_seconds ") ||
+		!strings.Contains(body, "lowmeet_last_rtt_ms 84") ||
+		!strings.Contains(body, "lowmeet_last_packet_loss_percent 0.4") {
+		t.Fatalf("metrics response omitted observed network sample: %s", body)
 	}
 }
 

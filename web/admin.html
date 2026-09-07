@@ -9,9 +9,19 @@
 <body class="admin-page">
   <main class="admin-shell">
     <aside class="signal-rail" aria-label="Service status">
-      <span class="signal-dot" aria-hidden="true"></span>
-      <span id="service-label">Checking service</span>
-      <small id="service-detail">Waiting for readiness</small>
+      <p class="eyebrow">Service status</p>
+      <div class="signal-state"><span class="signal-dot" aria-hidden="true"></span><strong id="service-label" aria-live="polite">Checking service</strong></div>
+      <small id="service-detail" aria-live="polite">Waiting for readiness</small>
+      <div class="service-checks" aria-label="Service checks">
+        <div id="health-check" class="service-check" data-level="checking">
+          <span class="service-check__dot" aria-hidden="true"></span>
+          <span><strong id="health-label">Health check</strong><small id="health-detail">Checking</small></span>
+        </div>
+        <div id="ready-check" class="service-check" data-level="checking">
+          <span class="service-check__dot" aria-hidden="true"></span>
+          <span><strong id="ready-label">Meeting path</strong><small id="ready-detail">Checking</small></span>
+        </div>
+      </div>
     </aside>
     <nav class="admin-nav" aria-label="Admin navigation">
       <a class="brand-mark" href="/" aria-label="LowMeet home">
@@ -19,7 +29,7 @@
         <span>LowMeet</span>
       </a>
       <p class="nav-caption">Operations</p>
-      <a class="nav-link nav-link--active" href="#overview">Overview</a>
+      <a class="nav-link nav-link--active" href="#overview" aria-current="page">Overview</a>
       <a class="nav-link" href="#settings">Meeting settings</a>
       <a class="nav-link" href="#network">Network health</a>
       <a class="nav-link" href="#diagnostics">Diagnostics</a>
@@ -35,6 +45,7 @@
         <div class="header-actions">
           <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
           <button id="refresh" class="button-primary" type="button">Refresh status</button>
+          <a class="button-secondary header-action-link" href="/">Open meeting</a>
         </div>
       </header>
 
@@ -44,29 +55,28 @@
             <p class="eyebrow">At a glance</p>
             <h2 id="overview-title">Current meeting health</h2>
           </div>
-          <a class="text-action" href="/">Open meeting</a>
         </div>
       <section class="admin-summary" aria-label="Service summary">
         <article class="summary-card">
           <span class="summary-label">Active participants</span>
-          <strong id="active-participants" class="summary-value">—</strong>
+          <strong id="active-participants" class="summary-value">No data</strong>
           <span id="capacity-detail" class="summary-detail">Waiting for metrics</span>
           <progress id="capacity-meter" class="capacity-meter" max="1" value="0" aria-label="Meeting capacity utilization"></progress>
         </article>
         <article class="summary-card">
           <span class="summary-label">Peer connections</span>
-          <strong id="peer-connections" class="summary-value">—</strong>
-          <span id="reconnect-count" class="summary-detail">— reconnects</span>
+          <strong id="peer-connections" class="summary-value">No data</strong>
+          <span id="reconnect-count" class="summary-detail">No data</span>
         </article>
         <article class="summary-card">
           <span class="summary-label">Average RTT</span>
-          <strong id="average-rtt" class="summary-value">—</strong>
-          <span class="summary-detail">Latest network sample</span>
+          <strong id="average-rtt" class="summary-value">No sample</strong>
+          <span class="summary-detail">Average of available samples</span>
         </article>
         <article class="summary-card">
           <span class="summary-label">Packet loss</span>
-          <strong id="packet-loss" class="summary-value">—</strong>
-          <span id="network-detail" class="summary-detail">Audio is prioritized</span>
+          <strong id="packet-loss" class="summary-value">No sample</strong>
+          <span id="network-detail" class="summary-detail">Awaiting network sample</span>
         </article>
       </section>
       <section class="quick-actions" aria-label="Quick actions">
@@ -89,9 +99,10 @@
           <form id="admin-form" class="admin-form">
             <div class="form-field">
               <label for="password">Admin password</label>
-              <input id="password" type="password" autocomplete="current-password" required>
-              <span class="field-help">Used only to authenticate this request.</span>
+              <input id="password" type="password" autocomplete="current-password" aria-describedby="password-help">
+              <span id="password-help" class="field-help">Required when the service is protected; never stored or logged.</span>
             </div>
+            <p id="validation-summary" class="validation-summary" role="alert" hidden></p>
             <fieldset>
               <legend>Capacity</legend>
               <div class="field-grid">
@@ -124,13 +135,13 @@
                 </div>
                 <div class="form-field">
                   <label for="video-bitrate">Maximum video bitrate</label>
-                  <input id="video-bitrate" type="number" min="1" value="500000">
-                  <span class="field-help">Bits per second.</span>
+                  <div class="input-with-unit"><input id="video-bitrate" type="number" min="1" step="0.1" value="500"><span aria-hidden="true">kbps</span></div>
+                  <span class="field-help">The server receives this as bits per second.</span>
                 </div>
                 <div class="form-field">
                   <label for="video-fps">Maximum video FPS</label>
-                  <input id="video-fps" type="number" min="1" max="60" value="30">
-                  <span class="field-help">1–60 frames per second.</span>
+                  <div class="input-with-unit"><input id="video-fps" type="number" min="1" max="60" value="30"><span aria-hidden="true">fps</span></div>
+                  <span class="field-help">1 to 60 frames per second; cannot be below the default profile.</span>
                 </div>
               </div>
             </fieldset>
@@ -139,12 +150,12 @@
               <div class="field-grid">
                 <div class="form-field">
                   <label for="audio-bitrate">Maximum audio bitrate</label>
-                  <input id="audio-bitrate" type="number" min="1" value="64000">
-                  <span class="field-help">Bits per second.</span>
+                  <div class="input-with-unit"><input id="audio-bitrate" type="number" min="1" step="0.1" value="64"><span aria-hidden="true">kbps</span></div>
+                  <span class="field-help">Audio is preserved first; cannot be below the default audio bitrate.</span>
                 </div>
               </div>
             </fieldset>
-            <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span>Allow screen sharing</span></label>
+            <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span><strong>Allow screen sharing</strong><small>Participants can share their screen during meetings.</small></span></label>
             <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>
           </form>
@@ -157,15 +168,18 @@
               <p class="eyebrow">Network watch</p>
               <h2 id="network-title">Latest signal</h2>
             </div>
+            <span id="network-health-status" class="status-chip" data-level="unknown">No sample</span>
           </div>
           <p class="card-copy">These are the latest reported values, not historical trends.</p>
-          <dl class="metric-list">
-            <div><dt>Latest RTT</dt><dd id="latest-rtt">—</dd></div>
-            <div><dt>Jitter</dt><dd id="jitter">—</dd></div>
-            <div><dt>Video bitrate</dt><dd id="video-kbps">—</dd></div>
-            <div><dt>Audio bitrate</dt><dd id="audio-kbps">—</dd></div>
-            <div><dt>Network samples</dt><dd id="network-samples">—</dd></div>
-            <div><dt>Connection failures</dt><dd id="connection-failures">—</dd></div>
+          <p id="network-sample-age" class="metric-note">No network sample collected.</p>
+            <dl class="metric-list">
+            <div><dt>Latest RTT</dt><dd id="latest-rtt">No sample</dd></div>
+            <div><dt>Packet loss</dt><dd id="latest-packet-loss">No sample</dd></div>
+            <div><dt>Jitter</dt><dd id="jitter">No sample</dd></div>
+            <div><dt>Video bitrate</dt><dd id="video-kbps">No sample</dd></div>
+            <div><dt>Audio bitrate</dt><dd id="audio-kbps">No sample</dd></div>
+            <div><dt>Network samples</dt><dd id="network-samples">No data</dd></div>
+            <div><dt>Connection failures</dt><dd id="connection-failures">No data</dd></div>
           </dl>
           <div class="policy-note">
             <strong id="network-detail-title">Reliability first</strong>
@@ -180,9 +194,9 @@
             </div>
           </div>
           <dl id="policy-summary" class="policy-summary">
-            <div><dt>Video</dt><dd>Authenticate to view</dd></div>
-            <div><dt>Audio</dt><dd>Authenticate to view</dd></div>
-            <div><dt>Features</dt><dd>Authenticate to view</dd></div>
+            <div><dt>Video</dt><dd>Enter admin password below</dd></div>
+            <div><dt>Audio</dt><dd>Enter admin password below</dd></div>
+            <div><dt>Features</dt><dd>Enter admin password below</dd></div>
           </dl>
         </section>
         </div>
@@ -198,6 +212,7 @@
         </div>
         <p class="card-copy">A redacted snapshot of current service, network, and non-secret policy values.</p>
         <p id="diagnostics-status" class="form-status" role="status"></p>
+        <pre id="diagnostics-preview" class="diagnostics-preview" hidden></pre>
       </section>
       <section class="admin-card events-card" aria-labelledby="events-title">
         <div class="card-heading">
@@ -207,6 +222,7 @@
           </div>
           <span class="updated-at">Not a durable audit log</span>
         </div>
+        <p class="card-copy activity-note">In-memory operational events from this session. This is not a durable audit log.</p>
         <ol id="recent-events" class="recent-events">
           <li class="empty-event">No recent events.</li>
         </ol>

@@ -78,9 +78,12 @@ func TestValidateNetworkState(t *testing.T) {
 	}
 	unknown := valid
 	unknown.RTTMs = -1
+	unknown.PacketLoss10 = -1
 	unknown.JitterMs = -1
+	unknown.VideoKbps = -1
+	unknown.AudioKbps = -1
 	if err := unknown.Validate(); err != nil {
-		t.Fatalf("unknown RTT/jitter should be accepted: %v", err)
+		t.Fatalf("unknown network values should be accepted: %v", err)
 	}
 	invalid := valid
 	invalid.PacketLoss10 = 1001

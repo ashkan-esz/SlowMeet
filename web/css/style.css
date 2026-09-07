@@ -1798,3 +1798,134 @@ button.control-button:disabled { color: var(--lm-text-subtle); background: trans
   .meeting-alert,
   .level-meter span { transition: none !important; }
 }
+
+/* UI completion pass: readable operator status, truthful form units, and narrow-toolbar guarantees. */
+body { overflow-x: hidden; }
+
+.admin-shell {
+  grid-template-columns: minmax(9rem, 10rem) minmax(12rem, 14rem) minmax(0, 1fr);
+}
+.signal-rail {
+  writing-mode: horizontal-tb;
+  justify-items: stretch;
+  align-content: start;
+  min-height: 0;
+  gap: .7rem;
+  padding: 1rem;
+  text-align: start;
+}
+.signal-rail .eyebrow { color: currentColor; }
+.signal-state { display: flex; align-items: center; gap: .55rem; min-width: 0; }
+.signal-state strong { min-width: 0; color: var(--text); font-size: .85rem; }
+.signal-rail.success .signal-state strong,
+.signal-rail.warning .signal-state strong,
+.signal-rail.danger .signal-state strong { color: currentColor; }
+.signal-rail small { line-height: 1.4; }
+.nav-link:focus-visible, .quick-action:focus-visible, .text-action:focus-visible { outline-offset: 3px; }
+
+.input-with-unit { position: relative; }
+.input-with-unit input { padding-inline-end: 4rem; }
+.input-with-unit > span {
+  position: absolute;
+  inset-inline-end: .75rem;
+  inset-block-start: 50%;
+  color: var(--text-muted);
+  font-size: .78rem;
+  font-weight: 700;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.checkbox-row { align-items: flex-start; }
+.checkbox-row > span { display: grid; gap: .2rem; }
+.checkbox-row strong { font-size: .85rem; }
+.checkbox-row small { color: var(--text-muted); font-size: .78rem; font-weight: 400; line-height: 1.4; }
+.validation-summary {
+  margin: 1rem 0 0;
+  padding: .7rem .8rem;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid #efc0bd;
+  border-radius: var(--radius-control);
+  font-size: .8rem;
+  line-height: 1.45;
+}
+.admin-form [aria-invalid="true"] { border-color: var(--danger); }
+.metric-note { margin: -.5rem 0 .65rem; color: var(--text-muted); font-size: .75rem; }
+.diagnostics-preview {
+  max-height: 18rem;
+  margin: .75rem 0 0;
+  padding: .8rem;
+  overflow: auto;
+  color: var(--inverse-text);
+  background: var(--surface-inverse);
+  border-radius: var(--radius-control);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.activity-note { margin-top: .75rem; margin-bottom: 0; }
+.header-actions .header-action-link { width: auto; margin: 0; text-decoration: none; }
+.service-checks { display: grid; gap: .55rem; margin-top: .35rem; padding-top: .75rem; border-top: 1px solid rgba(23, 32, 42, .12); }
+.service-check { display: flex; align-items: flex-start; gap: .55rem; min-width: 0; }
+.service-check__dot { width: .55rem; height: .55rem; flex: 0 0 auto; margin-top: .28rem; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 .2rem var(--warning-soft); }
+.service-check > span:last-child { display: grid; gap: .12rem; min-width: 0; }
+.service-check strong { color: var(--text); font-size: .78rem; }
+.service-check small { color: var(--text-muted); font-size: .7rem; }
+.service-check[data-level="success"] .service-check__dot { background: var(--success); box-shadow: 0 0 0 .2rem var(--success-soft); }
+.service-check[data-level="danger"] .service-check__dot { background: var(--danger); box-shadow: 0 0 0 .2rem var(--danger-soft); }
+.service-check[data-level="success"] strong { color: var(--success); }
+.service-check[data-level="danger"] strong { color: var(--danger); }
+.status-chip[data-level="success"] { color: var(--success); background: var(--success-soft); }
+.status-chip[data-level="warning"] { color: var(--warning); background: var(--warning-soft); }
+.status-chip[data-level="danger"] { color: var(--danger); background: var(--danger-soft); }
+.status-chip[data-level="unknown"] { color: var(--text-muted); background: var(--surface-raised); }
+.metric-note.is-stale { color: var(--warning); }
+.recent-events li { align-items: center; }
+.activity-event__content { display: inline-flex; align-items: center; gap: .55rem; min-width: 0; }
+.activity-event__content strong { min-width: 0; overflow-wrap: anywhere; }
+.activity-event__indicator { width: .5rem; height: .5rem; flex: 0 0 auto; border-radius: 50%; background: var(--success); }
+.activity-event--warning { border-inline-start: 3px solid var(--warning); }
+.activity-event--warning .activity-event__indicator { background: var(--warning); }
+.activity-event--danger { border-inline-start: 3px solid var(--danger); }
+.activity-event--danger .activity-event__indicator { background: var(--danger); }
+
+.participant-menu { max-height: calc(100% - 16px); overflow-y: auto; }
+
+/* Incoming video remains available at every toolbar width; only its label collapses. */
+.meeting-toolbar #receive-video,
+.controls #receive-video { flex: 0 0 auto; }
+@media (max-width: 68rem) {
+  .admin-shell { grid-template-columns: minmax(9rem, 10rem) minmax(0, 1fr); }
+}
+@media (max-width: 54rem) {
+  .admin-shell { grid-template-columns: 1fr; }
+  .admin-nav { grid-column: auto; grid-row: auto; }
+  .admin-main { grid-column: auto; grid-row: auto; }
+  .admin-nav { flex-direction: row; align-items: center; gap: .35rem; min-height: 0; overflow-x: auto; }
+  .admin-nav .brand-mark { flex: 0 0 auto; margin-right: .75rem; }
+  .admin-nav .nav-caption, .admin-nav .nav-footer { display: none; }
+  .admin-nav .nav-link { flex: 0 0 auto; white-space: nowrap; }
+  .signal-rail { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+  .signal-rail .eyebrow { grid-column: 1 / -1; }
+  .signal-state { grid-column: 1; }
+  .signal-rail small { grid-column: 2; }
+  .service-checks { grid-column: 1 / -1; }
+}
+@media (max-width: 680px) {
+  .meeting-toolbar #receive-video,
+  .controls #receive-video { display: inline-flex !important; width: 44px; padding-inline: 4px; }
+  .meeting-toolbar #receive-video [data-control-label],
+  .controls #receive-video [data-control-label] { display: none !important; }
+}
+@media (max-width: 400px) {
+  .meeting-toolbar #receive-video,
+  .controls #receive-video { width: 44px; }
+}
+@media (max-width: 900px) {
+  .chat-rail {
+    inset: 52px 0 var(--lm-toolbar-height);
+    height: auto;
+    max-height: none;
+  }
+}

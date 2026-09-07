@@ -95,7 +95,7 @@
       </header>
 
       <div class="meeting-layout">
-        <aside id="meeting-sidebar" class="meeting-sidebar" role="dialog" aria-label="Meeting controls" aria-hidden="true">
+        <aside id="meeting-sidebar" class="meeting-sidebar" role="dialog" aria-modal="true" aria-label="Meeting controls" aria-hidden="true">
           <div class="rail-header"><div><p class="eyebrow">Room controls</p><h2>Settings</h2></div><button id="close-sidebar" class="icon-button" type="button" aria-label="Close meeting controls" title="Close meeting controls (Esc)">×</button></div>
           <section id="connection-summary" class="settings-section connection-summary" data-level="connecting" aria-labelledby="connection-summary-title">
             <div class="connection-summary-heading"><span class="connection-summary-dot" aria-hidden="true"></span><div><p class="eyebrow">Live status</p><h3 id="connection-summary-title">Connecting</h3></div></div>
@@ -131,7 +131,7 @@
           </div>
         </section>
 
-        <aside id="chat-rail" class="chat-rail" role="dialog" aria-label="Meeting chat" aria-hidden="true" hidden>
+        <aside id="chat-rail" class="chat-rail" role="dialog" aria-modal="true" aria-label="Meeting chat" aria-hidden="true" hidden>
           <div class="rail-header"><div><p class="eyebrow">Room</p><h2>Chat</h2></div><button id="close-chat" class="icon-button" type="button" aria-label="Close chat" title="Close chat (Esc)">×</button></div>
           <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
           <button id="new-messages" class="new-messages" type="button" hidden>New messages ↓</button>

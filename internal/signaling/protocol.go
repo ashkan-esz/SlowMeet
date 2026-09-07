@@ -92,8 +92,8 @@ func (m Message) Validate() error {
 		if m.ParticipantID == "" {
 			return fmt.Errorf("network state requires participant_id")
 		}
-		if m.RTTMs < -1 || m.PacketLoss10 < 0 || m.PacketLoss10 > 1000 ||
-			m.JitterMs < -1 || m.VideoKbps < 0 || m.AudioKbps < 0 ||
+		if m.RTTMs < -1 || m.PacketLoss10 < -1 || m.PacketLoss10 > 1000 ||
+			m.JitterMs < -1 || m.VideoKbps < -1 || m.AudioKbps < -1 ||
 			m.RTTMs > 120000 || m.JitterMs > 120000 {
 			return fmt.Errorf("network state contains invalid values")
 		}

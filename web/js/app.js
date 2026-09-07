@@ -576,6 +576,25 @@ let unreadMessages = 0;
 let chatPinnedToBottom = true;
 let pushToTalkActive = false;
 let chatCloseTimer;
+let chatFocusTrigger;
+
+function isVisibleFocusTarget(element) {
+  return Boolean(
+    element?.isConnected &&
+      !element.disabled &&
+      !element.closest("[hidden]") &&
+      !element.closest('[aria-hidden="true"]') &&
+      element.getClientRects().length
+  );
+}
+
+function restoreFocusTo(target, fallback) {
+  if (isVisibleFocusTarget(target)) {
+    target.focus();
+    return;
+  }
+  if (isVisibleFocusTarget(fallback)) fallback.focus();
+}
 
 function addChatMessage(author, body, system = false, own = false) {
   if (!chatMessages) return;
@@ -638,24 +657,29 @@ function sendChatMessage(body) {
   return true;
 }
 
-function setChatOpen(open) {
+function setChatOpen(open, trigger = null, restoreFocus = true) {
   if (!chatRail) return;
   clearTimeout(chatCloseTimer);
   if (open) {
+    chatFocusTrigger = trigger || document.activeElement;
     setSidebarOpen(false);
     chatRail.hidden = false;
     chatRail.setAttribute("aria-hidden", "false");
     meeting.classList.add("has-rail");
     requestAnimationFrame(() => chatRail.classList.add("is-open"));
   } else {
-    const restoreFocus = chatRail.contains(document.activeElement);
+    const hasFocusInside = chatRail.contains(document.activeElement);
+    const focusTarget = chatFocusTrigger;
+    chatFocusTrigger = undefined;
     chatRail.classList.remove("is-open");
     const closeDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180;
     chatCloseTimer = setTimeout(() => {
       chatRail.hidden = true;
       chatRail.setAttribute("aria-hidden", "true");
       meeting.classList.toggle("has-rail", meeting.classList.contains("sidebar-open"));
-      if (restoreFocus && chatRail.contains(document.activeElement)) chatToggle?.focus();
+      if (restoreFocus && hasFocusInside && chatRail.contains(document.activeElement)) {
+        restoreFocusTo(focusTarget, chatToggle);
+      }
     }, closeDelay);
   }
   chatToggle?.setAttribute("aria-pressed", String(open));
@@ -676,7 +700,7 @@ function autoGrowChat() {
   chatInput.style.height = `${Math.min(chatInput.scrollHeight, 96)}px`;
 }
 
-chatToggle?.addEventListener("click", () => setChatOpen(chatRail.hidden || !chatRail.classList.contains("is-open")));
+chatToggle?.addEventListener("click", () => setChatOpen(chatRail.hidden || !chatRail.classList.contains("is-open"), chatToggle));
 closeChat?.addEventListener("click", () => setChatOpen(false));
 connection?.addEventListener("click", () => setSidebarOpen(true));
 chatMessages?.addEventListener("scroll", () => {
@@ -732,7 +756,7 @@ more?.addEventListener("click", () => setSidebarOpen(true));
 moreReceiveVideo?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 moreChat?.addEventListener("click", () => {
   setSidebarOpen(false);
-  setChatOpen(true);
+  setChatOpen(true, moreChat);
 });
 moreScreen?.addEventListener("click", () => {
   setSidebarOpen(false);
@@ -740,7 +764,7 @@ moreScreen?.addEventListener("click", () => {
 });
 function openPeoplePanel() {
   setChatOpen(false);
-  setSidebarOpen(true);
+  setSidebarOpen(true, participantsButton || morePeople);
   requestAnimationFrame(() => {
     if (!peopleList) return;
     peopleList.tabIndex = -1;
@@ -756,12 +780,21 @@ document.addEventListener("keydown", (event) => {
     if (!chatRail?.hidden) setChatOpen(false);
     if (meeting.classList.contains("sidebar-open")) {
       setSidebarOpen(false);
-      toggleSidebar.focus();
     }
     return;
   }
   if (event.key === "Tab" && meeting.classList.contains("sidebar-open")) {
     const focusable = [...meetingSidebar.querySelectorAll("button, select, input, summary, textarea, [tabindex]")].filter((element) => !element.disabled && element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    return;
+  }
+  if (event.key === "Tab" && chatRail && !chatRail.hidden && chatRail.classList.contains("is-open")) {
+    const focusable = [...chatRail.querySelectorAll("button, textarea, input, select, summary, [tabindex]")]
+      .filter((element) => !element.disabled && element.offsetParent !== null);
     if (!focusable.length) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -1174,9 +1207,12 @@ function setLocalMediaControls() {
   renderPeopleList();
 }
 
-function setSidebarOpen(open) {
+let sidebarFocusTrigger;
+
+function setSidebarOpen(open, trigger = null, restoreFocus = true) {
   closeParticipantMenu(false);
-  if (open && chatRail && !chatRail.hidden) setChatOpen(false);
+  if (open) sidebarFocusTrigger = trigger || document.activeElement;
+  if (open && chatRail && !chatRail.hidden) setChatOpen(false, null, false);
   meeting.classList.toggle("sidebar-open", open);
   toggleSidebar.setAttribute("aria-expanded", String(open));
   connection.setAttribute("aria-expanded", String(open));
@@ -1199,17 +1235,21 @@ function setSidebarOpen(open) {
   meeting.classList.toggle("has-rail", open || !chatRail?.hidden);
   sidebarBackdrop.hidden = !open;
   requestParticipantLayout();
-  if (open) closeSidebar.focus();
+  if (open) {
+    closeSidebar.focus();
+  } else {
+    const focusTarget = sidebarFocusTrigger;
+    sidebarFocusTrigger = undefined;
+    if (restoreFocus) restoreFocusTo(focusTarget, toggleSidebar);
+  }
 }
 
 toggleSidebar.addEventListener("click", () => setSidebarOpen(!meeting.classList.contains("sidebar-open")));
 closeSidebar.addEventListener("click", () => {
   setSidebarOpen(false);
-  toggleSidebar.focus();
 });
 sidebarBackdrop.addEventListener("click", () => {
   setSidebarOpen(false);
-  toggleSidebar.focus();
 });
 function setLocalVideoMirror(enabled) {
   const local = participantElements.get(localParticipantID);
@@ -2183,10 +2223,10 @@ async function updateDiagnostics() {
       type: "network_state",
       participant_id: localParticipantID,
       rtt_ms: values.rttMs ?? -1,
-      packet_loss10: Math.round(packetLoss * 10),
+      packet_loss10: values.packetLoss == null ? -1 : Math.round(packetLoss * 10),
       jitter_ms: values.jitterMs ?? -1,
-      video_kbps: Math.max(0, values.outboundKbps ?? 0),
-      audio_kbps: Math.max(0, values.outboundAudioKbps ?? 0)
+      video_kbps: values.outboundKbps == null ? -1 : Math.max(0, values.outboundKbps),
+      audio_kbps: values.outboundAudioKbps == null ? -1 : Math.max(0, values.outboundAudioKbps)
     }));
   }
 }
@@ -2808,8 +2848,8 @@ leave.addEventListener("click", () => {
   screenShareOwner = undefined;
   screenShareEnabled = true;
   updateScreenShareUI();
-  setChatOpen(false);
-  setSidebarOpen(false);
+  setChatOpen(false, null, false);
+  setSidebarOpen(false, null, false);
   setConnection("", "Connecting");
   lastConnectionLevel = "";
   pendingConnectionLevel = "";

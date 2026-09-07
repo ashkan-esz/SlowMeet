@@ -17,7 +17,7 @@ func TestSnapshotAggregatesNetworkObservations(t *testing.T) {
 	if snapshot.PeerConnections != 1 || snapshot.Reconnects != 1 || snapshot.ConnectionFailures != 1 {
 		t.Fatalf("unexpected counters: %+v", snapshot)
 	}
-	if snapshot.NetworkSamples != 2 || !snapshot.HasNetworkSample || snapshot.AverageRTTMs != 150 {
+	if snapshot.NetworkSamples != 2 || !snapshot.HasNetworkSample || snapshot.LastNetworkSample <= 0 || snapshot.AverageRTTMs != 150 {
 		t.Fatalf("unexpected network aggregate: %+v", snapshot)
 	}
 	if snapshot.LastRTTMs != 180 || snapshot.LastPacketLoss10 != 25 ||
@@ -28,5 +28,23 @@ func TestSnapshotAggregatesNetworkObservations(t *testing.T) {
 	metrics.PeerLeft()
 	if got := metrics.Snapshot().PeerConnections; got != 0 {
 		t.Fatalf("peer connections after leave = %d, want 0", got)
+	}
+}
+
+func TestMissingNetworkValuesDoNotCreateSamplesOrDefaults(t *testing.T) {
+	var metrics Metrics
+	metrics.ObserveNetwork(-1, -1, -1, -1, -1)
+	if snapshot := metrics.Snapshot(); snapshot.HasNetworkSample || snapshot.LastNetworkSample != 0 {
+		t.Fatal("an observation with no measured values should not create a sample")
+	}
+
+	metrics.ObserveNetwork(84, -1, -1, -1, -1)
+	snapshot := metrics.Snapshot()
+	if snapshot.NetworkSamples != 1 || snapshot.LastNetworkSample <= 0 || !snapshot.HasRTT || snapshot.HasPacketLoss ||
+		snapshot.HasJitter || snapshot.HasVideo || snapshot.HasAudio {
+		t.Fatalf("missing metric fields were reported as available: %+v", snapshot)
+	}
+	if snapshot.LastRTTMs != 84 || snapshot.LastPacketLoss10 != 0 || snapshot.LastVideoKbps != 0 {
+		t.Fatalf("missing metric fields received invented values: %+v", snapshot)
 	}
 }
