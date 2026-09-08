@@ -84,7 +84,7 @@
           </div>
         </div>
         <div class="meeting-header-actions">
-          <button id="connection" class="network-chip connection" type="button" aria-label="Connection status: Connecting" aria-controls="meeting-sidebar" aria-haspopup="dialog" aria-expanded="false">
+          <button id="connection" class="network-chip connection" type="button" aria-label="Connection status: Connecting" aria-controls="connection-popover" aria-haspopup="dialog" aria-expanded="false">
             <span class="network-chip__dot" aria-hidden="true"></span><span data-network-label role="status" aria-live="polite">Connecting</span>
           </button>
           <button id="toggle-sidebar" class="icon-button" type="button" aria-controls="meeting-sidebar" aria-haspopup="dialog" aria-expanded="false" aria-label="Open meeting controls" title="More meeting controls">
@@ -93,6 +93,26 @@
           </button>
         </div>
       </header>
+
+      <section id="connection-popover" class="connection-popover" role="dialog" aria-labelledby="connection-popover-title" aria-hidden="true" hidden>
+        <div class="connection-popover__heading">
+          <div>
+            <p class="eyebrow">Connection details</p>
+            <h2 id="connection-popover-title">Connecting</h2>
+          </div>
+          <button id="close-connection-popover" class="icon-button" type="button" aria-label="Close connection details" title="Close connection details (Esc)">×</button>
+        </div>
+        <p id="connection-popover-copy" class="connection-popover__copy">Waiting for a live media sample.</p>
+        <dl class="connection-popover__stats">
+          <div data-popover-stat="rtt" hidden><dt>Latency</dt><dd id="popover-stat-rtt"></dd></div>
+          <div data-popover-stat="jitter" hidden><dt>Jitter</dt><dd id="popover-stat-jitter"></dd></div>
+          <div data-popover-stat="loss" hidden><dt>Packet loss</dt><dd id="popover-stat-loss"></dd></div>
+          <div data-popover-stat="bitrate" hidden><dt>In / out</dt><dd id="popover-stat-bitrate"></dd></div>
+          <div data-popover-stat="resolution" hidden><dt>Resolution</dt><dd id="popover-stat-resolution"></dd></div>
+        </dl>
+        <p id="connection-popover-empty" class="connection-popover__empty">No live network sample yet.</p>
+        <button id="connection-popover-controls" class="text-button" type="button">Open meeting controls</button>
+      </section>
 
       <div class="meeting-layout">
         <aside id="meeting-sidebar" class="meeting-sidebar" role="dialog" aria-modal="true" aria-label="Meeting controls" aria-hidden="true">

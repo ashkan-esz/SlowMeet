@@ -58,6 +58,8 @@ let refreshInFlight;
 let settingsRequest;
 let publicPolicyRequest;
 
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
 function updateActiveNav() {
   const currentHash = location.hash || "#overview";
   adminNavLinks.forEach((link) => {
@@ -315,6 +317,12 @@ async function refreshStatus() {
       updatedAt.textContent = latestMetricsAt ?
         `Stale · last updated ${latestMetricsAt.toLocaleTimeString()}` : "Metrics unavailable";
       metricFields.network.textContent = "Metrics unavailable; retry refresh";
+      if (networkSampleAge) {
+        networkSampleAge.classList.add("is-stale");
+        networkSampleAge.textContent = latestMetricsAt
+          ? `Showing last known values from ${latestMetricsAt.toLocaleTimeString()}`
+          : "No network sample available; retry refresh.";
+      }
       if (!metricsStale) recordEvent("Metrics unavailable; showing last known values");
       metricsStale = true;
     } else if (metricsStale) {
@@ -453,5 +461,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("hashchange", updateActiveNav);
 updateActiveNav();
+if (!location.hash || location.hash === "#overview") {
+  window.scrollTo(0, 0);
+}
 loadPublicPolicy();
 refreshStatus();

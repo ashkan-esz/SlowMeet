@@ -40,6 +40,12 @@ const connectionSummary = document.querySelector("#connection-summary");
 const connectionSummaryTitle = document.querySelector("#connection-summary-title");
 const connectionSummaryCopy = document.querySelector("#connection-summary-copy");
 const connectionPreference = document.querySelector("#connection-preference");
+const connectionPopover = document.querySelector("#connection-popover");
+const closeConnectionPopover = document.querySelector("#close-connection-popover");
+const connectionPopoverTitle = document.querySelector("#connection-popover-title");
+const connectionPopoverCopy = document.querySelector("#connection-popover-copy");
+const connectionPopoverEmpty = document.querySelector("#connection-popover-empty");
+const connectionPopoverControls = document.querySelector("#connection-popover-controls");
 const meetingAlert = document.querySelector("#meeting-alert");
 const testMedia = document.querySelector("#test-media");
 const devicePreview = document.querySelector("#device-preview");
@@ -661,6 +667,7 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
   if (!chatRail) return;
   clearTimeout(chatCloseTimer);
   if (open) {
+    setConnectionPopoverOpen(false, null, false);
     chatFocusTrigger = trigger || document.activeElement;
     setSidebarOpen(false);
     chatRail.hidden = false;
@@ -702,7 +709,14 @@ function autoGrowChat() {
 
 chatToggle?.addEventListener("click", () => setChatOpen(chatRail.hidden || !chatRail.classList.contains("is-open"), chatToggle));
 closeChat?.addEventListener("click", () => setChatOpen(false));
-connection?.addEventListener("click", () => setSidebarOpen(true));
+connection?.addEventListener("click", () => {
+  setConnectionPopoverOpen(connectionPopover?.hidden !== false, connection);
+});
+closeConnectionPopover?.addEventListener("click", () => setConnectionPopoverOpen(false));
+connectionPopoverControls?.addEventListener("click", () => {
+  setConnectionPopoverOpen(false, null, false);
+  setSidebarOpen(true, connectionPopoverControls);
+});
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
   if (chatPinnedToBottom && newMessages) newMessages.hidden = true;
@@ -777,6 +791,7 @@ document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
   if (event.key === "Escape") {
+    if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);
     if (!chatRail?.hidden) setChatOpen(false);
     if (meeting.classList.contains("sidebar-open")) {
       setSidebarOpen(false);
@@ -816,6 +831,11 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     mic.click();
   }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!connectionPopover || connectionPopover.hidden) return;
+  if (connectionPopover.contains(event.target) || event.target.closest?.("#connection")) return;
+  setConnectionPopoverOpen(false, null, false);
 });
 document.addEventListener("keyup", (event) => {
   if (event.key === " " && pushToTalkActive) {
@@ -907,6 +927,7 @@ let lastSpeakerUpdateAt = 0;
 let lastConnectionLevel = "";
 let pendingConnectionLevel = "";
 let pendingConnectionSamples = 0;
+let connectionPopoverFocusTrigger;
 const speakerAnalyzers = new Map();
 const activeSpeakers = new Set();
 const pendingSpeakerStates = new Map();
@@ -1211,6 +1232,7 @@ let sidebarFocusTrigger;
 
 function setSidebarOpen(open, trigger = null, restoreFocus = true) {
   closeParticipantMenu(false);
+  if (open) setConnectionPopoverOpen(false, null, false);
   if (open) sidebarFocusTrigger = trigger || document.activeElement;
   if (open && chatRail && !chatRail.hidden) setChatOpen(false, null, false);
   meeting.classList.toggle("sidebar-open", open);
@@ -1936,6 +1958,67 @@ async function startWebRTC() {
   }
 }
 
+function syncConnectionPopoverStats() {
+  if (!connectionPopover) return;
+  const statMap = {
+    "stat-rtt": "popover-stat-rtt",
+    "stat-jitter": "popover-stat-jitter",
+    "stat-loss": "popover-stat-loss",
+    "stat-bitrate": "popover-stat-bitrate",
+    "stat-resolution": "popover-stat-resolution"
+  };
+  let available = false;
+  Object.entries(statMap).forEach(([sourceID, targetID]) => {
+    const source = document.querySelector(`#${sourceID}`);
+    const sourceRow = source?.closest("div");
+    const target = document.querySelector(`#${targetID}`);
+    const targetRow = target?.closest("div");
+    const visible = Boolean(source && target && sourceRow && !sourceRow.hidden);
+    if (target) target.textContent = source?.textContent || "";
+    if (targetRow) targetRow.hidden = !visible;
+    available ||= visible;
+  });
+  if (connectionPopoverEmpty) connectionPopoverEmpty.hidden = available;
+}
+
+function updateConnectionPopover(level, label) {
+  if (!connectionPopover) return;
+  if (connectionPopoverTitle) connectionPopoverTitle.textContent = label;
+  const audioAvailable = Boolean(localStream?.getAudioTracks().length);
+  const audioText = !audioAvailable ? "Audio is not available yet." : "Audio is connected.";
+  const videoText = receiveVideoEnabled ? "Incoming video is on for this device." : "Incoming video is off for this device.";
+  if (connectionPopoverCopy) {
+    connectionPopoverCopy.textContent = `${audioText} ${videoText}`;
+  }
+  connectionPopover.dataset.level = level || "connecting";
+  syncConnectionPopoverStats();
+}
+
+function setConnectionPopoverOpen(open, trigger = null, restoreFocus = true) {
+  if (!connectionPopover) return;
+  if (open) {
+    if (meeting.classList.contains("sidebar-open")) setSidebarOpen(false, null, false);
+    if (chatRail && !chatRail.hidden) setChatOpen(false, null, false);
+    connectionPopoverFocusTrigger = trigger || document.activeElement || connection;
+    connectionPopover.hidden = false;
+    connectionPopover.setAttribute("aria-hidden", "false");
+    connection.setAttribute("aria-expanded", "true");
+    updateConnectionPopover(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
+    requestAnimationFrame(() => {
+      connectionPopover.classList.add("is-open");
+      closeConnectionPopover?.focus();
+    });
+    return;
+  }
+  const focusTarget = connectionPopoverFocusTrigger;
+  connectionPopoverFocusTrigger = undefined;
+  connectionPopover.classList.remove("is-open");
+  connectionPopover.hidden = true;
+  connectionPopover.setAttribute("aria-hidden", "true");
+  connection.setAttribute("aria-expanded", "false");
+  if (restoreFocus) restoreFocusTo(focusTarget, connection);
+}
+
 function updateConnectionSummary(level, label) {
   if (connectionSummaryTitle) connectionSummaryTitle.textContent = label;
   if (connectionSummaryCopy) {
@@ -1953,6 +2036,7 @@ function updateConnectionSummary(level, label) {
   if (connectionPreference) {
     connectionPreference.textContent = `Data preference: ${audioOnly?.checked ? "Protect audio" : "Automatic"}`;
   }
+  updateConnectionPopover(level, label);
   if (!meetingAlert) return;
   const shouldAlert = level === "fair" || level === "poor";
   meetingAlert.hidden = !shouldAlert;
@@ -2003,6 +2087,7 @@ function setStatValue(element, value) {
   const row = element.closest("div");
   if (row) row.hidden = !available;
   if (available) element.textContent = value;
+  syncConnectionPopoverStats();
 }
 
 async function updateDiagnostics() {

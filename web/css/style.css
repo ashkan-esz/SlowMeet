@@ -848,6 +848,35 @@ html:has(.meeting-shell:not([hidden])) #root {
 .network-chip.connection.poor { color: var(--lm-danger); }
 .network-chip__dot { background: currentColor; }
 .network-chip.fair .network-chip__dot, .network-chip.poor .network-chip__dot { background: currentColor; }
+.connection-popover {
+  position: absolute;
+  inset-block-start: 52px;
+  inset-inline-end: 16px;
+  z-index: var(--lm-z-popover);
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100% - 32px));
+  padding: 16px;
+  color: var(--lm-text);
+  background: var(--lm-surface);
+  border: 1px solid var(--lm-border);
+  border-radius: var(--lm-r-md);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, .28);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.connection-popover.is-open { opacity: 1; transform: translateY(0); }
+.connection-popover__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.connection-popover__heading h2 { margin: 2px 0 0; font-size: 16px; }
+.connection-popover__copy,
+.connection-popover__empty { margin: 0; color: var(--lm-text-muted); font-size: 12px; line-height: 1.45; }
+.connection-popover__stats { display: grid; gap: 0; margin: 0; }
+.connection-popover__stats div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-block-end: 1px solid var(--lm-border); }
+.connection-popover__stats dt { color: var(--lm-text-muted); font-size: 11px; }
+.connection-popover__stats dd { margin: 0; color: var(--lm-text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; font-weight: 700; text-align: end; }
+.connection-popover__empty { padding: 8px 10px; background: var(--lm-surface-hover); border-radius: var(--lm-r-sm); }
+.connection-popover .text-button { justify-self: start; }
 .icon-button { color: var(--lm-text-dim); }
 .icon-button:hover { color: var(--lm-text); background: var(--lm-surface-2); border-color: var(--lm-border); }
 
@@ -1769,6 +1798,7 @@ button.control-button:disabled { color: var(--lm-text-subtle); background: trans
   .stage-action { width: 36px; min-height: 36px; padding: 0; justify-content: center; }
   .stage-action span { display: none; }
   .meeting-sidebar { width: 100%; padding: 16px; }
+  .connection-popover { inset-inline: 10px; width: auto; }
 }
 
 @media (max-width: 400px) {

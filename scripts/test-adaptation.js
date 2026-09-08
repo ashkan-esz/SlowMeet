@@ -128,6 +128,24 @@ for (const element of [
     throw new Error(`device test element is missing: ${element}`);
   }
 }
+for (const element of [
+  'id="connection-popover"',
+  'id="popover-stat-rtt"',
+  'id="connection-popover-controls"'
+]) {
+  if (!indexSource.includes(element)) {
+    throw new Error(`connection details element is missing: ${element}`);
+  }
+}
+for (const behavior of [
+  "setConnectionPopoverOpen",
+  "syncConnectionPopoverStats",
+  "connectionPopover?.hidden !== false"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`connection details behavior is missing: ${behavior}`);
+  }
+}
 if (!indexSource.includes('id="mic" type="button" aria-pressed="false"') ||
     !indexSource.includes('id="camera" type="button" aria-pressed="false"')) {
   throw new Error("microphone and camera must start disabled by default");
