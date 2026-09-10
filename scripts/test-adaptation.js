@@ -137,6 +137,12 @@ for (const element of [
     throw new Error(`connection details element is missing: ${element}`);
   }
 }
+if (appSource.includes('if (setupStream.getTracks().length === 0) throw new Error("No microphone is available");')) {
+  throw new Error("joining must continue when the microphone is unavailable");
+}
+if (!appSource.includes("if (localStream.getAudioTracks().length) attachSpeakerAnalyzer(localParticipantID, localStream);")) {
+  throw new Error("local speaker analysis must be skipped without an audio track");
+}
 for (const behavior of [
   "setConnectionPopoverOpen",
   "syncConnectionPopoverStats",

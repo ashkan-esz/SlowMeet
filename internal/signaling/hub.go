@@ -30,20 +30,21 @@ const (
 )
 
 type client struct {
-	conn              *websocket.Conn
-	writeMu           sync.Mutex
-	participant       meeting.Participant
-	reconnectToken    string
-	intentionalLeave  bool
-	joinAttempts      int
-	peer              *webrtc.Peer
-	negotiationMu     sync.Mutex
-	negotiationReady  bool
-	remoteDescription bool
-	pendingCandidates []Message
-	offerInFlight     bool
-	pendingOffer      bool
-	pendingICERestart bool
+	conn                      *websocket.Conn
+	writeMu                   sync.Mutex
+	participant               meeting.Participant
+	reconnectToken            string
+	intentionalLeave          bool
+	joinAttempts              int
+	peer                      *webrtc.Peer
+	negotiationMu             sync.Mutex
+	negotiationReady          bool
+	remoteDescription         bool
+	pendingCandidates         []Message
+	offerInFlight             bool
+	pendingOffer              bool
+	pendingICERestart         bool
+	activeScreenMediaStreamID string
 }
 
 type pendingReconnect struct {
@@ -104,8 +105,11 @@ func (h *Hub) Close() {
 func (h *Hub) BroadcastConfig(cfg config.Config) {
 	screenShareEnabled := cfg.EnableScreenShare
 	releasedScreenShare := false
+	var releasedScreenSharer *client
 	h.mu.Lock()
 	if !cfg.EnableScreenShare && h.screenSharer != nil {
+		releasedScreenSharer = h.screenSharer
+		releasedScreenSharer.activeScreenMediaStreamID = ""
 		h.screenSharer = nil
 		releasedScreenShare = true
 	}
@@ -115,6 +119,9 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		MaxVideoBitrate: cfg.MaxVideoBitrate,
 		MaxVideoFPS:     cfg.MaxVideoFPS,
 	})
+	if releasedScreenSharer != nil {
+		h.router.Unpublish(releasedScreenSharer.participant.ID, media.SourceRoleScreen)
+	}
 	h.broadcast(Message{
 		Version: ProtocolVersion, Type: TypeConfigUpdate,
 		MaxVideoBitrate: cfg.MaxVideoBitrate, MaxVideoFPS: cfg.MaxVideoFPS,
@@ -171,7 +178,11 @@ func (h *Hub) screenShareMessage(active bool, owner string) Message {
 	}
 }
 
-func (h *Hub) requestScreenShare(c *client, active bool) error {
+func (h *Hub) requestScreenShare(c *client, active bool, mediaStreamIDs ...string) error {
+	mediaStreamID := ""
+	if len(mediaStreamIDs) > 0 {
+		mediaStreamID = mediaStreamIDs[0]
+	}
 	cfg := h.Config.Snapshot()
 	if active && !cfg.EnableScreenShare {
 		return fmt.Errorf("screen sharing is disabled")
@@ -183,14 +194,19 @@ func (h *Hub) requestScreenShare(c *client, active bool) error {
 			return fmt.Errorf("screen sharing is already active")
 		}
 		h.screenSharer = c
+		c.activeScreenMediaStreamID = mediaStreamID
 	} else if h.screenSharer == c {
 		h.screenSharer = nil
+		c.activeScreenMediaStreamID = ""
 	}
 	owner := ""
 	if h.screenSharer != nil {
 		owner = h.screenSharer.participant.ID
 	}
 	h.mu.Unlock()
+	if !active {
+		h.router.Unpublish(c.participant.ID, media.SourceRoleScreen)
+	}
 	h.broadcast(h.screenShareMessage(owner != "", owner))
 	return nil
 }
@@ -202,7 +218,9 @@ func (h *Hub) releaseScreenShare(c *client) {
 		return
 	}
 	h.screenSharer = nil
+	c.activeScreenMediaStreamID = ""
 	h.mu.Unlock()
+	h.router.Unpublish(c.participant.ID, media.SourceRoleScreen)
 	active := false
 	h.broadcast(h.screenShareMessage(active, ""))
 }
@@ -376,7 +394,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.Type == TypeScreenShare {
 				msg.ParticipantID = c.participant.ID
-				if err := h.requestScreenShare(c, *msg.ScreenShareActive); err != nil {
+				if err := h.requestScreenShare(c, *msg.ScreenShareActive, msg.MediaStreamID); err != nil {
 					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				}
 				continue
@@ -454,7 +472,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
 		})
 		c.peer.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
-			h.router.Publish(c.participant.ID, c.peer, track)
+			role := media.SourceRoleAudio
+			if track.Kind() == pion.RTPCodecTypeVideo {
+				role = media.SourceRoleCamera
+				if c.activeScreenMediaStreamID != "" && track.StreamID() == c.activeScreenMediaStreamID {
+					role = media.SourceRoleScreen
+				}
+			}
+			h.router.Publish(c.participant.ID, role, c.peer, track)
 		})
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)

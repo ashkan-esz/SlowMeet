@@ -11,6 +11,14 @@ import (
 
 type Offerer func() error
 
+type SourceRole string
+
+const (
+	SourceRoleAudio  SourceRole = "audio"
+	SourceRoleCamera SourceRole = "camera"
+	SourceRoleScreen SourceRole = "screen"
+)
+
 // Limits are hard server-side caps for published RTP streams. A zero value
 // disables shaping for that media kind.
 type Limits struct {
@@ -22,11 +30,14 @@ type Limits struct {
 type publication struct {
 	key      string
 	sourceID string
+	role     SourceRole
 	trackID  string
+	streamID string
 	codec    pion.RTPCodecCapability
 	remote   *pion.TrackRemote
 	source   *webrtc.Peer
 	tracks   map[string]*pion.TrackLocalStaticRTP
+	senders  map[string]*pion.RTPSender
 	limiter  *bitrateLimiter
 }
 
@@ -104,19 +115,58 @@ func (r *Router) Unregister(id string) {
 			continue
 		}
 		delete(pub.tracks, id)
+		delete(pub.senders, id)
 	}
 }
 
-func (r *Router) Publish(sourceID string, source *webrtc.Peer, remote *pion.TrackRemote) {
-	key := sourceID + "/" + remote.Kind().String()
+// Publish accepts the role-aware form (sourceID, role, source, remote). The
+// legacy (sourceID, source, remote) form remains supported for older callers.
+func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...interface{}) {
+	var role SourceRole
+	var source *webrtc.Peer
+	var remote *pion.TrackRemote
+	switch value := roleOrSource.(type) {
+	case SourceRole:
+		role = value
+		if len(args) >= 2 {
+			source, _ = args[0].(*webrtc.Peer)
+			remote, _ = args[1].(*pion.TrackRemote)
+		}
+	case string:
+		role = SourceRole(value)
+		if len(args) >= 2 {
+			source, _ = args[0].(*webrtc.Peer)
+			remote, _ = args[1].(*pion.TrackRemote)
+		}
+	case *webrtc.Peer:
+		source = value
+		if len(args) >= 1 {
+			remote, _ = args[0].(*pion.TrackRemote)
+		}
+		if remote != nil {
+			role = roleForKind(remote.Kind())
+		}
+	}
+	if source == nil || remote == nil {
+		return
+	}
+	if role == "" {
+		role = roleForKind(remote.Kind())
+	}
+	key := sourceID + "/" + string(role)
+	trackID := fmt.Sprintf("%s|%s", sourceID, role)
+	streamID := fmt.Sprintf("lowmeet-%s-%s", sourceID, role)
 	pub := &publication{
 		key:      key,
 		sourceID: sourceID,
-		trackID:  fmt.Sprintf("%s|%s", sourceID, remote.Kind().String()),
+		role:     role,
+		trackID:  trackID,
+		streamID: streamID,
 		codec:    remote.Codec().RTPCodecCapability,
 		remote:   remote,
 		source:   source,
 		tracks:   make(map[string]*pion.TrackLocalStaticRTP),
+		senders:  make(map[string]*pion.RTPSender),
 		limiter:  newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
 	}
 	limits := r.currentLimits()
@@ -144,6 +194,37 @@ func (r *Router) Publish(sourceID string, source *webrtc.Peer, remote *pion.Trac
 	go r.forward(pub)
 }
 
+func roleForKind(kind pion.RTPCodecType) SourceRole {
+	if kind == pion.RTPCodecTypeAudio {
+		return SourceRoleAudio
+	}
+	return SourceRoleCamera
+}
+
+func (r *Router) Unpublish(sourceID string, role SourceRole) {
+	key := sourceID + "/" + string(role)
+	var offers []Offerer
+	r.mu.Lock()
+	pub, exists := r.pubs[key]
+	if !exists {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.pubs, key)
+	for targetID, sender := range pub.senders {
+		if peer := r.peers[targetID]; peer != nil {
+			_ = peer.RemoveTrack(sender)
+			if offerer := r.offerers[targetID]; offerer != nil {
+				offers = append(offers, offerer)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, offer := range offers {
+		_ = offer()
+	}
+}
+
 func (r *Router) currentLimits() Limits {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -165,7 +246,7 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 	if peer == nil {
 		return false
 	}
-	local, err := pion.NewTrackLocalStaticRTP(pub.codec, pub.trackID, "lowmeet-"+pub.sourceID)
+	local, err := pion.NewTrackLocalStaticRTP(pub.codec, pub.trackID, pub.streamID)
 	if err != nil {
 		return false
 	}
@@ -174,6 +255,7 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 		return false
 	}
 	pub.tracks[targetID] = local
+	pub.senders[targetID] = sender
 	if pub.source != nil {
 		go relayRTCP(sender, pub.source)
 	}

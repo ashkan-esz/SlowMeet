@@ -125,6 +125,16 @@ func (p *Peer) AddTrack(track pion.TrackLocal) (*pion.RTPSender, error) {
 	return sender, nil
 }
 
+func (p *Peer) RemoveTrack(sender *pion.RTPSender) error {
+	if sender == nil || p == nil || p.connection == nil {
+		return nil
+	}
+	if err := p.connection.RemoveTrack(sender); err != nil {
+		return fmt.Errorf("remove track: %w", err)
+	}
+	return nil
+}
+
 func (p *Peer) WriteRTCP(packets []rtcp.Packet) error {
 	return p.connection.WriteRTCP(packets)
 }

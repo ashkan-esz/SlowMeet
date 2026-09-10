@@ -10,6 +10,14 @@ const meetingEnded = document.querySelector("#meeting-ended");
 const rejoin = document.querySelector("#rejoin");
 const participants = document.querySelector("#participants");
 const stagePanel = document.querySelector(".stage-panel");
+const meetingLayoutHost = document.querySelector("#meeting-layout-host");
+const pinnedLayout = document.querySelector("#pinned-layout");
+const pinnedMain = document.querySelector("#pinned-main");
+const pinnedFilmstrip = document.querySelector("#pinned-filmstrip");
+const screenShareLayout = document.querySelector("#screen-share-layout");
+const screenShareMain = document.querySelector("#screen-share-main");
+const screenShareFilmstrip = document.querySelector("#screen-share-filmstrip");
+const layoutParking = document.querySelector("#layout-parking");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
 const receiveVideo = document.querySelector("#receive-video");
@@ -55,6 +63,8 @@ const stopMediaTest = document.querySelector("#stop-media-test");
 const deviceTestStatus = document.querySelector("#device-test-status");
 const chatToggle = document.querySelector("#chat");
 const participantsButton = document.querySelector("#participants-button");
+const mobileChat = document.querySelector("#mobile-chat");
+const mobilePeople = document.querySelector("#mobile-people");
 const chatRail = document.querySelector("#chat-rail");
 const closeChat = document.querySelector("#close-chat");
 const chatMessages = document.querySelector("#chat-messages");
@@ -64,7 +74,6 @@ const chatBadge = document.querySelector("#chat-badge");
 const newMessages = document.querySelector("#new-messages");
 const participantCount = document.querySelector("#participant-count");
 const participantCountBadge = document.querySelector("#participant-count-badge");
-const pauseAll = document.querySelector("#pause-all");
 const audioOnly = document.querySelector("#audio-only");
 const toastRegion = document.querySelector("#toast-region");
 const connectionMessage = document.querySelector("#connection-message");
@@ -82,10 +91,6 @@ const statJitter = document.querySelector("#stat-jitter");
 const statLoss = document.querySelector("#stat-loss");
 const statBitrate = document.querySelector("#stat-bitrate");
 const statResolution = document.querySelector("#stat-resolution");
-const moreReceiveVideo = document.querySelector("#more-receive-video");
-const moreChat = document.querySelector("#more-chat");
-const morePeople = document.querySelector("#more-people");
-const moreScreen = document.querySelector("#more-screen");
 const more = document.querySelector("#more");
 const moreStateBadge = document.querySelector("#more-state-badge");
 
@@ -127,6 +132,61 @@ let participantMenuOwner;
 let layoutFrame;
 let preferredLayoutColumns = 0;
 let participantResizeObserver;
+const meetingViewState = {
+  openPanel: "none",
+  pinnedParticipantId: null,
+  activeSpeakerId: null,
+  showSelfView: true,
+  cameraEnabled: false,
+  incomingVideoEnabled: true,
+  activeScreenShareId: null
+};
+const participantOrder = [];
+
+function currentMeetingLayoutMode() {
+  return typeof deriveMeetingLayoutMode === "function"
+    ? deriveMeetingLayoutMode(meetingViewState)
+    : (meetingViewState.activeScreenShareId ? "screen-share" : meetingViewState.pinnedParticipantId ? "pinned" : "grid");
+}
+
+function renderMeetingLayout() {
+  if (!meetingLayoutHost) return;
+  const mode = currentMeetingLayoutMode();
+  meetingLayoutHost.dataset.layoutMode = mode;
+  participants.hidden = mode !== "grid";
+  pinnedLayout.hidden = mode !== "pinned";
+  screenShareLayout.hidden = mode !== "screen-share";
+  const visible = participantOrder
+    .map((id) => participantElements.get(id))
+    .filter((element) => element && !element.item.hidden &&
+      (meetingViewState.showSelfView || !element.item.classList.contains("is-local")));
+  const excluded = participantOrder
+    .map((id) => participantElements.get(id))
+    .filter((element) => element && !visible.includes(element));
+  const append = (container, element, className = "") => {
+    if (!container || !element) return;
+    element.item.classList.toggle("is-layout-main", className === "main");
+    element.item.classList.toggle("is-screen-main", className === "screen-main");
+    container.append(element.item);
+    updateParticipantVideoVisibility(element);
+  };
+  if (mode === "grid") {
+    visible.forEach((element) => append(participants, element));
+  } else if (mode === "pinned") {
+    const pinned = participantElements.get(meetingViewState.pinnedParticipantId);
+    append(pinnedMain, pinned, "main");
+    visible.filter((element) => element !== pinned).forEach((element) => append(pinnedFilmstrip, element));
+  } else {
+    const owner = participantElements.get(meetingViewState.activeScreenShareId);
+    const pinned = participantElements.get(meetingViewState.pinnedParticipantId);
+    append(screenShareMain, pinned || owner, pinned ? "main" : "screen-main");
+    visible.filter((element) => element !== pinned && element !== owner).forEach((element) => append(screenShareFilmstrip, element));
+    if (owner && owner !== pinned) append(screenShareFilmstrip, owner);
+  }
+  excluded.forEach((element) => append(layoutParking, element));
+  positionParticipantMenu();
+  requestParticipantLayout();
+}
 
 function requestParticipantLayout() {
   if (layoutFrame || typeof requestAnimationFrame !== "function") return;
@@ -137,14 +197,17 @@ function requestParticipantLayout() {
 }
 
 function updateParticipantLayout() {
-  if (!participants || participants.hidden) return;
-  const visibleItems = [...participants.children].filter((item) => !item.hidden);
+  if (!participants) return;
+  const mode = currentMeetingLayoutMode();
+  const layoutContainer = mode === "grid" ? participants : mode === "pinned" ? pinnedMain : screenShareMain;
+  if (!layoutContainer || layoutContainer.hidden) return;
+  const visibleItems = [...layoutContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden);
   if (visibleItems.length === 0) {
     participants.style.removeProperty("--tile-width");
     participants.style.removeProperty("--tile-height");
     return;
   }
-  const bounds = participants.getBoundingClientRect();
+  const bounds = layoutContainer.getBoundingClientRect();
   if (bounds.width <= 0 || bounds.height <= 0 || typeof chooseParticipantLayout !== "function") return;
   const computed = getComputedStyle(participants);
   const gap = parseFloat(computed.columnGap) || 12;
@@ -158,8 +221,8 @@ function updateParticipantLayout() {
     minTileHeight: 82
   });
   preferredLayoutColumns = layout.columns;
-  participants.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);
-  participants.style.setProperty("--tile-height", `${Math.floor(layout.tileHeight)}px`);
+  layoutContainer.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);
+  layoutContainer.style.setProperty("--tile-height", `${Math.floor(layout.tileHeight)}px`);
   participants.dataset.columns = String(layout.columns);
   participants.dataset.rows = String(layout.rows);
   positionParticipantMenu();
@@ -265,11 +328,16 @@ function updateParticipantVideoVisibility(element) {
   const videoOn = element.item.dataset.camera === "on";
   const isLocal = element.item.classList.contains("is-local");
   const visible = videoOn && (isLocal || receiveVideoEnabled);
+  const hasScreen = Boolean(element.screenVideo?.srcObject) && element.item.dataset.sharing === "true";
+  const screenMain = element.item.classList.contains("is-screen-main");
   element.item.dataset.receiveVideo = String(visible);
-  element.avatar.hidden = visible;
-  element.video.hidden = !visible;
-  if (visible) element.video.play().catch(() => {});
-  else element.video.pause();
+  element.avatar.hidden = visible || hasScreen;
+  element.cameraVideo.hidden = !visible || screenMain;
+  element.screenVideo.hidden = !hasScreen;
+  if (visible && !screenMain) element.cameraVideo.play().catch(() => {});
+  else element.cameraVideo.pause();
+  if (hasScreen) element.screenVideo.play().catch(() => {});
+  else element.screenVideo.pause();
   updateParticipantTileState(element);
 }
 
@@ -405,6 +473,7 @@ function setPinnedParticipant(participantID) {
   const nextID = participantID && participantElements.has(participantID) &&
     (participantID !== localParticipantID || selfViewVisible) ? participantID : undefined;
   pinnedParticipantID = nextID;
+  meetingViewState.pinnedParticipantId = nextID || null;
   participantElements.forEach((element, currentID) => {
     element.item.classList.toggle("is-pinned", currentID === pinnedParticipantID);
     updateParticipantAriaLabel(element);
@@ -412,6 +481,7 @@ function setPinnedParticipant(participantID) {
   participants.classList.toggle("has-pinned", Boolean(pinnedParticipantID));
   participants.dataset.pinned = pinnedParticipantID ? "true" : "false";
   updateParticipantPagination();
+  renderMeetingLayout();
 }
 
 function openParticipantMenu(participantID, trigger) {
@@ -673,7 +743,7 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
     chatRail.hidden = false;
     chatRail.setAttribute("aria-hidden", "false");
     meeting.classList.add("has-rail");
-    requestAnimationFrame(() => chatRail.classList.add("is-open"));
+    setTimeout(() => chatRail.classList.add("is-open"), 0);
   } else {
     const hasFocusInside = chatRail.contains(document.activeElement);
     const focusTarget = chatFocusTrigger;
@@ -697,8 +767,39 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
   if (open) {
     unreadMessages = 0;
     if (chatBadge) chatBadge.hidden = true;
-    requestAnimationFrame(() => chatInput?.focus());
+    setTimeout(() => chatInput?.focus(), 0);
   }
+}
+
+/** @param {MeetingPanel} panel */
+function setOpenPanel(panel, trigger = null) {
+  const nextPanel = panel === meetingViewState.openPanel ? "none" : panel;
+  meetingViewState.openPanel = nextPanel;
+  if (nextPanel === "chat") {
+    setSidebarOpen(false, null, false);
+    setChatOpen(true, trigger || chatToggle);
+    return;
+  }
+  setChatOpen(false, null, false);
+  if (nextPanel === "none") {
+    closeOpenPanel();
+    return;
+  }
+  setSidebarOpen(true, trigger, true);
+  const sidebarTitle = document.querySelector("#sidebar-title");
+  if (sidebarTitle) sidebarTitle.textContent = nextPanel === "people" ? "People" : "Settings";
+  document.querySelectorAll("#meeting-sidebar > .settings-section").forEach((section) => {
+    section.hidden = section.id === "people-section" ? nextPanel !== "people" : nextPanel !== "settings";
+  });
+  if (nextPanel === "people") renderPeopleList();
+}
+
+function closeOpenPanel(restoreFocus = true) {
+  const chatWasOpen = Boolean(chatRail && !chatRail.hidden);
+  const sidebarWasOpen = meeting.classList.contains("sidebar-open");
+  meetingViewState.openPanel = "none";
+  if (chatWasOpen) setChatOpen(false, null, restoreFocus);
+  setSidebarOpen(false, null, restoreFocus && sidebarWasOpen && !chatWasOpen);
 }
 
 function autoGrowChat() {
@@ -707,15 +808,16 @@ function autoGrowChat() {
   chatInput.style.height = `${Math.min(chatInput.scrollHeight, 96)}px`;
 }
 
-chatToggle?.addEventListener("click", () => setChatOpen(chatRail.hidden || !chatRail.classList.contains("is-open"), chatToggle));
-closeChat?.addEventListener("click", () => setChatOpen(false));
+chatToggle?.addEventListener("click", () => setOpenPanel("chat", chatToggle));
+mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));
+closeChat?.addEventListener("click", () => closeOpenPanel());
 connection?.addEventListener("click", () => {
   setConnectionPopoverOpen(connectionPopover?.hidden !== false, connection);
 });
 closeConnectionPopover?.addEventListener("click", () => setConnectionPopoverOpen(false));
 connectionPopoverControls?.addEventListener("click", () => {
   setConnectionPopoverOpen(false, null, false);
-  setSidebarOpen(true, connectionPopoverControls);
+  setOpenPanel("settings", connectionPopoverControls);
 });
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
@@ -756,29 +858,20 @@ audioOnly?.addEventListener("change", () => {
   updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
 });
 
-pauseAll?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 function setSelfViewVisibility(visible, notify = true) {
   selfViewVisible = Boolean(visible);
+  meetingViewState.showSelfView = selfViewVisible;
   if (selfView) selfView.checked = selfViewVisible;
   writeStoredValue("meeting.showSelfView", String(selfViewVisible));
   if (!selfViewVisible && pinnedParticipantID === localParticipantID) setPinnedParticipant();
   updateParticipantPagination();
+  renderMeetingLayout();
   if (notify) showToast(selfViewVisible ? "Self-view shown" : "Self-view hidden; your camera is still on");
 }
 selfView?.addEventListener("change", () => setSelfViewVisibility(selfView.checked));
-more?.addEventListener("click", () => setSidebarOpen(true));
-moreReceiveVideo?.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
-moreChat?.addEventListener("click", () => {
-  setSidebarOpen(false);
-  setChatOpen(true, moreChat);
-});
-moreScreen?.addEventListener("click", () => {
-  setSidebarOpen(false);
-  screen.click();
-});
-function openPeoplePanel() {
-  setChatOpen(false);
-  setSidebarOpen(true, participantsButton || morePeople);
+more?.addEventListener("click", () => setOpenPanel("settings", more));
+function openPeoplePanel(trigger = participantsButton) {
+  setOpenPanel("people", trigger);
   requestAnimationFrame(() => {
     if (!peopleList) return;
     peopleList.tabIndex = -1;
@@ -786,16 +879,13 @@ function openPeoplePanel() {
   });
 }
 participantsButton?.addEventListener("click", openPeoplePanel);
-morePeople?.addEventListener("click", openPeoplePanel);
+mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
 document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
   if (event.key === "Escape") {
     if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);
-    if (!chatRail?.hidden) setChatOpen(false);
-    if (meeting.classList.contains("sidebar-open")) {
-      setSidebarOpen(false);
-    }
+    closeOpenPanel();
     return;
   }
   if (event.key === "Tab" && meeting.classList.contains("sidebar-open")) {
@@ -890,7 +980,14 @@ let videoTransceiver;
 let renegotiationChain = Promise.resolve();
 let renegotiationPending = false;
 let localStream;
+let localAudioStream;
+let localCameraStream;
+let localScreenStream;
 let screenStream;
+let localCameraTrack;
+let localScreenTrack;
+let cameraSender;
+let screenSender;
 let cameraTrack;
 let localParticipantID;
 let reconnectToken;
@@ -906,6 +1003,26 @@ let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
 let statsTimer;
 let previousStats;
+const connectionMetrics = {
+  status: "Connecting",
+  iceState: "new",
+  audioState: "No sample",
+  incomingVideoState: "No sample",
+  outgoingVideoState: "Not active",
+  lastSampleAt: null,
+  rttMs: null,
+  jitterMs: null,
+  packetLossPct: null,
+  incomingVideoKbps: null,
+  outgoingVideoKbps: null,
+  incomingAudioKbps: null,
+  outgoingAudioKbps: null,
+  incomingCameraResolution: null,
+  incomingCameraFps: null,
+  incomingScreenResolution: null,
+  incomingScreenFps: null,
+  reconnects: 0
+};
 let adaptationLevel = 2;
 let poorSamples = 0;
 let goodSamples = 0;
@@ -919,6 +1036,7 @@ let selfViewVisible = readStoredValue("meeting.showSelfView") !== "false";
 let cameraBeforeAudioOnly = false;
 const selectedDeviceIDs = { audio: "", video: "", speaker: "" };
 if (selfView) selfView.checked = selfViewVisible;
+meetingViewState.showSelfView = selfViewVisible;
 let mediaTestStream;
 let audioContext;
 let speakerAnimationFrame;
@@ -930,10 +1048,13 @@ let pendingConnectionSamples = 0;
 let connectionPopoverFocusTrigger;
 const speakerAnalyzers = new Map();
 const activeSpeakers = new Set();
+const speakerLevels = new Map();
 const pendingSpeakerStates = new Map();
 const speakerThresholdDb = -50;
 const speakerStartHoldMs = 200;
 const speakerStopHoldMs = 300;
+const speakerActivationDelayMs = 300;
+const speakerDeactivationHoldMs = 1000;
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
@@ -970,6 +1091,7 @@ const participantElements = new Map();
 const participantRemovalTimers = new Map();
 const remoteAudioElements = new Set();
 const remoteTrackOwners = new Map();
+const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
 const participantQualityLabels = {
   good: "good",
@@ -1196,19 +1318,19 @@ navigator.mediaDevices?.addEventListener?.("devicechange", refreshDeviceSelector
 
 function setLocalMediaControls() {
   const audioTrack = localStream?.getAudioTracks()[0];
-  const videoTrack = localStream?.getVideoTracks()[0];
+  const videoTrack = localCameraTrack;
   const audioAvailable = Boolean(audioTrack);
   const videoAvailable = Boolean(videoTrack);
   const audioOn = audioAvailable && audioTrack.enabled;
   const cameraOn = videoAvailable && cameraRequested && !videoSuspended && !audioOnly?.checked;
   mic.disabled = !audioAvailable;
-  camera.disabled = !videoAvailable;
+  camera.disabled = meeting.hidden || !peer;
   updateControlLabel(mic, audioOn ? "Mute microphone" : "Unmute microphone");
   mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));
   updateControlLabel(camera, cameraOn ? "Turn camera off" : "Turn camera on");
   camera.setAttribute("aria-pressed", String(cameraOn));
   if (!audioAvailable) updateControlLabel(mic, "Microphone unavailable");
-  if (!videoAvailable) updateControlLabel(camera, "Camera unavailable");
+  if (!videoAvailable) updateControlLabel(camera, "Turn camera on");
   const local = participantElements.get(localParticipantID);
   if (local) {
     local.item.dataset.mic = audioOn ? "on" : "off";
@@ -1226,6 +1348,70 @@ function setLocalMediaControls() {
     settingsPreview.hidden = !videoAvailable;
   }
   renderPeopleList();
+}
+
+async function renegotiateLocalMedia() {
+  const generation = socketGeneration;
+  const targetPeer = peer;
+  const targetSocket = socket;
+  if (!targetPeer || !isCurrentWebRTC(generation, targetPeer, targetSocket) ||
+      targetPeer.signalingState !== "stable") return;
+  renegotiationChain = renegotiationChain.catch(() => {}).then(async () => {
+    if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+    const offer = await targetPeer.createOffer();
+    await targetPeer.setLocalDescription(offer);
+    if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
+      targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
+    }
+  }).catch(() => {});
+  return renegotiationChain;
+}
+
+async function enableCamera() {
+  if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      ...cameraConstraints,
+      ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
+    }
+  });
+  const track = stream.getVideoTracks()[0];
+  if (!track) throw new Error("camera is unavailable");
+  localCameraStream = stream;
+  localCameraTrack = track;
+  cameraTrack = track;
+  track.enabled = !videoSuspended && !audioOnly?.checked;
+  localStream?.addTrack(track);
+  cameraSender = peer.addTrack(track, stream);
+  const local = participantElements.get(localParticipantID);
+  if (local) local.cameraVideo.srcObject = stream;
+  cameraRequested = true;
+  meetingViewState.cameraEnabled = true;
+  setLocalVideoMirror(true);
+  setLocalMediaControls();
+  await applyProfile(profile.value, peer, stream);
+  await renegotiateLocalMedia();
+  sendMediaState();
+}
+
+async function disableCamera() {
+  cameraRequested = false;
+  meetingViewState.cameraEnabled = false;
+  if (cameraSender && peer) {
+    peer.removeTrack(cameraSender);
+    cameraSender = undefined;
+    await renegotiateLocalMedia();
+  }
+  localCameraTrack?.stop();
+  localStream?.removeTrack(localCameraTrack);
+  localCameraStream?.getTracks().forEach((track) => track.stop());
+  localCameraTrack = undefined;
+  localCameraStream = undefined;
+  cameraTrack = undefined;
+  const local = participantElements.get(localParticipantID);
+  if (local) local.cameraVideo.srcObject = null;
+  setLocalMediaControls();
+  sendMediaState();
 }
 
 let sidebarFocusTrigger;
@@ -1266,12 +1452,12 @@ function setSidebarOpen(open, trigger = null, restoreFocus = true) {
   }
 }
 
-toggleSidebar.addEventListener("click", () => setSidebarOpen(!meeting.classList.contains("sidebar-open")));
+toggleSidebar.addEventListener("click", () => setOpenPanel("settings", toggleSidebar));
 closeSidebar.addEventListener("click", () => {
-  setSidebarOpen(false);
+  closeOpenPanel();
 });
 sidebarBackdrop.addEventListener("click", () => {
-  setSidebarOpen(false);
+  closeOpenPanel();
 });
 function setLocalVideoMirror(enabled) {
   const local = participantElements.get(localParticipantID);
@@ -1308,8 +1494,17 @@ function ensureAudioContext() {
 function remoteParticipantID(streams, track) {
   const streamID = streams?.[0]?.id || "";
   const streamPrefix = "lowmeet-";
-  if (streamID.startsWith(streamPrefix)) return streamID.slice(streamPrefix.length);
+  if (streamID.startsWith(streamPrefix)) {
+    return streamID.slice(streamPrefix.length).replace(/-(?:audio|camera|screen)$/, "");
+  }
   return track.id?.split("|")[0] || "";
+}
+
+function remoteMediaRole(streams, track) {
+  const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
+  if (/-screen$/.test(streamID) || /\|screen$/.test(track?.id || "")) return "screen";
+  if (/-camera$/.test(streamID) || /\|camera$/.test(track?.id || "")) return "camera";
+  return track?.kind === "audio" ? "audio" : "camera";
 }
 
 function rememberRemoteTrack(participantID, track, receiver) {
@@ -1373,6 +1568,17 @@ function applySpeakerState(participantID, speaking) {
   element.item.dataset.speaking = String(speaking);
   if (speaking) activeSpeakers.add(participantID);
   else activeSpeakers.delete(participantID);
+  const eligible = new Map([...speakerLevels].filter(([id]) => {
+    const item = participantElements.get(id)?.item;
+    return activeSpeakers.has(id) && item?.dataset.mic !== "off";
+  }));
+  meetingViewState.activeSpeakerId = typeof chooseActiveSpeaker === "function"
+    ? chooseActiveSpeaker(eligible)
+    : [...eligible.keys()].sort()[0] || null;
+  participantElements.forEach((participant) => {
+    participant.item.classList.toggle("is-primary-speaker", participant.item.dataset.participantId === meetingViewState.activeSpeakerId);
+  });
+  renderMeetingLayout();
 }
 
 function flushSpeakerStates() {
@@ -1439,24 +1645,26 @@ function runSpeakerDetection(timestamp) {
     }
     const rms = Math.sqrt(total / entry.data.length);
     entry.level = entry.level * 0.78 + rms * 0.22;
+    speakerLevels.set(participantID, entry.level);
     const levelDb = 20 * Math.log10(Math.max(entry.level, 0.000001));
     if (participantID === localParticipantID && micLevelMeter) {
       const level = Math.max(0, Math.min(100, Math.round(((levelDb + 60) / 60) * 100)));
       micLevelMeter.setAttribute("aria-valuenow", String(level));
       micLevelMeter.firstElementChild.style.width = `${level}%`;
     }
-    const aboveThreshold = levelDb > speakerThresholdDb;
+    const muted = participantElements.get(participantID)?.item.dataset.mic === "off";
+    const aboveThreshold = !muted && levelDb > speakerThresholdDb;
     if (aboveThreshold) {
       entry.quietSince = 0;
       if (!entry.speaking && !entry.speakingSince) entry.speakingSince = now;
-      if (!entry.speaking && now - entry.speakingSince >= speakerStartHoldMs) {
+      if (!entry.speaking && now - entry.speakingSince >= speakerActivationDelayMs) {
         entry.speaking = true;
         setSpeakerState(participantID, true);
       }
     } else {
       entry.speakingSince = 0;
       if (entry.speaking && !entry.quietSince) entry.quietSince = now;
-      if (entry.speaking && now - entry.quietSince >= speakerStopHoldMs) {
+      if (entry.speaking && now - entry.quietSince >= speakerDeactivationHoldMs) {
         entry.speaking = false;
         setSpeakerState(participantID, false);
       }
@@ -1620,9 +1828,11 @@ function connectSocket(name, password) {
     if (message.type === "screen_share_state") {
       const previousScreenShareOwner = screenShareOwner;
       screenShareOwner = message.screen_share_active === true ? message.screen_share_owner : undefined;
+      meetingViewState.activeScreenShareId = screenShareOwner || (screenStream ? localParticipantID : null);
       updateVideoOrientation(previousScreenShareOwner);
       updateVideoOrientation(screenShareOwner);
       updateScreenShareUI();
+      renderMeetingLayout();
       if (screenShareRequest) {
         const granted = screenShareRequest.active
           ? screenShareOwner === localParticipantID
@@ -1712,7 +1922,10 @@ function connectSocket(name, password) {
           if (participantElements.get(message.participant.id)?.item === element.item) {
             element.item.remove();
             participantElements.delete(message.participant.id);
+            const orderIndex = participantOrder.indexOf(message.participant.id);
+            if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);
             updateParticipantCount();
+            renderMeetingLayout();
           }
         }, 1200);
         const previousRemovalTimer = participantRemovalTimers.get(message.participant.id);
@@ -1763,11 +1976,13 @@ function resetMediaConnection() {
   participantRemovalTimers.clear();
   participants.replaceChildren();
   participantElements.clear();
+  participantOrder.splice(0);
   participantPage = 0;
   focusedParticipantID = undefined;
   updateParticipantPagination();
   remoteAudioElements.clear();
   remoteTrackOwners.clear();
+  remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
   enableAudio.hidden = true;
   peer?.close();
@@ -1778,7 +1993,14 @@ function resetMediaConnection() {
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
   localStream = undefined;
+  localAudioStream = undefined;
+  localCameraStream = undefined;
+  localScreenStream = undefined;
   screenStream = undefined;
+  localCameraTrack = undefined;
+  localScreenTrack = undefined;
+  cameraSender = undefined;
+  screenSender = undefined;
   cameraTrack = undefined;
   screenShareOwner = undefined;
   setLocalMediaControls();
@@ -1848,17 +2070,23 @@ async function startWebRTC() {
   renegotiationPending = false;
   currentPeer.ontrack = ({ streams, track, receiver }) => {
     const participantID = remoteParticipantID(streams, track);
+    const role = remoteMediaRole(streams, track);
     const element = participantElements.get(participantID);
     if (!element) return;
     rememberRemoteTrack(participantID, track, receiver);
     const stream = remoteMediaStream(streams, track);
     if (track.kind === "video") {
-      element.video.srcObject = stream;
-      element.video.autoplay = true;
-      element.video.playsInline = true;
+      const video = role === "screen" ? element.screenVideo : element.cameraVideo;
+      video.srcObject = stream;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.dataset.mediaRole = role;
+      remoteTrackRoles.set(track.id, role);
+      video.classList.toggle("is-screen-content", role === "screen");
       updateParticipantVideoVisibility(element);
       updateVideoOrientation(participantID);
-      element.video.play().catch(() => {});
+      video.play().catch(() => {});
+      if (role === "camera") element.video.play().catch(() => {});
     } else {
       element.audio.srcObject = stream;
       element.audio.autoplay = true;
@@ -1903,31 +2131,22 @@ async function startWebRTC() {
     } catch (error) {
       status.textContent = mediaAccessMessage("audio", error);
     }
-    try {
-      const videoStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          ...cameraConstraints,
-          ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
-        }
-      });
-      videoStream.getVideoTracks().forEach((track) => {
-        track.enabled = cameraRequested && !videoSuspended && !audioOnly?.checked;
-        setupStream.addTrack(track);
-      });
-      if (abortIfStale()) return;
-    } catch (error) {
-      cameraRequested = false;
-      status.textContent = mediaAccessMessage("video", error);
-    }
     if (abortIfStale()) return;
-    if (setupStream.getTracks().length === 0) throw new Error("No microphone or camera is available");
     localStream = setupStream;
-    cameraTrack = setupStream.getVideoTracks()[0];
+    localAudioStream = setupStream.getAudioTracks().length ? setupStream : undefined;
+    localCameraStream = undefined;
+    localCameraTrack = undefined;
+    localScreenStream = undefined;
+    localScreenTrack = undefined;
+    cameraTrack = undefined;
+    cameraSender = undefined;
+    screenSender = undefined;
     setLocalMediaControls();
-    attachSpeakerAnalyzer(localParticipantID, localStream);
+    if (localStream.getAudioTracks().length) attachSpeakerAnalyzer(localParticipantID, localStream);
     const local = participantElements.get(localParticipantID);
     if (local) {
-      local.video.srcObject = localStream;
+      local.cameraVideo.srcObject = null;
+      local.video.srcObject = null;
       local.video.autoplay = true;
       local.video.muted = true;
     }
@@ -1940,7 +2159,7 @@ async function startWebRTC() {
     setLocalVideoMirror(true);
     sendMediaState();
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-    for (const track of localStream.getTracks()) currentPeer.addTrack(track, localStream);
+    for (const track of localStream.getAudioTracks()) currentPeer.addTrack(track, localStream);
     await setVideoSending(!videoSuspended, videoSuspendedAutomatically);
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     await applyProfile(profile.value, currentPeer, localStream);
@@ -1997,8 +2216,9 @@ function updateConnectionPopover(level, label) {
 function setConnectionPopoverOpen(open, trigger = null, restoreFocus = true) {
   if (!connectionPopover) return;
   if (open) {
-    if (meeting.classList.contains("sidebar-open")) setSidebarOpen(false, null, false);
-    if (chatRail && !chatRail.hidden) setChatOpen(false, null, false);
+    if (meetingViewState.openPanel !== "none" || meeting.classList.contains("sidebar-open") || (chatRail && !chatRail.hidden)) {
+      closeOpenPanel(false);
+    }
     connectionPopoverFocusTrigger = trigger || document.activeElement || connection;
     connectionPopover.hidden = false;
     connectionPopover.setAttribute("aria-hidden", "false");
@@ -2062,6 +2282,8 @@ function setConnection(level, label) {
   if (connectionMessage) connectionMessage.textContent = normalizedLabel;
   updateConnectionSummary(normalizedLevel, normalizedLabel);
   lastConnectionLevel = normalizedLevel;
+  connectionMetrics.status = normalizedLabel;
+  updateConnectionMetrics({ ice: peer?.iceConnectionState, timestamp: Date.now() });
   pendingConnectionLevel = "";
   pendingConnectionSamples = 0;
 }
@@ -2090,6 +2312,49 @@ function setStatValue(element, value) {
   syncConnectionPopoverStats();
 }
 
+function updateConnectionMetrics(values) {
+  const next = {
+    ...connectionMetrics,
+    iceState: values.ice || connectionMetrics.iceState,
+    lastSampleAt: values.timestamp || Date.now(),
+    rttMs: values.rttMs,
+    jitterMs: values.jitterMs,
+    packetLossPct: values.packetLoss,
+    incomingVideoKbps: values.inboundKbps,
+    outgoingVideoKbps: values.outboundKbps,
+    incomingAudioKbps: values.inboundAudioKbps,
+    outgoingAudioKbps: values.outboundAudioKbps,
+    incomingVideoState: values.inboundKbps == null ? "No sample" : "Receiving",
+    outgoingVideoState: values.outboundKbps == null ? (cameraRequested ? "No sample" : "Not active") : "Sending",
+    audioState: values.inboundAudioKbps == null && values.outboundAudioKbps == null ? "No sample" : "Connected"
+  };
+  Object.assign(connectionMetrics, next);
+  const text = (id, value) => {
+    const node = document.querySelector(`#${id}`);
+    if (!node) return;
+    const rendered = String(value);
+    if (node.textContent !== rendered) node.textContent = rendered;
+  };
+  text("metric-status", connectionMetrics.status);
+  text("metric-ice-state", connectionMetrics.iceState || "No sample");
+  text("metric-rtt", connectionMetrics.rttMs == null ? "No sample" : `${connectionMetrics.rttMs} ms`);
+  text("metric-jitter-loss", connectionMetrics.jitterMs == null && connectionMetrics.packetLossPct == null
+    ? "No sample"
+    : `${connectionMetrics.jitterMs == null ? "Unavailable" : `${connectionMetrics.jitterMs} ms`} / ` +
+      `${connectionMetrics.packetLossPct == null ? "Unavailable" : `${connectionMetrics.packetLossPct}%`}`);
+  text("metric-video-bitrate", connectionMetrics.incomingVideoKbps == null && connectionMetrics.outgoingVideoKbps == null
+    ? "No sample" : `${connectionMetrics.incomingVideoKbps ?? "Unavailable"} / ${connectionMetrics.outgoingVideoKbps ?? "Unavailable"} kbps`);
+  text("metric-audio-bitrate", connectionMetrics.incomingAudioKbps == null && connectionMetrics.outgoingAudioKbps == null
+    ? "No sample" : `${connectionMetrics.incomingAudioKbps ?? "Unavailable"} / ${connectionMetrics.outgoingAudioKbps ?? "Unavailable"} kbps`);
+  text("metric-camera-format", connectionMetrics.incomingCameraResolution
+    ? `${connectionMetrics.incomingCameraResolution} / ${connectionMetrics.incomingCameraFps ?? "Unavailable"} FPS` : "Not active");
+  text("metric-screen-format", connectionMetrics.incomingScreenResolution
+    ? `${connectionMetrics.incomingScreenResolution} / ${connectionMetrics.incomingScreenFps ?? "Unavailable"} FPS` : "Not active");
+  text("metric-reconnects", connectionMetrics.reconnects);
+  const summary = document.querySelector("#connection-metrics-status");
+  if (summary) summary.textContent = connectionMetrics.lastSampleAt ? "Live" : "No sample";
+}
+
 async function updateDiagnostics() {
   const currentPeer = peer;
   if (!currentPeer) return;
@@ -2113,6 +2378,7 @@ async function updateDiagnostics() {
     iceTransport: null,
     connection: currentPeer.connectionState
   };
+  values.timestamp = Date.now();
   let sentBytes = 0;
   let receivedBytes = 0;
   let sentAudioBytes = 0;
@@ -2172,6 +2438,14 @@ async function updateDiagnostics() {
       }
       if (stat.jitter != null) values.jitterMs = Math.round(stat.jitter * 1000);
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
+      const role = remoteTrackRoles.get(stat.trackIdentifier);
+      if (role === "screen") {
+        values.screenResolution = `${stat.frameWidth || "?"}x${stat.frameHeight || "?"}`;
+        values.screenFps = stat.framesPerSecond ?? null;
+      } else if (role === "camera") {
+        values.cameraResolution = `${stat.frameWidth || "?"}x${stat.frameHeight || "?"}`;
+        values.cameraFps = stat.framesPerSecond ?? null;
+      }
       totalLost += stat.packetsLost || 0;
       totalReceived += stat.packetsReceived || 0;
       const participantID = participantForInboundStat(stat, trackStatsOwners);
@@ -2248,6 +2522,11 @@ async function updateDiagnostics() {
     ? null
     : `${values.inboundKbps == null ? "-" : values.inboundKbps} / ${values.outboundKbps == null ? "-" : values.outboundKbps} kbps`);
   setStatValue(statResolution, values.resolution || null);
+  connectionMetrics.incomingCameraResolution = values.cameraResolution || connectionMetrics.incomingCameraResolution;
+  connectionMetrics.incomingCameraFps = values.cameraFps ?? connectionMetrics.incomingCameraFps;
+  connectionMetrics.incomingScreenResolution = values.screenResolution || connectionMetrics.incomingScreenResolution;
+  connectionMetrics.incomingScreenFps = values.screenFps ?? connectionMetrics.incomingScreenFps;
+  updateConnectionMetrics(values);
   participantElements.forEach((element, id) => {
     if (id === localParticipantID) {
       const localStats = {
@@ -2468,6 +2747,7 @@ function addParticipant(participant) {
   shareLabel.hidden = true;
   shareLabel.textContent = "Screen sharing";
   const video = document.createElement("video");
+  const screenVideo = document.createElement("video");
   const audio = document.createElement("audio");
   const micIndicator = document.createElement("span");
   micIndicator.className = "participant-mic is-off";
@@ -2478,14 +2758,20 @@ function addParticipant(participant) {
   micIndicator.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="12" rx="4"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>';
   video.playsInline = true;
   video.hidden = true;
+  video.className = "camera-video";
+  screenVideo.playsInline = true;
+  screenVideo.hidden = true;
+  screenVideo.className = "screen-video";
   meta.append(name, youBadge, micIndicator);
   videoStage.append(avatar, video, pausedChip, quality);
+  videoStage.insertBefore(screenVideo, pausedChip);
   videoStage.append(state, shareLabel, meta);
   videoStage.append(menuTrigger);
   item.append(videoStage, audio);
   participants.append(item);
+  participantOrder.push(participant.id);
   participantElements.set(participant.id, {
-    item, name, youBadge, video, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
+    item, name, youBadge, video, cameraVideo: video, screenVideo, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
     trackIDs: new Set()
   });
   item.dataset.mic = "unknown";
@@ -2494,6 +2780,7 @@ function addParticipant(participant) {
   updateParticipantAriaLabel(participantElements.get(participant.id));
   updateParticipantCount();
   updateScreenShareUI();
+  renderMeetingLayout();
 }
 
 function updateMediaState(message) {
@@ -2523,9 +2810,9 @@ function updateMediaState(message) {
 
 function sendMediaState() {
   const audioEnabled = localStream?.getAudioTracks()[0]?.enabled === true;
-  const videoTrack = screenStream?.getVideoTracks()[0] || localStream?.getVideoTracks()[0];
+  const videoTrack = localCameraTrack;
   const videoEnabled = !audioOnly?.checked && videoTrack?.enabled === true &&
-    (Boolean(screenStream) || (cameraRequested && !videoSuspended));
+    cameraRequested && !videoSuspended;
   const videoPaused = !audioOnly?.checked && videoSuspendedAutomatically;
   const message = {
     version: 1, type: "media_state", participant_id: localParticipantID,
@@ -2541,23 +2828,25 @@ async function setVideoSending(enabled, automatic = false) {
   const sendingEnabled = enabled && !audioOnly?.checked;
   videoSuspended = !sendingEnabled;
   videoSuspendedAutomatically = !sendingEnabled && automatic && !audioOnly?.checked;
-  for (const sender of peer?.getSenders() || []) {
-    if (sender.track?.kind !== "video") continue;
+  for (const sender of [cameraSender, screenSender]) {
+    if (!sender) continue;
     const parameters = sender.getParameters();
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-    parameters.encodings[0].active = sendingEnabled && cameraRequested;
+    parameters.encodings[0].active = sender === screenSender
+      ? sendingEnabled
+      : sendingEnabled && cameraRequested;
     await sender.setParameters(parameters).catch(() => {});
   }
-  const track = localStream?.getVideoTracks()[0];
-  if (track) track.enabled = sendingEnabled && cameraRequested;
+  if (localCameraTrack) localCameraTrack.enabled = sendingEnabled && cameraRequested;
+  if (localScreenTrack) localScreenTrack.enabled = sendingEnabled;
   setLocalMediaControls();
   if (!sendingEnabled && automatic) setConnection("poor", "Unstable connection");
   sendMediaState();
 }
 
 async function setVideoSenderActive(enabled) {
-  for (const sender of peer?.getSenders() || []) {
-    if (sender.track?.kind !== "video") continue;
+  for (const sender of [cameraSender, screenSender]) {
+    if (!sender) continue;
     const parameters = sender.getParameters();
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
     parameters.encodings[0].active = enabled;
@@ -2598,19 +2887,6 @@ function setReceiveVideo(enabled) {
   receiveVideoEnabled = enabled;
   setReceiveVideoControlLabel(receiveVideo, enabled);
   receiveVideo.setAttribute("aria-pressed", String(enabled));
-  if (pauseAll) {
-    const pauseLabel = pauseAll.querySelector("span");
-    if (pauseLabel) pauseLabel.textContent = enabled
-      ? "Turn off incoming video"
-      : "Turn on incoming video";
-    updateControlLabel(pauseAll, enabled ? "Turn off incoming video" : "Turn on incoming video");
-    if (pauseAll.hasAttribute("data-tooltip")) {
-      pauseAll.dataset.tooltip = enabled
-        ? "Turn off video received by this device. Other participants can still see your camera."
-        : "Turn on video received by this device.";
-    }
-  }
-  setReceiveVideoControlLabel(moreReceiveVideo, enabled);
   setMoreIncomingVideoState(enabled);
   for (const [participantID, element] of participantElements) {
     if (participantID !== localParticipantID) updateParticipantVideoVisibility(element);
@@ -2659,9 +2935,11 @@ function updateScreenShareUI() {
     participants.dataset.sharingOwner = String(Boolean(screenShareOwner));
     participants.dataset.sharingLocal = String(screenShareOwner === localParticipantID);
   }
+  meetingViewState.activeScreenShareId = screenShareOwner || (screenStream ? localParticipantID : null);
+  participantElements.forEach((element) => updateParticipantVideoVisibility(element));
+  renderMeetingLayout();
   const ownedByOther = Boolean(screenShareOwner && screenShareOwner !== localParticipantID);
   screen.disabled = !screenShareEnabled || ownedByOther || Boolean(audioOnly?.checked);
-  if (moreScreen) moreScreen.disabled = screen.disabled;
   screen.setAttribute("aria-pressed", String(Boolean(screenStream)));
   if (ownedByOther) {
     updateControlLabel(screen, "In use");
@@ -2670,10 +2948,9 @@ function updateScreenShareUI() {
   } else {
     updateControlLabel(screen, "Share screen");
   }
-  if (moreScreen) moreScreen.textContent = screenStream ? "Stop sharing" : "Share screen";
 }
 
-function requestScreenShare(active) {
+function requestScreenShare(active, mediaStreamID = "") {
   if (screenShareRequest) {
     return Promise.reject(new Error("screen share request already in progress"));
   }
@@ -2685,9 +2962,9 @@ function requestScreenShare(active) {
       if (!screenShareRequest) return;
       screenShareRequest = undefined;
       if (active && socket?.readyState === WebSocket.OPEN && localParticipantID) {
-        socket.send(JSON.stringify({
-          version: 1, type: "screen_share", participant_id: localParticipantID,
-          screen_share_active: false
+      socket.send(JSON.stringify({
+        version: 1, type: "screen_share", participant_id: localParticipantID,
+        screen_share_active: false, media_stream_id: ""
         }));
       }
       reject(new Error("screen share request timed out"));
@@ -2695,7 +2972,7 @@ function requestScreenShare(active) {
     screenShareRequest = { active, resolve, reject, timer };
     socket?.send(JSON.stringify({
       version: 1, type: "screen_share", participant_id: localParticipantID,
-      screen_share_active: active
+      screen_share_active: active, media_stream_id: mediaStreamID
     }));
   });
 }
@@ -2708,26 +2985,29 @@ async function toggleScreenShare() {
   if (screen.disabled || audioOnly?.checked || !peer || (screenShareOwner && screenShareOwner !== localParticipantID)) return;
   try {
     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    await requestScreenShare(true);
-    const screenTrack = screenStream.getVideoTracks()[0];
-    const sender = peer.getSenders().find((item) => item.track?.kind === "video");
-    if (!sender) throw new Error("video sender is unavailable");
-    await sender.replaceTrack(screenTrack);
+    localScreenStream = screenStream;
+    localScreenTrack = screenStream.getVideoTracks()[0];
+    if (!localScreenTrack) throw new Error("screen capture is unavailable");
+    await requestScreenShare(true, screenStream.id);
+    screenSender = peer.addTrack(localScreenTrack, screenStream);
     await setVideoSenderActive(true);
-    await applyProfile(profile.value, peer, screenStream);
     const local = participantElements.get(localParticipantID);
-    if (local) local.video.srcObject = screenStream;
+    if (local) local.screenVideo.srcObject = screenStream;
     setLocalVideoMirror(false);
+    meetingViewState.activeScreenShareId = localParticipantID;
     sendMediaState();
     updateScreenShareUI();
-    screenTrack.addEventListener("ended", stopScreenShare, { once: true });
+    renderMeetingLayout();
+    localScreenTrack.addEventListener("ended", stopScreenShare, { once: true });
   } catch (error) {
     screenStream?.getTracks().forEach((track) => track.stop());
     screenStream = undefined;
+    localScreenStream = undefined;
+    localScreenTrack = undefined;
     if (screenShareOwner === localParticipantID) {
       socket?.send(JSON.stringify({
         version: 1, type: "screen_share", participant_id: localParticipantID,
-        screen_share_active: false
+        screen_share_active: false, media_stream_id: ""
       }));
     }
     updateScreenShareUI();
@@ -2738,23 +3018,30 @@ async function toggleScreenShare() {
 async function stopScreenShare() {
   if (!screenStream) return;
   const wasAutomaticallySuspended = videoSuspended && videoSuspendedAutomatically;
-  const sender = peer?.getSenders().find((item) => item.track?.kind === "video");
-  if (sender && cameraTrack) await sender.replaceTrack(cameraTrack).catch(() => {});
-  await setVideoSending(!videoSuspended, wasAutomaticallySuspended).catch(() => {});
+  if (screenSender && peer) {
+    peer.removeTrack(screenSender);
+    screenSender = undefined;
+    await renegotiateLocalMedia();
+  }
+  localScreenTrack?.stop();
   screenStream.getTracks().forEach((track) => track.stop());
   screenStream = undefined;
+  localScreenStream = undefined;
+  localScreenTrack = undefined;
+  meetingViewState.activeScreenShareId = screenShareOwner === localParticipantID ? localParticipantID : null;
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
     socket.send(JSON.stringify({
       version: 1, type: "screen_share", participant_id: localParticipantID,
       screen_share_active: false
     }));
   }
-  await applyProfile(profile.value);
   const local = participantElements.get(localParticipantID);
-  if (local && localStream) local.video.srcObject = localStream;
+  if (local) local.screenVideo.srcObject = null;
   setLocalVideoMirror(true);
+  await setVideoSending(!videoSuspended, wasAutomaticallySuspended).catch(() => {});
   sendMediaState();
   updateScreenShareUI();
+  renderMeetingLayout();
 }
 
 function isCurrentWebRTC(generation, currentPeer, currentSocket) {
@@ -2839,10 +3126,8 @@ mic.addEventListener("click", () => {
   sendMediaState();
 });
 
-camera.addEventListener("click", () => {
+camera.addEventListener("click", async () => {
   audioContext?.resume().catch(() => {});
-  const track = localStream?.getVideoTracks()[0];
-  if (!track) return;
   if (audioOnly?.checked) {
     showToast("Turn off Protect audio before enabling the camera");
     return;
@@ -2852,8 +3137,15 @@ camera.addEventListener("click", () => {
     showToast("Choose a camera quality before turning the camera on");
     return;
   }
-  cameraRequested = !cameraRequested;
-  setVideoSending(cameraRequested).catch(() => {});
+  try {
+    if (cameraRequested) await disableCamera();
+    else await enableCamera();
+  } catch (error) {
+    cameraRequested = false;
+    meetingViewState.cameraEnabled = false;
+    setLocalMediaControls();
+    status.textContent = mediaAccessMessage("video", error);
+  }
 });
 
 screen.addEventListener("click", toggleScreenShare);
@@ -2889,7 +3181,14 @@ leave.addEventListener("click", () => {
   for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
   participantRemovalTimers.clear();
   localStream = undefined;
+  localAudioStream = undefined;
+  localCameraStream = undefined;
+  localScreenStream = undefined;
   screenStream = undefined;
+  localCameraTrack = undefined;
+  localScreenTrack = undefined;
+  cameraSender = undefined;
+  screenSender = undefined;
   cameraTrack = undefined;
   peer = undefined;
   videoTransceiver = undefined;
@@ -2900,6 +3199,7 @@ leave.addEventListener("click", () => {
   videoSuspendedAutomatically = false;
   cameraRequested = false;
   remoteTrackOwners.clear();
+  remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
   previousStats = undefined;
   criticalSamples = 0;
@@ -2922,19 +3222,13 @@ leave.addEventListener("click", () => {
   camera.disabled = false;
   receiveVideoEnabled = true;
   setReceiveVideoControlLabel(receiveVideo, true);
-  setReceiveVideoControlLabel(moreReceiveVideo, true);
   setMoreIncomingVideoState(true);
-  if (pauseAll) {
-    const pauseLabel = pauseAll.querySelector("span");
-    if (pauseLabel) pauseLabel.textContent = "Turn off incoming video";
-  }
   updateControlLabel(screen, "Share screen");
   screen.setAttribute("aria-pressed", "false");
   screenShareOwner = undefined;
   screenShareEnabled = true;
   updateScreenShareUI();
-  setChatOpen(false, null, false);
-  setSidebarOpen(false, null, false);
+  closeOpenPanel(false);
   setConnection("", "Connecting");
   lastConnectionLevel = "";
   pendingConnectionLevel = "";
@@ -2947,6 +3241,7 @@ leave.addEventListener("click", () => {
   if (meetingAlert) meetingAlert.hidden = true;
   if (selfView) selfView.checked = selfViewVisible;
   participantElements.clear();
+  participantOrder.splice(0);
   participants.replaceChildren();
   updateParticipantPagination();
   brandBar.hidden = false;

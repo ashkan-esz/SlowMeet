@@ -34,6 +34,7 @@ type Message struct {
 	Password           string               `json:"password,omitempty"`
 	ReconnectToken     string               `json:"reconnect_token,omitempty"`
 	ParticipantID      string               `json:"participant_id,omitempty"`
+	MediaStreamID      string               `json:"media_stream_id,omitempty"`
 	Error              string               `json:"error,omitempty"`
 	Participant        *meeting.Participant `json:"participant,omitempty"`
 	TargetID           string               `json:"target_id,omitempty"`
@@ -62,6 +63,9 @@ type Message struct {
 func (m Message) Validate() error {
 	if m.Version != ProtocolVersion {
 		return fmt.Errorf("unsupported protocol version %d", m.Version)
+	}
+	if len(m.MediaStreamID) > 128 {
+		return fmt.Errorf("media_stream_id is too long")
 	}
 	switch m.Type {
 	case TypeJoin:

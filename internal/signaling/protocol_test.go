@@ -68,6 +68,39 @@ func TestMediaStateCarriesVideoPaused(t *testing.T) {
 	}
 }
 
+func TestMediaStreamIDIsOptionalAndBounded(t *testing.T) {
+	active := true
+	message := Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: "p1", ScreenShareActive: &active,
+		MediaStreamID: "screen-stream-1",
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatalf("marshal screen share: %v", err)
+	}
+	var decoded Message
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal screen share: %v", err)
+	}
+	if decoded.MediaStreamID != message.MediaStreamID {
+		t.Fatalf("media stream id = %q, want %q", decoded.MediaStreamID, message.MediaStreamID)
+	}
+	if err := (Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: "p1", ScreenShareActive: &active,
+		MediaStreamID: string(make([]byte, 129)),
+	}).Validate(); err == nil {
+		t.Fatal("oversized media stream id was accepted")
+	}
+	if err := (Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: "p1", ScreenShareActive: &active,
+	}).Validate(); err != nil {
+		t.Fatalf("missing optional media stream id rejected: %v", err)
+	}
+}
+
 func TestValidateNetworkState(t *testing.T) {
 	valid := Message{
 		Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: "p1",

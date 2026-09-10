@@ -114,19 +114,39 @@
         <button id="connection-popover-controls" class="text-button" type="button">Open meeting controls</button>
       </section>
 
-      <div class="meeting-layout">
+      <div class="meeting-content meeting-layout">
         <aside id="meeting-sidebar" class="meeting-sidebar" role="dialog" aria-modal="true" aria-label="Meeting controls" aria-hidden="true">
-          <div class="rail-header"><div><p class="eyebrow">Room controls</p><h2>Settings</h2></div><button id="close-sidebar" class="icon-button" type="button" aria-label="Close meeting controls" title="Close meeting controls (Esc)">×</button></div>
-          <section id="connection-summary" class="settings-section connection-summary" data-level="connecting" aria-labelledby="connection-summary-title">
+          <div class="rail-header"><div><p class="eyebrow">Room controls</p><h2 id="sidebar-title">Settings</h2></div><button id="close-sidebar" class="icon-button" type="button" aria-label="Close meeting controls" title="Close meeting controls (Esc)">×</button></div>
+          <section class="mobile-more-actions" aria-labelledby="mobile-more-actions-title">
+            <h3 id="mobile-more-actions-title">Quick actions</h3>
+            <div class="more-action-list">
+              <button id="mobile-chat" class="more-action" type="button" aria-controls="chat-rail">Open chat</button>
+              <button id="mobile-people" class="more-action" type="button" aria-controls="meeting-sidebar" aria-haspopup="dialog">View participants</button>
+            </div>
+          </section>
+          <section id="connection-summary" class="settings-section connection-summary" data-panel="settings" data-level="connecting" aria-labelledby="connection-summary-title">
             <div class="connection-summary-heading"><span class="connection-summary-dot" aria-hidden="true"></span><div><p class="eyebrow">Live status</p><h3 id="connection-summary-title">Connecting</h3></div></div>
             <p id="connection-summary-copy" class="setting-note">Connecting to the room.</p>
             <p id="connection-preference" class="setting-note">Data preference: Automatic</p>
             <p class="setting-note incoming-video-help">Incoming video controls only what this device receives. Others can still see you if your camera is on.</p>
           </section>
+          <section id="connection-metrics" class="settings-section" data-panel="settings" aria-labelledby="connection-metrics-title">
+            <div class="section-title-row"><h3 id="connection-metrics-title">Connection</h3><span id="connection-metrics-status" class="section-count">No sample</span></div>
+            <dl class="stats-list connection-metrics-list">
+              <div><dt>Status</dt><dd id="metric-status">Connecting</dd></div>
+              <div><dt>ICE</dt><dd id="metric-ice-state">No sample</dd></div>
+              <div><dt>RTT</dt><dd id="metric-rtt">No sample</dd></div>
+              <div><dt>Jitter / loss</dt><dd id="metric-jitter-loss">No sample</dd></div>
+              <div><dt>Video in / out</dt><dd id="metric-video-bitrate">No sample</dd></div>
+              <div><dt>Audio in / out</dt><dd id="metric-audio-bitrate">No sample</dd></div>
+              <div><dt>Camera</dt><dd id="metric-camera-format">Not active</dd></div>
+              <div><dt>Screen</dt><dd id="metric-screen-format">Not active</dd></div>
+              <div><dt>Reconnects</dt><dd id="metric-reconnects">0</dd></div>
+            </dl>
+          </section>
           <section class="settings-section"><h3>Devices</h3><div class="device-row"><label for="settings-mic">Microphone</label><select id="settings-mic"><option value="">System default</option></select></div><div class="device-row"><label for="settings-camera">Camera</label><select id="settings-camera"><option value="">System default</option></select></div><div class="device-row"><label for="settings-speaker">Speaker</label><select id="settings-speaker"><option value="">System default</option></select></div><div id="mic-level-meter" class="level-meter" role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div><video id="settings-preview" class="settings-preview" autoplay muted playsinline hidden></video></section>
           <section id="people-section" class="settings-section" aria-labelledby="people-title"><div class="section-title-row"><h3 id="people-title">People</h3><span id="people-count" class="section-count">1</span></div><ul id="people-list" class="people-list"></ul></section>
           <section class="settings-section"><h3>Bandwidth</h3><div class="setting-line"><label for="profile">Video profile</label><select id="profile" aria-describedby="profile-help"><option value="auto">Automatic</option><option value="very-slow">Very slow</option><option value="slow">Slow</option><option value="normal">Normal</option><option value="high">High</option></select></div><p id="profile-help" class="setting-note">Automatic adapts video after real connection samples.</p><div class="setting-line"><label for="camera-quality">Camera quality</label><select id="camera-quality"><option value="720p">720p</option><option value="480p">480p</option><option value="360p">360p</option><option value="240p">240p</option><option value="off">Off</option></select></div><p id="effective-profile" class="setting-note">Effective profile: waiting for media</p><p class="setting-note">Remote participants are shown in pages of 9; your self-view stays visible.</p><label class="switch-row" for="audio-only"><span><strong>Protect audio</strong><small id="audio-only-help">Turns off your outgoing camera; active screen sharing stops.</small></span><input id="audio-only" type="checkbox" aria-describedby="audio-only-help"><span class="switch" aria-hidden="true"></span></label><label class="switch-row" for="self-view"><span><strong>Show self-view</strong><small>Hiding it does not turn off your camera.</small></span><input id="self-view" type="checkbox" checked><span class="switch" aria-hidden="true"></span></label></section>
-          <section class="mobile-more-actions" aria-labelledby="more-actions-title"><h3 id="more-actions-title">More controls</h3><div class="more-action-list"><button id="more-receive-video" class="more-action" type="button" aria-pressed="true" aria-describedby="incoming-video-help">Incoming video</button><button id="more-chat" class="more-action" type="button">Chat</button><button id="more-people" class="more-action" type="button">People</button><button id="more-screen" class="more-action" type="button">Share screen</button></div></section>
           <section class="settings-section"><details open><summary>Connection details</summary><dl class="stats-list"><div hidden><dt>RTT</dt><dd id="stat-rtt"></dd></div><div hidden><dt>Jitter</dt><dd id="stat-jitter"></dd></div><div hidden><dt>Packet loss</dt><dd id="stat-loss"></dd></div><div hidden><dt>In / out</dt><dd id="stat-bitrate"></dd></div><div hidden><dt>Resolution</dt><dd id="stat-resolution"></dd></div></dl><button id="copy-diagnostics" class="text-button" type="button">Copy diagnostics</button><pre id="diagnostics">Waiting for media statistics…</pre><p id="diagnostics-status" class="status-message" role="status"></p></details></section>
           <button id="enable-audio" class="button-secondary audio-prompt" type="button" hidden>Enable remote audio</button>
         </aside>
@@ -134,14 +154,15 @@
           <div id="meeting-alert" class="meeting-alert" role="status" aria-live="polite" hidden></div>
           <div class="stage-status" aria-live="polite">
             <span id="connection-message" class="sr-only">Connecting</span>
-            <button id="pause-all" class="stage-action" type="button" aria-describedby="incoming-video-help" aria-label="Turn off incoming video" title="Turn off incoming video">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 9v6M15 9v6"/></svg>
-              <span>Turn off incoming video</span>
-            </button>
           </div>
           <p id="incoming-video-help" class="sr-only">Turn off video received by this device. Other participants can still see your camera.</p>
           <div class="sr-only"><h2 id="participants-title">Participants</h2></div>
-          <ul id="participants" class="participant-grid" data-count="0" tabindex="-1"></ul>
+          <div id="meeting-layout-host" class="meeting-layout-host" data-layout-mode="grid">
+            <ul id="participants" class="participant-grid" data-count="0" tabindex="-1"></ul>
+            <section id="pinned-layout" class="pinned-layout" hidden aria-label="Pinned participant"><div id="pinned-main" class="layout-main"></div><div id="pinned-filmstrip" class="layout-filmstrip"></div></section>
+            <section id="screen-share-layout" class="screen-share-layout" hidden aria-label="Screen share"><div id="screen-share-main" class="layout-main"></div><div id="screen-share-filmstrip" class="layout-filmstrip"></div></section>
+            <div id="layout-parking" class="layout-parking" hidden aria-hidden="true"></div>
+          </div>
           <div id="participant-pagination" class="participant-pagination" aria-label="Participant pages" hidden><button id="participant-page-previous" class="pagination-button" type="button" aria-label="Previous participant page">Previous</button><span id="participant-page-status" role="status" aria-live="polite">Page 1 of 1</span><button id="participant-page-next" class="pagination-button" type="button" aria-label="Next participant page">Next</button></div>
           <p id="participant-focus-status" class="sr-only" role="status" aria-live="polite"></p>
           <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
@@ -192,6 +213,7 @@
     </section>
   </main>
   <script src="/js/adaptation-policy.js"></script>
+  <script src="/js/meeting-layout.js"></script>
   <script src="/js/protocol.js"></script>
   <script src="/js/app.js"></script>
 </body>

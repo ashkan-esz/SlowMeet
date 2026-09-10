@@ -128,3 +128,43 @@ func TestRemovePublicationDoesNotDeleteReplacement(t *testing.T) {
 		t.Fatal("replacement publication was deleted by stale forwarder")
 	}
 }
+
+func TestRolePublicationIdentity(t *testing.T) {
+	for _, test := range []struct {
+		role     SourceRole
+		key      string
+		trackID  string
+		streamID string
+	}{
+		{SourceRoleAudio, "p1/audio", "p1|audio", "lowmeet-p1-audio"},
+		{SourceRoleCamera, "p1/camera", "p1|camera", "lowmeet-p1-camera"},
+		{SourceRoleScreen, "p1/screen", "p1|screen", "lowmeet-p1-screen"},
+	} {
+		pub := &publication{
+			key: test.key, sourceID: "p1", role: test.role,
+			trackID: test.trackID, streamID: test.streamID,
+		}
+		if pub.key != test.key || pub.trackID != test.trackID || pub.streamID != test.streamID {
+			t.Fatalf("publication identity = %+v, want key=%q track=%q stream=%q", pub, test.key, test.trackID, test.streamID)
+		}
+	}
+}
+
+func TestUnpublishRemovesOnlySelectedRole(t *testing.T) {
+	router := NewRouter()
+	router.pubs["p1/audio"] = &publication{key: "p1/audio", sourceID: "p1", role: SourceRoleAudio}
+	router.pubs["p1/camera"] = &publication{key: "p1/camera", sourceID: "p1", role: SourceRoleCamera}
+	router.pubs["p1/screen"] = &publication{key: "p1/screen", sourceID: "p1", role: SourceRoleScreen}
+
+	router.Unpublish("p1", SourceRoleScreen)
+
+	if _, exists := router.pubs["p1/screen"]; exists {
+		t.Fatal("screen publication was not removed")
+	}
+	if _, exists := router.pubs["p1/audio"]; !exists {
+		t.Fatal("audio publication was removed with screen")
+	}
+	if _, exists := router.pubs["p1/camera"]; !exists {
+		t.Fatal("camera publication was removed with screen")
+	}
+}
