@@ -94,5 +94,8 @@ assert.match(adminMarkup, /id="ready-check"/);
 assert.match(adminMarkup, /id="network-health-status"/);
 assert.match(adminMarkup, /id="password"[^>]+aria-describedby="password-help"/);
 assert.match(adminMarkup, /id="service-label"[^>]+aria-live="polite"/);
+assert.match(adminSource, /retain_chat_history/);
+assert.match(adminMarkup, /id="retain-chat-history"/);
+assert.match(adminMarkup, /removed 30 minutes after the room becomes empty/);
 assert.ok(!adminMarkup.includes('Authenticate to view'));
 console.log('Admin dashboard tests passed');

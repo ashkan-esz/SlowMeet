@@ -2023,7 +2023,7 @@ body { overflow-x: hidden; }
   }
   .screen-share-layout { grid-template-rows: minmax(0, 1fr) 104px; }
   .pinned-layout .layout-filmstrip .participant-tile,
-  .screen-share-layout .layout-filmstrip .participant-tile {
+.screen-share-layout .layout-filmstrip .participant-tile {
     flex: 0 0 var(--filmstrip-tile-width, 160px);
     width: var(--filmstrip-tile-width, 160px);
     height: var(--filmstrip-tile-height, 90px);
@@ -2050,6 +2050,53 @@ body { overflow-x: hidden; }
     z-index: auto;
     cursor: default;
     touch-action: auto;
+  }
+}
+
+/* Meeting surface corrections: stable status chrome, screen-share ownership, and rail spacing. */
+.meeting-header-actions { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.connection {
+  min-width: 132px;
+  max-width: none;
+  min-height: 44px;
+  justify-content: flex-start;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  text-align: start;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.connection [data-network-label] { display: inline; overflow: visible; text-overflow: clip; }
+.network-chip__icon { display: inline-flex; width: 16px; height: 16px; flex: 0 0 16px; align-items: center; justify-content: center; }
+.network-chip__icon svg { width: 16px; height: 16px; }
+.connection:hover { border-color: currentColor; box-shadow: 0 4px 12px rgba(0,0,0,.12); }
+.connection:focus-visible { outline: 2px solid var(--lm-focus, var(--focus)); outline-offset: 2px; }
+.network-chip__copy { display: grid; min-width: 0; gap: 1px; line-height: 1.1; }
+.network-chip__copy small { color: currentColor; font-size: 10px; font-weight: 600; opacity: .72; white-space: nowrap; }
+.participant-tile.is-poor-connection { border: 2px solid var(--lm-danger, var(--danger)) !important; box-shadow: 0 0 0 2px rgba(239,101,109,.22); }
+.chat-rail .rail-header { padding-inline: 16px; }
+.meeting-layout-host { container-type: inline-size; container-name: meeting-layout; }
+.screen-share-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 24%);
+  grid-template-rows: minmax(0, 1fr);
+}
+.screen-share-layout .layout-filmstrip {
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.screen-share-layout .layout-filmstrip .participant-tile {
+  flex: 0 0 var(--filmstrip-tile-height, 102px);
+  width: 100%;
+  height: var(--filmstrip-tile-height, 102px);
+}
+@container meeting-layout (max-width: 720px) {
+  .screen-share-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 104px; }
+  .screen-share-layout .layout-filmstrip { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .screen-share-layout .layout-filmstrip .participant-tile {
+    flex: 0 0 var(--filmstrip-tile-width, 160px);
+    width: var(--filmstrip-tile-width, 160px);
+    height: var(--filmstrip-tile-height, 90px);
   }
 }
 

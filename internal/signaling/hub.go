@@ -27,7 +27,17 @@ const (
 	websocketPingPeriod = (websocketPongWait * 9) / 10
 	websocketWriteWait  = 10 * time.Second
 	maxJoinAttempts     = 5
+	chatRoomID          = "default"
+	chatHistoryLimit    = 100
+	chatHistoryTTL      = 30 * time.Minute
 )
+
+var chatHistoryExpiry = chatHistoryTTL
+
+type roomChatHistory struct {
+	messages []ChatHistoryEntry
+	expiry   *time.Timer
+}
 
 type client struct {
 	conn                      *websocket.Conn
@@ -65,6 +75,7 @@ type Hub struct {
 	pending      map[string]*pendingReconnect
 	metrics      *metrics.Metrics
 	screenSharer *client
+	chatHistory  map[string]*roomChatHistory
 	closed       bool
 }
 
@@ -79,6 +90,12 @@ func (h *Hub) Metrics() *metrics.Metrics {
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true
+	for _, history := range h.chatHistory {
+		if history.expiry != nil {
+			history.expiry.Stop()
+		}
+	}
+	h.chatHistory = make(map[string]*roomChatHistory)
 	pending := make([]*pendingReconnect, 0, len(h.pending))
 	for token, reconnect := range h.pending {
 		delete(h.pending, token)
@@ -104,6 +121,7 @@ func (h *Hub) Close() {
 
 func (h *Hub) BroadcastConfig(cfg config.Config) {
 	screenShareEnabled := cfg.EnableScreenShare
+	retainChatHistory := cfg.RetainChatHistory
 	releasedScreenShare := false
 	var releasedScreenSharer *client
 	h.mu.Lock()
@@ -127,7 +145,11 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		MaxVideoBitrate: cfg.MaxVideoBitrate, MaxVideoFPS: cfg.MaxVideoFPS,
 		MaxAudioBitrate: cfg.MaxAudioBitrate, MaxVideoQuality: cfg.EffectiveMaxVideoQuality(),
 		ScreenShareEnabled: &screenShareEnabled,
+		RetainChatHistory:  &retainChatHistory,
 	})
+	if !cfg.RetainChatHistory {
+		h.clearChatHistory()
+	}
 	if releasedScreenShare {
 		h.broadcast(h.screenShareMessage(false, ""))
 	}
@@ -137,16 +159,94 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	snapshot := cfg.Snapshot()
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
-		Upgrader: websocket.Upgrader{CheckOrigin: sameOrigin},
-		clients:  make(map[*client]struct{}),
-		pending:  make(map[string]*pendingReconnect),
-		metrics:  &metrics.Metrics{},
+		Upgrader:    websocket.Upgrader{CheckOrigin: sameOrigin},
+		clients:     make(map[*client]struct{}),
+		pending:     make(map[string]*pendingReconnect),
+		chatHistory: make(map[string]*roomChatHistory),
+		metrics:     &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
 			MaxVideoFPS:     snapshot.MaxVideoFPS,
 		}),
 	}
+}
+
+func (h *Hub) clearChatHistory() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, history := range h.chatHistory {
+		if history.expiry != nil {
+			history.expiry.Stop()
+		}
+	}
+	h.chatHistory = make(map[string]*roomChatHistory)
+}
+
+func (h *Hub) cancelChatHistoryExpiry(roomID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if history := h.chatHistory[roomID]; history != nil && history.expiry != nil {
+		history.expiry.Stop()
+		history.expiry = nil
+	}
+}
+
+func (h *Hub) chatHistorySnapshot(roomID string) []ChatHistoryEntry {
+	if !h.Config.Snapshot().RetainChatHistory {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	history := h.chatHistory[roomID]
+	if history == nil || len(history.messages) == 0 {
+		return nil
+	}
+	return append([]ChatHistoryEntry(nil), history.messages...)
+}
+
+func (h *Hub) recordChatMessage(roomID string, entry ChatHistoryEntry) {
+	if !h.Config.Snapshot().RetainChatHistory {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	history := h.chatHistory[roomID]
+	if history == nil {
+		history = &roomChatHistory{}
+		h.chatHistory[roomID] = history
+	}
+	if history.expiry != nil {
+		history.expiry.Stop()
+		history.expiry = nil
+	}
+	history.messages = append(history.messages, entry)
+	if len(history.messages) > chatHistoryLimit {
+		history.messages = history.messages[len(history.messages)-chatHistoryLimit:]
+	}
+}
+
+func (h *Hub) scheduleChatHistoryExpiry(roomID string) {
+	if !h.Config.Snapshot().RetainChatHistory || h.Meeting.Count() != 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	history := h.chatHistory[roomID]
+	if history == nil {
+		return
+	}
+	if history.expiry != nil {
+		history.expiry.Stop()
+	}
+	history.expiry = time.AfterFunc(chatHistoryExpiry, func() {
+		if h.Meeting.Count() != 0 {
+			return
+		}
+		h.mu.Lock()
+		delete(h.chatHistory, roomID)
+		h.mu.Unlock()
+	})
 }
 
 func (h *Hub) disconnect(c *client) {
@@ -259,6 +359,7 @@ func (h *Hub) deferReconnect(participant meeting.Participant, token string) {
 		h.mu.Unlock()
 		if exists && current == pending {
 			_ = h.Meeting.Leave(participant.ID)
+			h.scheduleChatHistoryExpiry(chatRoomID)
 			h.Logger.Info("participant_reconnect_expired", "participant_id", participant.ID)
 		}
 	}()
@@ -297,6 +398,7 @@ func (h *Hub) isPendingParticipant(id string) bool {
 func (h *Hub) removeParticipant(participant meeting.Participant) {
 	if h.Meeting.Leave(participant.ID) {
 		h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &participant})
+		h.scheduleChatHistoryExpiry(chatRoomID)
 		h.Logger.Info("participant_left", "participant_id", participant.ID, "name", participant.Name)
 	}
 }
@@ -403,6 +505,12 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				msg.ParticipantID = c.participant.ID
 				msg.Name = c.participant.Name
 				msg.ChatText = strings.TrimSpace(msg.ChatText)
+				if h.Config.Snapshot().RetainChatHistory {
+					h.recordChatMessage(chatRoomID, ChatHistoryEntry{
+						ID: uuid.NewString(), Author: c.participant.Name,
+						Text: msg.ChatText, Timestamp: time.Now().UTC(),
+					})
+				}
 				h.broadcastExcept(c, msg)
 				continue
 			}
@@ -428,6 +536,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.participant = participant
+		h.cancelChatHistoryExpiry(chatRoomID)
 		c.reconnectToken = msg.ReconnectToken
 		if !resumed {
 			c.reconnectToken = uuid.NewString()
@@ -484,7 +593,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})
-		_ = c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant, ReconnectToken: c.reconnectToken})
+		_ = c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
+			ReconnectToken: c.reconnectToken, ChatHistory: h.chatHistorySnapshot(chatRoomID)})
 		for _, existing := range h.Meeting.List() {
 			if existing.ID != participant.ID && !h.isPendingParticipant(existing.ID) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})

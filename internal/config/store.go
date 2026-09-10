@@ -73,6 +73,7 @@ type AdminUpdate struct {
 	MaxVideoFPS         *int    `json:"max_video_fps"`
 	MaxAudioBitrate     *int    `json:"max_audio_bitrate"`
 	ScreenShare         *bool   `json:"screen_share_enabled"`
+	RetainChatHistory   *bool   `json:"retain_chat_history"`
 }
 
 func (s *Store) Update(update AdminUpdate) error {
@@ -121,6 +122,9 @@ func updatedConfig(current Config, update AdminUpdate) (Config, error) {
 	if update.ScreenShare != nil {
 		next.EnableScreenShare = *update.ScreenShare
 	}
+	if update.RetainChatHistory != nil {
+		next.RetainChatHistory = *update.RetainChatHistory
+	}
 	if err := next.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -143,6 +147,7 @@ func persist(cfg Config, path string) error {
 		MaxVideoFPS:         intPointer(cfg.MaxVideoFPS),
 		MaxAudioBitrate:     intPointer(cfg.MaxAudioBitrate),
 		ScreenShare:         boolPointer(cfg.EnableScreenShare),
+		RetainChatHistory:   boolPointer(cfg.RetainChatHistory),
 	}, "", "  ")
 	if err != nil {
 		return err

@@ -53,6 +53,7 @@ const closeConnectionPopover = document.querySelector("#close-connection-popover
 const connectionPopoverTitle = document.querySelector("#connection-popover-title");
 const connectionPopoverCopy = document.querySelector("#connection-popover-copy");
 const connectionPopoverEmpty = document.querySelector("#connection-popover-empty");
+const connectionPopoverRetry = document.querySelector("#connection-popover-retry");
 const connectionPopoverControls = document.querySelector("#connection-popover-controls");
 const meetingAlert = document.querySelector("#meeting-alert");
 const testMedia = document.querySelector("#test-media");
@@ -75,6 +76,7 @@ const newMessages = document.querySelector("#new-messages");
 const participantCount = document.querySelector("#participant-count");
 const participantCountBadge = document.querySelector("#participant-count-badge");
 const audioOnly = document.querySelector("#audio-only");
+if (audioOnly) audioOnly.checked = false;
 const toastRegion = document.querySelector("#toast-region");
 const connectionMessage = document.querySelector("#connection-message");
 const participantPagination = document.querySelector("#participant-pagination");
@@ -86,6 +88,7 @@ const participantMenu = document.querySelector("#participant-menu");
 const participantMenuPin = document.querySelector("#participant-menu-pin");
 const participantMenuSelfView = document.querySelector("#participant-menu-self-view");
 const networkLabel = document.querySelector("[data-network-label]");
+const networkSummary = document.querySelector("[data-network-summary]");
 const statRTT = document.querySelector("#stat-rtt");
 const statJitter = document.querySelector("#stat-jitter");
 const statLoss = document.querySelector("#stat-loss");
@@ -178,10 +181,9 @@ function renderMeetingLayout() {
     visible.filter((element) => element !== pinned).forEach((element) => append(pinnedFilmstrip, element));
   } else {
     const owner = participantElements.get(meetingViewState.activeScreenShareId);
-    const pinned = participantElements.get(meetingViewState.pinnedParticipantId);
-    append(screenShareMain, pinned || owner, pinned ? "main" : "screen-main");
-    visible.filter((element) => element !== pinned && element !== owner).forEach((element) => append(screenShareFilmstrip, element));
-    if (owner && owner !== pinned) append(screenShareFilmstrip, owner);
+    const primary = owner || visible[0];
+    append(screenShareMain, primary, "screen-main");
+    visible.filter((element) => element !== primary).forEach((element) => append(screenShareFilmstrip, element));
   }
   excluded.forEach((element) => append(layoutParking, element));
   positionParticipantMenu();
@@ -210,7 +212,8 @@ function updateParticipantLayout() {
   if (filmstripContainer && typeof chooseFilmstripLayout === "function") {
     const filmstripBounds = filmstripContainer.getBoundingClientRect();
     const isMobilePinned = mode === "pinned" && window.matchMedia?.("(max-width: 720px)").matches;
-    const orientation = mode === "screen-share" || isMobilePinned ? "horizontal" : "vertical";
+    const isBottomScreenShare = mode === "screen-share" && filmstripBounds.height < 220;
+    const orientation = isBottomScreenShare || isMobilePinned ? "horizontal" : "vertical";
     const filmstripLayout = chooseFilmstripLayout({
       width: filmstripBounds.width,
       height: filmstripBounds.height,
@@ -699,7 +702,7 @@ function restoreFocusTo(target, fallback) {
   if (isVisibleFocusTarget(fallback)) fallback.focus();
 }
 
-function addChatMessage(author, body, system = false, own = false) {
+function addChatMessage(author, body, system = false, own = false, timestampValue = null) {
   if (!chatMessages) return;
   const message = document.createElement("article");
   message.className = `chat-message${system ? " chat-message--system" : ""}${own ? " chat-message--own" : ""}`;
@@ -713,7 +716,8 @@ function addChatMessage(author, body, system = false, own = false) {
   const authorLabel = document.createElement("span");
   authorLabel.textContent = system ? "System" : author;
   const timestamp = document.createElement("time");
-  timestamp.dateTime = new Date().toISOString();
+  const timestampDate = timestampValue ? new Date(timestampValue) : new Date();
+  timestamp.dateTime = Number.isNaN(timestampDate.getTime()) ? new Date().toISOString() : timestampDate.toISOString();
   timestamp.textContent = new Date(timestamp.dateTime).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit"
@@ -846,6 +850,16 @@ connectionPopoverControls?.addEventListener("click", () => {
   setConnectionPopoverOpen(false, null, false);
   setOpenPanel("settings", connectionPopoverControls);
 });
+connectionPopoverRetry?.addEventListener("click", () => {
+  setConnectionPopoverOpen(false, null, false);
+  if (socket?.readyState === WebSocket.OPEN && peer) {
+    restartRequested = false;
+    status.textContent = "Restarting media...";
+    socket.send(JSON.stringify({version: 1, type: "ice_restart"}));
+    return;
+  }
+  if (!meeting.hidden) connectSocket(nameInput.value.trim(), passwordInput.value);
+});
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
   if (chatPinnedToBottom && newMessages) newMessages.hidden = true;
@@ -963,22 +977,37 @@ document.addEventListener("keyup", (event) => {
 });
 
 function mountDebugParticipants() {
-  if (new URLSearchParams(window.location.search).get("debug") !== "6" || !localStream) return;
-  for (let index = 1; index < 6; index += 1) {
-    const id = `debug-${index}`;
-    if (participantElements.has(id)) continue;
-    addParticipant({ id, name: `Guest ${index}` });
+  const mode = typeof parseDebugMode === "function"
+    ? parseDebugMode(window.location.search)
+    : 0;
+  if (!mode || !localStream) return;
+  const fixtures = typeof chooseDebugParticipants === "function"
+    ? chooseDebugParticipants(mode)
+    : [];
+  fixtures.forEach((fixture, index) => {
+    const id = fixture.id;
+    if (participantElements.has(id)) return;
+    addParticipant(fixture);
     const element = participantElements.get(id);
-    if (!element) continue;
+    if (!element) return;
     element.video.srcObject = localStream;
     element.video.autoplay = true;
     element.video.muted = true;
     element.item.dataset.camera = "on";
+    if (fixture.debugNetwork) {
+      Object.entries(fixture.debugNetwork).forEach(([key, value]) => {
+        element.item.dataset[key] = String(value);
+      });
+    }
     element.avatar.hidden = true;
-    if (index === 2) element.item.classList.add("is-speaking");
-    updateMediaState({ participant_id: id, audio_enabled: index !== 4, video_enabled: true });
-  }
-  addChatSystem("Debug mode: six local preview tiles mounted");
+    if (mode === 6 && index === 1) element.item.classList.add("is-speaking");
+    updateMediaState({ participant_id: id, audio_enabled: index !== 3, video_enabled: true });
+    if (fixture.debugPoorConnection) {
+      element.item.dataset.connection = "poor";
+      setParticipantQuality(element, "poor");
+    }
+  });
+  addChatSystem(`Debug mode: ${mode === 6 ? "six" : "two"} local preview tiles mounted`);
 }
 
 function readStoredValue(key) {
@@ -1013,6 +1042,7 @@ let localScreenStream;
 let screenStream;
 let localCameraTrack;
 let localScreenTrack;
+let cameraOperation;
 let cameraSender;
 let screenSender;
 let cameraTrack;
@@ -1394,7 +1424,27 @@ async function renegotiateLocalMedia() {
   return renegotiationChain;
 }
 
+function waitForCameraRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 async function enableCamera() {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await enableCameraOnce();
+    } catch (error) {
+      lastError = error;
+      if (localCameraTrack || localCameraStream || cameraSender) {
+        await disableCamera().catch(() => {});
+      }
+      if (attempt < 2) await waitForCameraRetry(100 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error("camera is unavailable");
+}
+
+async function enableCameraOnce() {
   if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
@@ -1555,6 +1605,7 @@ function setParticipantQuality(element, quality) {
   const normalized = participantQualityLabels[quality] ? quality : "unknown";
   const label = participantQualityLabels[normalized];
   element.item.dataset.quality = normalized;
+  element.item.classList.toggle("is-poor-connection", normalized === "poor");
   element.quality.hidden = normalized === "unknown";
   element.quality.setAttribute("aria-label", `${element.name.textContent} connection quality: ${label}`);
   element.quality.title = `Connection quality: ${label}`;
@@ -1643,7 +1694,7 @@ function setParticipantConnectionState(state) {
       element.micIndicator.setAttribute("aria-label", `${element.name.textContent} disconnected`);
       updateParticipantAriaLabel(element);
     } else {
-      setParticipantQuality(element, "unknown");
+      setParticipantQuality(element, element.item.dataset.debugPoorConnection === "true" ? "poor" : "unknown");
       if (element.item.dataset.camera !== "unknown" || element.item.dataset.mic !== "unknown") {
         updateMediaState({
           participant_id: participantID,
@@ -1926,6 +1977,11 @@ function connectSocket(name, password) {
         meeting.hidden = false;
         if (meetingEnded) meetingEnded.hidden = true;
         status.textContent = "";
+        if (Array.isArray(message.chat_history)) {
+          message.chat_history.forEach((entry) => {
+            if (entry?.text) addChatMessage(entry.author || "Participant", entry.text, false, false, entry.timestamp);
+          });
+        }
         startWebRTC();
       }
     }
@@ -2051,7 +2107,8 @@ function resetMediaConnection() {
 async function startWebRTC() {
   const generation = socketGeneration;
   const currentSocket = socket;
-  if (new URLSearchParams(window.location.search).get("debug") === "6" && selectedCameraQuality !== "off") {
+  const debugMode = typeof parseDebugMode === "function" ? parseDebugMode(window.location.search) : 0;
+  if ((debugMode === 5 || debugMode === 6) && selectedCameraQuality !== "off") {
     cameraRequested = true;
   }
   await iceConfigReady;
@@ -2380,6 +2437,11 @@ function updateConnectionMetrics(values) {
   text("metric-reconnects", connectionMetrics.reconnects);
   const summary = document.querySelector("#connection-metrics-status");
   if (summary) summary.textContent = connectionMetrics.lastSampleAt ? "Live" : "No sample";
+  if (networkSummary) {
+    networkSummary.textContent = connectionMetrics.rttMs == null
+      ? "Waiting for metrics"
+      : `RTT ${connectionMetrics.rttMs} ms`;
+  }
 }
 
 async function updateDiagnostics() {
@@ -2555,6 +2617,10 @@ async function updateDiagnostics() {
   connectionMetrics.incomingScreenFps = values.screenFps ?? connectionMetrics.incomingScreenFps;
   updateConnectionMetrics(values);
   participantElements.forEach((element, id) => {
+    if (element.item.dataset.debugPoorConnection === "true") {
+      setParticipantQuality(element, "poor");
+      return;
+    }
     if (id === localParticipantID) {
       const localStats = {
         hasData: totalLost + totalReceived > 0 || values.rttMs != null,
@@ -2727,6 +2793,7 @@ function addParticipant(participant) {
   item.dataset.sharing = "false";
   item.dataset.camera = "unknown";
   item.dataset.quality = "unknown";
+  item.dataset.debugPoorConnection = String(participant.debugPoorConnection === true);
   const avatarSeed = hashName(participant.name);
   item.style.setProperty("--avatar-angle", `${120 + avatarSeed % 121}deg`);
   const avatar = document.createElement("span");
@@ -2802,7 +2869,7 @@ function addParticipant(participant) {
     trackIDs: new Set()
   });
   item.dataset.mic = "unknown";
-  setParticipantQuality(participantElements.get(participant.id), "unknown");
+  setParticipantQuality(participantElements.get(participant.id), participant.debugPoorConnection ? "poor" : "unknown");
   updateParticipantTileState(participantElements.get(participant.id));
   updateParticipantAriaLabel(participantElements.get(participant.id));
   updateParticipantCount();
@@ -3154,6 +3221,7 @@ mic.addEventListener("click", () => {
 });
 
 camera.addEventListener("click", async () => {
+  if (cameraOperation) return;
   audioContext?.resume().catch(() => {});
   if (audioOnly?.checked) {
     showToast("Turn off Protect audio before enabling the camera");
@@ -3164,14 +3232,19 @@ camera.addEventListener("click", async () => {
     showToast("Choose a camera quality before turning the camera on");
     return;
   }
-  try {
+  cameraOperation = (async () => {
     if (cameraRequested) await disableCamera();
     else await enableCamera();
+  })();
+  try {
+    await cameraOperation;
   } catch (error) {
     cameraRequested = false;
     meetingViewState.cameraEnabled = false;
     setLocalMediaControls();
     status.textContent = mediaAccessMessage("video", error);
+  } finally {
+    cameraOperation = undefined;
   }
 });
 

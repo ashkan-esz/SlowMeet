@@ -67,6 +67,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			"max_video_fps":         cfg.MaxVideoFPS,
 			"max_audio_bitrate":     cfg.MaxAudioBitrate,
 			"screen_share_enabled":  cfg.EnableScreenShare,
+			"retain_chat_history":   cfg.RetainChatHistory,
 		})
 	})
 	mux.HandleFunc("/ice-config", func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +179,7 @@ func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
 		"default_video_fps":     cfg.DefaultVideoFPS, "default_audio_bitrate": cfg.DefaultAudioBitrate,
 		"max_video_fps": cfg.MaxVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,
 		"screen_share_enabled": cfg.EnableScreenShare,
+		"retain_chat_history":  cfg.RetainChatHistory,
 	})
 }
 

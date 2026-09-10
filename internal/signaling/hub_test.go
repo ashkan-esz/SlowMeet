@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"testing"
@@ -98,6 +99,112 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	readTestMessage(t, second, &left)
 	if left.Type != TypeLeft || left.Participant.Name != "Ashkan" {
 		t.Fatalf("leave broadcast = %+v", left)
+	}
+}
+
+func TestChatHistoryRetentionIsRoomScopedCappedAndExpiring(t *testing.T) {
+	oldExpiry := chatHistoryExpiry
+	chatHistoryExpiry = 20 * time.Millisecond
+	t.Cleanup(func() { chatHistoryExpiry = oldExpiry })
+
+	cfg := config.Config{RetainChatHistory: true, MaxParticipants: 2}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	t.Cleanup(hub.Close)
+
+	for index := 0; index < 105; index++ {
+		hub.recordChatMessage("room-a", ChatHistoryEntry{
+			ID: fmt.Sprintf("message-%d", index), Author: "Ashkan", Text: "hello",
+			Timestamp: time.Unix(int64(index), 0).UTC(),
+		})
+	}
+	if got := hub.chatHistorySnapshot("room-a"); len(got) != chatHistoryLimit || got[0].ID != "message-5" {
+		t.Fatalf("room-a history = %d messages starting with %q, want 100 starting with message-5", len(got), got[0].ID)
+	}
+	if got := hub.chatHistorySnapshot("room-b"); got != nil {
+		t.Fatalf("room-b history = %#v, want nil", got)
+	}
+
+	hub.scheduleChatHistoryExpiry("room-a")
+	time.Sleep(50 * time.Millisecond)
+	if got := hub.chatHistorySnapshot("room-a"); got != nil {
+		t.Fatalf("expired room history = %#v, want nil", got)
+	}
+}
+
+func TestChatHistoryIsReplayedToNewRoomMembers(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		RetainChatHistory:   true,
+		MaxParticipants:     3,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(3), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	var firstSeesSecond Message
+	readTestMessage(t, first, &firstSeesSecond)
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeChat,
+		ParticipantID: firstJoined.Participant.ID, ChatText: "Retained hello",
+	})
+	var secondSeesChat Message
+	readTestMessage(t, second, &secondSeesChat)
+
+	third := dialTestSocket(t, socketURL)
+	defer third.Close()
+	writeTestMessage(t, third, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Sara"})
+	var thirdJoined Message
+	readTestMessage(t, third, &thirdJoined)
+	if len(thirdJoined.ChatHistory) != 1 || thirdJoined.ChatHistory[0].Text != "Retained hello" ||
+		thirdJoined.ChatHistory[0].Author != "Ashkan" {
+		t.Fatalf("replayed chat history = %#v", thirdJoined.ChatHistory)
+	}
+}
+
+func TestDisablingChatHistoryClearsExistingMessages(t *testing.T) {
+	retain := true
+	store := config.NewStore(config.Config{
+		HTTPAddr:            ":8080",
+		RetainChatHistory:   true,
+		MaxParticipants:     2,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	})
+	hub := NewHub(meeting.New(2), store, slog.Default())
+	t.Cleanup(hub.Close)
+	hub.recordChatMessage("default", ChatHistoryEntry{ID: "message-1", Author: "Ashkan", Text: "hello"})
+	if got := hub.chatHistorySnapshot("default"); len(got) != 1 {
+		t.Fatalf("initial history length = %d, want 1", len(got))
+	}
+	retain = false
+	if err := store.Update(config.AdminUpdate{RetainChatHistory: &retain}); err != nil {
+		t.Fatalf("disabling retention failed: %v", err)
+	}
+	hub.clearChatHistory()
+	if got := hub.chatHistorySnapshot("default"); got != nil {
+		t.Fatalf("cleared history = %#v, want nil", got)
 	}
 }
 

@@ -56,6 +56,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	if cfg.ReconnectTimeout != 30*time.Second {
 		t.Fatalf("unexpected reconnect timeout: %s", cfg.ReconnectTimeout)
 	}
+	if cfg.RetainChatHistory {
+		t.Fatal("chat history retention must default to disabled")
+	}
 }
 
 func TestLoadFromEnvParsesTURNAndIPv4Settings(t *testing.T) {

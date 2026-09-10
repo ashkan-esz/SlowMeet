@@ -15,6 +15,32 @@ function visibleParticipantIds(participantOrder, localParticipantId, showSelfVie
   return (participantOrder || []).filter((id) => showSelfView || id !== localParticipantId);
 }
 
+function parseDebugMode(search = "") {
+  const value = new URLSearchParams(search).get("debug");
+  return value === "5" || value === "6" ? Number(value) : 0;
+}
+
+function createPoorConnectionFixture() {
+  return {
+    id: "debug-poor-network",
+    name: "Poor connection test",
+    debugPoorConnection: true,
+    debugNetwork: { rttMs: 850, packetLoss10: 180, jitterMs: 240, videoKbps: 24, audioKbps: 24 }
+  };
+}
+
+function chooseDebugParticipants(mode) {
+  if (mode !== 5 && mode !== 6) return [];
+  if (mode === 5) return [createPoorConnectionFixture()];
+  return [
+    { id: "debug-1", name: "Guest 1" },
+    { id: "debug-2", name: "Guest 2" },
+    { id: "debug-3", name: "Guest 3" },
+    { id: "debug-4", name: "Guest 4" },
+    createPoorConnectionFixture()
+  ];
+}
+
 function formatMetric(value, unit = "", placeholder = "No sample") {
   if (value === null || value === undefined || value === "") return placeholder;
   if (typeof value === "number" && !Number.isFinite(value)) return placeholder;
@@ -87,6 +113,9 @@ if (typeof module !== "undefined") {
   module.exports = {
     deriveMeetingLayoutMode,
     visibleParticipantIds,
+    parseDebugMode,
+    createPoorConnectionFixture,
+    chooseDebugParticipants,
     formatMetric,
     chooseActiveSpeaker,
     speakerDebounce,

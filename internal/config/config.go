@@ -37,6 +37,7 @@ type Config struct {
 	MaxVideoBitrate     int
 	MaxAudioBitrate     int
 	EnableScreenShare   bool
+	RetainChatHistory   bool
 	ReconnectTimeout    time.Duration
 	LogLevel            string
 }

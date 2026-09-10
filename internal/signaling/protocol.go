@@ -3,9 +3,17 @@ package signaling
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"SlowMeet/internal/meeting"
 )
+
+type ChatHistoryEntry struct {
+	ID        string    `json:"id"`
+	Author    string    `json:"author"`
+	Text      string    `json:"text"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
 const (
 	ProtocolVersion  = 1
@@ -50,6 +58,7 @@ type Message struct {
 	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
 	MaxVideoQuality    string               `json:"max_video_quality,omitempty"`
 	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
+	RetainChatHistory  *bool                `json:"retain_chat_history,omitempty"`
 	RTTMs              int                  `json:"rtt_ms,omitempty"`
 	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
 	JitterMs           int                  `json:"jitter_ms,omitempty"`
@@ -58,6 +67,7 @@ type Message struct {
 	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
 	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
 	ChatText           string               `json:"text,omitempty"`
+	ChatHistory        []ChatHistoryEntry   `json:"chat_history,omitempty"`
 }
 
 func (m Message) Validate() error {

@@ -99,6 +99,10 @@ if (!appSource.includes('const streamPrefix = "lowmeet-";') ||
   throw new Error("remote video tracks must resolve and start playback");
 }
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
+if (!indexSource.includes('id="audio-only" type="checkbox" autocomplete="off"') ||
+    indexSource.includes('id="audio-only" type="checkbox" checked')) {
+  throw new Error("protect-audio toggle must default to off");
+}
 const sidebarPosition = indexSource.indexOf('id="meeting-sidebar"');
 const stagePosition = indexSource.indexOf('<section class="stage-panel"');
 if (sidebarPosition < 0 || stagePosition < 0 || sidebarPosition > stagePosition) {

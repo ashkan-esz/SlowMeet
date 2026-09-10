@@ -27,7 +27,8 @@ const fields = {
   max_video_bitrate: document.querySelector("#video-bitrate"),
   max_video_fps: document.querySelector("#video-fps"),
   max_audio_bitrate: document.querySelector("#audio-bitrate"),
-  screen_share_enabled: document.querySelector("#screen-share")
+  screen_share_enabled: document.querySelector("#screen-share"),
+  retain_chat_history: document.querySelector("#retain-chat-history")
 };
 
 const metricFields = {
@@ -117,9 +118,11 @@ function renderPolicySummary(values) {
   const qualityLabel = (value) => value.charAt(0).toUpperCase() + value.slice(1);
   summaryValues[0].textContent = `${qualityLabel(videoQuality)} default · ${qualityLabel(maxVideoQuality)} max · ${videoBitrate}`;
   summaryValues[1].textContent = `${audioBitrate} max${Number.isFinite(values.max_video_fps) ? ` · ${values.max_video_fps} fps video` : ""}`;
-  summaryValues[2].textContent = values.screen_share_enabled == null
-    ? "Not available"
+  const screenShareLabel = values.screen_share_enabled == null
+    ? "Screen sharing unknown"
     : values.screen_share_enabled ? "Screen sharing allowed" : "Screen sharing disabled";
+  const retentionLabel = values.retain_chat_history ? "chat history retained" : "chat history not retained";
+  summaryValues[2].textContent = `${screenShareLabel} · ${retentionLabel}`;
 }
 
 function setServiceState(level, label, detail, record = true) {
@@ -194,7 +197,8 @@ function collectSettings() {
     max_video_bitrate: bitrateFromKbps(fields.max_video_bitrate.value),
     max_video_fps: Number(fields.max_video_fps.value),
     max_audio_bitrate: bitrateFromKbps(fields.max_audio_bitrate.value),
-    screen_share_enabled: fields.screen_share_enabled.checked
+    screen_share_enabled: fields.screen_share_enabled.checked,
+    retain_chat_history: fields.retain_chat_history.checked
   };
 }
 
@@ -206,6 +210,7 @@ function applySettingsToForm(values) {
   if (values.max_video_fps != null) fields.max_video_fps.value = values.max_video_fps;
   if (values.max_audio_bitrate != null) fields.max_audio_bitrate.value = displayKbps(values.max_audio_bitrate);
   if (values.screen_share_enabled != null) fields.screen_share_enabled.checked = values.screen_share_enabled;
+  if (values.retain_chat_history != null) fields.retain_chat_history.checked = values.retain_chat_history;
 }
 
 function renderValidation(errors) {
