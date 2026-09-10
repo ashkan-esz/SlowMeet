@@ -91,6 +91,22 @@ for (const behavior of [
     throw new Error(`chat panel opening must not depend on a stalled animation frame: ${behavior}`);
   }
 }
+for (const behavior of [
+  'setTimeout(() => {\n      connectionPopover.classList.add("is-open");',
+  'closeConnectionPopover?.focus();\n    }, 0);'
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`connection popover opening must not depend on a stalled animation frame: ${behavior}`);
+  }
+}
+for (const behavior of [
+  'function openPeoplePanel(trigger = participantsButton) {\n  setOpenPanel("people", trigger);\n  setTimeout(() => {',
+  'peopleList.focus({ preventScroll: true });\n  }, 0);'
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`People panel focus must not depend on a stalled animation frame: ${behavior}`);
+  }
+}
 if ((appSource.match(/closeOpenPanel\(false\);/g) || []).length < 2) {
   throw new Error("connection popover and meeting teardown must clear panel state");
 }

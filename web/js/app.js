@@ -872,11 +872,11 @@ selfView?.addEventListener("change", () => setSelfViewVisibility(selfView.checke
 more?.addEventListener("click", () => setOpenPanel("settings", more));
 function openPeoplePanel(trigger = participantsButton) {
   setOpenPanel("people", trigger);
-  requestAnimationFrame(() => {
+  setTimeout(() => {
     if (!peopleList) return;
     peopleList.tabIndex = -1;
     peopleList.focus({ preventScroll: true });
-  });
+  }, 0);
 }
 participantsButton?.addEventListener("click", openPeoplePanel);
 mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
@@ -2224,10 +2224,10 @@ function setConnectionPopoverOpen(open, trigger = null, restoreFocus = true) {
     connectionPopover.setAttribute("aria-hidden", "false");
     connection.setAttribute("aria-expanded", "true");
     updateConnectionPopover(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       connectionPopover.classList.add("is-open");
       closeConnectionPopover?.focus();
-    });
+    }, 0);
     return;
   }
   const focusTarget = connectionPopoverFocusTrigger;
