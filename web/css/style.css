@@ -1992,11 +1992,45 @@ body { overflow-x: hidden; }
 .participant-share-label::before { content: "Screen share"; }
 .participant-share-label { font-size: 0; }
 .participant-share-label::before { font-size: .72rem; }
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid.has-remote > .participant-tile.is-local {
+  position: relative;
+  inset: auto;
+  inset-inline-start: auto;
+  inset-inline-end: auto;
+  inset-block-start: auto;
+  inset-block-end: auto;
+  z-index: auto;
+  cursor: default;
+  touch-action: auto;
+}
 @media (max-width: 720px) {
   .pinned-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) 112px; }
   .pinned-layout .layout-filmstrip { flex-direction: row; }
   .screen-share-layout { grid-template-rows: minmax(0, 1fr) 104px; }
   .layout-filmstrip .participant-tile { flex-basis: 160px; width: 160px; height: 90px; }
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid {
+    align-content: start;
+    align-items: stretch;
+    justify-content: stretch;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile.is-local {
+    position: relative;
+    inset: auto;
+    inset-inline: auto;
+    inset-block: auto;
+    z-index: auto;
+    cursor: default;
+    touch-action: auto;
+  }
 }
 
 /* The shell owns panel columns. Keep the content wrapper transparent to that grid. */

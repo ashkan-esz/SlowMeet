@@ -257,6 +257,7 @@ for (const behavior of [
 for (const behavior of [
   "id=\"participant-menu\"",
   "participant-menu-trigger",
+  "meetingLayoutHost.addEventListener(\"click\"",
   "setPinnedParticipant",
   "data-action=\"pin\"",
   "data-action=\"self-view\"",
@@ -268,11 +269,16 @@ for (const behavior of [
     throw new Error(`participant tile menu behavior is missing: ${behavior}`);
   }
 }
+if (appSource.includes("participants.addEventListener(\"click\"")) {
+  throw new Error("participant menu delegation must include pinned and screen-share layouts");
+}
 for (const behavior of [
   "cameraQualityPresets",
   "meeting.cameraQuality",
   "cameraConstraintsForQuality",
   "selectedCameraQuality",
+  "getVideoTracks",
+  "hasCameraTrack",
   "updateParticipantAriaLabel",
   "item.tabIndex = 0",
   "participantFocusStatus"
@@ -390,6 +396,24 @@ for (const style of [
 ]) {
   if (!styleSource.includes(style)) {
     throw new Error(`production edge-case style is missing: ${style}`);
+  }
+}
+for (const style of [
+      ".meeting-layout-host[data-layout-mode=\"grid\"] > .participant-grid",
+      ".meeting-layout-host[data-layout-mode=\"grid\"] > .participant-grid > .participant-tile",
+      ".meeting-layout-host[data-layout-mode=\"grid\"] > .participant-grid > .participant-tile.is-local",
+      ".meeting-layout-host[data-layout-mode=\"grid\"] > .participant-grid.has-remote > .participant-tile.is-local",
+      "overflow-y: auto",
+      "aspect-ratio: 16 / 9",
+      "inset-inline: auto",
+      "inset-block: auto",
+      "inset-inline-start: auto",
+      "inset-inline-end: auto",
+      "inset-block-start: auto",
+      "inset-block-end: auto"
+    ]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`narrow grid width behavior is missing: ${style}`);
   }
 }
 for (const behavior of [

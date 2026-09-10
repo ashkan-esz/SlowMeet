@@ -327,7 +327,9 @@ function updateParticipantVideoVisibility(element) {
   if (!element?.item) return;
   const videoOn = element.item.dataset.camera === "on";
   const isLocal = element.item.classList.contains("is-local");
-  const visible = videoOn && (isLocal || receiveVideoEnabled);
+  const hasCameraTrack = Boolean(element.cameraVideo?.srcObject?.getVideoTracks?.()
+    .some((track) => track.readyState !== "ended"));
+  const visible = videoOn && hasCameraTrack && (isLocal || receiveVideoEnabled);
   const hasScreen = Boolean(element.screenVideo?.srcObject) && element.item.dataset.sharing === "true";
   const screenMain = element.item.classList.contains("is-screen-main");
   element.item.dataset.receiveVideo = String(visible);
@@ -575,7 +577,7 @@ participants.addEventListener("keydown", (event) => {
   setPipPosition(item, position);
 });
 
-participants.addEventListener("click", (event) => {
+meetingLayoutHost.addEventListener("click", (event) => {
   const trigger = event.target.closest?.(".participant-menu-trigger");
   if (!trigger) return;
   event.preventDefault();
