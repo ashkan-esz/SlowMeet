@@ -39,13 +39,18 @@ if (visibleParticipantIds(["local", "p1"], "local", true).length !== 2) {
   throw new Error("self-view enabled should preserve all participants");
 }
 const five = chooseParticipantLayout({ width: 1200, height: 620, count: 5 });
-if (five.columns !== 3 || five.rows !== 2 || five.rowCounts.join(",") !== "3,2") {
-  throw new Error("five tiles should use a centered 3+2 incomplete row");
+if (five.columns !== 2 || five.rows !== 3 || five.rowCounts.join(",") !== "2,2,1") {
+  throw new Error("five tiles should use a two-column layout");
 }
 const wide = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 const narrow = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
-if (wide.columns !== 3 || wide.rows !== 2 || narrow.columns !== 2 || narrow.rows !== 3) {
-  throw new Error("wide and narrow grid choices are incorrect");
+const ultraNarrow = chooseParticipantLayout({ width: 120, height: 1110, count: 5, minTileWidth: 132 });
+const eight = chooseParticipantLayout({ width: 1200, height: 620, count: 8 });
+const nine = chooseParticipantLayout({ width: 1200, height: 620, count: 9 });
+if (wide.columns !== 2 || wide.rows !== 3 || narrow.columns !== 2 || narrow.rows !== 3 ||
+    ultraNarrow.columns !== 1 || ultraNarrow.rows !== 5 ||
+    eight.columns > 2 || eight.rowCounts.some((rowCount) => rowCount > 2) || nine.columns < 2) {
+  throw new Error("fewer than nine participants must use no more than two columns");
 }
 const singlePinned = chooseFilmstripLayout({ width: 323, height: 634, count: 1, orientation: "vertical", minTileHeight: 102 });
 if (singlePinned.rows !== 1 || singlePinned.tileWidth !== 323 || singlePinned.tileHeight !== 634 || singlePinned.overflow) {
@@ -82,6 +87,7 @@ if (state.speaking) throw new Error("speaker deactivation should occur after the
 
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
 for (const element of [
   'class="mobile-more-actions"',
   'id="mobile-chat"',
@@ -171,5 +177,26 @@ if (!appSource.includes('item.classList.toggle("is-poor-connection", normalized 
 }
 if (!indexSource.includes('data-network-summary') || !indexSource.includes('id="chat-rail"')) {
   throw new Error("meeting status and chat rail markup is missing");
+}
+if ((indexSource.match(/id="leave"/g) || []).length !== 1 ||
+    !indexSource.includes('<button id="leave"') ||
+    !indexSource.includes('</div>\n        <button id="leave"')) {
+  throw new Error("leave control must remain a single toolbar action aligned outside the session group");
+}
+for (const rule of [
+  ".stage-panel {\n  border: 0;",
+  ".participant-grid {\n  width: 100%;",
+  "@media (max-height: 1220px) and (min-width: 901px)",
+  "@media (min-height: 1101px) and (min-width: 901px)",
+  ".participant-grid > li.participant-tile",
+  ".participant-grid.has-remote > li.participant-tile.is-local",
+  ".meeting-toolbar {\n  justify-content: space-between;",
+  ".meeting-toolbar::before",
+  ".meeting-toolbar > #leave",
+  ".network-chip.connection {\n  min-width: 0;"
+]) {
+  if (!styleSource.includes(rule)) {
+    throw new Error(`meeting UI refinement rule is missing: ${rule}`);
+  }
 }
 console.log("Meeting layout tests passed");

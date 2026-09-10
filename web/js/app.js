@@ -245,7 +245,8 @@ function updateParticipantLayout() {
     count: visibleItems.length,
     gap,
     preferredColumns: preferredLayoutColumns,
-    minTileWidth: Math.min(180, Math.max(132, bounds.width / 2.6)),
+    maxColumns: mode === "grid" && window.matchMedia?.("(max-width: 700px)").matches && visibleItems.length <= 4 ? 1 : 0,
+    minTileWidth: Math.min(180, Math.max(160, bounds.width / 2.6)),
     minTileHeight: 82
   });
   preferredLayoutColumns = layout.columns;

@@ -49,13 +49,38 @@ if (isBelowBitrate(20, 40) !== true ||
   throw new Error("missing inbound video bitrate must not be treated as critical");
 }
 const sixPersonLayout = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
-if (sixPersonLayout.columns !== 3 || sixPersonLayout.rows !== 2 ||
-    sixPersonLayout.tileWidth < 300 || sixPersonLayout.tileHeight < 160) {
-  throw new Error("six participants should use a compact three-by-two layout");
+if (sixPersonLayout.columns !== 2 || sixPersonLayout.rows !== 3 ||
+    sixPersonLayout.rowCounts.some((rowCount) => rowCount > 2) ||
+    sixPersonLayout.tileWidth < 260 || sixPersonLayout.tileHeight < 140) {
+  throw new Error("six participants should use a compact two-column layout");
 }
-const mobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
-if (mobileLayout.columns !== 2 || mobileLayout.rows !== 3 || mobileLayout.tileWidth < 140) {
-  throw new Error("mobile participant layout should preserve usable tile width");
+const mobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 6, minTileWidth: 160 });
+const fourParticipantMobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 4, maxColumns: 1, minTileWidth: 160 });
+if (mobileLayout.columns !== 2 || mobileLayout.rows !== 3 || mobileLayout.tileWidth < 140 ||
+    fourParticipantMobileLayout.columns !== 1 || fourParticipantMobileLayout.rows !== 4) {
+  throw new Error("mobile layouts should use one tile per row through four participants");
+}
+// Stage content is narrower than the viewport because of the meeting gutters.
+const compactPhoneLayout = chooseParticipantLayout({ width: 288, height: 504, count: 6, minTileWidth: 160 });
+const narrowPhoneLayout = chooseParticipantLayout({ width: 328, height: 676, count: 6, minTileWidth: 160 });
+const standardPhoneLayout = chooseParticipantLayout({ width: 358, height: 812, count: 6, minTileWidth: 160 });
+const widePhoneLayout = chooseParticipantLayout({ width: 398, height: 900, count: 6, minTileWidth: 160 });
+if (compactPhoneLayout.columns !== 1 || compactPhoneLayout.rows !== 6 ||
+    narrowPhoneLayout.columns !== 1 || narrowPhoneLayout.rows !== 6 ||
+    standardPhoneLayout.columns !== 2 || standardPhoneLayout.rows !== 3 ||
+    widePhoneLayout.columns !== 2 || widePhoneLayout.rows !== 3) {
+  throw new Error("phone layout policy should preserve the adaptive non-mobile behavior");
+}
+const eightPersonLayout = chooseParticipantLayout({ width: 1280, height: 720, count: 8 });
+if (eightPersonLayout.columns !== 2 || eightPersonLayout.rows !== 4 ||
+    eightPersonLayout.rowCounts.some((rowCount) => rowCount > 2) ||
+    Math.abs(eightPersonLayout.tileWidth / eightPersonLayout.tileHeight - 16 / 9) > 0.01) {
+  throw new Error("eight participants should remain two-column rectangular tiles");
+}
+const ultraNarrowLayout = chooseParticipantLayout({ width: 120, height: 1110, count: 5, minTileWidth: 132 });
+if (ultraNarrowLayout.columns !== 1 || ultraNarrowLayout.rows !== 5 ||
+    Math.abs(ultraNarrowLayout.tileWidth / ultraNarrowLayout.tileHeight - 16 / 9) > 0.01) {
+  throw new Error("ultra-narrow stages should use one-column rectangular tiles");
 }
 const singleLayout = chooseParticipantLayout({ width: 1600, height: 800, count: 1 });
 if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWidth > 720) {
@@ -204,6 +229,30 @@ for (const style of [
   if (!styleSource.includes(style)) {
     throw new Error(`meeting state style is missing: ${style}`);
   }
+}
+for (const style of [
+  'data-count="8"',
+  "grid-template-columns: repeat(2, minmax(0, 1fr))",
+  "aspect-ratio: 16 / 9 !important",
+  "scrollbar-width: thin",
+  "-webkit-overflow-scrolling: touch",
+  ".toolbar-primary",
+  ".toolbar-secondary",
+  ".toolbar-session",
+  "data-columns=\"1\"",
+  "data-columns=\"2\"",
+  "grid-template-rows: none !important",
+  "grid-auto-rows: max-content !important",
+  "@media (max-width: 700px)",
+  "overflow-y: auto"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`responsive meeting layout style is missing: ${style}`);
+  }
+}
+if (!appSource.includes("maxColumns: mode === \"grid\" && window.matchMedia?.(\"(max-width: 700px)\").matches && visibleItems.length <= 4 ? 1 : 0") ||
+    !appSource.includes("minTileWidth: Math.min(180, Math.max(160, bounds.width / 2.6))")) {
+  throw new Error("runtime participant layout must use a readable mobile minimum tile width");
 }
 for (const behavior of [
   "video.hidden = true",

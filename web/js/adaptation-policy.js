@@ -47,7 +47,8 @@ function chooseParticipantLayout({
   minTileWidth = 144,
   minTileHeight = 88,
   maxTileWidth = 720,
-  preferredColumns = 0
+  preferredColumns = 0,
+  maxColumns = 0
 }) {
   const participantCount = Math.max(0, Math.floor(Number(count) || 0));
   const stageWidth = Math.max(0, Number(width) || 0);
@@ -57,7 +58,13 @@ function chooseParticipantLayout({
   }
 
   const candidates = [];
-  for (let columns = 1; columns <= participantCount; columns += 1) {
+  const twoColumnWidth = minTileWidth * 2 + gap;
+  const participantColumnLimit = maxColumns > 0
+    ? Math.min(participantCount, Math.floor(maxColumns))
+    : participantCount < 9
+    ? (stageWidth < twoColumnWidth ? 1 : Math.min(2, participantCount))
+    : participantCount;
+  for (let columns = 1; columns <= participantColumnLimit; columns += 1) {
     const rows = Math.ceil(participantCount / columns);
     const availableWidth = (stageWidth - gap * (columns - 1)) / columns;
     const availableHeight = (stageHeight - gap * (rows - 1)) / rows;
@@ -82,8 +89,15 @@ function chooseParticipantLayout({
     });
   }
 
+  const fallback = { columns: 1, rows: participantCount, tileWidth: 0, tileHeight: 0, rowCounts: [participantCount] };
+  const usableCandidates = candidates.filter((candidate) => !candidate.belowMinimum);
+  if (participantCount < 9 && usableCandidates.length > 0) {
+    const widestUsable = usableCandidates.reduce((best, candidate) =>
+      candidate.columns > best.columns ? candidate : best);
+    return widestUsable;
+  }
   candidates.sort((left, right) => right.score - left.score);
-  return candidates[0] || { columns: 1, rows: participantCount, tileWidth: 0, tileHeight: 0, rowCounts: [participantCount] };
+  return candidates[0] || fallback;
 }
 
 if (typeof module !== "undefined") {
