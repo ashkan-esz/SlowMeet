@@ -414,6 +414,18 @@ for (const style of [
     throw new Error(`chat rail style is missing: ${style}`);
   }
 }
+for (const style of [
+  ".meeting-content {\n  display: contents;",
+  "@media (max-width: 900px) {\n  .meeting-shell.has-rail { grid-template-columns: minmax(0, 1fr); }",
+  ".meeting-sidebar,\n.chat-rail {\n  min-width: 0;\n  width: 100%;"
+]) {
+  if (!styleSource.includes(style)) {
+    throw new Error(`responsive shell geometry contract is missing: ${style}`);
+  }
+}
+if (styleSource.includes(".meeting-content {\n  min-height: 0;\n  display: grid;")) {
+  throw new Error("meeting content must not create a competing panel grid");
+}
 for (const control of ["mic", "camera", "receive-video", "screen"]) {
   if (!indexSource.includes(`id="${control}"`) ||
       !indexSource.includes(`id="${control}" type="button" aria-pressed="`)) {
