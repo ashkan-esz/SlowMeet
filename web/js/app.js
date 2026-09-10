@@ -202,6 +202,31 @@ function updateParticipantLayout() {
   const layoutContainer = mode === "grid" ? participants : mode === "pinned" ? pinnedMain : screenShareMain;
   if (!layoutContainer || layoutContainer.hidden) return;
   const visibleItems = [...layoutContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden);
+  const filmstripContainer = mode === "pinned" ? pinnedFilmstrip : mode === "screen-share" ? screenShareFilmstrip : null;
+  const filmstripItems = filmstripContainer
+    ? [...filmstripContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden)
+    : [];
+
+  if (filmstripContainer && typeof chooseFilmstripLayout === "function") {
+    const filmstripBounds = filmstripContainer.getBoundingClientRect();
+    const isMobilePinned = mode === "pinned" && window.matchMedia?.("(max-width: 720px)").matches;
+    const orientation = mode === "screen-share" || isMobilePinned ? "horizontal" : "vertical";
+    const filmstripLayout = chooseFilmstripLayout({
+      width: filmstripBounds.width,
+      height: filmstripBounds.height,
+      count: filmstripItems.length,
+      orientation,
+      gap: parseFloat(getComputedStyle(filmstripContainer).gap) || 12,
+      minTileWidth: isMobilePinned || mode === "screen-share" ? 160 : 180,
+      minTileHeight: isMobilePinned || mode === "screen-share" ? 90 : 102
+    });
+    filmstripContainer.style.setProperty("--filmstrip-count", String(filmstripLayout.rows || filmstripLayout.columns));
+    filmstripContainer.style.setProperty("--filmstrip-tile-width", `${filmstripLayout.tileWidth}px`);
+    filmstripContainer.style.setProperty("--filmstrip-tile-height", `${filmstripLayout.tileHeight}px`);
+    filmstripContainer.style.setProperty("--filmstrip-min-height", `${isMobilePinned || mode === "screen-share" ? 90 : 102}px`);
+    filmstripContainer.dataset.overflow = String(filmstripLayout.overflow);
+  }
+
   if (visibleItems.length === 0) {
     participants.style.removeProperty("--tile-width");
     participants.style.removeProperty("--tile-height");

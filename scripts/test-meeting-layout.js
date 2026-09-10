@@ -5,7 +5,8 @@ const {
   visibleParticipantIds,
   formatMetric,
   chooseActiveSpeaker,
-  speakerDebounce
+  speakerDebounce,
+  chooseFilmstripLayout
 } = require("../web/js/meeting-layout.js");
 const { chooseParticipantLayout } = require("../web/js/adaptation-policy.js");
 
@@ -28,6 +29,22 @@ const wide = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 const narrow = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
 if (wide.columns !== 3 || wide.rows !== 2 || narrow.columns !== 2 || narrow.rows !== 3) {
   throw new Error("wide and narrow grid choices are incorrect");
+}
+const singlePinned = chooseFilmstripLayout({ width: 323, height: 634, count: 1, orientation: "vertical", minTileHeight: 102 });
+if (singlePinned.rows !== 1 || singlePinned.tileWidth !== 323 || singlePinned.tileHeight !== 634 || singlePinned.overflow) {
+  throw new Error("one pinned companion should fill the desktop filmstrip without overflow");
+}
+const multiplePinned = chooseFilmstripLayout({ width: 323, height: 634, count: 5, orientation: "vertical", minTileHeight: 102 });
+if (multiplePinned.rows !== 5 || multiplePinned.tileWidth !== 323 || multiplePinned.tileHeight !== 117 || multiplePinned.overflow) {
+  throw new Error("desktop pinned companions should share the available rail height");
+}
+const crowdedPinned = chooseFilmstripLayout({ width: 323, height: 634, count: 8, orientation: "vertical", minTileHeight: 102 });
+if (!crowdedPinned.overflow || crowdedPinned.tileHeight !== 102) {
+  throw new Error("desktop filmstrip overflow should occur only below the minimum tile height");
+}
+const mobilePinned = chooseFilmstripLayout({ width: 368, height: 112, count: 3, orientation: "horizontal" });
+if (mobilePinned.rows !== 1 || mobilePinned.tileWidth !== 160 || mobilePinned.tileHeight !== 90 || !mobilePinned.overflow) {
+  throw new Error("mobile pinned companions should remain touch-sized and horizontally scrollable");
 }
 if (formatMetric(null, " ms") !== "No sample" || formatMetric(undefined, " kbps", "Unavailable") !== "Unavailable" ||
     formatMetric(42, " ms") !== "42 ms") {
