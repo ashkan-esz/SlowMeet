@@ -2646,3 +2646,11 @@ body { overflow-x: hidden; }
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid,
   .layout-filmstrip { scroll-behavior: auto; }
 }
+
+/* Keep the speaking frame inside the clipped grid viewport on every edge. */
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile.is-speaking {
+  box-sizing: border-box;
+  outline: 0;
+  border: 2px solid var(--lm-accent);
+  box-shadow: none;
+}
