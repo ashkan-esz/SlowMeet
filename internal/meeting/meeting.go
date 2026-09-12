@@ -12,20 +12,24 @@ import (
 )
 
 var (
-	ErrMeetingFull = errors.New("meeting is full")
-	ErrInvalidName = errors.New("name must be between 1 and 32 characters")
+	ErrMeetingFull         = errors.New("meeting is full")
+	ErrInvalidName         = errors.New("name must be between 1 and 32 characters")
+	ErrParticipantNotFound = errors.New("participant not found")
 )
 
 type Participant struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	JoinedAt time.Time `json:"joined_at"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	JoinedAt   time.Time `json:"joined_at"`
+	RaisedHand bool      `json:"raised_hand"`
+	HandOrder  int       `json:"hand_order,omitempty"`
 }
 
 type Meeting struct {
-	mu           sync.RWMutex
-	max          int
-	participants map[string]Participant
+	mu            sync.RWMutex
+	max           int
+	participants  map[string]Participant
+	raisedHandIDs []string
 }
 
 func New(maxParticipants int) *Meeting {
@@ -70,7 +74,63 @@ func (m *Meeting) Leave(id string) bool {
 		return false
 	}
 	delete(m.participants, id)
+	for index, participantID := range m.raisedHandIDs {
+		if participantID == id {
+			m.raisedHandIDs = append(m.raisedHandIDs[:index], m.raisedHandIDs[index+1:]...)
+			m.reindexRaisedHandsLocked()
+			break
+		}
+	}
 	return true
+}
+
+// SetRaisedHand updates a participant's hand state and returns the participant
+// states whose visible queue position changed.
+func (m *Meeting) SetRaisedHand(id string, raised bool) ([]Participant, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	participant, ok := m.participants[id]
+	if !ok {
+		return nil, ErrParticipantNotFound
+	}
+	if participant.RaisedHand == raised {
+		return nil, nil
+	}
+
+	participant.RaisedHand = raised
+	if raised {
+		m.raisedHandIDs = append(m.raisedHandIDs, id)
+		participant.HandOrder = len(m.raisedHandIDs)
+		m.participants[id] = participant
+		return []Participant{participant}, nil
+	}
+
+	participant.HandOrder = 0
+	m.participants[id] = participant
+	for index, participantID := range m.raisedHandIDs {
+		if participantID == id {
+			m.raisedHandIDs = append(m.raisedHandIDs[:index], m.raisedHandIDs[index+1:]...)
+			break
+		}
+	}
+
+	changed := []Participant{participant}
+	for index, participantID := range m.raisedHandIDs {
+		queued := m.participants[participantID]
+		queued.HandOrder = index + 1
+		m.participants[participantID] = queued
+		changed = append(changed, queued)
+	}
+	return changed, nil
+}
+
+func (m *Meeting) reindexRaisedHandsLocked() {
+	for index, participantID := range m.raisedHandIDs {
+		participant := m.participants[participantID]
+		participant.HandOrder = index + 1
+		m.participants[participantID] = participant
+	}
 }
 
 func (m *Meeting) SetMaxParticipants(max int) {

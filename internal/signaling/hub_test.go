@@ -159,8 +159,16 @@ func TestChatHistoryIsReplayedToNewRoomMembers(t *testing.T) {
 	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
 	var secondJoined Message
 	readTestMessage(t, second, &secondJoined)
+	var secondSeesFirst Message
+	readTestMessage(t, second, &secondSeesFirst)
+	if secondSeesFirst.Type != TypeJoined || secondSeesFirst.Participant.ID != firstJoined.Participant.ID {
+		t.Fatalf("second existing participant = %+v", secondSeesFirst)
+	}
 	var firstSeesSecond Message
 	readTestMessage(t, first, &firstSeesSecond)
+	if firstSeesSecond.Type != TypeJoined || firstSeesSecond.Participant.ID != secondJoined.Participant.ID {
+		t.Fatalf("first new participant = %+v", firstSeesSecond)
+	}
 	writeTestMessage(t, first, Message{
 		Version: ProtocolVersion, Type: TypeChat,
 		ParticipantID: firstJoined.Participant.ID, ChatText: "Retained hello",
@@ -640,6 +648,101 @@ func TestHubLimitsJoinAttemptsPerConnection(t *testing.T) {
 	}
 	if _, _, err := conn.NextReader(); err == nil {
 		t.Fatal("connection remained open after join-attempt limit")
+	}
+}
+
+func TestHubRaisedHandQueueBroadcastsAndRejectsSpoofing(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		MaxParticipants:     2,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	var secondSeesFirst Message
+	readTestMessage(t, second, &secondSeesFirst)
+	if secondSeesFirst.Type != TypeJoined || secondSeesFirst.Participant.ID != firstJoined.Participant.ID {
+		t.Fatalf("second existing participant = %+v", secondSeesFirst)
+	}
+	var firstSeesSecond Message
+	readTestMessage(t, first, &firstSeesSecond)
+	if firstSeesSecond.Type != TypeJoined || firstSeesSecond.Participant.ID != secondJoined.Participant.ID {
+		t.Fatalf("first new participant = %+v", firstSeesSecond)
+	}
+
+	firstRaised := true
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeHandState,
+		ParticipantID: firstJoined.Participant.ID, HandRaised: &firstRaised,
+	})
+	for _, conn := range []*websocket.Conn{first, second} {
+		var update Message
+		readTestMessage(t, conn, &update)
+		if update.Type != TypeHandState || update.ParticipantID != firstJoined.Participant.ID ||
+			update.HandRaised == nil || !*update.HandRaised || update.HandOrder != 1 {
+			t.Fatalf("first raised-hand update = %+v", update)
+		}
+	}
+
+	secondRaised := true
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeHandState,
+		ParticipantID: secondJoined.Participant.ID, HandRaised: &secondRaised,
+	})
+	for _, conn := range []*websocket.Conn{first, second} {
+		var update Message
+		readTestMessage(t, conn, &update)
+		if update.Type != TypeHandState || update.ParticipantID != secondJoined.Participant.ID ||
+			update.HandRaised == nil || !*update.HandRaised || update.HandOrder != 2 {
+			t.Fatalf("second raised-hand update = %+v", update)
+		}
+	}
+
+	firstLowered := false
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeHandState,
+		ParticipantID: firstJoined.Participant.ID, HandRaised: &firstLowered,
+	})
+	for _, conn := range []*websocket.Conn{first, second} {
+		var lowered Message
+		readTestMessage(t, conn, &lowered)
+		var compacted Message
+		readTestMessage(t, conn, &compacted)
+		if lowered.ParticipantID != firstJoined.Participant.ID || lowered.HandRaised == nil ||
+			*lowered.HandRaised || lowered.HandOrder != 0 ||
+			compacted.ParticipantID != secondJoined.Participant.ID || compacted.HandRaised == nil ||
+			!*compacted.HandRaised || compacted.HandOrder != 1 {
+			t.Fatalf("lowered queue updates = %+v, %+v", lowered, compacted)
+		}
+	}
+
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeHandState,
+		ParticipantID: secondJoined.Participant.ID, HandRaised: &secondRaised,
+	})
+	var spoofed Message
+	readTestMessage(t, first, &spoofed)
+	if spoofed.Type != TypeError || spoofed.Error != "participant_id does not belong to this connection" {
+		t.Fatalf("spoofed hand-state response = %+v", spoofed)
 	}
 }
 

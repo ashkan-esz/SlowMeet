@@ -259,7 +259,7 @@ for (const behavior of [
   "updateParticipantVideoVisibility(element)",
   "element.micIndicator.hidden = audioOn",
   "element.pausedChip.hidden = !videoPaused",
-  "videoStage.append(avatar, video, pausedChip, quality)",
+  "videoStage.append(avatar, video, pausedChip, quality, handIndicator)",
   "video_paused: videoPaused"
 ]) {
   if (!appSource.includes(behavior)) {

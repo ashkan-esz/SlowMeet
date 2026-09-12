@@ -489,6 +489,29 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.broadcastExcept(c, msg)
 				continue
 			}
+			if msg.Type == TypeHandState {
+				if msg.ParticipantID != c.participant.ID {
+					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "participant_id does not belong to this connection"})
+					continue
+				}
+				changed, err := h.Meeting.SetRaisedHand(c.participant.ID, *msg.HandRaised)
+				if err != nil {
+					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+					continue
+				}
+				for _, participant := range changed {
+					if participant.ID == c.participant.ID {
+						c.participant = participant
+					}
+					raised := participant.RaisedHand
+					h.broadcast(Message{
+						Version: ProtocolVersion, Type: TypeHandState,
+						ParticipantID: participant.ID, HandRaised: &raised,
+						HandOrder: participant.HandOrder,
+					})
+				}
+				continue
+			}
 			if msg.Type == TypeNetworkState {
 				msg.ParticipantID = c.participant.ID
 				h.metrics.ObserveNetwork(msg.RTTMs, msg.PacketLoss10, msg.JitterMs, msg.VideoKbps, msg.AudioKbps)

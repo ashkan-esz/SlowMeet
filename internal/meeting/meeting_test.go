@@ -58,3 +58,47 @@ func TestSetMaxParticipantsDoesNotEvictExistingParticipants(t *testing.T) {
 		t.Fatalf("Join() error = %v, want ErrMeetingFull", err)
 	}
 }
+
+func TestRaisedHandQueueIsFIFOAndCompacts(t *testing.T) {
+	m := New(3)
+	first, _ := m.Join("Ashkan")
+	second, _ := m.Join("Ali")
+	third, _ := m.Join("Sara")
+
+	changed, err := m.SetRaisedHand(first.ID, true)
+	if err != nil || len(changed) != 1 || changed[0].HandOrder != 1 {
+		t.Fatalf("first raise = %+v, error = %v", changed, err)
+	}
+	changed, err = m.SetRaisedHand(second.ID, true)
+	if err != nil || len(changed) != 1 || changed[0].HandOrder != 2 {
+		t.Fatalf("second raise = %+v, error = %v", changed, err)
+	}
+	if changed, err = m.SetRaisedHand(second.ID, true); err != nil || changed != nil {
+		t.Fatalf("duplicate raise = %+v, error = %v, want no change", changed, err)
+	}
+
+	changed, err = m.SetRaisedHand(first.ID, false)
+	if err != nil || len(changed) != 2 {
+		t.Fatalf("first lower = %+v, error = %v, want two changed participants", changed, err)
+	}
+	if changed[0].ID != first.ID || changed[0].RaisedHand || changed[0].HandOrder != 0 ||
+		changed[1].ID != second.ID || !changed[1].RaisedHand || changed[1].HandOrder != 1 {
+		t.Fatalf("compacted queue = %+v", changed)
+	}
+	if changed, err = m.SetRaisedHand(first.ID, false); err != nil || changed != nil {
+		t.Fatalf("duplicate lower = %+v, error = %v, want no change", changed, err)
+	}
+
+	if changed, err = m.SetRaisedHand("missing", true); !errors.Is(err, ErrParticipantNotFound) || changed != nil {
+		t.Fatalf("unknown participant = %+v, error = %v", changed, err)
+	}
+	if !m.Leave(second.ID) {
+		t.Fatal("expected raised participant leave to succeed")
+	}
+	if got := m.List(); len(got) != 2 {
+		t.Fatalf("participants after leave = %d, want 2", len(got))
+	}
+	if changed, err = m.SetRaisedHand(third.ID, true); err != nil || len(changed) != 1 || changed[0].HandOrder != 1 {
+		t.Fatalf("raise after leave = %+v, error = %v", changed, err)
+	}
+}

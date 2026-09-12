@@ -18,19 +18,25 @@ if (deriveMeetingLayoutMode({ pinnedParticipantId: "p1", activeScreenShareId: "p
     deriveMeetingLayoutMode({}) !== "grid") {
   throw new Error("layout mode precedence is incorrect");
 }
-if (parseDebugMode("?debug=5") !== 5 || parseDebugMode("?debug=6") !== 6 ||
+if (parseDebugMode("?debug=4") !== 4 || parseDebugMode("?debug=5") !== 5 || parseDebugMode("?debug=6") !== 6 ||
     parseDebugMode("?debug=7") !== 0 || parseDebugMode("?debug=6&debug=5") !== 6) {
-  throw new Error("debug mode parsing should accept only exact 5 and 6 values");
+  throw new Error("debug mode parsing should accept only exact 4, 5, and 6 values");
 }
 const poorFixture = createPoorConnectionFixture();
 if (poorFixture.id !== "debug-poor-network" || !poorFixture.debugPoorConnection ||
     poorFixture.debugNetwork.rttMs < 500 || poorFixture.debugNetwork.packetLoss10 < 100) {
   throw new Error("poor connection fixture is not sufficiently degraded");
 }
-if (chooseDebugParticipants(5).length !== 1 || chooseDebugParticipants(5)[0].id !== poorFixture.id ||
+if (chooseDebugParticipants(4).length !== 1 || chooseDebugParticipants(4)[0].id !== poorFixture.id ||
+    chooseDebugParticipants(5).length !== 1 || chooseDebugParticipants(5)[0].id !== poorFixture.id ||
     chooseDebugParticipants(6).length !== 5 ||
     chooseDebugParticipants(6).filter((participant) => participant.debugPoorConnection).length !== 1) {
   throw new Error("debug modes should share one poor connection fixture");
+}
+if (chooseDebugParticipants(4)[0].raisedHand !== true || chooseDebugParticipants(4)[0].handOrder !== 2 ||
+    chooseDebugParticipants(5)[0].raisedHand !== true || chooseDebugParticipants(5)[0].handOrder !== 2 ||
+    chooseDebugParticipants(6)[0].raisedHand !== true || chooseDebugParticipants(6)[0].handOrder !== 2) {
+  throw new Error("debug modes should include a second raised-hand fixture");
 }
 if (visibleParticipantIds(["local", "p1", "p2"], "local", false).join(",") !== "p1,p2") {
   throw new Error("self-view filtering must not alter the roster order");

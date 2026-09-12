@@ -2654,3 +2654,15 @@ body { overflow-x: hidden; }
   border: 2px solid var(--lm-accent);
   box-shadow: none;
 }
+
+.participant-hand-indicator { position: absolute; inset-block-start: 10px; inset-inline-start: 10px; z-index: 4; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 5px 8px; color: #1c1608; background: #facc15; border: 1px solid rgba(255,255,255,.8); border-radius: 999px; box-shadow: 0 1px 5px rgba(0,0,0,.35); font-size: 12px; font-weight: 800; line-height: 1; }
+.participant-hand-indicator[hidden] { display: none; }
+.participant-hand-indicator svg { width: 16px; height: 16px; }
+.participant-hand-order { font-variant-numeric: tabular-nums; }
+.control-button--raise-hand { min-width: 92px; white-space: normal; }
+.control-button--raise-hand[aria-pressed="true"] { color: #7c5800; background: #fff4bf; border-color: #e8bd36; }
+.control-button--raise-hand[aria-pressed="true"]:hover { background: #ffe999; }
+
+@media (max-width: 700px) {
+  .meeting-toolbar .control-button--raise-hand { flex-basis: 44px; min-width: 44px; width: 44px; }
+}

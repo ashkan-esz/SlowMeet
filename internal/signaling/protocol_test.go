@@ -157,6 +157,24 @@ func TestValidateChatMessage(t *testing.T) {
 	}
 }
 
+func TestValidateHandStateMessage(t *testing.T) {
+	raised := true
+	if err := (Message{
+		Version: ProtocolVersion, Type: TypeHandState,
+		ParticipantID: "p1", HandRaised: &raised,
+	}).Validate(); err != nil {
+		t.Fatalf("valid hand state rejected: %v", err)
+	}
+	for _, invalid := range []Message{
+		{Version: ProtocolVersion, Type: TypeHandState},
+		{Version: ProtocolVersion, Type: TypeHandState, ParticipantID: "p1"},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Errorf("Validate(%+v) succeeded, want error", invalid)
+		}
+	}
+}
+
 func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
 	for _, msg := range []Message{
 		{Version: ProtocolVersion, Type: TypeOffer},

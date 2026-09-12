@@ -27,6 +27,7 @@ const (
 	TypeCandidate    = "candidate"
 	TypeICERestart   = "ice_restart"
 	TypeMediaState   = "media_state"
+	TypeHandState    = "hand_state"
 	TypeNetworkState = "network_state"
 	TypeScreenShare  = "screen_share"
 	TypeScreenState  = "screen_share_state"
@@ -53,6 +54,8 @@ type Message struct {
 	AudioEnabled       *bool                `json:"audio_enabled,omitempty"`
 	VideoEnabled       *bool                `json:"video_enabled,omitempty"`
 	VideoPaused        *bool                `json:"video_paused,omitempty"`
+	HandRaised         *bool                `json:"hand_raised,omitempty"`
+	HandOrder          int                  `json:"hand_order,omitempty"`
 	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
 	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
 	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
@@ -101,6 +104,10 @@ func (m Message) Validate() error {
 	case TypeMediaState:
 		if m.ParticipantID == "" || (m.AudioEnabled == nil && m.VideoEnabled == nil) {
 			return fmt.Errorf("media state requires participant_id and a state")
+		}
+	case TypeHandState:
+		if m.ParticipantID == "" || m.HandRaised == nil {
+			return fmt.Errorf("hand state requires participant_id and state")
 		}
 	case TypeNetworkState:
 		if m.ParticipantID == "" {

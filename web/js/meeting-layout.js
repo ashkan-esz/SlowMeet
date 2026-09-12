@@ -17,7 +17,7 @@ function visibleParticipantIds(participantOrder, localParticipantId, showSelfVie
 
 function parseDebugMode(search = "") {
   const value = new URLSearchParams(search).get("debug");
-  return value === "5" || value === "6" ? Number(value) : 0;
+  return value === "4" || value === "5" || value === "6" ? Number(value) : 0;
 }
 
 function createPoorConnectionFixture() {
@@ -30,10 +30,12 @@ function createPoorConnectionFixture() {
 }
 
 function chooseDebugParticipants(mode) {
-  if (mode !== 5 && mode !== 6) return [];
-  if (mode === 5) return [createPoorConnectionFixture()];
+  if (mode !== 4 && mode !== 5 && mode !== 6) return [];
+  if (mode === 4 || mode === 5) {
+    return [{ ...createPoorConnectionFixture(), raisedHand: true, handOrder: 2 }];
+  }
   return [
-    { id: "debug-1", name: "Guest 1" },
+    { id: "debug-1", name: "Guest 1", raisedHand: true, handOrder: 2 },
     { id: "debug-2", name: "Guest 2" },
     { id: "debug-3", name: "Guest 3" },
     { id: "debug-4", name: "Guest 4" },

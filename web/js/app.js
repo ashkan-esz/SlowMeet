@@ -20,6 +20,7 @@ const screenShareFilmstrip = document.querySelector("#screen-share-filmstrip");
 const layoutParking = document.querySelector("#layout-parking");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
+const raiseHand = document.querySelector("#raise-hand");
 const receiveVideo = document.querySelector("#receive-video");
 const screen = document.querySelector("#screen");
 const leave = document.querySelector("#leave");
@@ -270,6 +271,71 @@ function remoteParticipantCount() {
   return count;
 }
 
+function raisedHandCount() {
+  let count = 0;
+  participantElements.forEach((element) => {
+    if (element.item.dataset.handRaised === "true") count += 1;
+  });
+  return count;
+}
+
+function normalizeRaisedHandOrders() {
+  const raised = [...participantElements.values()]
+    .filter((element) => element.item.dataset.handRaised === "true")
+    .sort((left, right) => {
+      const orderDifference = (Number(left.item.dataset.handOrder) || 0) -
+        (Number(right.item.dataset.handOrder) || 0);
+      if (orderDifference !== 0) return orderDifference;
+      return participantOrder.indexOf(left.item.dataset.participantId) -
+        participantOrder.indexOf(right.item.dataset.participantId);
+    });
+  raised.forEach((element, index) => {
+    element.item.dataset.handOrder = String(index + 1);
+  });
+}
+
+function updateRaisedHandsUI() {
+  const count = raisedHandCount();
+  participantElements.forEach((element) => {
+    const raised = element.item.dataset.handRaised === "true";
+    const order = Number(element.item.dataset.handOrder) || 0;
+    element.item.classList.toggle("has-raised-hand", raised);
+    if (element.handIndicator) {
+      element.handIndicator.hidden = !raised;
+      element.handIndicator.setAttribute("aria-label", raised
+        ? `${element.name.textContent} has raised their hand${count > 1 && order > 0 ? `, number ${order}` : ""}`
+        : `${element.name.textContent} has not raised their hand`);
+    }
+    if (element.handOrder) {
+      element.handOrder.hidden = !raised || count < 2 || order < 1;
+      element.handOrder.textContent = order > 0 ? `#${order}` : "";
+    }
+    updateParticipantAriaLabel(element);
+  });
+  const local = participantElements.get(localParticipantID);
+  const raised = local?.item.dataset.handRaised === "true";
+  if (raiseHand) {
+    raiseHand.disabled = pendingHandState !== undefined;
+    raiseHand.setAttribute("aria-pressed", String(raised));
+    updateControlLabel(raiseHand, raised ? "Lower hand" : "Raise hand");
+    const label = raiseHand.querySelector("[data-control-label]");
+    if (label) label.textContent = raised ? "Lower hand" : "Raise hand";
+  }
+}
+
+function updateParticipantHandState(message) {
+  const element = participantElements.get(message.participant_id);
+  if (!element) return;
+  const raised = message.hand_raised === true;
+  element.item.dataset.handRaised = String(raised);
+  element.item.dataset.handOrder = raised ? String(Number(message.hand_order) || 0) : "0";
+  if (message.participant_id === localParticipantID && pendingHandState === raised) {
+    pendingHandState = undefined;
+  }
+  updateRaisedHandsUI();
+  renderPeopleList();
+}
+
 function participantCameraLabel(element) {
   if (!element?.item) return "unknown";
   const cameraState = element.item.dataset.camera || "unknown";
@@ -316,13 +382,18 @@ function renderPeopleList() {
     const state = document.createElement("span");
     state.className = "people-list__state";
     const cameraState = participantCameraLabel(element);
-    state.textContent = element.item.dataset.connection === "left" ? "Left" :
+    const handRaised = element.item.dataset.handRaised === "true";
+    const handOrder = Number(element.item.dataset.handOrder) || 0;
+    const baseState = element.item.dataset.connection === "left" ? "Left" :
       element.item.dataset.connection === "disconnected" ? "Reconnecting" :
         element.item.dataset.mic === "off" ? "Muted" :
           cameraState === "incoming video off" ? "Incoming video off" :
             cameraState === "video paused" ? "Video paused" :
               cameraState === "off" ? "Camera off" :
                 cameraState === "unknown" ? "Connecting" : "Connected";
+    state.textContent = handRaised
+      ? `${baseState}, Hand raised${raisedHandCount() > 1 && handOrder > 0 ? ` #${handOrder}` : ""}`
+      : baseState;
     row.append(name, state);
     peopleList.append(row);
   });
@@ -347,9 +418,14 @@ function updateParticipantAriaLabel(element) {
   const selfView = element.item.classList.contains("is-local") && participants.classList.contains("is-pip-mode")
     ? " Self-view. Use arrow keys to move it between corners."
     : "";
+  const raisedHand = element.item.dataset.handRaised === "true";
+  const handOrder = Number(element.item.dataset.handOrder) || 0;
+  const handState = raisedHand
+    ? ` Hand raised${raisedHandCount() > 1 && handOrder > 0 ? `, queue position ${handOrder}` : ""}.`
+    : " Hand not raised.";
   element.item.setAttribute("aria-label",
     `${element.name.textContent}${localState}: camera ${cameraState}; microphone ${microphoneState}; ` +
-    `connection quality ${qualityState}.${pinnedState}${selfView}`);
+    `connection quality ${qualityState}.${handState}${pinnedState}${selfView}`);
 }
 
 function updateParticipantVideoVisibility(element) {
@@ -447,6 +523,7 @@ function markLocalParticipant(participantID) {
   element.item.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown ArrowLeft ArrowRight");
   setPipPosition(element.item, readStoredValue("meeting.pipPosition") || "bottom-right", false);
   updateParticipantCount();
+  updateRaisedHandsUI();
 }
 
 function pipPositionForPoint(clientX, clientY) {
@@ -985,6 +1062,9 @@ function mountDebugParticipants() {
   const fixtures = typeof chooseDebugParticipants === "function"
     ? chooseDebugParticipants(mode)
     : [];
+  if (localParticipantID && participantElements.has(localParticipantID)) {
+    setParticipantHandState(localParticipantID, true, 1);
+  }
   fixtures.forEach((fixture, index) => {
     const id = fixture.id;
     if (participantElements.has(id)) return;
@@ -1008,6 +1088,7 @@ function mountDebugParticipants() {
       setParticipantQuality(element, "poor");
     }
   });
+  updateRaisedHandsUI();
   addChatSystem(`Debug mode: ${mode === 6 ? "six" : "two"} local preview tiles mounted`);
 }
 
@@ -1048,6 +1129,7 @@ let cameraSender;
 let screenSender;
 let cameraTrack;
 let localParticipantID;
+let pendingHandState;
 let reconnectToken;
 let screenShareOwner;
 let screenShareRequest;
@@ -1933,6 +2015,10 @@ function connectSocket(name, password) {
       if (message.text) addChatMessage(message.name || "Participant", message.text);
       return;
     }
+    if (message.type === "hand_state") {
+      updateParticipantHandState(message);
+      return;
+    }
     if (message.type === "config_update") {
       if (Number.isFinite(message.max_video_bitrate) && message.max_video_bitrate > 0) {
         hostLimits.maxVideoBitrate = message.max_video_bitrate;
@@ -1959,6 +2045,10 @@ function connectSocket(name, password) {
         clearTimeout(screenShareRequest.timer);
         screenShareRequest.reject(new Error(message.error || "screen share request failed"));
         screenShareRequest = undefined;
+      }
+      if (pendingHandState !== undefined) {
+        pendingHandState = undefined;
+        updateRaisedHandsUI();
       }
       status.textContent = message.error;
       if (meeting.hidden) joinButton.disabled = false;
@@ -1998,6 +2088,9 @@ function connectSocket(name, password) {
         element.item.classList.remove("is-speaking");
         element.item.classList.add("is-disconnected");
         element.item.dataset.connection = "left";
+        element.item.dataset.handRaised = "false";
+        element.item.dataset.handOrder = "0";
+        normalizeRaisedHandOrders();
         element.micIndicator.setAttribute("aria-label", `${message.participant.name} disconnected`);
         updateParticipantTileState(element);
         renderPeopleList();
@@ -2024,6 +2117,10 @@ function connectSocket(name, password) {
   });
   currentSocket.addEventListener("close", () => {
     if (generation !== socketGeneration) return;
+    if (pendingHandState !== undefined) {
+      pendingHandState = undefined;
+      updateRaisedHandsUI();
+    }
     if (intentionalClose || meeting.hidden) {
       if (meeting.hidden) joinButton.disabled = false;
       return;
@@ -2061,6 +2158,8 @@ function resetMediaConnection() {
   participants.replaceChildren();
   participantElements.clear();
   participantOrder.splice(0);
+  pendingHandState = undefined;
+  updateRaisedHandsUI();
   participantPage = 0;
   focusedParticipantID = undefined;
   updateParticipantPagination();
@@ -2794,6 +2893,8 @@ function addParticipant(participant) {
   item.dataset.sharing = "false";
   item.dataset.camera = "unknown";
   item.dataset.quality = "unknown";
+  item.dataset.handRaised = String(participant.raised_hand === true || participant.raisedHand === true);
+  item.dataset.handOrder = String(Number(participant.hand_order ?? participant.handOrder) || 0);
   item.dataset.debugPoorConnection = String(participant.debugPoorConnection === true);
   const avatarSeed = hashName(participant.name);
   item.style.setProperty("--avatar-angle", `${120 + avatarSeed % 121}deg`);
@@ -2833,6 +2934,14 @@ function addParticipant(participant) {
   quality.setAttribute("role", "img");
   quality.setAttribute("aria-label", `${participant.name} connection quality: unknown`);
   quality.title = "Connection quality: unknown";
+  const handIndicator = document.createElement("span");
+  handIndicator.className = "participant-hand-indicator";
+  handIndicator.hidden = item.dataset.handRaised !== "true";
+  handIndicator.setAttribute("role", "img");
+  handIndicator.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 11V6a1.5 1.5 0 0 1 3 0v4V4.5a1.5 1.5 0 0 1 3 0V10V5.5a1.5 1.5 0 0 1 3 0V11V8a1.5 1.5 0 0 1 3 0v6.5c0 3.6-2.4 6-6 6h-1.5c-2.3 0-4.2-1.1-5.5-3L3.5 14a1.5 1.5 0 0 1 2.5-1.6Z"/></svg>';
+  const handOrder = document.createElement("span");
+  handOrder.className = "participant-hand-order";
+  handOrder.hidden = true;
   const state = document.createElement("span");
   state.className = "participant-state";
   state.hidden = true;
@@ -2858,7 +2967,8 @@ function addParticipant(participant) {
   screenVideo.hidden = true;
   screenVideo.className = "screen-video";
   meta.append(name, youBadge, micIndicator);
-  videoStage.append(avatar, video, pausedChip, quality);
+  handIndicator.append(handOrder);
+  videoStage.append(avatar, video, pausedChip, quality, handIndicator);
   videoStage.insertBefore(screenVideo, pausedChip);
   videoStage.append(state, shareLabel, meta);
   videoStage.append(menuTrigger);
@@ -2866,16 +2976,26 @@ function addParticipant(participant) {
   participants.append(item);
   participantOrder.push(participant.id);
   participantElements.set(participant.id, {
-    item, name, youBadge, video, cameraVideo: video, screenVideo, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger,
+    item, name, youBadge, video, cameraVideo: video, screenVideo, audio, micIndicator, avatar, pausedChip, quality, state, shareLabel, menuTrigger, handIndicator, handOrder,
     trackIDs: new Set()
   });
   item.dataset.mic = "unknown";
   setParticipantQuality(participantElements.get(participant.id), participant.debugPoorConnection ? "poor" : "unknown");
   updateParticipantTileState(participantElements.get(participant.id));
   updateParticipantAriaLabel(participantElements.get(participant.id));
+  updateRaisedHandsUI();
   updateParticipantCount();
   updateScreenShareUI();
   renderMeetingLayout();
+}
+
+function setParticipantHandState(participantID, raised, order = 0) {
+  const element = participantElements.get(participantID);
+  if (!element) return;
+  element.item.dataset.handRaised = String(raised);
+  element.item.dataset.handOrder = raised ? String(Number(order) || 0) : "0";
+  updateRaisedHandsUI();
+  renderPeopleList();
 }
 
 function updateMediaState(message) {
@@ -2916,6 +3036,27 @@ function sendMediaState() {
   updateMediaState(message);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
     socket.send(JSON.stringify(message));
+  }
+}
+
+function sendHandState(raised) {
+  if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) {
+    addChatSystem("Hand raising is unavailable while the meeting reconnects.");
+    return;
+  }
+  pendingHandState = raised;
+  updateRaisedHandsUI();
+  try {
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "hand_state",
+      participant_id: localParticipantID,
+      hand_raised: raised
+    }));
+  } catch (_) {
+    pendingHandState = undefined;
+    updateRaisedHandsUI();
+    addChatSystem("Could not update your raised-hand state.");
   }
 }
 
@@ -3221,6 +3362,12 @@ mic.addEventListener("click", () => {
   sendMediaState();
 });
 
+raiseHand?.addEventListener("click", () => {
+  if (pendingHandState !== undefined) return;
+  const local = participantElements.get(localParticipantID);
+  sendHandState(local?.item.dataset.handRaised !== "true");
+});
+
 camera.addEventListener("click", async () => {
   if (cameraOperation) return;
   audioContext?.resume().catch(() => {});
@@ -3294,6 +3441,8 @@ leave.addEventListener("click", () => {
   peer = undefined;
   videoTransceiver = undefined;
   localParticipantID = undefined;
+  pendingHandState = undefined;
+  updateRaisedHandsUI();
   remoteDescriptionSet = false;
   criticalSamples = 0;
   videoSuspended = false;
