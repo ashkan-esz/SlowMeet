@@ -53,7 +53,7 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxVideoFPS, err := envInt("MAX_VIDEO_FPS", 30)
+	maxVideoFPS, err := envInt("MAX_VIDEO_FPS", 60)
 	if err != nil {
 		return Config{}, err
 	}
@@ -61,11 +61,11 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxVideoBitrate, err := envInt("MAX_VIDEO_BITRATE", 500000)
+	maxVideoBitrate, err := envInt("MAX_VIDEO_BITRATE", 3000000)
 	if err != nil {
 		return Config{}, err
 	}
-	maxAudioBitrate, err := envInt("MAX_AUDIO_BITRATE", 64000)
+	maxAudioBitrate, err := envInt("MAX_AUDIO_BITRATE", 96000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -111,7 +111,7 @@ func LoadFromEnv() (Config, error) {
 		ICEUDPPortMax:       iceUDPPortMax,
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
-		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "high"),
+		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
 		DefaultVideoFPS:     defaultVideoFPS,
 		MaxVideoFPS:         maxVideoFPS,
 		DefaultAudioBitrate: defaultAudioBitrate,
@@ -164,18 +164,18 @@ func (c Config) Validate() error {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not be empty")
 	}
 	switch c.DefaultVideoQuality {
-	case "low", "medium", "high":
+	case "low", "medium", "high", "very-good", "ultra":
 	default:
-		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must be one of low, medium, or high")
+		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must be one of low, medium, high, very-good, or ultra")
 	}
 	maxVideoQuality := c.MaxVideoQuality
 	if maxVideoQuality == "" {
-		maxVideoQuality = "high"
+		maxVideoQuality = "ultra"
 	}
 	switch maxVideoQuality {
-	case "low", "medium", "high":
+	case "low", "medium", "high", "very-good", "ultra":
 	default:
-		return fmt.Errorf("MAX_VIDEO_QUALITY must be one of low, medium, or high")
+		return fmt.Errorf("MAX_VIDEO_QUALITY must be one of low, medium, high, very-good, or ultra")
 	}
 	if videoQualityRank(c.DefaultVideoQuality) > videoQualityRank(maxVideoQuality) {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not exceed MAX_VIDEO_QUALITY")
@@ -188,7 +188,7 @@ func (c Config) Validate() error {
 
 func (c Config) EffectiveMaxVideoQuality() string {
 	if c.MaxVideoQuality == "" {
-		return "high"
+		return "ultra"
 	}
 	return c.MaxVideoQuality
 }
@@ -222,6 +222,10 @@ func videoQualityRank(quality string) int {
 		return 1
 	case "high":
 		return 2
+	case "very-good":
+		return 3
+	case "ultra":
+		return 4
 	default:
 		return 0
 	}

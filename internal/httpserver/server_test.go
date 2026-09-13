@@ -56,7 +56,7 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	if values["default_video_quality"] != "low" {
 		t.Fatalf("unexpected default video quality: %#v", values["default_video_quality"])
 	}
-	if values["max_video_quality"] != "high" {
+	if values["max_video_quality"] != "ultra" {
 		t.Fatalf("unexpected maximum video quality: %#v", values["max_video_quality"])
 	}
 	if _, exposed := values["admin_password"]; exposed {

@@ -17,7 +17,7 @@ if (transition(0, 2, 0).level !== 0) throw new Error("downgrade should stop at v
 if (transition(0, 0, 5).level !== 1) throw new Error("good network should upgrade very-slow to slow");
 if (transition(1, 0, 5).level !== 2) throw new Error("good network should upgrade slow to normal");
 if (transition(2, 0, 5).level !== 3) throw new Error("good network should upgrade normal to high");
-if (transition(3, 0, 5).level !== 3) throw new Error("upgrade should stop at high");
+if (transition(3, 0, 5).level !== 3) throw new Error("automatic upgrade should stop at high");
 if (transition(2, 1, 0).level !== 2) throw new Error("downgrade requires two samples");
 if (transition(0, 0, 4).level !== 0) throw new Error("upgrade requires five samples");
 if (!shouldRecoverVideo(5, true) || shouldRecoverVideo(4, true) || shouldRecoverVideo(5, false)) {
@@ -39,7 +39,9 @@ if (resolveCodecName(codecById, "C1") !== "video/VP8" ||
 }
 if (profileNameForQuality("low") !== "slow" ||
     profileNameForQuality("medium") !== "normal" ||
-    profileNameForQuality("high") !== "high") {
+    profileNameForQuality("high") !== "high" ||
+    profileNameForQuality("very-good") !== "very-good" ||
+    profileNameForQuality("ultra") !== "ultra") {
   throw new Error("host quality names should map to client profile names");
 }
 if (isBelowBitrate(20, 40) !== true ||

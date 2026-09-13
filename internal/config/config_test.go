@@ -38,11 +38,14 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	if cfg.DefaultVideoQuality != "low" || cfg.DefaultVideoFPS != 15 {
 		t.Fatalf("unexpected media defaults: %+v", cfg)
 	}
-	if cfg.MaxVideoQuality != "high" {
+	if cfg.MaxVideoQuality != "ultra" {
 		t.Fatalf("unexpected maximum video quality: %+v", cfg)
 	}
-	if cfg.MaxVideoFPS != 30 {
+	if cfg.MaxVideoFPS != 60 {
 		t.Fatalf("unexpected maximum FPS: %+v", cfg)
+	}
+	if cfg.MaxAudioBitrate != 96000 {
+		t.Fatalf("unexpected maximum audio bitrate: %+v", cfg)
 	}
 	if cfg.ICEUDPPortMin != 50000 || cfg.ICEUDPPortMax != 50100 {
 		t.Fatalf("unexpected ICE UDP port range: %d-%d", cfg.ICEUDPPortMin, cfg.ICEUDPPortMax)
@@ -151,7 +154,7 @@ func TestValidateRejectsUnknownQualityAndLogLevel(t *testing.T) {
 	cfg := Config{
 		HTTPAddr:            ":8080",
 		MaxParticipants:     5,
-		DefaultVideoQuality: "ultra",
+		DefaultVideoQuality: "invalid",
 		DefaultVideoFPS:     15,
 		MaxVideoFPS:         30,
 		DefaultAudioBitrate: 32000,
@@ -174,6 +177,10 @@ func TestValidateRejectsUnknownQualityAndLogLevel(t *testing.T) {
 	}
 	cfg.DefaultVideoQuality = "low"
 	cfg.MaxVideoQuality = "ultra"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("new maximum video quality rejected: %v", err)
+	}
+	cfg.MaxVideoQuality = "invalid"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unknown maximum video quality was accepted")
 	}

@@ -73,7 +73,7 @@
 
   function validateSettings(values, defaults = {}) {
     const errors = {};
-    const qualityRank = {low: 0, medium: 1, high: 2};
+    const qualityRank = {low: 0, medium: 1, high: 2, 'very-good': 3, ultra: 4};
     if (!Number.isInteger(values.max_participants) || values.max_participants < 1 || values.max_participants > 100) {
       errors.max_participants = 'Maximum participants must be a whole number from 1 to 100.';
     }

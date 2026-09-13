@@ -30,7 +30,9 @@ function profileNameForQuality(quality) {
   return {
     low: "slow",
     medium: "normal",
-    high: "high"
+    high: "high",
+    "very-good": "very-good",
+    ultra: "ultra"
   }[quality] || "high";
 }
 

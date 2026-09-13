@@ -33,10 +33,10 @@ assert.equal(displayKbps(64000), '64');
 assert.equal(bitrateFromKbps('64'), 64000);
 assert.equal(Object.keys(validateSettings({
   max_participants: 5,
-  default_video_quality: 'high',
-  max_video_quality: 'medium',
-  max_video_bitrate: 500000,
-  max_video_fps: 30,
+  default_video_quality: 'ultra',
+  max_video_quality: 'very-good',
+  max_video_bitrate: 3000000,
+  max_video_fps: 60,
   max_audio_bitrate: 64000
 })).length, 1);
 assert.equal(validateSettings({

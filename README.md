@@ -83,7 +83,9 @@ networks.
 `MAX_AUDIO_BITRATE` are enforced as hard ceilings. The quality ceiling limits
 the browser profile resolution; bitrate and FPS ceilings are also enforced by
 the SFU, which drops excess RTP immediately rather than queuing or
-transcoding.
+transcoding. The built-in profiles include `very-good` at 720p/60 FPS and
+`ultra` at 1080p/30 FPS; the starter configuration permits both with a 3 Mbps
+video ceiling, a 60 FPS ceiling, and a 96 kbps audio ceiling.
 
 ## Docker
 

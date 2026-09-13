@@ -1323,7 +1323,7 @@ const speakerDeactivationHoldMs = 1000;
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
-  maxAudioBitrate: 64000,
+  maxAudioBitrate: 96000,
   maxVideoQuality: "high"
 };
 const hostDefaults = {
@@ -1366,7 +1366,8 @@ const participantQualityLabels = {
 };
 const storedProfile = readStoredValue("meeting.bandwidthProfile");
 const cameraQualityPresets = {
-  "720p": { width: 1280, height: 720, fps: 30 },
+  "1080p": { width: 1920, height: 1080, fps: 30 },
+  "720p": { width: 1280, height: 720, fps: 60 },
   "480p": { width: 854, height: 480, fps: 24 },
   "360p": { width: 640, height: 360, fps: 15 },
   "240p": { width: 426, height: 240, fps: 15 }
@@ -1378,8 +1379,11 @@ const profiles = [
   { name: "very-slow", width: 240, height: 160, fps: 5, bitrate: 90000, audioBitrate: 24000 },
   { name: "slow", width: 360, height: 240, fps: 10, bitrate: 180000, audioBitrate: 32000 },
   { name: "normal", width: 640, height: 360, fps: 15, bitrate: 400000, audioBitrate: 48000 },
-  { name: "high", width: 854, height: 480, fps: 24, bitrate: 650000, audioBitrate: 64000 }
+  { name: "high", width: 854, height: 480, fps: 24, bitrate: 650000, audioBitrate: 96000 },
+  { name: "very-good", width: 1280, height: 720, fps: 60, bitrate: 1800000, audioBitrate: 96000 },
+  { name: "ultra", width: 1920, height: 1080, fps: 30, bitrate: 3000000, audioBitrate: 96000 }
 ];
+const automaticProfileCount = profiles.findIndex((item) => item.name === "very-good");
 function cameraConstraintsForQuality(quality) {
   const preset = cameraQualityPresets[quality] || cameraQualityPresets["360p"];
   return {
@@ -2064,7 +2068,9 @@ fetch("/config").then((response) => response.json()).then((config) => {
   screenShareEnabled = config.screen_share_enabled !== false;
   screen.disabled = !screenShareEnabled;
   if (!storedProfile && config.default_video_quality) {
-    profile.value = config.default_video_quality === "high" ? "high" :
+    profile.value = config.default_video_quality === "ultra" ? "ultra" :
+      config.default_video_quality === "very-good" ? "very-good" :
+      config.default_video_quality === "high" ? "high" :
       config.default_video_quality === "medium" ? "normal" :
       config.default_video_quality === "low" ? "slow" : "very-slow";
     serverDefaultProfile = true;
@@ -2891,7 +2897,12 @@ async function updateDiagnostics() {
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
     goodSamples = good ? goodSamples + 1 : 0;
-    const transition = chooseAdaptationLevel(adaptationLevel, poorSamples, goodSamples, profiles.length);
+    const transition = chooseAdaptationLevel(
+      adaptationLevel,
+      poorSamples,
+      goodSamples,
+      automaticProfileCount
+    );
     if (transition.reset === "poor") {
       adaptationLevel = transition.level;
       poorSamples = 0;
@@ -2965,7 +2976,11 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
 profile.addEventListener("change", async () => {
   writeStoredValue("meeting.bandwidthProfile", profile.value);
   serverDefaultProfile = false;
-  if (profile.value !== "auto") {
+  if (profile.value === "auto") {
+    adaptationLevel = Math.min(adaptationLevel, automaticProfileCount - 1);
+    poorSamples = 0;
+    goodSamples = 0;
+  } else {
     adaptationLevel = profiles.findIndex((item) => item.name === profile.value);
     poorSamples = 0;
     goodSamples = 0;
