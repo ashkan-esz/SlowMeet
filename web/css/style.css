@@ -1989,7 +1989,7 @@ body { overflow-x: hidden; }
 .pinned-layout { grid-template-columns: minmax(0, 1fr) minmax(160px, 26%); }
 .screen-share-layout { grid-template-rows: minmax(0, 1fr) minmax(112px, 24%); }
 .layout-main, .layout-filmstrip { min-width: 0; min-height: 0; }
-.layout-main { display: grid; place-items: stretch; }
+.layout-main { display: grid; grid-template-columns: repeat(var(--pinned-count, 1), minmax(0, 1fr)); gap: 12px; place-items: stretch; }
 .layout-filmstrip { display: flex; gap: 12px; overflow: auto; overscroll-behavior: contain; }
 .pinned-layout .layout-filmstrip {
   display: grid;

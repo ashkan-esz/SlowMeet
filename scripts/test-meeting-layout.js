@@ -2,6 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   deriveMeetingLayoutMode,
+  pinParticipant,
+  unpinParticipant,
   visibleParticipantIds,
   formatMetric,
   parseDebugMode,
@@ -13,10 +15,27 @@ const {
 } = require("../web/js/meeting-layout.js");
 const { chooseParticipantLayout } = require("../web/js/adaptation-policy.js");
 
-if (deriveMeetingLayoutMode({ pinnedParticipantId: "p1", activeScreenShareId: "p2" }) !== "screen-share" ||
-    deriveMeetingLayoutMode({ pinnedParticipantId: "p1" }) !== "pinned" ||
+if (deriveMeetingLayoutMode({ pinnedParticipantIds: ["p1"], activeScreenShareId: "p2" }) !== "screen-share" ||
+    deriveMeetingLayoutMode({ pinnedParticipantIds: ["p1", "p2"] }) !== "pinned" ||
     deriveMeetingLayoutMode({}) !== "grid") {
   throw new Error("layout mode precedence is incorrect");
+}
+if (pinParticipant([], "p1").join(",") !== "p1" ||
+    pinParticipant(["p1"], "p2").join(",") !== "p1,p2" ||
+    pinParticipant(["p1", "p2"], "p3").join(",") !== "p2,p3" ||
+    pinParticipant(["p1", "p2"], "p2").join(",") !== "p1,p2" ||
+    unpinParticipant(["p1", "p2"], "p1").join(",") !== "p2") {
+  throw new Error("two-participant pin state should preserve order and replace the oldest pin");
+}
+const pinAppSource = fs.readFileSync(path.join(__dirname, "../web/js/app.js"), "utf8");
+const pinStyleSource = fs.readFileSync(path.join(__dirname, "../web/css/style.css"), "utf8");
+if (!pinAppSource.includes("let pinnedParticipantIDs = []") ||
+    !pinAppSource.includes("meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs]") ||
+    !pinAppSource.includes("pinnedParticipantIDs.includes(participantID)")) {
+  throw new Error("two-participant pin state wiring is missing");
+}
+if (!pinStyleSource.includes("grid-template-columns: repeat(var(--pinned-count, 1), minmax(0, 1fr));")) {
+  throw new Error("pinned stage must support equal two-up tiles");
 }
 if (parseDebugMode("?debug=4") !== 4 || parseDebugMode("?debug=5") !== 5 || parseDebugMode("?debug=6") !== 6 ||
     parseDebugMode("?debug=7") !== 0 || parseDebugMode("?debug=6&debug=5") !== 6) {
@@ -123,7 +142,7 @@ for (const behavior of [
   'closeChat?.addEventListener("click", () => closeOpenPanel());',
   'closeSidebar.addEventListener("click", () => {\n  closeOpenPanel();\n});',
   'sidebarBackdrop.addEventListener("click", () => {\n  closeOpenPanel();\n});',
-  'if (event.key === "Escape") {\n    if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);\n    closeOpenPanel();',
+  'if (event.key === "Escape") {\n    if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);\n    if (reactionPicker && !reactionPicker.hidden) setReactionPickerOpen(false);\n    if (chatEmojiPicker && !chatEmojiPicker.hidden) setChatEmojiPickerOpen(false);\n    closeOpenPanel();',
 ]) {
   if (!appSource.includes(behavior)) {
     throw new Error(`panel close behavior is missing: ${behavior}`);

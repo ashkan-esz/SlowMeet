@@ -2,13 +2,26 @@
 /** @typedef {'none'|'settings'|'chat'|'people'} MeetingPanel */
 /** @typedef {'audio'|'camera'|'screen'} MediaRole */
 
-/** @param {{activeScreenShareId?: string|null, pinnedParticipantId?: string|null}} state */
+/** @param {{activeScreenShareId?: string|null, pinnedParticipantIds?: string[], pinnedParticipantId?: string|null}} state */
 function deriveMeetingLayoutMode(state) {
   return state?.activeScreenShareId
     ? "screen-share"
-    : state?.pinnedParticipantId
+    : (state?.pinnedParticipantIds?.length || state?.pinnedParticipantId)
       ? "pinned"
       : "grid";
+}
+
+/** @param {string[]} pinnedParticipantIds @param {string} participantId @param {number} maxPins */
+function pinParticipant(pinnedParticipantIds, participantId, maxPins = 2) {
+  const current = Array.isArray(pinnedParticipantIds) ? pinnedParticipantIds : [];
+  if (!participantId || current.includes(participantId)) return current.slice(-maxPins);
+  return [...current, participantId].slice(-maxPins);
+}
+
+/** @param {string[]} pinnedParticipantIds @param {string} participantId */
+function unpinParticipant(pinnedParticipantIds, participantId) {
+  return (Array.isArray(pinnedParticipantIds) ? pinnedParticipantIds : [])
+    .filter((id) => id !== participantId);
 }
 
 function visibleParticipantIds(participantOrder, localParticipantId, showSelfView) {
@@ -114,6 +127,8 @@ function chooseFilmstripLayout({
 if (typeof module !== "undefined") {
   module.exports = {
     deriveMeetingLayoutMode,
+    pinParticipant,
+    unpinParticipant,
     visibleParticipantIds,
     parseDebugMode,
     createPoorConnectionFixture,

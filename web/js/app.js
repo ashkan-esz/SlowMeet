@@ -137,14 +137,14 @@ const participantPageSize = 9;
 let participantPage = 0;
 let focusedParticipantID;
 let pipDragState;
-let pinnedParticipantID;
+let pinnedParticipantIDs = [];
 let participantMenuOwner;
 let layoutFrame;
 let preferredLayoutColumns = 0;
 let participantResizeObserver;
 const meetingViewState = {
   openPanel: "none",
-  pinnedParticipantId: null,
+  pinnedParticipantIds: [],
   activeSpeakerId: null,
   showSelfView: true,
   cameraEnabled: false,
@@ -156,7 +156,7 @@ const participantOrder = [];
 function currentMeetingLayoutMode() {
   return typeof deriveMeetingLayoutMode === "function"
     ? deriveMeetingLayoutMode(meetingViewState)
-    : (meetingViewState.activeScreenShareId ? "screen-share" : meetingViewState.pinnedParticipantId ? "pinned" : "grid");
+    : (meetingViewState.activeScreenShareId ? "screen-share" : meetingViewState.pinnedParticipantIds.length ? "pinned" : "grid");
 }
 
 function renderMeetingLayout() {
@@ -183,10 +183,14 @@ function renderMeetingLayout() {
   if (mode === "grid") {
     visible.forEach((element) => append(participants, element));
   } else if (mode === "pinned") {
-    const pinned = participantElements.get(meetingViewState.pinnedParticipantId);
-    append(pinnedMain, pinned, "main");
-    visible.filter((element) => element !== pinned).forEach((element) => append(pinnedFilmstrip, element));
+    const pinned = pinnedParticipantIDs
+      .map((participantID) => participantElements.get(participantID))
+      .filter(Boolean);
+    pinnedMain.style.setProperty("--pinned-count", String(Math.max(1, pinned.length)));
+    pinned.forEach((element) => append(pinnedMain, element, "main"));
+    visible.filter((element) => !pinned.includes(element)).forEach((element) => append(pinnedFilmstrip, element));
   } else {
+    pinnedMain.style.removeProperty("--pinned-count");
     const owner = participantElements.get(meetingViewState.activeScreenShareId);
     const primary = owner || visible[0];
     append(screenShareMain, primary, "screen-main");
@@ -465,10 +469,14 @@ function updateParticipantPagination() {
       participantPage = Math.floor(ownerIndex / participantPageSize);
     }
   }
-  if (pinnedParticipantID && pinnedParticipantID !== localParticipantID && remoteEntries.length > participantPageSize) {
-    const pinnedIndex = remoteEntries.findIndex(([participantID]) => participantID === pinnedParticipantID);
-    if (pinnedIndex >= 0 && Math.floor(pinnedIndex / participantPageSize) !== participantPage) {
-      participantPage = Math.floor(pinnedIndex / participantPageSize);
+  const pinnedRemoteIndexes = pinnedParticipantIDs
+    .filter((participantID) => participantID !== localParticipantID)
+    .map((participantID) => remoteEntries.findIndex(([id]) => id === participantID))
+    .filter((index) => index >= 0);
+  if (pinnedRemoteIndexes.length > 0 && remoteEntries.length > participantPageSize) {
+    const firstPinnedPage = Math.floor(pinnedRemoteIndexes[0] / participantPageSize);
+    if (pinnedRemoteIndexes.some((index) => Math.floor(index / participantPageSize) !== participantPage)) {
+      participantPage = firstPinnedPage;
     }
   }
   participantPage = Math.min(Math.max(participantPage, 0), pageCount - 1);
@@ -477,8 +485,9 @@ function updateParticipantPagination() {
   const visibleRemoteIDs = new Set(visibleEntries.map(([participantID]) => participantID));
   participantElements.forEach((element, participantID) => {
     const localVisible = participantID === localParticipantID && selfViewVisible;
+    const pinned = pinnedParticipantIDs.includes(participantID);
     const visible = localVisible || (participantID !== localParticipantID &&
-      (remoteEntries.length === 0 || visibleRemoteIDs.has(participantID)));
+      (remoteEntries.length === 0 || visibleRemoteIDs.has(participantID) || pinned));
     element.item.hidden = !visible;
     if (!visible && participantID === focusedParticipantID) {
       element.item.classList.remove("is-focused");
@@ -490,9 +499,11 @@ function updateParticipantPagination() {
   participants.dataset.count = String(visibleCount);
   participants.dataset.remoteCount = String(visibleEntries.length);
   participants.classList.toggle("has-remote", remoteEntries.length > 0);
-  const pinnedIsVisible = pinnedParticipantID && participantElements.get(pinnedParticipantID) &&
-    !participantElements.get(pinnedParticipantID).item.hidden;
-  participants.classList.toggle("has-pinned", Boolean(pinnedIsVisible));
+  const pinnedIsVisible = pinnedParticipantIDs.some((participantID) => {
+    const element = participantElements.get(participantID);
+    return element && !element.item.hidden;
+  });
+  participants.classList.toggle("has-pinned", pinnedIsVisible);
   participants.dataset.pinned = pinnedIsVisible ? "true" : "false";
   if (participantMenuOwner?.item.hidden) closeParticipantMenu(false);
   const paginated = remoteEntries.length > participantPageSize;
@@ -584,16 +595,22 @@ function positionParticipantMenu() {
 }
 
 function setPinnedParticipant(participantID) {
-  const nextID = participantID && participantElements.has(participantID) &&
+  const validID = participantID && participantElements.has(participantID) &&
     (participantID !== localParticipantID || selfViewVisible) ? participantID : undefined;
-  pinnedParticipantID = nextID;
-  meetingViewState.pinnedParticipantId = nextID || null;
+  if (!validID) {
+    pinnedParticipantIDs = [];
+  } else if (pinnedParticipantIDs.includes(validID)) {
+    pinnedParticipantIDs = unpinParticipant(pinnedParticipantIDs, validID);
+  } else {
+    pinnedParticipantIDs = pinParticipant(pinnedParticipantIDs, validID, 2);
+  }
+  meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs];
   participantElements.forEach((element, currentID) => {
-    element.item.classList.toggle("is-pinned", currentID === pinnedParticipantID);
+    element.item.classList.toggle("is-pinned", pinnedParticipantIDs.includes(currentID));
     updateParticipantAriaLabel(element);
   });
-  participants.classList.toggle("has-pinned", Boolean(pinnedParticipantID));
-  participants.dataset.pinned = pinnedParticipantID ? "true" : "false";
+  participants.classList.toggle("has-pinned", pinnedParticipantIDs.length > 0);
+  participants.dataset.pinned = pinnedParticipantIDs.length > 0 ? "true" : "false";
   updateParticipantPagination();
   renderMeetingLayout();
 }
@@ -608,7 +625,7 @@ function openParticipantMenu(participantID, trigger) {
   closeParticipantMenu(false);
   participantMenuOwner = { participantID, trigger, item: element.item };
   participantMenu.setAttribute("aria-label", `${element.name.textContent} actions`);
-  participantMenuPin.textContent = pinnedParticipantID === participantID
+  participantMenuPin.textContent = pinnedParticipantIDs.includes(participantID)
     ? "Unpin participant" : "Pin participant";
   participantMenuSelfView.hidden = participantID !== localParticipantID;
   participantMenuSelfView.textContent = selfViewVisible ? "Hide self-view" : "Show self-view";
@@ -702,8 +719,8 @@ participantMenu?.addEventListener("click", (event) => {
   const owner = participantMenuOwner;
   if (!action || !owner) return;
   if (action === "pin") {
-    const shouldPin = pinnedParticipantID !== owner.participantID;
-    setPinnedParticipant(shouldPin ? owner.participantID : undefined);
+    const shouldPin = !pinnedParticipantIDs.includes(owner.participantID);
+    setPinnedParticipant(owner.participantID);
     if (participantFocusStatus) participantFocusStatus.textContent = shouldPin
       ? `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} pinned.`
       : `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} unpinned.`;
@@ -1095,7 +1112,7 @@ function setSelfViewVisibility(visible, notify = true) {
   meetingViewState.showSelfView = selfViewVisible;
   if (selfView) selfView.checked = selfViewVisible;
   writeStoredValue("meeting.showSelfView", String(selfViewVisible));
-  if (!selfViewVisible && pinnedParticipantID === localParticipantID) setPinnedParticipant();
+  if (!selfViewVisible && pinnedParticipantIDs.includes(localParticipantID)) setPinnedParticipant(localParticipantID);
   updateParticipantPagination();
   renderMeetingLayout();
   if (notify) showToast(selfViewVisible ? "Self-view shown" : "Self-view hidden; your camera is still on");
@@ -2216,7 +2233,7 @@ function connectSocket(name, password) {
       const element = participantElements.get(message.participant.id);
       if (element) {
         if (participantMenuOwner?.participantID === message.participant.id) closeParticipantMenu(false);
-        if (pinnedParticipantID === message.participant.id) setPinnedParticipant();
+        if (pinnedParticipantIDs.includes(message.participant.id)) setPinnedParticipant(message.participant.id);
         remoteAudioElements.delete(element.audio);
         removeSpeakerAnalyzer(message.participant.id);
         forgetRemoteTracks(element, message.participant.id);
@@ -2285,7 +2302,8 @@ function resetMediaConnection() {
   const preserveAutomaticSuspension = videoSuspendedAutomatically;
   resetSpeakerDetection();
   closeParticipantMenu(false);
-  pinnedParticipantID = undefined;
+  pinnedParticipantIDs = [];
+  meetingViewState.pinnedParticipantIds = [];
   participants.classList.remove("has-pinned");
   participants.dataset.pinned = "false";
   for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
@@ -3567,7 +3585,8 @@ leave.addEventListener("click", () => {
   peer?.close();
   resetSpeakerDetection();
   closeParticipantMenu(false);
-  pinnedParticipantID = undefined;
+  pinnedParticipantIDs = [];
+  meetingViewState.pinnedParticipantIds = [];
   participants.classList.remove("has-pinned");
   participants.dataset.pinned = "false";
   for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
