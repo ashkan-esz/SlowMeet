@@ -157,6 +157,35 @@ func TestValidateChatMessage(t *testing.T) {
 	}
 }
 
+func TestValidateReactionMessage(t *testing.T) {
+	valid := Message{
+		Version: ProtocolVersion, Type: TypeReaction,
+		ParticipantID: "p1", Emoji: "🎉",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid reaction rejected: %v", err)
+	}
+	for _, invalid := range []Message{
+		{Version: ProtocolVersion, Type: TypeReaction, Emoji: "🎉"},
+		{Version: ProtocolVersion, Type: TypeReaction, ParticipantID: "p1"},
+		{Version: ProtocolVersion, Type: TypeReaction, ParticipantID: "p1", Emoji: "🦄"},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Errorf("invalid reaction %+v was accepted", invalid)
+		}
+	}
+}
+
+func TestValidateReactionRejectsOversizedEmoji(t *testing.T) {
+	msg := Message{
+		Version: ProtocolVersion, Type: TypeReaction,
+		ParticipantID: "p1", Emoji: string([]rune("🎉🎉🎉🎉🎉🎉🎉")),
+	}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("oversized reaction was accepted")
+	}
+}
+
 func TestValidateHandStateMessage(t *testing.T) {
 	raised := true
 	if err := (Message{

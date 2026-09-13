@@ -720,7 +720,25 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .chat-message--system { justify-items: center; }
 .chat-message--system .chat-message__body { max-width: 100%; padding: 0; color: var(--lm-text-dim); background: transparent; font-style: italic; }
 .chat-composer { display: flex; align-items: flex-end; gap: 8px; padding: 12px; border-block-start: 1px solid var(--lm-border); }
+.chat-composer__field { position: relative; flex: 1; min-width: 0; }
 .chat-composer textarea { flex: 1; min-height: 36px; max-height: 96px; resize: none; padding: 9px 10px; color: var(--lm-text); background: var(--lm-surface-2); border: 1px solid var(--lm-border); border-radius: var(--lm-r-sm); font-size: 12px; }
+.emoji-trigger { position: absolute; inset-block-end: 4px; inset-inline-end: 4px; display: grid; width: 28px; height: 28px; place-items: center; padding: 0; color: var(--lm-text-dim); background: transparent; border: 0; border-radius: var(--lm-r-sm); font-size: 18px; }
+.emoji-trigger:hover, .emoji-trigger:focus-visible { color: var(--lm-text); background: var(--lm-border); }
+.emoji-picker { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; padding: 5px; color: var(--lm-text); background: var(--lm-surface-2); border: 1px solid var(--lm-border); border-radius: var(--lm-r-sm); box-shadow: 0 12px 28px rgba(0,0,0,.24); }
+.emoji-picker[hidden] { display: none !important; }
+.emoji-picker button { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; color: inherit; background: transparent; border: 0; border-radius: var(--lm-r-sm); font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: 19px; }
+.emoji-picker button:hover, .emoji-picker button:focus-visible { background: var(--lm-border); }
+.emoji-picker--chat { position: absolute; inset-block-end: calc(100% + 8px); inset-inline-end: 0; z-index: 1000; }
+.toolbar-popover-wrap { position: relative; z-index: 1300; }
+.emoji-picker--toolbar { position: fixed; inset-block-end: auto; inset-inline-start: 0; z-index: 1300; min-width: 244px; transform: none; }
+.emoji-picker--toolbar.is-open { display: grid; visibility: visible; opacity: 1; }
+.meeting-toolbar #reactions .control-icon { width: 24px; height: 24px; font-size: 24px; line-height: 1; }
+.stage-panel { position: relative; }
+.reaction-overlay { position: absolute; inset: 0; z-index: 100; overflow: hidden; pointer-events: none; }
+.floating-reaction { position: absolute; inset-block-end: 18%; inset-inline-start: calc(50% + var(--reaction-offset)); font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: clamp(28px, 4vw, 48px); line-height: 1; filter: drop-shadow(0 4px 8px rgba(0,0,0,.28)); animation: reaction-float 2.6s ease-out forwards; }
+@keyframes reaction-float { from { opacity: 0; transform: translate(-50%, 18px) scale(.82); } 12% { opacity: 1; } to { opacity: 0; transform: translate(-50%, -180px) scale(1.06); } }
+@media (prefers-reduced-motion: reduce) { .floating-reaction { animation: reaction-fade 1.2s ease-out forwards; } }
+@keyframes reaction-fade { from { opacity: 0; } 15% { opacity: 1; } to { opacity: 0; } }
 .send-button { display: grid; width: 36px; height: 36px; min-height: 36px; place-items: center; padding: 0; color: #fff; background: var(--lm-accent); border: 0; border-radius: var(--lm-r-sm); }
 .send-button svg { width: 16px; height: 16px; }
 .new-messages { position: absolute; inset-block-end: 62px; inset-inline: 50%; z-index: 2; width: max-content; min-height: 28px; padding: 0 10px; color: var(--lm-text); background: var(--lm-surface-2); border: 1px solid var(--lm-border); border-radius: 999px; font-size: 10px; transform: translateX(-50%); }
@@ -754,6 +772,7 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
   .controls { padding-inline: 8px; }
   .control-button { width: 52px; }
   .control-button--quiet { margin-inline-start: 0; }
+  .emoji-picker--toolbar { inset-inline-end: auto; transform: none; }
 }
 @media (max-width: 700px) {
   .participant-grid[data-count="2"] { grid-template-columns: 1fr; grid-template-rows: repeat(2, minmax(0, 1fr)); }

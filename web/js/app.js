@@ -74,6 +74,12 @@ const chatForm = document.querySelector("#chat-form");
 const chatInput = document.querySelector("#chat-input");
 const chatBadge = document.querySelector("#chat-badge");
 const newMessages = document.querySelector("#new-messages");
+const reactions = document.querySelector("#reactions");
+const reactionPicker = document.querySelector("#reaction-picker");
+const reactionOverlay = document.querySelector("#reaction-overlay");
+const reactionAnnouncements = document.querySelector("#reaction-announcements");
+const chatEmoji = document.querySelector("#chat-emoji");
+const chatEmojiPicker = document.querySelector("#chat-emoji-picker");
 const participantCount = document.querySelector("#participant-count");
 const participantCountBadge = document.querySelector("#participant-count-badge");
 const audioOnly = document.querySelector("#audio-only");
@@ -761,6 +767,96 @@ let chatPinnedToBottom = true;
 let pushToTalkActive = false;
 let chatCloseTimer;
 let chatFocusTrigger;
+const reactionEmojiSet = new Set(["👍", "👎", "❤️", "😂", "🎉", "😮", "👏", "🙌", "🔥", "💯", "😢", "🤔"]);
+let reactionFocusTrigger;
+let reactionAnnouncementTimer;
+let reactionSequence = 0;
+
+function setReactionPickerOpen(open, restoreFocus = true) {
+  if (!reactionPicker || !reactions) return;
+  reactionPicker.hidden = !open;
+  reactionPicker.classList.toggle("is-open", open);
+  reactions.setAttribute("aria-expanded", String(open));
+  if (open) {
+    positionReactionPicker();
+    reactionFocusTrigger = document.activeElement;
+    reactionPicker.querySelector("[data-reaction]")?.focus();
+  } else if (restoreFocus && reactionFocusTrigger?.isConnected) {
+    reactionFocusTrigger.focus();
+    reactionFocusTrigger = undefined;
+  }
+}
+
+function positionReactionPicker() {
+  if (!reactionPicker || !reactions || reactionPicker.hidden) return;
+  const trigger = reactions.getBoundingClientRect();
+  const pickerWidth = Math.max(reactionPicker.offsetWidth, 244);
+  const left = Math.max(8, Math.min(
+    window.innerWidth - pickerWidth - 8,
+    trigger.left + (trigger.width - pickerWidth) / 2
+  ));
+  reactionPicker.style.left = `${left}px`;
+  reactionPicker.style.bottom = `${Math.max(8, window.innerHeight - trigger.top + 8)}px`;
+}
+
+function setChatEmojiPickerOpen(open) {
+  if (!chatEmojiPicker || !chatEmoji) return;
+  chatEmojiPicker.hidden = !open;
+  chatEmoji.setAttribute("aria-expanded", String(open));
+}
+
+function insertChatEmoji(emoji) {
+  if (!chatInput) return;
+  const start = chatInput.selectionStart ?? chatInput.value.length;
+  const end = chatInput.selectionEnd ?? start;
+  const next = `${chatInput.value.slice(0, start)}${emoji}${chatInput.value.slice(end)}`.slice(0, 500);
+  const caret = Math.min(start + emoji.length, next.length);
+  chatInput.value = next;
+  chatInput.focus();
+  chatInput.setSelectionRange(caret, caret);
+  autoGrowChat();
+}
+
+function announceReaction(name, emoji) {
+  if (!reactionAnnouncements) return;
+  clearTimeout(reactionAnnouncementTimer);
+  reactionAnnouncements.textContent = `${name || "Participant"} sent ${emoji}`;
+  reactionAnnouncementTimer = setTimeout(() => {
+    reactionAnnouncements.textContent = "";
+  }, 1200);
+}
+
+function renderReaction(message) {
+  if (!reactionOverlay || !reactionEmojiSet.has(message?.emoji)) return;
+  const reaction = document.createElement("span");
+  const sequence = reactionSequence++;
+  reaction.className = "floating-reaction";
+  reaction.textContent = message.emoji;
+  reaction.style.setProperty("--reaction-offset", `${((sequence * 37) % 120) - 60}px`);
+  reactionOverlay.append(reaction);
+  setTimeout(() => reaction.remove(), 2600);
+  announceReaction(message.name, message.emoji);
+}
+
+function sendReaction(emoji) {
+  if (!reactionEmojiSet.has(emoji)) return false;
+  if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) {
+    showToast("Reactions are unavailable while the meeting reconnects.");
+    return false;
+  }
+  try {
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "emoji_reaction",
+      participant_id: localParticipantID,
+      emoji
+    }));
+    return true;
+  } catch (_) {
+    showToast("Reaction could not be sent. Try again.");
+    return false;
+  }
+}
 
 function isVisibleFocusTarget(element) {
   return Boolean(
@@ -920,6 +1016,20 @@ function autoGrowChat() {
 chatToggle?.addEventListener("click", () => setOpenPanel("chat", chatToggle));
 mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));
 closeChat?.addEventListener("click", () => closeOpenPanel());
+reactions?.addEventListener("click", () => setReactionPickerOpen(reactionPicker?.hidden !== false));
+window.addEventListener("resize", positionReactionPicker);
+reactionPicker?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-reaction]");
+  if (!button) return;
+  sendReaction(button.dataset.reaction);
+});
+chatEmoji?.addEventListener("click", () => setChatEmojiPickerOpen(chatEmojiPicker?.hidden !== false));
+chatEmojiPicker?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-emoji]");
+  if (!button) return;
+  insertChatEmoji(button.dataset.emoji);
+  setChatEmojiPickerOpen(false);
+});
 connection?.addEventListener("click", () => {
   setConnectionPopoverOpen(connectionPopover?.hidden !== false, connection);
 });
@@ -1004,6 +1114,8 @@ document.addEventListener("keydown", (event) => {
   const isFormField = event.target.matches("input, textarea, select");
   if (event.key === "Escape") {
     if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);
+    if (reactionPicker && !reactionPicker.hidden) setReactionPickerOpen(false);
+    if (chatEmojiPicker && !chatEmojiPicker.hidden) setChatEmojiPickerOpen(false);
     closeOpenPanel();
     return;
   }
@@ -1045,6 +1157,16 @@ document.addEventListener("pointerdown", (event) => {
   if (!connectionPopover || connectionPopover.hidden) return;
   if (connectionPopover.contains(event.target) || event.target.closest?.("#connection")) return;
   setConnectionPopoverOpen(false, null, false);
+});
+document.addEventListener("pointerdown", (event) => {
+  if (reactionPicker && !reactionPicker.hidden &&
+      !reactionPicker.contains(event.target) && !reactions?.contains(event.target)) {
+    setReactionPickerOpen(false, false);
+  }
+  if (chatEmojiPicker && !chatEmojiPicker.hidden &&
+      !chatEmojiPicker.contains(event.target) && !chatEmoji?.contains(event.target)) {
+    setChatEmojiPickerOpen(false);
+  }
 });
 document.addEventListener("keyup", (event) => {
   if (event.key === " " && pushToTalkActive) {
@@ -2013,6 +2135,10 @@ function connectSocket(name, password) {
     }
     if (message.type === "chat_message") {
       if (message.text) addChatMessage(message.name || "Participant", message.text);
+      return;
+    }
+    if (message.type === "emoji_reaction") {
+      renderReaction(message);
       return;
     }
     if (message.type === "hand_state") {

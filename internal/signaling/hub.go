@@ -30,6 +30,8 @@ const (
 	chatRoomID          = "default"
 	chatHistoryLimit    = 100
 	chatHistoryTTL      = 30 * time.Minute
+	reactionBurstLimit  = 6
+	reactionBurstWindow = 3 * time.Second
 )
 
 var chatHistoryExpiry = chatHistoryTTL
@@ -55,6 +57,8 @@ type client struct {
 	pendingOffer              bool
 	pendingICERestart         bool
 	activeScreenMediaStreamID string
+	reactionWindowStart       time.Time
+	reactionCount             int
 }
 
 type pendingReconnect struct {
@@ -537,6 +541,15 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.broadcastExcept(c, msg)
 				continue
 			}
+			if msg.Type == TypeReaction {
+				if !c.allowReaction() {
+					continue
+				}
+				msg.ParticipantID = c.participant.ID
+				msg.Name = c.participant.Name
+				h.broadcast(msg)
+				continue
+			}
 			h.handleWebRTCMessage(c, msg)
 			continue
 		}
@@ -639,6 +652,19 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.metrics.Reconnected()
 		}
 	}
+}
+
+func (c *client) allowReaction() bool {
+	now := time.Now()
+	if c.reactionWindowStart.IsZero() || now.Sub(c.reactionWindowStart) >= reactionBurstWindow {
+		c.reactionWindowStart = now
+		c.reactionCount = 0
+	}
+	if c.reactionCount >= reactionBurstLimit {
+		return false
+	}
+	c.reactionCount++
+	return true
 }
 
 func readMessage(conn *websocket.Conn, message *Message) error {

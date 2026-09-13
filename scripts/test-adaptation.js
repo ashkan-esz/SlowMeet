@@ -472,6 +472,10 @@ for (const style of [
 for (const behavior of [
   "sendChatMessage",
   "message.type === \"chat_message\"",
+  "emoji_reaction",
+  "renderReaction",
+  "insertChatEmoji",
+  "reactionEmojiSet",
   "chat-message--own",
   "chat-message__meta",
   "unreadMessages"
@@ -479,6 +483,26 @@ for (const behavior of [
   if (!appSource.includes(behavior) && !indexSource.includes(behavior)) {
     throw new Error(`chat behavior is missing: ${behavior}`);
   }
+}
+for (const element of [
+  'id="reactions"',
+  'id="reaction-picker"',
+  'id="reaction-overlay"',
+  'id="chat-emoji"',
+  'id="chat-emoji-picker"',
+  'aria-live="polite"'
+]) {
+  if (!indexSource.includes(element)) throw new Error(`emoji UI contract is missing: ${element}`);
+}
+for (const style of [
+  ".reaction-overlay",
+  ".floating-reaction",
+  "@keyframes reaction-float",
+  "@media (prefers-reduced-motion: reduce)",
+  ".emoji-picker--toolbar",
+  ".emoji-picker--chat"
+]) {
+  if (!styleSource.includes(style)) throw new Error(`emoji style is missing: ${style}`);
 }
 for (const style of [
   ".chat-rail.is-open",

@@ -240,6 +240,73 @@ func TestWebSocketLivenessConfiguration(t *testing.T) {
 	}
 }
 
+func TestReactionRateLimit(t *testing.T) {
+	client := &client{}
+	for range reactionBurstLimit {
+		if !client.allowReaction() {
+			t.Fatal("reaction within burst limit was rejected")
+		}
+	}
+	if client.allowReaction() {
+		t.Fatal("reaction beyond burst limit was accepted")
+	}
+	client.reactionWindowStart = time.Now().Add(-reactionBurstWindow)
+	if !client.allowReaction() {
+		t.Fatal("reaction after rate-limit window was rejected")
+	}
+}
+
+func TestReactionBroadcastsToAllParticipantsWithoutHistory(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		RetainChatHistory:   true,
+		MaxParticipants:     2,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	var secondSeesFirst Message
+	readTestMessage(t, second, &secondSeesFirst)
+	var firstSeesSecond Message
+	readTestMessage(t, first, &firstSeesSecond)
+
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeReaction,
+		ParticipantID: "spoofed", Name: "Spoofed", Emoji: "🎉",
+	})
+	var firstReaction, secondReaction Message
+	readTestMessage(t, first, &firstReaction)
+	readTestMessage(t, second, &secondReaction)
+	for _, got := range []Message{firstReaction, secondReaction} {
+		if got.Type != TypeReaction || got.Emoji != "🎉" ||
+			got.ParticipantID != firstJoined.Participant.ID || got.Name != "Ashkan" {
+			t.Fatalf("reaction = %+v, want authenticated broadcast", got)
+		}
+	}
+	if got := hub.chatHistorySnapshot("default"); got != nil {
+		t.Fatalf("reaction was stored in chat history: %#v", got)
+	}
+}
+
 func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr:            ":8080",

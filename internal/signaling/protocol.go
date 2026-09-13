@@ -33,8 +33,14 @@ const (
 	TypeScreenState  = "screen_share_state"
 	TypeConfigUpdate = "config_update"
 	TypeChat         = "chat_message"
+	TypeReaction     = "emoji_reaction"
 	TypeError        = "error"
 )
+
+var approvedReactionEmojis = map[string]struct{}{
+	"👍": {}, "👎": {}, "❤️": {}, "😂": {}, "🎉": {}, "😮": {},
+	"👏": {}, "🙌": {}, "🔥": {}, "💯": {}, "😢": {}, "🤔": {},
+}
 
 type Message struct {
 	Version            int                  `json:"version"`
@@ -70,6 +76,7 @@ type Message struct {
 	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
 	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
 	ChatText           string               `json:"text,omitempty"`
+	Emoji              string               `json:"emoji,omitempty"`
 	ChatHistory        []ChatHistoryEntry   `json:"chat_history,omitempty"`
 }
 
@@ -129,6 +136,13 @@ func (m Message) Validate() error {
 		}
 		if len([]rune(text)) > 500 {
 			return fmt.Errorf("chat message is too long")
+		}
+	case TypeReaction:
+		if m.ParticipantID == "" || m.Emoji == "" {
+			return fmt.Errorf("reaction requires participant_id and emoji")
+		}
+		if _, ok := approvedReactionEmojis[m.Emoji]; !ok {
+			return fmt.Errorf("unsupported reaction emoji")
 		}
 	default:
 		return fmt.Errorf("unknown message type %q", m.Type)
