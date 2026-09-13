@@ -781,9 +781,12 @@ function setReactionPickerOpen(open, restoreFocus = true) {
     positionReactionPicker();
     reactionFocusTrigger = document.activeElement;
     reactionPicker.querySelector("[data-reaction]")?.focus();
-  } else if (restoreFocus && reactionFocusTrigger?.isConnected) {
-    reactionFocusTrigger.focus();
+  } else {
+    const focusTrigger = reactionFocusTrigger;
     reactionFocusTrigger = undefined;
+    if (restoreFocus && focusTrigger?.isConnected) {
+      focusTrigger.focus();
+    }
   }
 }
 
@@ -1775,7 +1778,7 @@ function ensureAudioContext() {
 
 function remoteParticipantID(streams, track) {
   const streamID = streams?.[0]?.id || "";
-  const streamPrefix = "lowmeet-";
+  const streamPrefix = "slowmeet-";
   if (streamID.startsWith(streamPrefix)) {
     return streamID.slice(streamPrefix.length).replace(/-(?:audio|camera|screen)$/, "");
   }

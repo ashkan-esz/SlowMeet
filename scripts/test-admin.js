@@ -13,7 +13,7 @@ const {
   buildDiagnostics
 } = require('../web/js/admin-utils.js');
 
-assert.deepEqual(parseMetrics('lowmeet_active_participants 4\nlowmeet_last_rtt_ms 280.0\n'), {
+assert.deepEqual(parseMetrics('slowmeet_active_participants 4\nslowmeet_last_rtt_ms 280.0\n'), {
   active_participants: 4,
   last_rtt_ms: 280
 });

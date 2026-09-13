@@ -155,7 +155,7 @@ func persist(cfg Config, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".lowmeet-config-*")
+	temp, err := os.CreateTemp(filepath.Dir(path), ".slowmeet-config-*")
 	if err != nil {
 		return err
 	}

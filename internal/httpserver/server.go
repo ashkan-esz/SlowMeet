@@ -88,34 +88,34 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		cfg := store.Snapshot()
 		snapshot := hub.Metrics().Snapshot()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(w, "lowmeet_active_participants %d\n", meetingState.Count())
-		_, _ = fmt.Fprintf(w, "lowmeet_peer_connections %d\n", snapshot.PeerConnections)
-		_, _ = fmt.Fprintf(w, "lowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
-		_, _ = fmt.Fprintf(w, "lowmeet_reconnects_total %d\n", snapshot.Reconnects)
-		_, _ = fmt.Fprintf(w, "lowmeet_network_samples_total %d\n", snapshot.NetworkSamples)
-		_, _ = fmt.Fprintf(w, "lowmeet_network_sample_available %d\n", boolMetric(snapshot.HasNetworkSample))
+		_, _ = fmt.Fprintf(w, "slowmeet_active_participants %d\n", meetingState.Count())
+		_, _ = fmt.Fprintf(w, "slowmeet_peer_connections %d\n", snapshot.PeerConnections)
+		_, _ = fmt.Fprintf(w, "slowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
+		_, _ = fmt.Fprintf(w, "slowmeet_reconnects_total %d\n", snapshot.Reconnects)
+		_, _ = fmt.Fprintf(w, "slowmeet_network_samples_total %d\n", snapshot.NetworkSamples)
+		_, _ = fmt.Fprintf(w, "slowmeet_network_sample_available %d\n", boolMetric(snapshot.HasNetworkSample))
 		if snapshot.HasNetworkSample {
-			_, _ = fmt.Fprintf(w, "lowmeet_last_network_sample_timestamp_seconds %d\n", snapshot.LastNetworkSample)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_network_sample_timestamp_seconds %d\n", snapshot.LastNetworkSample)
 		}
 		if snapshot.HasRTT {
-			_, _ = fmt.Fprintf(w, "lowmeet_average_rtt_ms %.1f\n", snapshot.AverageRTTMs)
-			_, _ = fmt.Fprintf(w, "lowmeet_last_rtt_ms %d\n", snapshot.LastRTTMs)
+			_, _ = fmt.Fprintf(w, "slowmeet_average_rtt_ms %.1f\n", snapshot.AverageRTTMs)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_rtt_ms %d\n", snapshot.LastRTTMs)
 		}
 		if snapshot.HasPacketLoss {
-			_, _ = fmt.Fprintf(w, "lowmeet_last_packet_loss_percent %.1f\n", float64(snapshot.LastPacketLoss10)/10)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_packet_loss_percent %.1f\n", float64(snapshot.LastPacketLoss10)/10)
 		}
 		if snapshot.HasJitter {
-			_, _ = fmt.Fprintf(w, "lowmeet_last_jitter_ms %d\n", snapshot.LastJitterMs)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_jitter_ms %d\n", snapshot.LastJitterMs)
 		}
 		if snapshot.HasVideo {
-			_, _ = fmt.Fprintf(w, "lowmeet_last_video_kbps %d\n", snapshot.LastVideoKbps)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_video_kbps %d\n", snapshot.LastVideoKbps)
 		}
 		if snapshot.HasAudio {
-			_, _ = fmt.Fprintf(w, "lowmeet_last_audio_kbps %d\n", snapshot.LastAudioKbps)
+			_, _ = fmt.Fprintf(w, "slowmeet_last_audio_kbps %d\n", snapshot.LastAudioKbps)
 		}
-		_, _ = fmt.Fprintf(w, "lowmeet_max_participants %d\n", cfg.MaxParticipants)
-		_, _ = fmt.Fprintf(w, "lowmeet_max_video_bitrate %d\n", cfg.MaxVideoBitrate)
-		_, _ = fmt.Fprintf(w, "lowmeet_max_audio_bitrate %d\n", cfg.MaxAudioBitrate)
+		_, _ = fmt.Fprintf(w, "slowmeet_max_participants %d\n", cfg.MaxParticipants)
+		_, _ = fmt.Fprintf(w, "slowmeet_max_video_bitrate %d\n", cfg.MaxVideoBitrate)
+		_, _ = fmt.Fprintf(w, "slowmeet_max_audio_bitrate %d\n", cfg.MaxAudioBitrate)
 	})
 	mux.HandleFunc("/admin/config", func(w http.ResponseWriter, r *http.Request) {
 		cfg := store.Snapshot()

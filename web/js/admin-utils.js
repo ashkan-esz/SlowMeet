@@ -1,7 +1,7 @@
 (function (global) {
   function parseMetrics(body) {
     return body.split('\n').reduce((values, line) => {
-      const match = line.match(/^lowmeet_([a-z0-9_]+)\s+([-+]?[0-9]*\.?[0-9]+)$/);
+      const match = line.match(/^slowmeet_([a-z0-9_]+)\s+([-+]?[0-9]*\.?[0-9]+)$/);
       if (match) values[match[1]] = Number(match[2]);
       return values;
     }, {});

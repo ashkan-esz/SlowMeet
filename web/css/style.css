@@ -577,7 +577,7 @@ fieldset legend { margin-bottom: .75rem; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 
-/* LowMeet meeting surface: dense, quiet, and intentionally independent from the join page. */
+/* SlowMeet meeting surface: dense, quiet, and intentionally independent from the join page. */
 html:has(.meeting-shell:not([hidden])),
 html:has(.meeting-shell:not([hidden])) body,
 html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }

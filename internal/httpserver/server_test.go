@@ -68,11 +68,11 @@ func TestHealthAndPublicConfig(t *testing.T) {
 
 	metrics := httptest.NewRecorder()
 	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "lowmeet_peer_connections 0") ||
-		strings.Contains(metrics.Body.String(), "lowmeet_average_rtt_ms") ||
-		strings.Contains(metrics.Body.String(), "lowmeet_last_network_sample_timestamp_seconds") ||
-		strings.Contains(metrics.Body.String(), "lowmeet_last_video_kbps") ||
-		!strings.Contains(metrics.Body.String(), "lowmeet_network_sample_available 0") {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "slowmeet_peer_connections 0") ||
+		strings.Contains(metrics.Body.String(), "slowmeet_average_rtt_ms") ||
+		strings.Contains(metrics.Body.String(), "slowmeet_last_network_sample_timestamp_seconds") ||
+		strings.Contains(metrics.Body.String(), "slowmeet_last_video_kbps") ||
+		!strings.Contains(metrics.Body.String(), "slowmeet_network_sample_available 0") {
 		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
 	}
 
@@ -80,9 +80,9 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	withSample := httptest.NewRecorder()
 	handler.ServeHTTP(withSample, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := withSample.Body.String()
-	if !strings.Contains(body, "lowmeet_last_network_sample_timestamp_seconds ") ||
-		!strings.Contains(body, "lowmeet_last_rtt_ms 84") ||
-		!strings.Contains(body, "lowmeet_last_packet_loss_percent 0.4") {
+	if !strings.Contains(body, "slowmeet_last_network_sample_timestamp_seconds ") ||
+		!strings.Contains(body, "slowmeet_last_rtt_ms 84") ||
+		!strings.Contains(body, "slowmeet_last_packet_loss_percent 0.4") {
 		t.Fatalf("metrics response omitted observed network sample: %s", body)
 	}
 }

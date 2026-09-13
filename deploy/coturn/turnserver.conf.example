@@ -17,6 +17,6 @@ pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem
 # Use this when coturn is behind a NAT. Otherwise omit it.
 # external-ip=PUBLIC_IP/PRIVATE_IP
 
-# Keep this range separate from LowMeet's ICE_UDP_PORT_MIN/MAX range.
+# Keep this range separate from SlowMeet's ICE_UDP_PORT_MIN/MAX range.
 min-port=49152
 max-port=65535

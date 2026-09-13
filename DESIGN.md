@@ -1,5 +1,5 @@
 ---
-name: LowMeet Operations Cockpit
+name: SlowMeet Operations Cockpit
 version: 1.1
 colors:
   canvas: '#eef2f5'
@@ -55,28 +55,28 @@ layout:
   touchTarget: '44px'
 ---
 
-# LowMeet Operations Cockpit
+# SlowMeet Operations Cockpit
 
 ## Product context
 
-LowMeet is a small, self-hosted single-meeting WebRTC/SFU service. Its promise is
+SlowMeet is a small, self-hosted single-meeting WebRTC/SFU service. Its promise is
 usable audio and graceful video degradation on slow or unstable connections.
 The admin interface is an operator tool for one deployment, not a multi-tenant
 analytics product.
 
-The primary audience is the person who deploys and maintains LowMeet. They may
+The primary audience is the person who deploys and maintains SlowMeet. They may
 be checking the service from a laptop during a live call, or from a phone while
 troubleshooting a remote installation. They need confidence and fast answers,
 not a wall of infrastructure terminology.
 
-The single job of the dashboard is: **show whether this LowMeet instance is
+The single job of the dashboard is: **show whether this SlowMeet instance is
 healthy, explain the current meeting conditions, and make safe runtime policy
 changes.**
 
 ## Brand and style
 
 The visual identity is a quiet operations cockpit: calm, compact, and readable
-under pressure. LowMeet should feel dependable rather than enterprise-heavy.
+under pressure. SlowMeet should feel dependable rather than enterprise-heavy.
 Use the existing blue, white, cool-gray, and dark-diagnostics language as the
 starting point, then make the roles and states consistent.
 
@@ -102,7 +102,7 @@ must always have a text label and must never be the only status signal.
 Tokens are named by role so their purpose remains stable if the palette changes.
 
 - `canvas` is the page background. It separates the dashboard from white
-  content surfaces and preserves the existing LowMeet visual language.
+  content surfaces and preserves the existing SlowMeet visual language.
 - `surface` is the default card and form background. Use it for primary reading
   areas, never for full-viewport decoration.
 - `surface-raised` is for secondary controls, table rows, and selected-but-not-
@@ -129,7 +129,7 @@ states.
 
 Use the existing system sans-serif stack for dependable rendering on a
 self-hosted product with no font download dependency. This keeps the dashboard
-fast on the same constrained networks LowMeet is designed to tolerate.
+fast on the same constrained networks SlowMeet is designed to tolerate.
 
 - `display` is for the page title and major section headings. Use it sparingly.
 - `body` is for descriptions, help text, and status explanations.
@@ -158,7 +158,7 @@ The desktop layout has three zones:
 
 ```text
 ┌──── signal rail ────┬──── navigation rail ────┬──────── content ────────┐
-│ Service ready       │ LowMeet                 │ Overview                │
+│ Service ready       │ SlowMeet                 │ Overview                │
 │                     │                         │ [title] [refresh]       │
 │                     │ Overview                │                         │
 │                     │ Meeting settings        │ [health summary]        │
@@ -234,7 +234,7 @@ setting. Never display, persist, echo, or include it in a status summary.
 
 This may initially be a focused section within Meeting settings. Use plain
 language to explain the relationship between quality, bitrate, FPS, and
-degradation. The dashboard should preserve LowMeet’s principle that audio
+degradation. The dashboard should preserve SlowMeet’s principle that audio
 remains usable as video degrades.
 
 ### Network health
@@ -475,7 +475,7 @@ profile visible without turning every warning into a blocking modal.
 
 ## Implementation constraints
 
-- Use the existing system font stack; LowMeet is self-hosted and optimized for
+- Use the existing system font stack; SlowMeet is self-hosted and optimized for
   constrained networks.
 - Use CSS custom properties for semantic color, spacing, radii, and focus
   treatments. Do not add one-off per-component colors.
@@ -796,7 +796,7 @@ been tested.
 
 ```text
 ┌─────────────────────────────┐
-│ LowMeet       [Menu]        │
+│ SlowMeet       [Menu]        │
 │ Service ready               │
 ├─────────────────────────────┤
 │ Overview                    │

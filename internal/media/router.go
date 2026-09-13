@@ -155,7 +155,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 	key := sourceID + "/" + string(role)
 	trackID := fmt.Sprintf("%s|%s", sourceID, role)
-	streamID := fmt.Sprintf("lowmeet-%s-%s", sourceID, role)
+	streamID := fmt.Sprintf("slowmeet-%s-%s", sourceID, role)
 	pub := &publication{
 		key:      key,
 		sourceID: sourceID,

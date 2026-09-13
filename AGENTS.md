@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-LowMeet is a small Go WebRTC/SFU application. The entry point is `main.go`;
+SlowMeet is a small Go WebRTC/SFU application. The entry point is `main.go`;
 server packages live in `internal/`:
 
 - `config/` handles environment-backed and persistent settings.

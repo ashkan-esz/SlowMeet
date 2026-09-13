@@ -1,6 +1,6 @@
-# LowMeet
+# SlowMeet
 
-LowMeet is a small, self-hosted single-meeting video call focused on usable
+SlowMeet is a small, self-hosted single-meeting video call focused on usable
 audio and graceful degradation on slow or unstable connections.
 
 The current MVP provides:
@@ -115,9 +115,9 @@ session to reconnect without changing participant identity.
 ## HTTPS and WebSockets
 
 Production browsers require a secure origin for camera and microphone access.
-Put Caddy, Nginx, or another TLS reverse proxy in front of LowMeet. Examples
-are provided in `deploy/caddy/Caddyfile` and `deploy/nginx/lowmeet.conf`.
-For a non-container installation, `deploy/systemd/lowmeet.service` provides a
+Put Caddy, Nginx, or another TLS reverse proxy in front of SlowMeet. Examples
+are provided in `deploy/caddy/Caddyfile` and `deploy/nginx/slowmeet.conf`.
+For a non-container installation, `deploy/systemd/slowmeet.service` provides a
 least-privilege service template.
 
 The proxy must preserve WebSocket upgrade headers and allow long-lived
@@ -135,5 +135,5 @@ packet loss, jitter, and reported audio/video bitrate.
 
 ## Scope
 
-LowMeet intentionally does not include accounts, rooms, recording, chat,
+SlowMeet intentionally does not include accounts, rooms, recording, chat,
 transcoding, clustering, or a database in this MVP.

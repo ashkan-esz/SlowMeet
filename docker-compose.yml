@@ -1,5 +1,5 @@
 services:
-  lowmeet:
+  slowmeet:
     build: .
     restart: unless-stopped
     env_file:
@@ -8,7 +8,7 @@ services:
       - "8080:8080"
       - "${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}:${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}/udp"
     volumes:
-      - lowmeet-data:/app/data
+      - slowmeet-data:/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 10s
@@ -16,4 +16,4 @@ services:
       retries: 3
 
 volumes:
-  lowmeet-data:
+  slowmeet-data:

@@ -116,7 +116,7 @@ if (!styleSource.includes(".participant-grid video.local-camera-preview") ||
     !appSource.includes("updateVideoOrientation(screenShareOwner);")) {
   throw new Error("camera previews should be mirrored without mirroring screen shares");
 }
-if (!appSource.includes('const streamPrefix = "lowmeet-";') ||
+if (!appSource.includes('const streamPrefix = "slowmeet-";') ||
     !appSource.includes('return track.id?.split("|")[0] || "";') ||
     !appSource.includes("const stream = new MediaStream();") ||
     !appSource.includes("const participantID = remoteParticipantID(streams, track);") ||

@@ -1,22 +1,22 @@
 [Unit]
-Description=LowMeet self-hosted meeting
+Description=SlowMeet self-hosted meeting
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=lowmeet
-Group=lowmeet
-WorkingDirectory=/opt/lowmeet
-EnvironmentFile=/opt/lowmeet/.env
-ExecStart=/opt/lowmeet/lowmeet
+User=slowmeet
+Group=slowmeet
+WorkingDirectory=/opt/slowmeet
+EnvironmentFile=/opt/slowmeet/.env
+ExecStart=/opt/slowmeet/slowmeet
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/lowmeet/data
+ReadWritePaths=/opt/slowmeet/data
 
 [Install]
 WantedBy=multi-user.target

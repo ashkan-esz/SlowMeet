@@ -1,6 +1,6 @@
 # Network impairment testing
 
-LowMeet should be tested with two or more browsers while applying impairment
+SlowMeet should be tested with two or more browsers while applying impairment
 to the client network namespace or interface. These commands require Linux
 `iproute2` and usually root privileges.
 

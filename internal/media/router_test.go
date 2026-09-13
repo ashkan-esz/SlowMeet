@@ -136,9 +136,9 @@ func TestRolePublicationIdentity(t *testing.T) {
 		trackID  string
 		streamID string
 	}{
-		{SourceRoleAudio, "p1/audio", "p1|audio", "lowmeet-p1-audio"},
-		{SourceRoleCamera, "p1/camera", "p1|camera", "lowmeet-p1-camera"},
-		{SourceRoleScreen, "p1/screen", "p1|screen", "lowmeet-p1-screen"},
+		{SourceRoleAudio, "p1/audio", "p1|audio", "slowmeet-p1-audio"},
+		{SourceRoleCamera, "p1/camera", "p1|camera", "slowmeet-p1-camera"},
+		{SourceRoleScreen, "p1/screen", "p1|screen", "slowmeet-p1-screen"},
 	} {
 		pub := &publication{
 			key: test.key, sourceID: "p1", role: test.role,
