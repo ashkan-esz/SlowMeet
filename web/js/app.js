@@ -67,6 +67,9 @@ const chatToggle = document.querySelector("#chat");
 const participantsButton = document.querySelector("#participants-button");
 const mobileChat = document.querySelector("#mobile-chat");
 const mobilePeople = document.querySelector("#mobile-people");
+const mobileScreen = document.querySelector("#mobile-screen");
+const mobileRaiseHand = document.querySelector("#mobile-raise-hand");
+const mobileReceiveVideo = document.querySelector("#mobile-receive-video");
 const chatRail = document.querySelector("#chat-rail");
 const closeChat = document.querySelector("#close-chat");
 const chatMessages = document.querySelector("#chat-messages");
@@ -1129,6 +1132,10 @@ function openPeoplePanel(trigger = participantsButton) {
 }
 participantsButton?.addEventListener("click", openPeoplePanel);
 mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
+mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));
+mobileScreen?.addEventListener("click", () => screen?.click());
+mobileRaiseHand?.addEventListener("click", () => raiseHand?.click());
+mobileReceiveVideo?.addEventListener("click", () => receiveVideo?.click());
 document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
