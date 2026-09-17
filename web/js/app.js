@@ -190,10 +190,14 @@ function renderMeetingLayout() {
       .map((participantID) => participantElements.get(participantID))
       .filter(Boolean);
     pinnedMain.style.setProperty("--pinned-count", String(Math.max(1, pinned.length)));
+    pinnedLayout.dataset.pinnedCount = String(pinned.length);
+    pinnedLayout.dataset.unpinnedCount = String(Math.max(0, visible.length - pinned.length));
     pinned.forEach((element) => append(pinnedMain, element, "main"));
     visible.filter((element) => !pinned.includes(element)).forEach((element) => append(pinnedFilmstrip, element));
   } else {
     pinnedMain.style.removeProperty("--pinned-count");
+    pinnedLayout.dataset.pinnedCount = "0";
+    pinnedLayout.dataset.unpinnedCount = "0";
     const owner = participantElements.get(meetingViewState.activeScreenShareId);
     const primary = owner || visible[0];
     append(screenShareMain, primary, "screen-main");
@@ -227,7 +231,24 @@ function updateParticipantLayout() {
     const filmstripBounds = filmstripContainer.getBoundingClientRect();
     const isMobilePinned = mode === "pinned" && window.matchMedia?.("(max-width: 720px)").matches;
     const isBottomScreenShare = mode === "screen-share" && filmstripBounds.height < 220;
-    const orientation = isBottomScreenShare || isMobilePinned ? "horizontal" : "vertical";
+    const orientation = mode === "pinned" ? "grid" : isBottomScreenShare ? "horizontal" : "vertical";
+    if (mode === "pinned" && typeof chooseParticipantLayout === "function") {
+      const gridLayout = chooseParticipantLayout({
+        width: filmstripBounds.width,
+        height: filmstripBounds.height,
+        count: filmstripItems.length,
+        gap: parseFloat(getComputedStyle(filmstripContainer).gap) || 12,
+        minTileWidth: isMobilePinned ? 104 : 132,
+        minTileHeight: isMobilePinned ? 58 : 74,
+        maxTileWidth: 420
+      });
+      filmstripContainer.style.setProperty("--filmstrip-columns", String(Math.max(1, gridLayout.columns)));
+      filmstripContainer.style.setProperty("--filmstrip-rows", String(Math.max(1, gridLayout.rows)));
+      filmstripContainer.style.setProperty("--filmstrip-tile-width", `${Math.floor(gridLayout.tileWidth)}px`);
+      filmstripContainer.style.setProperty("--filmstrip-tile-height", `${Math.floor(gridLayout.tileHeight)}px`);
+      filmstripContainer.dataset.overflow = "false";
+    }
+    if (mode === "pinned") return;
     const filmstripLayout = chooseFilmstripLayout({
       width: filmstripBounds.width,
       height: filmstripBounds.height,
@@ -259,13 +280,15 @@ function updateParticipantLayout() {
     count: visibleItems.length,
     gap,
     preferredColumns: preferredLayoutColumns,
-    maxColumns: mode === "grid" && window.matchMedia?.("(max-width: 700px)").matches && visibleItems.length <= 4 ? 1 : 0,
+    maxColumns: 0,
     minTileWidth: Math.min(180, Math.max(160, bounds.width / 2.6)),
     minTileHeight: 82
   });
   preferredLayoutColumns = layout.columns;
   layoutContainer.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);
   layoutContainer.style.setProperty("--tile-height", `${Math.floor(layout.tileHeight)}px`);
+  layoutContainer.style.setProperty("--layout-columns", String(layout.columns));
+  layoutContainer.style.setProperty("--layout-rows", String(layout.rows));
   participants.dataset.columns = String(layout.columns);
   participants.dataset.rows = String(layout.rows);
   positionParticipantMenu();

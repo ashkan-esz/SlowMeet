@@ -51,10 +51,9 @@ if (isBelowBitrate(20, 40) !== true ||
   throw new Error("missing inbound video bitrate must not be treated as critical");
 }
 const sixPersonLayout = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
-if (sixPersonLayout.columns !== 2 || sixPersonLayout.rows !== 3 ||
-    sixPersonLayout.rowCounts.some((rowCount) => rowCount > 2) ||
-    sixPersonLayout.tileWidth < 260 || sixPersonLayout.tileHeight < 140) {
-  throw new Error("six participants should use a compact two-column layout");
+if (sixPersonLayout.columns !== 3 || sixPersonLayout.rows !== 2 ||
+    sixPersonLayout.tileWidth < 260 || sixPersonLayout.tileHeight < 140 || sixPersonLayout.overflow) {
+  throw new Error("six participants should use a compact fitting grid");
 }
 const mobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 6, minTileWidth: 160 });
 const fourParticipantMobileLayout = chooseParticipantLayout({ width: 344, height: 500, count: 4, maxColumns: 1, minTileWidth: 160 });
@@ -67,22 +66,43 @@ const compactPhoneLayout = chooseParticipantLayout({ width: 288, height: 504, co
 const narrowPhoneLayout = chooseParticipantLayout({ width: 328, height: 676, count: 6, minTileWidth: 160 });
 const standardPhoneLayout = chooseParticipantLayout({ width: 358, height: 812, count: 6, minTileWidth: 160 });
 const widePhoneLayout = chooseParticipantLayout({ width: 398, height: 900, count: 6, minTileWidth: 160 });
-if (compactPhoneLayout.columns !== 1 || compactPhoneLayout.rows !== 6 ||
+if (compactPhoneLayout.columns !== 2 || compactPhoneLayout.rows !== 3 ||
     narrowPhoneLayout.columns !== 1 || narrowPhoneLayout.rows !== 6 ||
-    standardPhoneLayout.columns !== 2 || standardPhoneLayout.rows !== 3 ||
-    widePhoneLayout.columns !== 2 || widePhoneLayout.rows !== 3) {
+    standardPhoneLayout.columns !== 1 || standardPhoneLayout.rows !== 6 ||
+    widePhoneLayout.columns !== 1 || widePhoneLayout.rows !== 6) {
   throw new Error("phone layout policy should preserve the adaptive non-mobile behavior");
 }
 const eightPersonLayout = chooseParticipantLayout({ width: 1280, height: 720, count: 8 });
-if (eightPersonLayout.columns !== 2 || eightPersonLayout.rows !== 4 ||
-    eightPersonLayout.rowCounts.some((rowCount) => rowCount > 2) ||
+if (eightPersonLayout.columns !== 3 || eightPersonLayout.rows !== 3 ||
     Math.abs(eightPersonLayout.tileWidth / eightPersonLayout.tileHeight - 16 / 9) > 0.01) {
-  throw new Error("eight participants should remain two-column rectangular tiles");
+  throw new Error("eight participants should use a dense rectangular grid");
 }
 const ultraNarrowLayout = chooseParticipantLayout({ width: 120, height: 1110, count: 5, minTileWidth: 132 });
 if (ultraNarrowLayout.columns !== 1 || ultraNarrowLayout.rows !== 5 ||
     Math.abs(ultraNarrowLayout.tileWidth / ultraNarrowLayout.tileHeight - 16 / 9) > 0.01) {
   throw new Error("ultra-narrow stages should use one-column rectangular tiles");
+}
+for (const [width, height] of [[390, 844], [780, 493], [1440, 900]]) {
+  const threeParticipantLayout = chooseParticipantLayout({ width, height, count: 3 });
+  if (threeParticipantLayout.columns !== 2 || threeParticipantLayout.rows !== 2 ||
+      threeParticipantLayout.rowCounts.join(",") !== "2,1" || threeParticipantLayout.overflow) {
+    throw new Error(`three participants should use a balanced 2x2 layout at ${width}x${height}`);
+  }
+}
+const tooNarrowForThree = chooseParticipantLayout({ width: 120, height: 600, count: 3, minTileWidth: 144 });
+if (tooNarrowForThree.columns !== 1 || tooNarrowForThree.rows !== 3) {
+  throw new Error("three participants should fall back to one column when two tiles are too narrow");
+}
+
+for (const [width, height] of [[390, 844], [780, 493], [1440, 900]]) {
+  for (let count = 1; count <= 10; count += 1) {
+    const layout = chooseParticipantLayout({ width, height, count });
+    const usedWidth = layout.columns * layout.tileWidth + Math.max(0, layout.columns - 1) * 12;
+    const usedHeight = layout.rows * layout.tileHeight + Math.max(0, layout.rows - 1) * 12;
+    if (layout.columns < 1 || layout.rows < 1 || usedWidth > width + 0.01 || usedHeight > height + 0.01 || layout.overflow) {
+      throw new Error(`layout ${width}x${height} count ${count} must fit without overflow`);
+    }
+  }
 }
 const singleLayout = chooseParticipantLayout({ width: 1600, height: 800, count: 1 });
 if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWidth > 720) {
@@ -234,7 +254,7 @@ for (const style of [
 }
 for (const style of [
   'data-count="8"',
-  "grid-template-columns: repeat(2, minmax(0, 1fr))",
+  "grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr))",
   "aspect-ratio: 16 / 9 !important",
   "scrollbar-width: thin",
   "-webkit-overflow-scrolling: touch",
@@ -246,13 +266,13 @@ for (const style of [
   "grid-template-rows: none !important",
   "grid-auto-rows: max-content !important",
   "@media (max-width: 700px)",
-  "overflow-y: auto"
+  "overflow: hidden"
 ]) {
   if (!styleSource.includes(style)) {
     throw new Error(`responsive meeting layout style is missing: ${style}`);
   }
 }
-if (!appSource.includes("maxColumns: mode === \"grid\" && window.matchMedia?.(\"(max-width: 700px)\").matches && visibleItems.length <= 4 ? 1 : 0") ||
+if (!appSource.includes("maxColumns: 0") ||
     !appSource.includes("minTileWidth: Math.min(180, Math.max(160, bounds.width / 2.6))")) {
   throw new Error("runtime participant layout must use a readable mobile minimum tile width");
 }

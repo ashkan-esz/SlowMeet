@@ -1978,27 +1978,24 @@ body { overflow-x: hidden; }
 .participant-grid {
   align-content: start !important;
   justify-content: center;
+  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr));
   grid-auto-rows: var(--tile-height, auto);
 }
-.participant-grid .participant-tile { width: var(--tile-width, auto); height: var(--tile-height, auto); }
+.participant-grid .participant-tile { width: 100%; height: var(--tile-height, auto); }
 .pinned-layout, .screen-share-layout {
   height: 100%;
   min-height: 0;
   display: grid;
   gap: 12px;
 }
-.pinned-layout { grid-template-columns: minmax(0, 1fr) minmax(160px, 26%); }
+.pinned-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); }
+.pinned-layout[data-unpinned-count="0"] { grid-template-rows: minmax(0, 1fr); }
 .screen-share-layout { grid-template-rows: minmax(0, 1fr) minmax(112px, 24%); }
 .layout-main, .layout-filmstrip { min-width: 0; min-height: 0; }
 .layout-main { display: grid; grid-template-columns: repeat(var(--pinned-count, 1), minmax(0, 1fr)); gap: 12px; place-items: stretch; }
-.layout-filmstrip { display: flex; gap: 12px; overflow: auto; overscroll-behavior: contain; }
+.layout-filmstrip { display: grid; grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr)); grid-template-rows: repeat(var(--filmstrip-rows, 1), minmax(0, 1fr)); gap: 12px; overflow: hidden; overscroll-behavior: contain; }
 .pinned-layout .layout-filmstrip {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: repeat(var(--filmstrip-count, 1), minmax(var(--filmstrip-min-height, 102px), 1fr));
   align-content: stretch;
-  overflow-x: hidden;
-  overflow-y: auto;
 }
 .layout-filmstrip .participant-tile { width: 100%; height: 100%; aspect-ratio: auto; }
 .screen-share-layout .layout-filmstrip .participant-tile { flex: 0 0 180px; width: 180px; height: 102px; }
@@ -2033,18 +2030,10 @@ body { overflow-x: hidden; }
   touch-action: auto;
 }
 @media (max-width: 720px) {
-  .pinned-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) 112px; }
-  .pinned-layout .layout-filmstrip {
-    display: flex;
-    flex-direction: row;
-    align-items: stretch;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
+  .pinned-layout { grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr); }
   .screen-share-layout { grid-template-rows: minmax(0, 1fr) 104px; }
   .pinned-layout .layout-filmstrip .participant-tile,
-.screen-share-layout .layout-filmstrip .participant-tile {
-    flex: 0 0 var(--filmstrip-tile-width, 160px);
+  .screen-share-layout .layout-filmstrip .participant-tile {
     width: var(--filmstrip-tile-width, 160px);
     height: var(--filmstrip-tile-height, 90px);
   }
@@ -2053,7 +2042,7 @@ body { overflow-x: hidden; }
     align-items: stretch;
     justify-content: stretch;
     overflow-x: hidden;
-    overflow-y: auto;
+    overflow-y: hidden;
   }
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile {
     flex: 0 0 auto;
@@ -2102,8 +2091,7 @@ body { overflow-x: hidden; }
 }
 .screen-share-layout .layout-filmstrip {
   flex-direction: column;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
 }
 .screen-share-layout .layout-filmstrip .participant-tile {
   flex: 0 0 var(--filmstrip-tile-height, 102px);
@@ -2112,7 +2100,7 @@ body { overflow-x: hidden; }
 }
 @container meeting-layout (max-width: 720px) {
   .screen-share-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 104px; }
-  .screen-share-layout .layout-filmstrip { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .screen-share-layout .layout-filmstrip { grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr)); grid-template-rows: 1fr; overflow: hidden; }
   .screen-share-layout .layout-filmstrip .participant-tile {
     flex: 0 0 var(--filmstrip-tile-width, 160px);
     width: var(--filmstrip-tile-width, 160px);
@@ -2820,4 +2808,53 @@ body { overflow-x: hidden; }
 
 @media (prefers-reduced-motion: reduce) {
   .meeting-toolbar .control-button { transition: none; }
+}
+
+/* Runtime layout variables must win over the legacy count-based grid rules. */
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid {
+  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr)) !important;
+  grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;
+  grid-auto-rows: unset !important;
+  align-content: start;
+  justify-content: center;
+  overflow: hidden !important;
+}
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile {
+  width: 100% !important;
+  height: 100% !important;
+  justify-self: center;
+  align-self: start;
+}
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-columns] {
+  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr)) !important;
+  grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;
+  grid-auto-rows: unset !important;
+}
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-columns] > .participant-tile,
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-columns] > .participant-tile.is-local {
+  width: 100% !important;
+  height: 100% !important;
+}
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-columns="2"][data-rows="2"] > .participant-tile:nth-child(3):last-child {
+  grid-column: 1 / -1;
+  width: var(--tile-width, 100%) !important;
+  justify-self: center;
+}
+.pinned-layout .layout-filmstrip {
+  grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--filmstrip-rows, 1), minmax(0, 1fr));
+  overflow: hidden;
+}
+.participant-tile > .participant-video {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: auto !important;
+}
+.participant-tile > .participant-video > video {
+  width: 100% !important;
+  height: 100% !important;
 }

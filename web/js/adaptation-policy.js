@@ -56,15 +56,12 @@ function chooseParticipantLayout({
   const stageWidth = Math.max(0, Number(width) || 0);
   const stageHeight = Math.max(0, Number(height) || 0);
   if (participantCount === 0 || stageWidth === 0 || stageHeight === 0) {
-    return { columns: 1, rows: 0, tileWidth: 0, tileHeight: 0, rowCounts: [] };
+    return { columns: 1, rows: 0, tileWidth: 0, tileHeight: 0, rowCounts: [], overflow: false };
   }
 
   const candidates = [];
-  const twoColumnWidth = minTileWidth * 2 + gap;
   const participantColumnLimit = maxColumns > 0
     ? Math.min(participantCount, Math.floor(maxColumns))
-    : participantCount < 9
-    ? (stageWidth < twoColumnWidth ? 1 : Math.min(2, participantCount))
     : participantCount;
   for (let columns = 1; columns <= participantColumnLimit; columns += 1) {
     const rows = Math.ceil(participantCount / columns);
@@ -75,8 +72,6 @@ function chooseParticipantLayout({
     const tileHeight = tileWidth / aspectRatio;
     const belowMinimum = tileWidth < minTileWidth || tileHeight < minTileHeight;
     const area = tileWidth * tileHeight * participantCount;
-    const wastedWidth = Math.max(0, stageWidth - (tileWidth * columns + gap * (columns - 1)));
-    const wastedHeight = Math.max(0, stageHeight - (tileHeight * rows + gap * (rows - 1)));
     const stabilityBonus = preferredColumns === columns ? 0.06 : 0;
     const rowCounts = Array.from({ length: rows }, (_, row) =>
       Math.min(columns, participantCount - row * columns));
@@ -86,20 +81,22 @@ function chooseParticipantLayout({
       tileWidth,
       tileHeight,
       rowCounts,
-      score: (belowMinimum ? area * 0.2 : area) -
-        (wastedWidth * wastedHeight * 0.08) + area * stabilityBonus
+      belowMinimum,
+      overflow: false,
+      score: (belowMinimum ? area * 0.2 : area) + area * stabilityBonus
     });
   }
 
-  const fallback = { columns: 1, rows: participantCount, tileWidth: 0, tileHeight: 0, rowCounts: [participantCount] };
+  const fallback = { columns: 1, rows: participantCount, tileWidth: 0, tileHeight: 0, rowCounts: [participantCount], overflow: false };
   const usableCandidates = candidates.filter((candidate) => !candidate.belowMinimum);
-  if (participantCount < 9 && usableCandidates.length > 0) {
-    const widestUsable = usableCandidates.reduce((best, candidate) =>
-      candidate.columns > best.columns ? candidate : best);
-    return widestUsable;
+  if (participantCount === 3) {
+    const balancedCandidate = usableCandidates.find((candidate) => candidate.columns === 2);
+    if (balancedCandidate) return balancedCandidate;
   }
-  candidates.sort((left, right) => right.score - left.score);
-  return candidates[0] || fallback;
+  const rankedCandidates = usableCandidates.length > 0 ? usableCandidates : candidates;
+  rankedCandidates.sort((left, right) =>
+    right.score - left.score || left.columns - right.columns);
+  return rankedCandidates[0] || fallback;
 }
 
 if (typeof module !== "undefined") {

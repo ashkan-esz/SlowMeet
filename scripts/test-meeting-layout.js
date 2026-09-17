@@ -78,34 +78,29 @@ if (visibleParticipantIds(["local", "p1"], "local", true).length !== 2) {
   throw new Error("self-view enabled should preserve all participants");
 }
 const five = chooseParticipantLayout({ width: 1200, height: 620, count: 5 });
-if (five.columns !== 2 || five.rows !== 3 || five.rowCounts.join(",") !== "2,2,1") {
-  throw new Error("five tiles should use a two-column layout");
+if (five.columns !== 3 || five.rows !== 2 || five.rowCounts.join(",") !== "3,2") {
+  throw new Error("five tiles should use the largest fitting responsive layout");
 }
 const wide = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 const narrow = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
 const ultraNarrow = chooseParticipantLayout({ width: 120, height: 1110, count: 5, minTileWidth: 132 });
 const eight = chooseParticipantLayout({ width: 1200, height: 620, count: 8 });
 const nine = chooseParticipantLayout({ width: 1200, height: 620, count: 9 });
-if (wide.columns !== 2 || wide.rows !== 3 || narrow.columns !== 2 || narrow.rows !== 3 ||
+if (wide.columns !== 3 || wide.rows !== 2 || narrow.columns !== 2 || narrow.rows !== 3 ||
     ultraNarrow.columns !== 1 || ultraNarrow.rows !== 5 ||
-    eight.columns > 2 || eight.rowCounts.some((rowCount) => rowCount > 2) || nine.columns < 2) {
-  throw new Error("fewer than nine participants must use no more than two columns");
+    eight.columns !== 3 || eight.rows !== 3 || nine.columns !== 3 || nine.rows !== 3 ||
+    [five, wide, narrow, ultraNarrow, eight, nine].some((layout) => layout.overflow)) {
+  throw new Error("participant layouts should use fitting responsive grids without overflow");
 }
-const singlePinned = chooseFilmstripLayout({ width: 323, height: 634, count: 1, orientation: "vertical", minTileHeight: 102 });
-if (singlePinned.rows !== 1 || singlePinned.tileWidth !== 323 || singlePinned.tileHeight !== 634 || singlePinned.overflow) {
-  throw new Error("one pinned companion should fill the desktop filmstrip without overflow");
-}
-const multiplePinned = chooseFilmstripLayout({ width: 323, height: 634, count: 5, orientation: "vertical", minTileHeight: 102 });
-if (multiplePinned.rows !== 5 || multiplePinned.tileWidth !== 323 || multiplePinned.tileHeight !== 117 || multiplePinned.overflow) {
-  throw new Error("desktop pinned companions should share the available rail height");
-}
-const crowdedPinned = chooseFilmstripLayout({ width: 323, height: 634, count: 8, orientation: "vertical", minTileHeight: 102 });
-if (!crowdedPinned.overflow || crowdedPinned.tileHeight !== 102) {
-  throw new Error("desktop filmstrip overflow should occur only below the minimum tile height");
-}
-const mobilePinned = chooseFilmstripLayout({ width: 368, height: 112, count: 3, orientation: "horizontal" });
-if (mobilePinned.rows !== 1 || mobilePinned.tileWidth !== 160 || mobilePinned.tileHeight !== 90 || !mobilePinned.overflow) {
-  throw new Error("mobile pinned companions should remain touch-sized and horizontally scrollable");
+for (const [width, height] of [[368, 220], [748, 220], [1408, 300]]) {
+  for (let count = 1; count <= 8; count += 1) {
+    const layout = chooseParticipantLayout({ width, height, count, minTileWidth: 104, minTileHeight: 58 });
+    const usedWidth = layout.columns * layout.tileWidth + Math.max(0, layout.columns - 1) * 12;
+    const usedHeight = layout.rows * layout.tileHeight + Math.max(0, layout.rows - 1) * 12;
+    if (usedWidth > width + 0.01 || usedHeight > height + 0.01 || layout.overflow) {
+      throw new Error(`pinned companion grid ${width}x${height} count ${count} must fit`);
+    }
+  }
 }
 if (formatMetric(null, " ms") !== "No sample" || formatMetric(undefined, " kbps", "Unavailable") !== "Unavailable" ||
     formatMetric(42, " ms") !== "42 ms") {
@@ -236,6 +231,32 @@ for (const rule of [
 ]) {
   if (!styleSource.includes(rule)) {
     throw new Error(`meeting UI refinement rule is missing: ${rule}`);
+  }
+}
+for (const rule of [
+  "grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr));",
+  "grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;",
+  ".pinned-layout { grid-template-columns: minmax(0, 1fr);",
+  ".pinned-layout[data-unpinned-count=\"0\"]",
+  "grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));",
+  "overflow: hidden !important;",
+  ".participant-tile > .participant-video",
+  "height: 100% !important;",
+  "[data-columns=\"2\"][data-rows=\"2\"] > .participant-tile:nth-child(3):last-child",
+  "grid-column: 1 / -1;"
+]) {
+  if (!styleSource.includes(rule)) {
+    throw new Error(`no-scroll participant layout rule is missing: ${rule}`);
+  }
+}
+for (const behavior of [
+  'pinnedLayout.dataset.unpinnedCount',
+  'filmstripContainer.style.setProperty("--filmstrip-columns"',
+  'filmstripContainer.dataset.overflow = "false"',
+  'maxColumns: 0'
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`responsive participant layout behavior is missing: ${behavior}`);
   }
 }
 console.log("Meeting layout tests passed");
