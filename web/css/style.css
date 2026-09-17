@@ -2857,6 +2857,12 @@ body { overflow-x: hidden; }
 }
 
 @media (max-width: 700px) and (orientation: portrait) {
+  .stage-panel:has(#participants[data-count="6"]),
+  .stage-panel:has(#participants[data-count="7"]),
+  .stage-panel:has(#participants[data-count="8"]) {
+    padding: 6px 8px;
+  }
+
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] {
     grid-template-columns: minmax(0, 1fr) !important;
     grid-template-rows: repeat(3, minmax(0, 1fr)) !important;
@@ -2963,19 +2969,55 @@ body { overflow-x: hidden; }
     aspect-ratio: 16 / 9 !important;
   }
 
-  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] {
-    grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: repeat(6, auto) !important;
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"],
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-rows: repeat(3, auto) !important;
+    gap: 6px;
     grid-auto-rows: unset !important;
     align-content: start !important;
-    overflow-y: auto !important;
+    overflow: hidden !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] {
+    grid-template-rows: repeat(4, auto) !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"],
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"],
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] {
+    --mobile-debug7-tile-height: min(160px, calc((100dvh - 154px) / 4));
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] {
+    --mobile-debug7-tile-height: min(160px, calc((100dvh - 148px) / 3));
+    grid-template-rows: repeat(3, minmax(0, var(--mobile-debug7-tile-height))) !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"],
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] {
+    grid-template-rows: repeat(4, minmax(0, var(--mobile-debug7-tile-height))) !important;
   }
 
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile,
-  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile.is-local {
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile.is-local,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] > .participant-tile.is-local,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] > .participant-tile.is-local {
     grid-column: auto !important;
     width: 100% !important;
     height: auto !important;
-    aspect-ratio: 16 / 9 !important;
+    aspect-ratio: 16 / 10 !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile.is-local,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="7"] > .participant-tile.is-local,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] > .participant-tile.is-local {
+    height: var(--mobile-debug7-tile-height) !important;
+    aspect-ratio: auto !important;
   }
 }
