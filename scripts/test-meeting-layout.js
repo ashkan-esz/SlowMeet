@@ -15,7 +15,8 @@ const {
 } = require("../web/js/meeting-layout.js");
 const { chooseParticipantLayout } = require("../web/js/adaptation-policy.js");
 
-if (deriveMeetingLayoutMode({ pinnedParticipantIds: ["p1"], activeScreenShareId: "p2" }) !== "screen-share" ||
+if (deriveMeetingLayoutMode({ pinnedParticipantIds: ["p1"], activeScreenShareId: "p2" }) !== "pinned" ||
+    deriveMeetingLayoutMode({ activeScreenShareId: "p2" }) !== "grid" ||
     deriveMeetingLayoutMode({ pinnedParticipantIds: ["p1", "p2"] }) !== "pinned" ||
     deriveMeetingLayoutMode({}) !== "grid") {
   throw new Error("layout mode precedence is incorrect");
@@ -251,6 +252,7 @@ for (const rule of [
 }
 for (const behavior of [
   'pinnedLayout.dataset.unpinnedCount',
+  'const screenMain = hasScreen;',
   'filmstripContainer.style.setProperty("--filmstrip-columns"',
   'filmstripContainer.dataset.overflow = "false"',
   'maxColumns: 0'
@@ -258,5 +260,11 @@ for (const behavior of [
   if (!appSource.includes(behavior)) {
     throw new Error(`responsive participant layout behavior is missing: ${behavior}`);
   }
+}
+if (appSource.includes('mode === "screen-share"') ||
+    appSource.includes('screenShareLayout') ||
+    appSource.includes('screenShareMain') ||
+    styleSource.includes('.screen-share-layout')) {
+  throw new Error("screen sharing must not create a dedicated layout");
 }
 console.log("Meeting layout tests passed");

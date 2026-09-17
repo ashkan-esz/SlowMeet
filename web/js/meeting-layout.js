@@ -1,14 +1,12 @@
-/** @typedef {'grid'|'pinned'|'screen-share'} MeetingLayoutMode */
+/** @typedef {'grid'|'pinned'} MeetingLayoutMode */
 /** @typedef {'none'|'settings'|'chat'|'people'} MeetingPanel */
 /** @typedef {'audio'|'camera'|'screen'} MediaRole */
 
 /** @param {{activeScreenShareId?: string|null, pinnedParticipantIds?: string[], pinnedParticipantId?: string|null}} state */
 function deriveMeetingLayoutMode(state) {
-  return state?.activeScreenShareId
-    ? "screen-share"
-    : (state?.pinnedParticipantIds?.length || state?.pinnedParticipantId)
-      ? "pinned"
-      : "grid";
+  return (state?.pinnedParticipantIds?.length || state?.pinnedParticipantId)
+    ? "pinned"
+    : "grid";
 }
 
 /** @param {string[]} pinnedParticipantIds @param {string} participantId @param {number} maxPins */

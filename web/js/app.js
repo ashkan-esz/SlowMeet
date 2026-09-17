@@ -14,9 +14,6 @@ const meetingLayoutHost = document.querySelector("#meeting-layout-host");
 const pinnedLayout = document.querySelector("#pinned-layout");
 const pinnedMain = document.querySelector("#pinned-main");
 const pinnedFilmstrip = document.querySelector("#pinned-filmstrip");
-const screenShareLayout = document.querySelector("#screen-share-layout");
-const screenShareMain = document.querySelector("#screen-share-main");
-const screenShareFilmstrip = document.querySelector("#screen-share-filmstrip");
 const layoutParking = document.querySelector("#layout-parking");
 const mic = document.querySelector("#mic");
 const camera = document.querySelector("#camera");
@@ -159,7 +156,7 @@ const participantOrder = [];
 function currentMeetingLayoutMode() {
   return typeof deriveMeetingLayoutMode === "function"
     ? deriveMeetingLayoutMode(meetingViewState)
-    : (meetingViewState.activeScreenShareId ? "screen-share" : meetingViewState.pinnedParticipantIds.length ? "pinned" : "grid");
+    : (meetingViewState.pinnedParticipantIds.length ? "pinned" : "grid");
 }
 
 function renderMeetingLayout() {
@@ -168,7 +165,6 @@ function renderMeetingLayout() {
   meetingLayoutHost.dataset.layoutMode = mode;
   participants.hidden = mode !== "grid";
   pinnedLayout.hidden = mode !== "pinned";
-  screenShareLayout.hidden = mode !== "screen-share";
   const visible = participantOrder
     .map((id) => participantElements.get(id))
     .filter((element) => element && !element.item.hidden &&
@@ -179,7 +175,7 @@ function renderMeetingLayout() {
   const append = (container, element, className = "") => {
     if (!container || !element) return;
     element.item.classList.toggle("is-layout-main", className === "main");
-    element.item.classList.toggle("is-screen-main", className === "screen-main");
+    element.item.classList.toggle("is-screen-main", className === "screen-main" || element.item.dataset.sharing === "true");
     container.append(element.item);
     updateParticipantVideoVisibility(element);
   };
@@ -194,14 +190,6 @@ function renderMeetingLayout() {
     pinnedLayout.dataset.unpinnedCount = String(Math.max(0, visible.length - pinned.length));
     pinned.forEach((element) => append(pinnedMain, element, "main"));
     visible.filter((element) => !pinned.includes(element)).forEach((element) => append(pinnedFilmstrip, element));
-  } else {
-    pinnedMain.style.removeProperty("--pinned-count");
-    pinnedLayout.dataset.pinnedCount = "0";
-    pinnedLayout.dataset.unpinnedCount = "0";
-    const owner = participantElements.get(meetingViewState.activeScreenShareId);
-    const primary = owner || visible[0];
-    append(screenShareMain, primary, "screen-main");
-    visible.filter((element) => element !== primary).forEach((element) => append(screenShareFilmstrip, element));
   }
   excluded.forEach((element) => append(layoutParking, element));
   positionParticipantMenu();
@@ -219,10 +207,10 @@ function requestParticipantLayout() {
 function updateParticipantLayout() {
   if (!participants) return;
   const mode = currentMeetingLayoutMode();
-  const layoutContainer = mode === "grid" ? participants : mode === "pinned" ? pinnedMain : screenShareMain;
+  const layoutContainer = mode === "grid" ? participants : pinnedMain;
   if (!layoutContainer || layoutContainer.hidden) return;
   const visibleItems = [...layoutContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden);
-  const filmstripContainer = mode === "pinned" ? pinnedFilmstrip : mode === "screen-share" ? screenShareFilmstrip : null;
+  const filmstripContainer = mode === "pinned" ? pinnedFilmstrip : null;
   const filmstripItems = filmstripContainer
     ? [...filmstripContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden)
     : [];
@@ -230,8 +218,6 @@ function updateParticipantLayout() {
   if (filmstripContainer && typeof chooseFilmstripLayout === "function") {
     const filmstripBounds = filmstripContainer.getBoundingClientRect();
     const isMobilePinned = mode === "pinned" && window.matchMedia?.("(max-width: 720px)").matches;
-    const isBottomScreenShare = mode === "screen-share" && filmstripBounds.height < 220;
-    const orientation = mode === "pinned" ? "grid" : isBottomScreenShare ? "horizontal" : "vertical";
     if (mode === "pinned" && typeof chooseParticipantLayout === "function") {
       const gridLayout = chooseParticipantLayout({
         width: filmstripBounds.width,
@@ -249,20 +235,6 @@ function updateParticipantLayout() {
       filmstripContainer.dataset.overflow = "false";
     }
     if (mode === "pinned") return;
-    const filmstripLayout = chooseFilmstripLayout({
-      width: filmstripBounds.width,
-      height: filmstripBounds.height,
-      count: filmstripItems.length,
-      orientation,
-      gap: parseFloat(getComputedStyle(filmstripContainer).gap) || 12,
-      minTileWidth: isMobilePinned || mode === "screen-share" ? 160 : 180,
-      minTileHeight: isMobilePinned || mode === "screen-share" ? 90 : 102
-    });
-    filmstripContainer.style.setProperty("--filmstrip-count", String(filmstripLayout.rows || filmstripLayout.columns));
-    filmstripContainer.style.setProperty("--filmstrip-tile-width", `${filmstripLayout.tileWidth}px`);
-    filmstripContainer.style.setProperty("--filmstrip-tile-height", `${filmstripLayout.tileHeight}px`);
-    filmstripContainer.style.setProperty("--filmstrip-min-height", `${isMobilePinned || mode === "screen-share" ? 90 : 102}px`);
-    filmstripContainer.dataset.overflow = String(filmstripLayout.overflow);
   }
 
   if (visibleItems.length === 0) {
@@ -472,7 +444,8 @@ function updateParticipantVideoVisibility(element) {
     .some((track) => track.readyState !== "ended"));
   const visible = videoOn && hasCameraTrack && (isLocal || receiveVideoEnabled);
   const hasScreen = Boolean(element.screenVideo?.srcObject) && element.item.dataset.sharing === "true";
-  const screenMain = element.item.classList.contains("is-screen-main");
+  const screenMain = hasScreen;
+  element.item.classList.toggle("is-screen-main", screenMain);
   element.item.dataset.receiveVideo = String(visible);
   element.avatar.hidden = visible || hasScreen;
   element.cameraVideo.hidden = !visible || screenMain;
