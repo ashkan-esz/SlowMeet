@@ -2806,6 +2806,94 @@ body { overflow-x: hidden; }
   }
 }
 
+/* Keep the compact portrait toolbar inside the narrowest supported viewport. */
+@media (max-width: 320px) and (orientation: portrait) {
+  .meeting-shell {
+    grid-template-rows: 52px minmax(0, 1fr) 72px;
+  }
+
+  .meeting-toolbar {
+    width: 100%;
+    margin-inline: 0;
+    min-height: 72px;
+    height: 72px;
+    padding-inline: 8px;
+    gap: 0;
+    border-radius: 0;
+    justify-content: stretch;
+    overflow: hidden;
+  }
+
+  .meeting-toolbar .toolbar-primary,
+  .meeting-toolbar .toolbar-secondary,
+  .meeting-toolbar .toolbar-session,
+  .meeting-toolbar .control-group {
+    display: contents !important;
+  }
+
+  .meeting-toolbar .toolbar-spacer,
+  .meeting-toolbar .control-separator {
+    display: none !important;
+  }
+
+  .meeting-toolbar .toolbar-secondary {
+    padding-inline: 0;
+    border-inline-start: 0;
+  }
+
+  .meeting-toolbar .control-button,
+  .meeting-toolbar .control-button--danger,
+  .meeting-toolbar > #leave {
+    flex: 0 0 44px;
+    width: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (max-width: 700px) {
+  .meeting-shell {
+    grid-template-rows: 52px minmax(0, 1fr) 72px;
+  }
+}
+
+@media (max-width: 700px) and (orientation: portrait) {
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: repeat(3, minmax(0, 1fr)) !important;
+    grid-auto-rows: unset !important;
+    overflow-y: hidden !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] > .participant-tile.is-local {
+    grid-column: auto !important;
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9 !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"][data-columns="2"][data-rows="2"] > .participant-tile:nth-child(3):last-child {
+    grid-column: auto !important;
+    width: 100% !important;
+    justify-self: stretch !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-rows: repeat(3, auto) !important;
+    grid-auto-rows: unset !important;
+    align-content: start !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile.is-local {
+    grid-column: auto !important;
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9 !important;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .meeting-toolbar .control-button { transition: none; }
 }
@@ -2857,4 +2945,37 @@ body { overflow-x: hidden; }
 .participant-tile > .participant-video > video {
   width: 100% !important;
   height: 100% !important;
+}
+
+@media (max-width: 700px) and (orientation: portrait) {
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: repeat(3, minmax(0, 1fr)) !important;
+    grid-auto-rows: unset !important;
+    overflow-y: hidden !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] > .participant-tile.is-local {
+    grid-column: auto !important;
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9 !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: repeat(6, auto) !important;
+    grid-auto-rows: unset !important;
+    align-content: start !important;
+    overflow-y: auto !important;
+  }
+
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile,
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="6"] > .participant-tile.is-local {
+    grid-column: auto !important;
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9 !important;
+  }
 }
