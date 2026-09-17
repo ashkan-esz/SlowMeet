@@ -1223,22 +1223,26 @@ function mountDebugParticipants() {
     element.video.srcObject = localStream;
     element.video.autoplay = true;
     element.video.muted = true;
-    element.item.dataset.camera = "on";
     if (fixture.debugNetwork) {
       Object.entries(fixture.debugNetwork).forEach(([key, value]) => {
         element.item.dataset[key] = String(value);
       });
     }
     element.avatar.hidden = true;
-    if (mode === 6 && index === 1) element.item.classList.add("is-speaking");
-    updateMediaState({ participant_id: id, audio_enabled: index !== 3, video_enabled: true });
+    updateMediaState({
+      participant_id: id,
+      audio_enabled: fixture.audioEnabled !== false,
+      video_enabled: fixture.videoEnabled !== false,
+      video_paused: fixture.videoPaused === true
+    });
+    element.item.classList.toggle("is-speaking", fixture.debugTalking === true && fixture.audioEnabled !== false);
     if (fixture.debugPoorConnection) {
       element.item.dataset.connection = "poor";
       setParticipantQuality(element, "poor");
     }
   });
   updateRaisedHandsUI();
-  addChatSystem(`Debug mode: ${mode === 6 ? "six" : "two"} local preview tiles mounted`);
+  addChatSystem(`Debug mode: ${mode} participant${mode === 1 ? "" : "s"} mounted`);
 }
 
 function readStoredValue(key) {

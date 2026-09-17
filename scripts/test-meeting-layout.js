@@ -37,25 +37,39 @@ if (!pinAppSource.includes("let pinnedParticipantIDs = []") ||
 if (!pinStyleSource.includes("grid-template-columns: repeat(var(--pinned-count, 1), minmax(0, 1fr));")) {
   throw new Error("pinned stage must support equal two-up tiles");
 }
-if (parseDebugMode("?debug=4") !== 4 || parseDebugMode("?debug=5") !== 5 || parseDebugMode("?debug=6") !== 6 ||
-    parseDebugMode("?debug=7") !== 0 || parseDebugMode("?debug=6&debug=5") !== 6) {
-  throw new Error("debug mode parsing should accept only exact 4, 5, and 6 values");
+for (let mode = 1; mode <= 10; mode += 1) {
+  if (parseDebugMode(`?debug=${mode}`) !== mode) {
+    throw new Error(`debug mode ${mode} should be accepted`);
+  }
+}
+if (parseDebugMode("?debug=0") !== 0 || parseDebugMode("?debug=11") !== 0 ||
+    parseDebugMode("?debug=-1") !== 0 || parseDebugMode("?debug=1.5") !== 0 ||
+    parseDebugMode("?debug=abc") !== 0 || parseDebugMode("?debug=6&debug=5") !== 6) {
+  throw new Error("debug mode parsing should accept only integer values from 1 through 10");
 }
 const poorFixture = createPoorConnectionFixture();
 if (poorFixture.id !== "debug-poor-network" || !poorFixture.debugPoorConnection ||
     poorFixture.debugNetwork.rttMs < 500 || poorFixture.debugNetwork.packetLoss10 < 100) {
   throw new Error("poor connection fixture is not sufficiently degraded");
 }
-if (chooseDebugParticipants(4).length !== 1 || chooseDebugParticipants(4)[0].id !== poorFixture.id ||
-    chooseDebugParticipants(5).length !== 1 || chooseDebugParticipants(5)[0].id !== poorFixture.id ||
-    chooseDebugParticipants(6).length !== 5 ||
-    chooseDebugParticipants(6).filter((participant) => participant.debugPoorConnection).length !== 1) {
-  throw new Error("debug modes should share one poor connection fixture");
+for (let mode = 1; mode <= 10; mode += 1) {
+  const participants = chooseDebugParticipants(mode);
+  if (participants.length !== mode - 1) {
+    throw new Error(`debug mode ${mode} should provide ${mode - 1} synthetic participants`);
+  }
+  if (new Set(participants.map((participant) => participant.id)).size !== participants.length) {
+    throw new Error(`debug mode ${mode} should provide unique participant IDs`);
+  }
 }
-if (chooseDebugParticipants(4)[0].raisedHand !== true || chooseDebugParticipants(4)[0].handOrder !== 2 ||
-    chooseDebugParticipants(5)[0].raisedHand !== true || chooseDebugParticipants(5)[0].handOrder !== 2 ||
-    chooseDebugParticipants(6)[0].raisedHand !== true || chooseDebugParticipants(6)[0].handOrder !== 2) {
-  throw new Error("debug modes should include a second raised-hand fixture");
+const debugRoster = chooseDebugParticipants(10);
+if (!debugRoster.some((participant) => participant.debugPoorConnection) ||
+    !debugRoster.some((participant) => participant.debugTalking) ||
+    !debugRoster.some((participant) => participant.audioEnabled === false) ||
+    !debugRoster.some((participant) => participant.videoEnabled === false && !participant.videoPaused) ||
+    !debugRoster.some((participant) => participant.videoPaused) ||
+    debugRoster.filter((participant) => participant.raisedHand === true).length < 2 ||
+    debugRoster.filter((participant) => participant.debugPoorConnection).length !== 1) {
+  throw new Error("debug mode 10 should cover connection, talking, mute, video, and raised-hand states");
 }
 if (visibleParticipantIds(["local", "p1", "p2"], "local", false).join(",") !== "p1,p2") {
   throw new Error("self-view filtering must not alter the roster order");

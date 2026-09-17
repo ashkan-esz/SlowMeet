@@ -30,30 +30,35 @@ function visibleParticipantIds(participantOrder, localParticipantId, showSelfVie
 
 function parseDebugMode(search = "") {
   const value = new URLSearchParams(search).get("debug");
-  return value === "4" || value === "5" || value === "6" ? Number(value) : 0;
+  const mode = Number(value);
+  return Number.isInteger(mode) && mode >= 1 && mode <= 10 ? mode : 0;
 }
 
 function createPoorConnectionFixture() {
   return {
     id: "debug-poor-network",
     name: "Poor connection test",
+    audioEnabled: true,
+    videoEnabled: true,
     debugPoorConnection: true,
     debugNetwork: { rttMs: 850, packetLoss10: 180, jitterMs: 240, videoKbps: 24, audioKbps: 24 }
   };
 }
 
 function chooseDebugParticipants(mode) {
-  if (mode !== 4 && mode !== 5 && mode !== 6) return [];
-  if (mode === 4 || mode === 5) {
-    return [{ ...createPoorConnectionFixture(), raisedHand: true, handOrder: 2 }];
-  }
-  return [
-    { id: "debug-1", name: "Guest 1", raisedHand: true, handOrder: 2 },
-    { id: "debug-2", name: "Guest 2" },
-    { id: "debug-3", name: "Guest 3" },
-    { id: "debug-4", name: "Guest 4" },
-    createPoorConnectionFixture()
+  if (!Number.isInteger(mode) || mode < 1 || mode > 10) return [];
+  const fixtures = [
+    { id: "debug-normal", name: "Normal guest", audioEnabled: true, videoEnabled: true },
+    createPoorConnectionFixture(),
+    { id: "debug-talking", name: "Talking guest", audioEnabled: true, videoEnabled: true, debugTalking: true },
+    { id: "debug-muted", name: "Muted guest", audioEnabled: false, videoEnabled: true },
+    { id: "debug-camera-off", name: "Camera-off guest", audioEnabled: true, videoEnabled: false },
+    { id: "debug-video-paused", name: "Paused-video guest", audioEnabled: true, videoEnabled: false, videoPaused: true },
+    { id: "debug-raised-hand-1", name: "Raised hand 1", audioEnabled: true, videoEnabled: true, raisedHand: true, handOrder: 2 },
+    { id: "debug-raised-hand-2", name: "Raised hand 2", audioEnabled: false, videoEnabled: true, raisedHand: true, handOrder: 3 },
+    { id: "debug-mixed", name: "Mixed state guest", audioEnabled: false, videoEnabled: false, videoPaused: true, raisedHand: true, handOrder: 4, debugTalking: false }
   ];
+  return fixtures.slice(0, mode - 1);
 }
 
 function formatMetric(value, unit = "", placeholder = "No sample") {
