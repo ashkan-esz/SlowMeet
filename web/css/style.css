@@ -3071,4 +3071,22 @@ body { overflow-x: hidden; }
   .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"] {
     grid-template-rows: minmax(0, .8fr) minmax(0, 1fr);
   }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="3"] > .layout-filmstrip {
+    grid-template-rows: repeat(2, 120px);
+    align-content: start;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="3"] > .layout-filmstrip > .participant-tile {
+    height: 120px !important;
+    aspect-ratio: auto;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-main > .participant-tile.is-speaking,
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-filmstrip > .participant-tile.is-speaking {
+    box-sizing: border-box;
+    outline: 0;
+    border: 2px solid var(--lm-accent);
+    box-shadow: none;
+  }
 }

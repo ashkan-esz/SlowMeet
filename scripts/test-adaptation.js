@@ -265,6 +265,13 @@ for (const style of [
   "data-columns=\"2\"",
   "grid-template-rows: none !important",
   "grid-auto-rows: max-content !important",
+  "data-pinned-count=\"1\"][data-unpinned-count=\"3\"] > .layout-filmstrip",
+  "grid-template-rows: repeat(2, 120px)",
+  "height: 120px !important",
+  ".layout-main > .participant-tile.is-speaking",
+  ".layout-filmstrip > .participant-tile.is-speaking",
+  "border: 2px solid var(--lm-accent)",
+  "align-content: start",
   "@media (max-width: 700px)",
   "overflow: hidden"
 ]) {
