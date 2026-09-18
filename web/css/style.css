@@ -2956,6 +2956,26 @@ body { overflow-x: hidden; }
     align-items: center;
   }
 
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] {
+    grid-template-rows: minmax(0, 1.5fr) minmax(0, .5fr);
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-main > .participant-tile {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: auto;
+    align-self: center;
+    justify-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="1"] > .layout-filmstrip > .participant-tile {
+    width: 240px;
+    height: 135px;
+    aspect-ratio: auto;
+    align-self: center;
+    justify-self: center;
+  }
+
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] {
     grid-template-columns: minmax(0, 1fr) !important;
     grid-template-rows: repeat(3, minmax(0, 1fr)) !important;
