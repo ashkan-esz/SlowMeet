@@ -102,7 +102,14 @@ With the optional coturn profile:
 docker compose --profile turn up -d --build
 ```
 
-Podman with `podman-compose`:
+Podman with the native Compose provider:
+
+```sh
+podman compose -f podman-compose.yml up -d --build
+```
+
+If the standalone `podman-compose` executable is installed, this is
+equivalent:
 
 ```sh
 podman-compose -f podman-compose.yml up -d --build

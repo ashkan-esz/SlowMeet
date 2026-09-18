@@ -87,6 +87,55 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	}
 }
 
+func TestStaticAssetsUseETagCaching(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/js/protocol.js", nil))
+	if asset.Code != http.StatusOK || asset.Body.Len() == 0 {
+		t.Fatalf("asset response = %d, body length = %d; want 200 with content", asset.Code, asset.Body.Len())
+	}
+	etag := asset.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("asset response did not include an ETag")
+	}
+	if got := asset.Header().Get("Cache-Control"); got != "public, max-age=0, must-revalidate" {
+		t.Fatalf("asset Cache-Control = %q, want public, max-age=0, must-revalidate", got)
+	}
+
+	conditional := httptest.NewRequest(http.MethodGet, "/js/protocol.js", nil)
+	conditional.Header.Set("If-None-Match", etag)
+	notModified := httptest.NewRecorder()
+	handler.ServeHTTP(notModified, conditional)
+	if notModified.Code != http.StatusNotModified || notModified.Body.Len() != 0 {
+		t.Fatalf("conditional asset response = %d with body length %d; want 304 with empty body", notModified.Code, notModified.Body.Len())
+	}
+
+	html := httptest.NewRecorder()
+	handler.ServeHTTP(html, httptest.NewRequest(http.MethodGet, "/", nil))
+	if html.Code != http.StatusOK {
+		t.Fatalf("HTML response status = %d, want 200", html.Code)
+	}
+	if got := html.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("HTML Cache-Control = %q, want no-cache", got)
+	}
+	if html.Header().Get("ETag") == "" {
+		t.Fatal("HTML response did not include an ETag")
+	}
+}
+
+func TestStaticAssetWithNonMatchingETagReturnsContent(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	request := httptest.NewRequest(http.MethodGet, "/css/style.css", nil)
+	request.Header.Set("If-None-Match", `"different-content"`)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.Len() == 0 {
+		t.Fatalf("non-matching ETag response = %d, body length = %d; want 200 with content", response.Code, response.Body.Len())
+	}
+}
+
 func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.STUNServers = []string{"stun:stun.example.com:3478"}

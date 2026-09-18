@@ -1,12 +1,15 @@
 package httpserver
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -154,10 +157,64 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	})
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
-	mux.Handle("/", http.FileServer(http.FS(webassets.Files)))
+	mux.Handle("/", newStaticFileHandler())
 	app.handler = withSecurityHeaders(mux)
 	app.ready.Store(true)
 	return app
+}
+
+func newStaticFileHandler() http.Handler {
+	etags := make(map[string]string)
+	err := fs.WalkDir(webassets.Files, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		contents, err := fs.ReadFile(webassets.Files, name)
+		if err != nil {
+			return err
+		}
+		etag := fmt.Sprintf("\"%x\"", sha256.Sum256(contents))
+		etags["/"+name] = etag
+		if name == "index.html" {
+			etags["/"] = etag
+		}
+		return nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("prepare embedded static assets: %v", err))
+	}
+	staticFiles := http.FileServer(http.FS(webassets.Files))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if etag, ok := etags[r.URL.Path]; ok {
+				w.Header().Set("ETag", etag)
+				if strings.HasSuffix(r.URL.Path, ".html") || r.URL.Path == "/" {
+					w.Header().Set("Cache-Control", "no-cache")
+				} else {
+					w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+				}
+				if matchesETag(r.Header.Get("If-None-Match"), etag) {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+		staticFiles.ServeHTTP(w, r)
+	})
+}
+
+func matchesETag(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag || strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

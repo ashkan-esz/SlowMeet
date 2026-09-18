@@ -5,7 +5,7 @@ GO ?= go
 NODE ?= node
 COMPOSE ?= docker compose
 DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
-PODMAN_COMPOSE ?= podman-compose -f podman-compose.yml
+PODMAN_COMPOSE ?= $(shell if command -v podman-compose >/dev/null 2>&1; then printf '%s' 'podman-compose -f podman-compose.yml'; else printf '%s' 'podman compose -f podman-compose.yml'; fi)
 
 .PHONY: help run build test vet fmt fmt-check tidy \
 	test-js test-admin test-protocol test-adaptation test-layout smoke \
