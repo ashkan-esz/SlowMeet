@@ -1,0 +1,184 @@
+name: Publish container images
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/ashkan-esz/slowmeet
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      docker_tags: ${{ steps.release.outputs.docker_tags }}
+      podman_tags: ${{ steps.release.outputs.podman_tags }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate release and generate image tags
+        id: release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          docker_tags="$(scripts/release-tags.sh "$GITHUB_REF_NAME" docker "$IMAGE_NAME" "$GITHUB_SHA")"
+          podman_tags="$(scripts/release-tags.sh "$GITHUB_REF_NAME" podman "$IMAGE_NAME" "$GITHUB_SHA")"
+
+          {
+            echo "version=$version"
+            echo 'docker_tags<<EOF'
+            echo "$docker_tags"
+            echo EOF
+            echo 'podman_tags<<EOF'
+            echo "$podman_tags"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run application checks
+        # test-meeting-layout currently expects mobile-chat/mobile-people
+        # elements that are absent from the existing web/index.html baseline.
+        run: make fmt-check test vet build test-admin test-protocol test-adaptation
+
+      - name: Verify container definition parity
+        run: make container-parity
+
+      - name: Verify release tag behavior
+        shell: bash
+        run: |
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc | wc -l)" -eq 5
+          test "$(scripts/release-tags.sh v1.2.3-rc.1 docker example/image abc | wc -l)" -eq 2
+          if scripts/release-tags.sh v1.2 docker example/image abc >/dev/null 2>&1; then
+            echo "invalid release tag was accepted"
+            exit 1
+          fi
+
+  publish-docker:
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ needs.validate.outputs.docker_tags }}
+          cache-from: type=gha,scope=slowmeet-docker
+          cache-to: type=gha,mode=max,scope=slowmeet-docker
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+
+      - name: Smoke test Docker image
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -e
+          docker pull "$IMAGE_NAME:$VERSION"
+          docker run --detach --name slowmeet-docker-smoke --publish 18080:8080 "$IMAGE_NAME:$VERSION"
+          trap 'docker rm --force slowmeet-docker-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18080/health && exit 0
+            sleep 1
+          done
+          docker logs slowmeet-docker-smoke
+          exit 1
+
+  publish-podman:
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | podman login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build Podman image
+        run: |
+          podman build \
+            --format docker \
+            --file Containerfile \
+            --tag "$IMAGE_NAME:podman-local" \
+            --build-arg VERSION="${{ needs.validate.outputs.version }}" \
+            --build-arg VCS_REF="${{ github.sha }}" \
+            --build-arg BUILD_DATE="${{ github.event.head_commit.timestamp || '' }}" \
+            .
+
+      - name: Publish Podman image tags
+        env:
+          TAGS: ${{ needs.validate.outputs.podman_tags }}
+        shell: bash
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            podman tag "$IMAGE_NAME:podman-local" "$tag"
+            podman push "$tag"
+          done <<< "$TAGS"
+
+      - name: Smoke test Podman image
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -e
+          podman pull "$IMAGE_NAME:$VERSION-podman"
+          podman run --detach --name slowmeet-podman-smoke --publish 18081:8080 "$IMAGE_NAME:$VERSION-podman"
+          trap 'podman rm --force slowmeet-podman-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18081/health && exit 0
+            sleep 1
+          done
+          podman logs slowmeet-podman-smoke
+          exit 1

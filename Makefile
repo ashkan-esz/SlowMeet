@@ -1,6 +1,11 @@
 SHELL := /bin/sh
 
 APP_NAME ?= slowmeet
+CONTAINER_IMAGE ?= slowmeet
+IMAGE_TAG ?= dev
+VERSION ?= dev
+VCS_REF ?= local
+BUILD_DATE ?= unknown
 GO ?= go
 NODE ?= node
 COMPOSE ?= docker compose
@@ -11,7 +16,7 @@ PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 	test-js test-admin test-protocol test-adaptation test-layout smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
-	container-config
+	container-config container-parity image-build image-build-podman image-check
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -120,3 +125,23 @@ container-config: podman-check ## Validate Docker and Podman Compose manifests
 	$(DOCKER_COMPOSE) --profile turn config --quiet
 	$(PODMAN_COMPOSE) config --quiet
 	$(PODMAN_COMPOSE) --profile turn config --quiet
+
+container-parity: ## Verify Docker and Podman build definitions stay synchronized
+	@cmp -s Dockerfile Containerfile || { \
+		echo "Dockerfile and Containerfile differ."; \
+		exit 1; \
+	}
+
+image-build: ## Build a versioned Docker image directly
+	docker build --file Dockerfile --tag $(CONTAINER_IMAGE):$(IMAGE_TAG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg VCS_REF=$(VCS_REF) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) .
+
+image-build-podman: ## Build a versioned Podman image directly
+	podman build --format docker --file Containerfile --tag $(CONTAINER_IMAGE):$(IMAGE_TAG)-podman \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg VCS_REF=$(VCS_REF) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) .
+
+image-check: container-parity image-build image-build-podman ## Build both local container variants

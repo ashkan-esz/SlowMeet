@@ -7,11 +7,21 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/slowmeet .
 
 FROM alpine:3.20
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
 RUN addgroup -S -g 10001 slowmeet \
   && adduser -S -D -H -u 10001 -G slowmeet slowmeet
 WORKDIR /app
 COPY --from=build --chown=10001:10001 /out/slowmeet /app/slowmeet
 RUN mkdir -p /app/data && chown 10001:10001 /app/data
+LABEL org.opencontainers.image.title="SlowMeet" \
+      org.opencontainers.image.description="Low-bandwidth WebRTC meeting SFU" \
+      org.opencontainers.image.source="https://github.com/ashkan-esz/SlowMeet" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.created="$BUILD_DATE"
 USER 10001:10001
 EXPOSE 8080
 EXPOSE 50000-50100/udp

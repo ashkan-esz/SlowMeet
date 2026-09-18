@@ -161,6 +161,34 @@ SlowMeet; coturn defaults to half a CPU, 128 MiB, and 128 PIDs. Override them
 with the `SLOWMEET_*` and `TURN_*` variables in `.env` when hosting larger
 meetings.
 
+### Published images and releases
+
+Container images are published to GHCR when a SemVer tag is pushed. Create a
+release with:
+
+```sh
+git tag -a v1.2.3 -m "Release v1.2.3"
+git push origin v1.2.3
+```
+
+Stable Docker tags include `1.2.3`, `1.2`, `1`, and `latest`. The equivalent
+Podman-engine artifact uses the `-podman` suffix, for example
+`1.2.3-podman`. Prerelease tags such as `v1.2.3-rc.1` publish only the exact
+version tag and its Podman variant.
+
+Pull the published images with either engine:
+
+```sh
+docker pull ghcr.io/ashkan-esz/slowmeet:1.2.3
+podman pull ghcr.io/ashkan-esz/slowmeet:1.2.3
+podman pull ghcr.io/ashkan-esz/slowmeet:1.2.3-podman
+```
+
+Pull requests and pushes to `master` build and test both Docker and Podman
+images without publishing them. Release publishing requires the repository's
+GitHub Actions workflow to have package write permission; GHCR visibility is
+controlled from the package settings.
+
 Disconnected participants retain their meeting slot for
 `RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser
 session to reconnect without changing participant identity.
