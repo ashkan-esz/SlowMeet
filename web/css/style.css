@@ -2928,6 +2928,34 @@ body { overflow-x: hidden; }
 }
 
 @media (max-width: 700px) and (orientation: portrait) {
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-main > .participant-tile {
+    width: auto;
+    max-width: 100%;
+    height: 100%;
+    aspect-ratio: 16 / 9;
+    align-self: center;
+    justify-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-filmstrip > .participant-tile {
+    width: var(--filmstrip-tile-width, 160px);
+    max-width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    align-self: center;
+    justify-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-filmstrip {
+    align-items: center;
+  }
+
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="3"] {
     grid-template-columns: minmax(0, 1fr) !important;
     grid-template-rows: repeat(3, minmax(0, 1fr)) !important;
@@ -2993,5 +3021,34 @@ body { overflow-x: hidden; }
   .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-count="8"] > .participant-tile.is-local {
     height: var(--mobile-debug7-tile-height) !important;
     aspect-ratio: auto !important;
+  }
+}
+
+@media (max-width: 700px) and (orientation: landscape) {
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-main > .participant-tile,
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-filmstrip > .participant-tile {
+    width: auto;
+    max-width: 100%;
+    height: 100%;
+    aspect-ratio: 16 / 9;
+    align-self: center;
+    justify-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-filmstrip > .participant-tile {
+    width: auto;
+    max-width: 100%;
+    height: 100%;
+    aspect-ratio: 16 / 9;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-filmstrip {
+    align-items: center;
+  }
+}
+
+@media (max-width: 720px) {
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"] {
+    grid-template-rows: minmax(0, .8fr) minmax(0, 1fr);
   }
 }

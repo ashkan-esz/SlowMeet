@@ -243,6 +243,13 @@ for (const rule of [
   "overflow: hidden !important;",
   ".participant-tile > .participant-video",
   "height: 100% !important;",
+  "@media (max-width: 700px) and (orientation: portrait)",
+  "[data-layout-mode=\"pinned\"] > .pinned-layout[data-pinned-count=\"2\"] > .layout-main",
+  "grid-template-rows: repeat(2, minmax(0, 1fr));",
+  "aspect-ratio: 16 / 9;",
+  "@media (max-width: 700px) and (orientation: landscape)",
+  "[data-layout-mode=\"pinned\"] > .pinned-layout[data-pinned-count=\"1\"]",
+  "grid-template-rows: minmax(0, .8fr) minmax(0, 1fr);",
   "[data-columns=\"2\"][data-rows=\"2\"] > .participant-tile:nth-child(3):last-child",
   "grid-column: 1 / -1;"
 ]) {
