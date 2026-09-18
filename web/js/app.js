@@ -233,6 +233,12 @@ function updateParticipantLayout() {
       filmstripContainer.style.setProperty("--filmstrip-rows", String(Math.max(1, gridLayout.rows)));
       filmstripContainer.style.setProperty("--filmstrip-tile-width", `${Math.floor(gridLayout.tileWidth)}px`);
       filmstripContainer.style.setProperty("--filmstrip-tile-height", `${Math.floor(gridLayout.tileHeight)}px`);
+      const isDebugThreeOnePinnedDesktop = meetingLayoutHost?.dataset.debugMode === "3" &&
+        pinnedLayout?.dataset.pinnedCount === "1" && !isMobilePinned;
+      if (isDebugThreeOnePinnedDesktop) {
+        filmstripContainer.style.setProperty("--filmstrip-columns", String(Math.max(1, filmstripItems.length)));
+        filmstripContainer.style.setProperty("--filmstrip-rows", "1");
+      }
       filmstripContainer.dataset.overflow = "false";
     }
     if (mode === "pinned") return;
@@ -1207,6 +1213,7 @@ function mountDebugParticipants() {
     ? parseDebugMode(window.location.search)
     : 0;
   if (meetingLayoutHost) {
+    meetingLayoutHost.dataset.debugMode = String(mode);
     meetingLayoutHost.dataset.debugDensity = mode >= 6 ? "compact" : "default";
   }
   if (!mode || !localStream) return;

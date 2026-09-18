@@ -250,6 +250,10 @@ for (const rule of [
   ".pinned-layout { grid-template-columns: minmax(0, 1fr);",
   ".pinned-layout[data-unpinned-count=\"0\"]",
   "grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));",
+  "@media (min-width: 721px)",
+  "[data-debug-mode=\"3\"][data-layout-mode=\"pinned\"] > .pinned-layout[data-pinned-count=\"1\"] > .layout-filmstrip",
+  "grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));",
+  "grid-template-rows: minmax(0, 1fr);",
   "overflow: hidden !important;",
   ".participant-tile > .participant-video",
   "height: 100% !important;",
@@ -277,6 +281,9 @@ for (const rule of [
   }
 }
 for (const behavior of [
+  'meetingLayoutHost.dataset.debugMode = String(mode)',
+  'pinnedLayout?.dataset.pinnedCount === "1" && !isMobilePinned',
+  'String(Math.max(1, filmstripItems.length))',
   'pinnedLayout.dataset.unpinnedCount',
   'const screenMain = hasScreen;',
   'filmstripContainer.style.setProperty("--filmstrip-columns"',

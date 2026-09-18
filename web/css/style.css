@@ -2981,6 +2981,14 @@ body { overflow-x: hidden; }
   height: 100% !important;
 }
 
+@media (min-width: 721px) {
+  .meeting-layout-host[data-debug-mode="3"][data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"] > .layout-filmstrip {
+    grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+}
+
 @media (max-width: 700px) and (orientation: portrait) {
   .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"] > .layout-main {
     grid-template-columns: minmax(0, 1fr);
