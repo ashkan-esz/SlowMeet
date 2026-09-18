@@ -74,10 +74,10 @@ Record for each run:
 Do not run these commands on a shared production interface. `tc` changes the
 interface for all traffic handled by that namespace.
 
-## Docker media ports
+## Container media ports
 
 The default container configuration limits Pion's server-side ICE UDP
-allocation to ports `50000-50100`. Docker Compose publishes the configured
-range automatically; if you change `ICE_UDP_PORT_MIN` or `ICE_UDP_PORT_MAX`,
-allow the resulting range through the host firewall. Use TURN when direct UDP
-is blocked by the network or NAT.
+allocation to ports `50000-50100`. Docker Compose and podman-compose publish
+the configured range automatically; if you change `ICE_UDP_PORT_MIN` or
+`ICE_UDP_PORT_MAX`, allow the resulting range through the host firewall. Use
+TURN when direct UDP is blocked by the network or NAT.

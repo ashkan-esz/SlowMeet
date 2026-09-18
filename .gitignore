@@ -1,6 +1,10 @@
 .env
 .gitignore
 .idea
+data/
+deploy/coturn/turnserver.conf
+deploy/coturn/certs/
+slowmeet
 
 # AI
 .agents

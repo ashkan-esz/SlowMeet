@@ -87,12 +87,30 @@ transcoding. The built-in profiles include `very-good` at 720p/60 FPS and
 `ultra` at 1080p/30 FPS; the starter configuration permits both with a 3 Mbps
 video ceiling, a 60 FPS ceiling, and a 96 kbps audio ceiling.
 
-## Docker
+## Docker and Podman
+
+Docker Compose:
 
 ```sh
 cp .env.example .env
 docker compose up -d --build
 ```
+
+With the optional coturn profile:
+
+```sh
+docker compose --profile turn up -d --build
+```
+
+Podman with `podman-compose`:
+
+```sh
+podman-compose -f podman-compose.yml up -d --build
+```
+
+The equivalent Make targets are `make docker-up`, `make docker-turn-up`,
+`make podman-up`, and `make podman-turn-up`. `podman compose` can also be used
+when its external Compose provider is configured.
 
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.
@@ -105,10 +123,22 @@ The Compose example publishes the configured `ICE_UDP_PORT_MIN` through
 connectivity. Allow that range through the VPS firewall. TURN remains
 recommended for restrictive NATs and networks that block inbound UDP.
 
-TURN is a separate service. Open its client listeners on UDP/TCP 3478 and
+TURN is optional and can run as the Compose `turn` profile. Open its client listeners on UDP/TCP 3478 and
 TLS/TCP 443, plus the coturn UDP relay range configured by `min-port` and
 `max-port`. If HTTPS already uses TCP 443 on the same address, use a separate
 TURN IP or TCP passthrough routing.
+
+The optional `turn` profile expects a local copy of
+`deploy/coturn/turnserver.conf.example` at `deploy/coturn/turnserver.conf` and
+certificates under `deploy/coturn/certs`. These paths are ignored by Git. The
+profile uses host networking so coturn can expose its full relay range without
+mapping thousands of ports. Rootless Podman may need a host-level permission
+change or a non-privileged TLS port for TCP 443.
+
+The default container limits are one CPU, 256 MiB of memory, and 128 PIDs for
+SlowMeet; coturn defaults to half a CPU, 128 MiB, and 128 PIDs. Override them
+with the `SLOWMEET_*` and `TURN_*` variables in `.env` when hosting larger
+meetings.
 
 Disconnected participants retain their meeting slot for
 `RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser

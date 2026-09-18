@@ -2,7 +2,7 @@ services:
   slowmeet:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Containerfile
     restart: unless-stopped
     init: true
     read_only: true
@@ -18,7 +18,7 @@ services:
       - "8080:8080"
       - "${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}:${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}/udp"
     volumes:
-      - slowmeet-data:/app/data
+      - slowmeet-data:/app/data:Z
     deploy:
       resources:
         limits:
@@ -53,8 +53,8 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - "${TURN_CONFIG_FILE:-./deploy/coturn/turnserver.conf}:/etc/coturn/turnserver.conf:ro"
-      - "${TURN_CERT_DIR:-./deploy/coturn/certs}:/etc/letsencrypt:ro"
+      - "${TURN_CONFIG_FILE:-./deploy/coturn/turnserver.conf}:/etc/coturn/turnserver.conf:ro,Z"
+      - "${TURN_CERT_DIR:-./deploy/coturn/certs}:/etc/letsencrypt:ro,Z"
     deploy:
       resources:
         limits:

@@ -4,10 +4,14 @@ APP_NAME ?= slowmeet
 GO ?= go
 NODE ?= node
 COMPOSE ?= docker compose
+DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
+PODMAN_COMPOSE ?= podman-compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
 	test-js test-admin test-protocol test-adaptation test-layout smoke \
-	check docker-build docker-up docker-down docker-logs
+	check docker-build docker-up docker-turn-up docker-down docker-logs \
+	podman-build podman-up podman-turn-up podman-down podman-logs \
+	container-config
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -58,13 +62,37 @@ smoke: ## Run the local HTTP smoke test
 check: fmt-check test vet build test-js ## Run formatting, Go, JavaScript, and smoke-independent checks
 
 docker-build: ## Build the container image
-	$(COMPOSE) build
+	$(DOCKER_COMPOSE) build
 
 docker-up: ## Build and start the Compose stack
-	$(COMPOSE) up -d --build
+	$(DOCKER_COMPOSE) up -d --build
+
+docker-turn-up: ## Build and start Docker Compose with coturn
+	$(DOCKER_COMPOSE) --profile turn up -d --build
 
 docker-down: ## Stop the Compose stack
-	$(COMPOSE) down
+	$(DOCKER_COMPOSE) down
 
 docker-logs: ## Follow Compose service logs
-	$(COMPOSE) logs -f
+	$(DOCKER_COMPOSE) logs -f
+
+podman-build: ## Build the Podman image
+	$(PODMAN_COMPOSE) build
+
+podman-up: ## Build and start the podman-compose stack
+	$(PODMAN_COMPOSE) up -d --build
+
+podman-turn-up: ## Build and start podman-compose with coturn
+	$(PODMAN_COMPOSE) --profile turn up -d --build
+
+podman-down: ## Stop the podman-compose stack
+	$(PODMAN_COMPOSE) down
+
+podman-logs: ## Follow podman-compose service logs
+	$(PODMAN_COMPOSE) logs -f
+
+container-config: ## Validate Docker and Podman Compose manifests
+	$(DOCKER_COMPOSE) config --quiet
+	$(DOCKER_COMPOSE) --profile turn config --quiet
+	$(PODMAN_COMPOSE) config --quiet
+	$(PODMAN_COMPOSE) --profile turn config --quiet
