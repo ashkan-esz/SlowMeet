@@ -2012,7 +2012,7 @@ function runSpeakerDetection(timestamp) {
     if (participantID === localParticipantID && micLevelMeter) {
       const level = Math.max(0, Math.min(100, Math.round(((levelDb + 60) / 60) * 100)));
       micLevelMeter.setAttribute("aria-valuenow", String(level));
-      micLevelMeter.firstElementChild.style.width = `${level}%`;
+      micLevelMeter.firstElementChild.style.setProperty("--level-meter-fill", String(level / 100));
     }
     const muted = participantElements.get(participantID)?.item.dataset.mic === "off";
     const aboveThreshold = !muted && levelDb > speakerThresholdDb;
@@ -2098,7 +2098,9 @@ function resetSpeakerDetection() {
   });
   if (micLevelMeter) {
     micLevelMeter.setAttribute("aria-valuenow", "0");
-    if (micLevelMeter.firstElementChild) micLevelMeter.firstElementChild.style.width = "0%";
+    if (micLevelMeter.firstElementChild) {
+      micLevelMeter.firstElementChild.style.setProperty("--level-meter-fill", "0");
+    }
   }
   if (audioContext) {
     audioContext.close().catch(() => {});

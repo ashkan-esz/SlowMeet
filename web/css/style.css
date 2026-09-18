@@ -26,6 +26,33 @@
   --radius-card: .65rem;
   --radius-panel: .9rem;
   --shadow-soft: 0 .75rem 2rem rgba(23, 32, 42, .08);
+
+  /* Shared semantic layer. Meeting styles alias these values locally. */
+  --color-bg: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-inverse: var(--surface-inverse);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-border: var(--border-subtle);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--primary);
+  --color-accent-hover: var(--primary-hover);
+  --color-accent-soft: var(--primary-soft);
+  --color-state-success: var(--success);
+  --color-state-success-soft: var(--success-soft);
+  --color-state-warning: var(--warning);
+  --color-state-warning-soft: var(--warning-soft);
+  --color-state-danger: var(--danger);
+  --color-state-danger-soft: var(--danger-soft);
+  --color-state-speaking: var(--speaking);
+  --color-state-speaking-soft: var(--speaking-soft);
+  --color-state-sharing: var(--screen-share);
+  --color-state-sharing-soft: var(--screen-share-soft);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--text);
   background: var(--canvas);
@@ -241,158 +268,6 @@ input:hover, select:hover { border-color: var(--primary); }
 .device-result--error::before { background: var(--danger); }
 .device-test-status { min-height: 1.2rem; margin: .7rem 0 0; color: var(--text-muted); font-size: .76rem; line-height: 1.4; }
 .device-test #stop-media-test { margin-top: .65rem; }
-
-.meeting-shell { padding: 1rem 0 calc(5rem + env(safe-area-inset-bottom)); }
-.meeting-header { align-items: center; margin-bottom: 1rem; }
-.meeting-header h1 { margin: .35rem 0 0; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.04em; }
-.connection {
-  display: inline-flex;
-  align-items: center;
-  gap: .4rem;
-  margin: 0;
-  padding: .45rem .7rem;
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-radius: 999px;
-  font-size: .8rem;
-  font-weight: 800;
-}
-.connection.good { color: var(--success); background: var(--success-soft); }
-.connection.fair, .connection.poor { color: var(--warning); background: var(--warning-soft); }
-.meeting-layout { display: block; }
-.stage-panel { min-width: 0; padding: clamp(.85rem, 2.5vw, 1.25rem); }
-.section-heading { align-items: center; margin-bottom: 1rem; }
-.section-heading h2 { margin: .25rem 0 0; font-size: 1.2rem; letter-spacing: -.025em; }
-.section-note, .setting-note { margin: .3rem 0 0; color: var(--text-muted); font-size: .8rem; line-height: 1.45; }
-.live-label { display: inline-flex; align-items: center; gap: .45rem; color: var(--success); font-size: .78rem; font-weight: 800; }
-.live-label__dot { width: .45rem; height: .45rem; background: var(--success); box-shadow: none; }
-.participant-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-  gap: .75rem;
-  min-height: 12rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.participant-grid:empty::before {
-  display: grid;
-  grid-column: 1 / -1;
-  place-items: center;
-  min-height: 12rem;
-  color: var(--text-muted);
-  background: var(--surface-raised);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-card);
-  content: "Waiting for participants…";
-  font-size: .9rem;
-}
-.participant-grid audio { display: none; }
-.meeting-sidebar {
-  position: fixed;
-  inset: 0 auto 0 0;
-  z-index: 30;
-  display: grid;
-  align-content: start;
-  gap: .75rem;
-  width: min(20rem, calc(100vw - 2rem));
-  min-width: 0;
-  padding: 1rem;
-  overflow-y: auto;
-  background: var(--canvas);
-  border-right: 1px solid var(--border-subtle);
-  box-shadow: var(--shadow-soft);
-  transform: translateX(-105%);
-  transition: transform .22s ease;
-}
-.meeting-shell.sidebar-open .meeting-sidebar { transform: translateX(0); }
-.sidebar-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
-.sidebar-heading h2 { margin: .2rem 0 0; font-size: 1.05rem; letter-spacing: -.025em; }
-.sidebar-toggle, .sidebar-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: .45rem;
-  min-height: 44px;
-  padding: .55rem .7rem;
-  color: var(--text);
-  background: var(--surface);
-  border-color: var(--border-subtle);
-}
-.sidebar-toggle:hover, .sidebar-close:hover { background: var(--surface-raised); border-color: var(--border-strong); }
-.sidebar-toggle__icon { display: grid; place-items: center; width: 1.2rem; height: 1.2rem; }
-.sidebar-toggle__icon svg { width: 100%; height: 100%; }
-.sidebar-close { width: 44px; padding: 0; font-size: 1.5rem; line-height: 1; }
-.sidebar-backdrop { position: fixed; inset: 0; z-index: 25; padding: 0; background: rgba(23, 32, 42, .35); border: 0; border-radius: 0; }
-.utility-card { padding: .85rem; box-shadow: none; }
-.utility-card label { display: block; margin-top: 1rem; }
-.audio-prompt { width: 100%; }
-.diagnostics-panel summary { cursor: pointer; color: var(--text); font-size: .9rem; font-weight: 800; }
-.diagnostics-panel[open] summary { margin-bottom: .75rem; }
-.diagnostics-panel #diagnostics {
-  max-height: 15rem;
-  overflow: auto;
-  margin: 1rem 0 0;
-  padding: .8rem;
-  color: var(--inverse-text);
-  background: var(--surface-inverse);
-  border-radius: var(--radius-control);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: .75rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-.controls {
-  position: fixed;
-  left: 50%;
-  bottom: max(.75rem, env(safe-area-inset-bottom));
-  z-index: 20;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: .5rem;
-  width: min(calc(100% - 2rem), 760px);
-  margin: 0 0 8px;
-  padding: .5rem;
-  transform: translateX(-50%);
-  background: var(--surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-soft);
-}
-.control-button {
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  padding: .5rem .6rem;
-  color: var(--text);
-  background: var(--surface-raised);
-  border-color: var(--border-subtle);
-  border-radius: var(--radius-control);
-  font-size: .8rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.control-button[aria-pressed="true"] {
-  color: var(--primary);
-  background: var(--primary-soft);
-  border-color: #a9cfe8;
-}
-.control-button[aria-pressed="false"] {
-  color: var(--text);
-  background: var(--surface-raised);
-  border-color: var(--border-subtle);
-}
-.control-button:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
-.control-button[aria-pressed="true"]:hover { background: #d4e9f7; }
-.control-button[aria-pressed="false"]:hover { background: #e5f1fa; }
-.control-button--danger { color: var(--danger); background: var(--danger-soft); border-color: #efc0bd; }
-.control-button--danger:hover { background: #f8d8d5; }
-button.control-button:disabled {
-  cursor: not-allowed;
-  color: var(--text-muted);
-  background: var(--surface-raised);
-  border-color: var(--border-subtle);
-}
 
 .admin-page { background: var(--canvas); }
 .admin-shell {
@@ -806,10 +681,10 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 /* Specificity guards for the meeting surface over the legacy join-page rules. */
 .participant-grid li.participant-tile { padding: 0; border: 0; border-radius: var(--lm-r-md); background: #111318; box-shadow: none; transition: box-shadow 150ms ease; }
 .participant-grid li.participant-tile.is-speaking { border: 0; box-shadow: inset 0 0 0 2px var(--lm-accent); }
-.participant-grid li.participant-tile[data-sharing="true"] { border: 0; box-shadow: inset 0 0 0 2px #8b5cf6; }
+.participant-grid li.participant-tile[data-sharing="true"] { border: 0; box-shadow: inset 0 0 0 2px var(--lm-share); }
 .participant-grid li.participant-tile.is-speaking[data-sharing="true"] { box-shadow: inset 0 0 0 2px var(--lm-accent); }
 .participant-grid li.participant-tile.is-focused { box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 4px var(--lm-accent); }
-.participant-grid li.participant-tile:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.participant-grid li.participant-tile:focus-visible { outline: 2px solid var(--lm-text); outline-offset: 2px; }
 .participant-video-paused, .participant-quality { pointer-events: none; }
 .participant-meta .participant-mic { width: 16px; height: 16px; min-height: 16px; opacity: 1; pointer-events: none; }
 
@@ -1090,7 +965,7 @@ html:has(.meeting-shell:not([hidden])) #root {
   background: var(--lm-surface-3);
   border-color: var(--lm-border);
 }
-.participant-mic.is-off { color: #fff; background: #F43F5E; border-radius: 4px; }
+.participant-mic.is-off { color: var(--lm-text); background: var(--lm-danger); border-radius: var(--lm-radius-sm); }
 .participant-quality { border-color: var(--lm-bg); }
 .participant-tile[data-quality="good"] .participant-quality { background: var(--lm-success); }
 .participant-tile[data-quality="degraded"] .participant-quality { background: var(--lm-warning); }
@@ -1123,7 +998,15 @@ html:has(.meeting-shell:not([hidden])) #root {
 .meeting-sidebar select, .chat-composer textarea { color: var(--lm-text); background: var(--lm-surface-2); border-color: var(--lm-border); }
 .meeting-sidebar select:hover, .chat-composer textarea:hover { border-color: var(--lm-accent); }
 .level-meter { background: var(--lm-surface-2); }
-.level-meter span { width: 0; background: var(--lm-success); transition: width 120ms linear; }
+.level-meter span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--lm-success);
+  transform: scaleX(var(--level-meter-fill, 0));
+  transform-origin: 0 50%;
+  transition: transform 120ms linear;
+}
 .settings-preview { background: #11151b; transform: scaleX(-1); }
 .section-count { min-width: 22px; padding: 3px 7px; color: var(--lm-text-dim); background: var(--lm-surface-2); border-radius: 999px; font-size: 10px; font-variant-numeric: tabular-nums; text-align: center; }
 .people-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -1268,10 +1151,10 @@ button.control-button:disabled { color: #77808c; background: transparent; border
 /* Keep state selectors explicit for fixture styling and downstream themes. */
 .participant-grid li.is-speaking { box-shadow: inset 0 0 0 2px var(--lm-accent); }
 .participant-grid li.is-disconnected { opacity: .62; }
-.participant-grid li[data-sharing="true"] { box-shadow: inset 0 0 0 2px #8b5cf6; }
+.participant-grid li[data-sharing="true"] { box-shadow: inset 0 0 0 2px var(--lm-share); }
 
-/* Final meeting UI polish: semantic tokens, bounded layers, and priority controls. */
-:root {
+/* Meeting semantic tokens: scoped beneath the shared brand layer. */
+.meeting-shell {
   --lm-bg: #0d1014;
   --lm-header: #151b22;
   --lm-stage: #0b0f13;
@@ -2181,7 +2064,7 @@ body { overflow-x: hidden; }
   padding: 3px;
   background: var(--lm-surface-2);
   border: 1px solid var(--lm-border);
-  border-radius: 14px;
+  border-radius: var(--lm-radius-md);
 }
 
 .toolbar-session {
@@ -2197,7 +2080,7 @@ body { overflow-x: hidden; }
   min-width: 48px;
   height: 48px;
   padding-inline: 8px;
-  border-radius: 10px;
+  border-radius: var(--lm-radius-md);
 }
 
 .meeting-toolbar .control-button--quiet {
@@ -2307,50 +2190,7 @@ body { overflow-x: hidden; }
   }
 }
 
-/* Final meeting polish: status color, fluid tall grids, and a floating Meet-style bar. */
-.network-chip.connection {
-  color: var(--lm-text);
-  background: var(--primary-soft);
-  border-color: rgba(23, 105, 170, .42);
-}
-
-.network-chip.connection .network-chip__dot {
-  background: var(--primary);
-  box-shadow: 0 0 0 3px rgba(23, 105, 170, .14);
-}
-
-.network-chip.connection.good {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: rgba(40, 122, 69, .38);
-}
-
-.network-chip.connection.good .network-chip__dot {
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(40, 122, 69, .14);
-}
-
-.network-chip.connection.fair {
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-color: rgba(163, 110, 32, .4);
-}
-
-.network-chip.connection.fair .network-chip__dot {
-  background: var(--warning);
-  box-shadow: 0 0 0 3px rgba(163, 110, 32, .14);
-}
-
-.network-chip.connection.poor {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: rgba(179, 59, 54, .4);
-}
-
-.network-chip.connection.poor .network-chip__dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px rgba(179, 59, 54, .14);
-}
+/* Final meeting polish: fluid tall grids and a floating Meet-style bar. */
 
 @media (min-height: 1101px) and (min-width: 901px) {
   .participant-grid {
@@ -2395,7 +2235,7 @@ body { overflow-x: hidden; }
 
 .meeting-toolbar .control-button {
   height: 48px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .meeting-toolbar .control-button:hover,
@@ -2404,7 +2244,7 @@ body { overflow-x: hidden; }
 }
 
 .meeting-toolbar .control-button--danger {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 @media (max-width: 700px) {
@@ -2421,21 +2261,21 @@ body { overflow-x: hidden; }
 }
 
 .network-chip.connection.good {
-  color: #fff;
-  background: var(--success);
-  border-color: var(--success);
+  color: var(--lm-text);
+  background: var(--lm-success);
+  border-color: var(--lm-success);
 }
 
 .network-chip.connection.fair {
-  color: #fff;
-  background: var(--warning);
-  border-color: var(--warning);
+  color: var(--lm-on-warning);
+  background: var(--lm-warning);
+  border-color: var(--lm-warning);
 }
 
 .network-chip.connection.poor {
-  color: #fff;
-  background: var(--danger);
-  border-color: var(--danger);
+  color: var(--lm-text);
+  background: var(--lm-danger);
+  border-color: var(--lm-danger);
 }
 
 .network-chip.connection .network-chip__dot,
@@ -2480,7 +2320,7 @@ body { overflow-x: hidden; }
 
 .meeting-toolbar .control-button,
 .meeting-toolbar .control-button--danger {
-  border-radius: 8px;
+  border-radius: var(--lm-radius-sm);
 }
 
 .meeting-toolbar > #leave {
@@ -2697,8 +2537,12 @@ body { overflow-x: hidden; }
   box-sizing: border-box;
   background: var(--lm-surface);
   border: 1px solid var(--lm-border);
-  border-radius: 16px;
+  border-radius: var(--lm-radius-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+}
+.meeting-toolbar::before {
+  content: "";
+  display: none;
 }
 
 .meeting-toolbar .toolbar-primary,
@@ -2727,7 +2571,7 @@ body { overflow-x: hidden; }
   min-width: 48px;
   height: 56px;
   padding: 4px;
-  border-radius: 10px;
+  border-radius: var(--lm-radius-md);
   line-height: 1.1;
   text-align: center;
   white-space: normal;

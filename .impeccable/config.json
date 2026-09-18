@@ -1,0 +1,23 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-font",
+        "value": "apple color emoji",
+        "createdAt": "2026-09-18T21:38:36.565Z",
+        "reason": "Intentional emoji-picker fallback already used by the meeting reaction UI"
+      },
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "web/css/style.css"
+        ],
+        "createdAt": "2026-09-18T21:43:55.579Z",
+        "reason": "Intentional semantic status markers on policy notes and warning or danger activity events; attribution unknown and outside meeting-surface cleanup"
+      }
+    ]
+  }
+}
