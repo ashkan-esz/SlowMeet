@@ -12,6 +12,7 @@ tmp
 .github
 .playwright-mcp
 .serena
+.codex
 debug*.png
 *.tmp
 *.swp

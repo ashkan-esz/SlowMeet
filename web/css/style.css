@@ -2061,7 +2061,7 @@ body { overflow-x: hidden; }
   outline: 2px solid var(--lm-accent);
   box-shadow: 0 0 0 2px rgb(80 155 255 / 18%);
 }
-.participant-tile.is-speaking .participant-meta { background: var(--lm-accent); color: white; }
+.participant-tile.is-speaking .participant-meta { color: white; }
 .participant-share-label::before { content: "Screen share"; }
 .participant-share-label { font-size: 0; }
 .participant-share-label::before { font-size: .72rem; }
@@ -2926,6 +2926,33 @@ body { overflow-x: hidden; }
     height: auto !important;
     aspect-ratio: 16 / 9 !important;
   }
+}
+
+/* Meeting experience pass: informative camera-off states and reachable mobile actions. */
+.participant-tile[data-camera="off"] .participant-video,
+.participant-tile[data-camera="paused"] .participant-video {
+  background: #1a222c;
+}
+
+.participant-tile[data-camera="off"] .participant-avatar,
+.participant-tile[data-camera="paused"] .participant-avatar {
+  inset: 50% auto auto 50%;
+  width: clamp(72px, 13vw, 132px);
+  height: clamp(72px, 13vw, 132px);
+  color: #eef4fb;
+  background: #30445d;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 50%;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .22), inset 0 1px 0 rgba(255, 255, 255, .12);
+  font-size: clamp(24px, 4vw, 48px);
+  letter-spacing: .04em;
+  transform: translate(-50%, -50%);
+}
+
+.participant-tile[data-camera="off"] .participant-name,
+.participant-tile[data-camera="paused"] .participant-name {
+  font-size: 14px;
+  font-weight: 700;
 }
 
 @media (prefers-reduced-motion: reduce) {
