@@ -6,7 +6,7 @@ audio and graceful degradation on slow or unstable connections.
 The current MVP provides:
 
 - One meeting at `/`
-- Browser-persisted display name
+- Browser-persisted meeting preferences and device selections
 - Optional meeting password
 - Up to five participants by default
 - WebSocket signaling and Pion WebRTC
@@ -102,22 +102,36 @@ With the optional coturn profile:
 docker compose --profile turn up -d --build
 ```
 
-Podman with the native Compose provider:
+Podman through its Compose wrapper:
 
 ```sh
 podman compose -f podman-compose.yml up -d --build
 ```
 
-If the standalone `podman-compose` executable is installed, this is
-equivalent:
+Podman Compose requires an external Compose provider to be installed and
+configured. Verify it before starting the stack:
 
 ```sh
-podman-compose -f podman-compose.yml up -d --build
+podman compose version
+make podman-check
 ```
 
+The Compose provider must be able to reach the Podman API socket. For a
+rootless Podman installation using the default socket, start the user socket
+before running the Make target:
+
+```sh
+systemctl --user enable --now podman.socket
+```
+
+Do not mix modes: use `make podman-build` with the rootless socket, or use
+`sudo make podman-build` only after enabling the rootful socket with
+`sudo systemctl enable --now podman.socket`.
+
 The equivalent Make targets are `make docker-up`, `make docker-turn-up`,
-`make podman-up`, and `make podman-turn-up`. `podman compose` can also be used
-when its external Compose provider is configured.
+`make podman-up`, and `make podman-turn-up`. The Make targets intentionally use
+`podman compose` and do not auto-select the standalone `podman-compose`
+executable.
 
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.

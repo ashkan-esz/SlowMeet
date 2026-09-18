@@ -5,12 +5,12 @@ GO ?= go
 NODE ?= node
 COMPOSE ?= docker compose
 DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
-PODMAN_COMPOSE ?= $(shell if command -v podman-compose >/dev/null 2>&1; then printf '%s' 'podman-compose -f podman-compose.yml'; else printf '%s' 'podman compose -f podman-compose.yml'; fi)
+PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
 	test-js test-admin test-protocol test-adaptation test-layout smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
-	podman-build podman-up podman-turn-up podman-down podman-logs \
+	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config
 
 help: ## Show available commands
@@ -76,22 +76,46 @@ docker-down: ## Stop the Compose stack
 docker-logs: ## Follow Compose service logs
 	$(DOCKER_COMPOSE) logs -f
 
+podman-check: ## Verify Podman Compose is available
+	@command -v podman >/dev/null 2>&1 || { \
+		echo "Podman is required but was not found in PATH."; \
+		exit 1; \
+	}
+	@$(PODMAN_COMPOSE) version || { \
+		status=$$?; \
+		echo "Podman Compose preflight failed. Check the Podman runtime and Compose provider."; \
+		echo "Retry with: $(PODMAN_COMPOSE) version"; \
+		exit $$status; \
+	}
+	@$(PODMAN_COMPOSE) ps --all >/dev/null || { \
+		status=$$?; \
+		echo "Podman Compose cannot reach the Podman API socket."; \
+		if [ "$$(id -u)" -eq 0 ]; then \
+			echo "For rootful Podman, start it with: systemctl enable --now podman.socket"; \
+		else \
+			echo "For rootless Podman, start it with: systemctl --user enable --now podman.socket"; \
+		fi; \
+		exit $$status; \
+	}
+
+podman-build podman-up podman-turn-up podman-down podman-logs: podman-check
+
 podman-build: ## Build the Podman image
 	$(PODMAN_COMPOSE) build
 
-podman-up: ## Build and start the podman-compose stack
+podman-up: ## Build and start the Podman Compose stack
 	$(PODMAN_COMPOSE) up -d --build
 
-podman-turn-up: ## Build and start podman-compose with coturn
+podman-turn-up: ## Build and start Podman Compose with coturn
 	$(PODMAN_COMPOSE) --profile turn up -d --build
 
-podman-down: ## Stop the podman-compose stack
+podman-down: ## Stop the Podman Compose stack
 	$(PODMAN_COMPOSE) down
 
-podman-logs: ## Follow podman-compose service logs
+podman-logs: ## Follow Podman Compose service logs
 	$(PODMAN_COMPOSE) logs -f
 
-container-config: ## Validate Docker and Podman Compose manifests
+container-config: podman-check ## Validate Docker and Podman Compose manifests
 	$(DOCKER_COMPOSE) config --quiet
 	$(DOCKER_COMPOSE) --profile turn config --quiet
 	$(PODMAN_COMPOSE) config --quiet

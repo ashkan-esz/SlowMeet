@@ -83,7 +83,8 @@ const chatEmojiPicker = document.querySelector("#chat-emoji-picker");
 const participantCount = document.querySelector("#participant-count");
 const participantCountBadge = document.querySelector("#participant-count-badge");
 const audioOnly = document.querySelector("#audio-only");
-if (audioOnly) audioOnly.checked = false;
+let audioOnlyPreference = readStoredValue("meeting.audioOnly") === "true";
+if (audioOnly) audioOnly.checked = audioOnlyPreference;
 const toastRegion = document.querySelector("#toast-region");
 const connectionMessage = document.querySelector("#connection-message");
 const participantPagination = document.querySelector("#participant-pagination");
@@ -1093,6 +1094,8 @@ chatForm?.addEventListener("submit", (event) => {
 });
 
 audioOnly?.addEventListener("change", () => {
+  audioOnlyPreference = audioOnly.checked;
+  writeStoredValue("meeting.audioOnly", String(audioOnlyPreference));
   if (audioOnly.checked) {
     cameraBeforeAudioOnly = cameraRequested;
     cameraRequested = false;
@@ -1323,7 +1326,11 @@ let cameraRequested = false;
 let receiveVideoEnabled = true;
 let selfViewVisible = readStoredValue("meeting.showSelfView") !== "false";
 let cameraBeforeAudioOnly = false;
-const selectedDeviceIDs = { audio: "", video: "", speaker: "" };
+const selectedDeviceIDs = {
+  audio: readStoredValue("meeting.audioInputDevice") || "",
+  video: readStoredValue("meeting.videoInputDevice") || "",
+  speaker: readStoredValue("meeting.audioOutputDevice") || ""
+};
 if (selfView) selfView.checked = selfViewVisible;
 meetingViewState.showSelfView = selfViewVisible;
 let mediaTestStream;
@@ -1432,7 +1439,7 @@ function stopDeviceTest() {
   testMedia.disabled = false;
 }
 
-function setDeviceOptions(select, devices, defaultLabel) {
+function setDeviceOptions(select, devices, defaultLabel, preferredDeviceID = "") {
   if (!select) return;
   const previous = select.value;
   select.replaceChildren(new Option(defaultLabel, ""));
@@ -1440,22 +1447,45 @@ function setDeviceOptions(select, devices, defaultLabel) {
     const option = new Option(device.label || `${defaultLabel.replace("System ", "")} ${index + 1}`, device.deviceId);
     select.append(option);
   });
-  if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+  const desired = preferredDeviceID || previous;
+  select.value = [...select.options].some((option) => option.value === desired) ? desired : "";
+}
+
+const deviceStorageKeys = {
+  audio: "meeting.audioInputDevice",
+  video: "meeting.videoInputDevice",
+  speaker: "meeting.audioOutputDevice"
+};
+
+function setSelectedDevice(kind, deviceID) {
+  const normalized = deviceID || "";
+  selectedDeviceIDs[kind] = normalized;
+  writeStoredValue(deviceStorageKeys[kind], normalized);
 }
 
 async function refreshDeviceSelectors() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
-  setDeviceOptions(settingsMic, devices.filter((device) => device.kind === "audioinput"), "System default");
-  setDeviceOptions(settingsCamera, devices.filter((device) => device.kind === "videoinput"), "System default");
-  setDeviceOptions(settingsSpeaker, devices.filter((device) => device.kind === "audiooutput"), "System default");
-  if (settingsMic) settingsMic.value = selectedDeviceIDs.audio || settingsMic.value;
-  if (settingsCamera) settingsCamera.value = selectedDeviceIDs.video || settingsCamera.value;
-  if (settingsSpeaker) settingsSpeaker.value = selectedDeviceIDs.speaker || settingsSpeaker.value;
+  setDeviceOptions(settingsMic, devices.filter((device) => device.kind === "audioinput"), "System default", selectedDeviceIDs.audio);
+  setDeviceOptions(settingsCamera, devices.filter((device) => device.kind === "videoinput"), "System default", selectedDeviceIDs.video);
+  setDeviceOptions(settingsSpeaker, devices.filter((device) => device.kind === "audiooutput"), "System default", selectedDeviceIDs.speaker);
+}
+
+function isUnavailableDeviceError(error) {
+  return error?.name === "NotFoundError" || error?.name === "OverconstrainedError";
+}
+
+async function getUserMediaWithDeviceFallback(kind, deviceID, preferredConstraints, fallbackConstraints) {
+  try {
+    return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+  } catch (error) {
+    if (!deviceID || !isUnavailableDeviceError(error)) throw error;
+    return navigator.mediaDevices.getUserMedia(fallbackConstraints);
+  }
 }
 
 async function setSpeakerOutput(deviceID) {
-  selectedDeviceIDs.speaker = deviceID;
+  setSelectedDevice("speaker", deviceID);
   let unsupported = false;
   for (const audio of remoteAudioElements) {
     if (typeof audio.setSinkId !== "function") {
@@ -1468,7 +1498,7 @@ async function setSpeakerOutput(deviceID) {
 }
 
 async function replaceLocalDevice(kind, deviceID) {
-  selectedDeviceIDs[kind] = deviceID;
+  setSelectedDevice(kind, deviceID);
   if (!localStream || !navigator.mediaDevices?.getUserMedia) return;
   const targetStream = localStream;
   const targetPeer = peer;
@@ -1479,8 +1509,11 @@ async function replaceLocalDevice(kind, deviceID) {
   const constraints = kind === "audio"
     ? { audio: deviceID ? { deviceId: { exact: deviceID } } : true }
     : { video: { ...cameraConstraints, ...(deviceID ? { deviceId: { exact: deviceID } } : {}) } };
+  const fallbackConstraints = kind === "audio"
+    ? { audio: true }
+    : { video: { ...cameraConstraints } };
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await getUserMediaWithDeviceFallback(kind, deviceID, constraints, fallbackConstraints);
     if (localStream !== targetStream || peer !== targetPeer ||
         localParticipantID !== targetParticipantID || meeting.hidden) {
       stream.getTracks().forEach((track) => track.stop());
@@ -1608,6 +1641,7 @@ settingsMic?.addEventListener("change", () => replaceLocalDevice("audio", settin
 settingsCamera?.addEventListener("change", () => replaceLocalDevice("video", settingsCamera.value));
 settingsSpeaker?.addEventListener("change", () => setSpeakerOutput(settingsSpeaker.value));
 navigator.mediaDevices?.addEventListener?.("devicechange", refreshDeviceSelectors);
+void refreshDeviceSelectors();
 
 function setLocalMediaControls() {
   const audioTrack = localStream?.getAudioTracks()[0];
@@ -1682,12 +1716,17 @@ async function enableCamera() {
 
 async function enableCameraOnce() {
   if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      ...cameraConstraints,
-      ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
-    }
-  });
+  const stream = await getUserMediaWithDeviceFallback(
+    "video",
+    selectedDeviceIDs.video,
+    {
+      video: {
+        ...cameraConstraints,
+        ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
+      }
+    },
+    { video: { ...cameraConstraints } }
+  );
   const track = stream.getVideoTracks()[0];
   if (!track) throw new Error("camera is unavailable");
   localCameraStream = stream;
@@ -2464,9 +2503,12 @@ async function startWebRTC() {
       return true;
     };
     try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: selectedDeviceIDs.audio ? { deviceId: { exact: selectedDeviceIDs.audio } } : true
-      });
+      const audioStream = await getUserMediaWithDeviceFallback(
+        "audio",
+        selectedDeviceIDs.audio,
+        { audio: selectedDeviceIDs.audio ? { deviceId: { exact: selectedDeviceIDs.audio } } : true },
+        { audio: true }
+      );
       audioStream.getAudioTracks().forEach((track) => {
         track.enabled = false;
         setupStream.addTrack(track);
@@ -3631,7 +3673,7 @@ leave.addEventListener("click", () => {
   focusedParticipantID = undefined;
   profile.value = "auto";
   cameraQuality.value = selectedCameraQuality;
-  audioOnly.checked = false;
+  audioOnly.checked = audioOnlyPreference;
   cameraBeforeAudioOnly = false;
   pendingCandidates.splice(0);
   updateControlLabel(mic, "Unmute microphone");
