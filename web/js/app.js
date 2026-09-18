@@ -1137,7 +1137,6 @@ function openPeoplePanel(trigger = participantsButton) {
 }
 participantsButton?.addEventListener("click", openPeoplePanel);
 mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
-mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));
 mobileScreen?.addEventListener("click", () => screen?.click());
 mobileRaiseHand?.addEventListener("click", () => raiseHand?.click());
 mobileReceiveVideo?.addEventListener("click", () => receiveVideo?.click());
