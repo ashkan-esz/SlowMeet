@@ -48,6 +48,16 @@ if (parseDebugMode("?debug=0") !== 0 || parseDebugMode("?debug=11") !== 0 ||
     parseDebugMode("?debug=abc") !== 0 || parseDebugMode("?debug=6&debug=5") !== 6) {
   throw new Error("debug mode parsing should accept only integer values from 1 through 10");
 }
+if (!pinAppSource.includes('meetingLayoutHost.dataset.debugDensity = mode >= 6 ? "compact" : "default";') ||
+    !pinStyleSource.includes('@media (max-width: 700px)') ||
+    !pinStyleSource.includes('#meeting-layout-host[data-debug-density="compact"] .participant-meta') ||
+    !pinStyleSource.includes('#meeting-layout-host[data-debug-density="compact"] .participant-state') ||
+    !pinStyleSource.includes('#meeting-layout-host[data-debug-density="compact"] .participant-menu') ||
+    !pinStyleSource.includes('#meeting-layout-host[data-debug-density="compact"] .participant-menu-trigger') ||
+    !pinStyleSource.includes('min-width: 44px;') ||
+    !pinStyleSource.includes('min-height: 44px;')) {
+  throw new Error("dense debug participant controls must be scoped to mobile debug modes and retain touch targets");
+}
 const poorFixture = createPoorConnectionFixture();
 if (poorFixture.id !== "debug-poor-network" || !poorFixture.debugPoorConnection ||
     poorFixture.debugNetwork.rttMs < 500 || poorFixture.debugNetwork.packetLoss10 < 100) {

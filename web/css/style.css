@@ -1911,6 +1911,55 @@ body { overflow-x: hidden; }
 
 .participant-menu { max-height: calc(100% - 16px); overflow-y: auto; }
 
+/* Dense debug fixtures keep tile content readable on small mobile screens. */
+@media (max-width: 700px) {
+  #meeting-layout-host[data-debug-density="compact"] .participant-meta {
+    inset-inline-start: 6px;
+    inset-block-end: 6px;
+    gap: 4px;
+    max-width: calc(100% - 12px);
+    padding: 4px 6px;
+    border-radius: 5px;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-name {
+    font-size: 11px;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-state {
+    max-width: calc(100% - 12px);
+    padding: 4px 7px;
+    font-size: 9px;
+    line-height: 1.1;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-menu-trigger {
+    inset-block-start: 4px;
+    inset-inline-end: 4px;
+    background: radial-gradient(circle, rgba(13, 16, 20, .72) 0 16px, transparent 17px);
+    border-color: transparent;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-menu-trigger svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-menu {
+    inset-block-start: 6px;
+    inset-inline-start: 6px;
+    min-width: 144px;
+    max-width: min(190px, calc(100% - 12px));
+    gap: 2px;
+    padding: 4px;
+  }
+
+  #meeting-layout-host[data-debug-density="compact"] .participant-menu button {
+    padding-inline: 8px;
+    font-size: 11px;
+  }
+}
+
 /* Incoming video remains available at every toolbar width; only its label collapses. */
 .meeting-toolbar #receive-video,
 .controls #receive-video { flex: 0 0 auto; }

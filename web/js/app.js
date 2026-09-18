@@ -1206,6 +1206,9 @@ function mountDebugParticipants() {
   const mode = typeof parseDebugMode === "function"
     ? parseDebugMode(window.location.search)
     : 0;
+  if (meetingLayoutHost) {
+    meetingLayoutHost.dataset.debugDensity = mode >= 6 ? "compact" : "default";
+  }
   if (!mode || !localStream) return;
   const fixtures = typeof chooseDebugParticipants === "function"
     ? chooseDebugParticipants(mode)
