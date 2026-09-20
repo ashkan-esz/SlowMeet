@@ -245,6 +245,20 @@ for (const rule of [
   }
 }
 for (const rule of [
+  ".network-chip.connection.connecting {\n  color: var(--lm-text);\n  background: var(--lm-surface-2);\n  border-color: var(--lm-border);",
+  ".network-chip.connection.good {\n  color: var(--lm-on-success);\n  background: var(--lm-success);\n  border-color: var(--lm-success);",
+  ".network-chip.connection.fair {\n  color: var(--lm-on-warning);\n  background: var(--lm-warning);\n  border-color: var(--lm-warning);",
+  ".network-chip.connection.poor {\n  color: var(--lm-on-danger);\n  background: var(--lm-danger);\n  border-color: var(--lm-danger);"
+]) {
+  if (!styleSource.includes(rule)) {
+    throw new Error(`connection chip state color rule is missing: ${rule}`);
+  }
+}
+if (!styleSource.includes(".network-chip.connection .network-chip__copy small {\n  color: currentColor;\n  font-size: 10px;\n  font-weight: 600;") ||
+    styleSource.includes(".network-chip.connection .network-chip__copy small {\n    display: none;")) {
+  throw new Error("connection summary must remain readable in compact desktop layouts");
+}
+for (const rule of [
   "grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr));",
   "grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;",
   ".pinned-layout { grid-template-columns: minmax(0, 1fr);",

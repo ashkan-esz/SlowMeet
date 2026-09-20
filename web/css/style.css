@@ -1215,8 +1215,10 @@ button.control-button:disabled { color: #77808c; background: transparent; border
   --lm-accent: #85adff;
   --lm-accent-soft: rgba(133, 173, 255, .16);
   --lm-success: #62d39a;
+  --lm-on-success: #0d1014;
   --lm-warning: #f2c66d;
   --lm-danger: #ef656d;
+  --lm-on-danger: #0d1014;
   --lm-danger-hover: #f47b82;
   --lm-on-warning: #2a220e;
   --lm-share: #a78bfa;
@@ -2155,8 +2157,8 @@ body { overflow-x: hidden; }
 }
 
 .network-chip.connection .network-chip__copy small {
-  color: var(--lm-text-dim);
-  font-size: 9px;
+  color: currentColor;
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -2209,10 +2211,6 @@ body { overflow-x: hidden; }
   .network-chip.connection {
     min-height: 32px;
     padding-inline: 7px;
-  }
-
-  .network-chip.connection .network-chip__copy small {
-    display: none;
   }
 }
 
@@ -2306,10 +2304,16 @@ body { overflow-x: hidden; }
   margin-top: 0;
 }
 
-.network-chip.connection.good {
+.network-chip.connection.connecting {
   color: var(--lm-text);
-  background: #4fae7f;
-  border-color: #4fae7f;
+  background: var(--lm-surface-2);
+  border-color: var(--lm-border);
+}
+
+.network-chip.connection.good {
+  color: var(--lm-on-success);
+  background: var(--lm-success);
+  border-color: var(--lm-success);
 }
 
 .network-chip.connection.fair {
@@ -2319,7 +2323,7 @@ body { overflow-x: hidden; }
 }
 
 .network-chip.connection.poor {
-  color: var(--lm-text);
+  color: var(--lm-on-danger);
   background: var(--lm-danger);
   border-color: var(--lm-danger);
 }
