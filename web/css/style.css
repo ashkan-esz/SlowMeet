@@ -550,7 +550,7 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .participant-tile[data-quality="poor"] .participant-quality { background: #ef4444; }
 .toast-region { position: absolute; inset-inline-start: 16px; inset-block-end: 16px; z-index: 5; display: grid; gap: 8px; pointer-events: none; }
 .toast { max-width: min(360px, calc(100vw - 32px)); padding: 10px 12px; color: var(--lm-text); background: var(--lm-surface); border: 1px solid var(--lm-border); border-radius: var(--lm-r-sm); font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.22); }
-.meeting-sidebar, .chat-rail { grid-area: rail; position: relative; z-index: 7; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: var(--lm-text); background: var(--lm-surface); border-inline-start: 1px solid var(--lm-border); }
+.meeting-sidebar, .chat-rail { grid-area: rail; position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: var(--lm-text); background: var(--lm-surface); border-inline-start: 1px solid var(--lm-border); }
 .meeting-sidebar { padding: 16px; overflow-y: auto; transform: translateX(0); }
 .meeting-sidebar[aria-hidden="true"] { display: none; }
 .chat-rail { transform: translateX(100%); opacity: 0; transition: transform 180ms ease, opacity 180ms ease; }
@@ -641,7 +641,7 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
   .meeting-shell { grid-template-columns: 1fr; grid-template-rows: 48px minmax(0, 1fr) 72px; grid-template-areas: "header" "stage" "bar"; }
   .chat-rail { position: absolute; inset-inline: 0; inset-block-end: 0; width: 100%; height: 60dvh; max-height: 480px; border-inline-start: 0; border-block-start: 1px solid var(--lm-border); transform: translateY(100%); }
   .chat-rail.is-open { transform: translateY(0); }
-  .meeting-sidebar { position: absolute; inset-block: 48px 72px; inset-inline-end: 0; width: min(360px, 100%); height: auto; border-inline-start: 1px solid var(--lm-border); box-shadow: -12px 0 28px rgba(0,0,0,.2); }
+  .meeting-sidebar { position: absolute; inset-block: 48px 72px; inset-inline-end: 0; z-index: var(--lm-z-rail); width: min(360px, 100%); height: auto; border-inline-start: 1px solid var(--lm-border); box-shadow: -12px 0 28px rgba(0,0,0,.2); }
   .meeting-sidebar[aria-hidden="false"] { display: flex; }
   .sidebar-backdrop { position: absolute; inset: 48px 0 72px; z-index: 6; display: block; background: transparent; border: 0; }
   .stage-panel { grid-area: stage; }
@@ -732,7 +732,7 @@ html:has(.meeting-shell:not([hidden])) #root {
 .network-chip.fair { color: var(--lm-warning); }
 .network-chip.poor { color: var(--lm-danger); }
 .network-chip.connection { color: var(--lm-text-dim); }
-.network-chip.connection.good { color: var(--lm-success); }
+.network-chip.connection.good { color: #4fae7f; }
 .network-chip.connection.fair { color: var(--lm-warning); }
 .network-chip.connection.poor { color: var(--lm-danger); }
 .network-chip__dot { background: currentColor; }
@@ -1095,7 +1095,7 @@ button.control-button:disabled { color: #77808c; background: transparent; border
   .meeting-sidebar {
     position: absolute;
     inset: 52px 0 72px auto;
-    z-index: 7;
+    z-index: var(--lm-z-rail);
     width: min(360px, 100%);
     height: auto;
     border-inline-start: 1px solid var(--lm-border);
@@ -1414,7 +1414,6 @@ html:has(.meeting-shell:not([hidden])) #root {
   border-inline-start-color: var(--lm-border);
 }
 .meeting-sidebar {
-  z-index: var(--lm-z-rail);
   display: none;
   padding: 20px;
   overflow-y: auto;
@@ -1597,6 +1596,7 @@ button.control-button:disabled { color: var(--lm-text-subtle); background: trans
   .meeting-sidebar {
     position: absolute;
     inset: 52px 0 var(--lm-toolbar-height) auto;
+    z-index: var(--lm-z-rail);
     width: min(360px, 100%);
     height: auto;
     border-inline-start: 1px solid var(--lm-border);
@@ -2262,8 +2262,8 @@ body { overflow-x: hidden; }
 
 .network-chip.connection.good {
   color: var(--lm-text);
-  background: var(--lm-success);
-  border-color: var(--lm-success);
+  background: #4fae7f;
+  border-color: #4fae7f;
 }
 
 .network-chip.connection.fair {
