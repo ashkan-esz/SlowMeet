@@ -406,6 +406,52 @@ fieldset legend { margin-bottom: .75rem; }
 .admin-footer a { color: var(--primary); font-weight: 800; text-decoration: none; }
 .admin-footer a:hover { text-decoration: underline; }
 
+/* Join and operations surfaces share a forced dark theme. The in-call UI owns
+   its separate --lm-* token set below, so this does not alter meeting controls. */
+.public-page, .admin-page {
+  --canvas: #0d131b;
+  --surface: #151d27;
+  --surface-raised: #1a2531;
+  --surface-inverse: #081019;
+  --text: #edf4fb;
+  --text-muted: #9babbc;
+  --border-subtle: #2a3847;
+  --border-strong: #405367;
+  --primary: #69bcf5;
+  --primary-hover: #91d0fb;
+  --primary-soft: #102e44;
+  --success: #62ca8a;
+  --success-soft: #102d21;
+  --warning: #f0bc66;
+  --warning-soft: #352814;
+  --danger: #fa8e89;
+  --danger-soft: #3b1d21;
+  --speaking: #69bcf5;
+  --speaking-soft: #102e44;
+  --screen-share: #69bcf5;
+  --screen-share-soft: #102e44;
+  --inverse-text: #dce8f2;
+  --focus: #9bd7ff;
+  --shadow-soft: 0 1rem 2.5rem rgba(0, 0, 0, .28);
+  color: var(--text);
+  background: var(--canvas);
+  color-scheme: dark;
+}
+
+.public-page .button-primary, .admin-page .button-primary { color: #edf4fb; }
+.public-page .button-secondary, .admin-page .button-secondary { border-color: #315570; }
+.public-page .button-secondary:hover, .admin-page .button-secondary:hover { background: #173e59; }
+.public-page .device-result--pending { border-color: #6e572b; }
+.public-page .device-result--ready { border-color: #2d6e49; }
+.public-page .device-result--error { border-color: #744147; }
+.admin-page .signal-rail.success { border-color: #2d6e49; }
+.admin-page .signal-rail.warning { border-color: #6e572b; }
+.admin-page .signal-rail.danger { border-color: #744147; }
+.admin-page .signal-rail.success .signal-dot { box-shadow: 0 0 0 .25rem var(--success-soft); }
+.admin-page .signal-rail.danger .signal-dot { box-shadow: 0 0 0 .25rem var(--danger-soft); }
+.admin-page .quick-action:hover { border-color: #315570; }
+.admin-page .policy-note span { color: #a8d8b8; }
+
 @media (max-width: 68rem) {
   .admin-shell { grid-template-columns: 4.5rem minmax(0, 1fr); }
   .admin-nav { grid-column: 2; grid-row: 1; position: static; flex-direction: row; align-items: center; gap: .35rem; min-height: 0; overflow-x: auto; }
