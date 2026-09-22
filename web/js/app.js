@@ -55,6 +55,7 @@ const connectionPopoverRetry = document.querySelector("#connection-popover-retry
 const connectionPopoverControls = document.querySelector("#connection-popover-controls");
 const meetingAlert = document.querySelector("#meeting-alert");
 const testMedia = document.querySelector("#test-media");
+const deviceTest = document.querySelector(".device-test");
 const devicePreview = document.querySelector("#device-preview");
 const testCamera = document.querySelector("#test-camera");
 const testMicrophone = document.querySelector("#test-microphone");
@@ -1442,6 +1443,7 @@ function setDeviceResult(element, state, label) {
 function stopDeviceTest() {
   mediaTestStream?.getTracks().forEach((track) => track.stop());
   mediaTestStream = undefined;
+  deviceTest?.classList.remove("device-test--active");
   devicePreview.srcObject = null;
   devicePreview.hidden = true;
   stopMediaTest.hidden = true;
@@ -1571,6 +1573,7 @@ async function replaceLocalDevice(kind, deviceID) {
 
 async function runDeviceTest() {
   stopDeviceTest();
+  deviceTest?.classList.add("device-test--active");
   setDeviceResult(testCamera, "pending", "Checking camera…");
   setDeviceResult(testMicrophone, "pending", "Checking microphone…");
   deviceTestStatus.textContent = "Requesting temporary access. Nothing is recorded.";

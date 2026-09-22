@@ -19,8 +19,7 @@
 
     <section class="welcome-grid" aria-labelledby="welcome-title">
       <div class="welcome-copy">
-        <p class="eyebrow">A calmer way to meet</p>
-        <h1 id="welcome-title">Stay present. Keep the call moving.</h1>
+        <h1 id="welcome-title"><span class="headline-desktop">Stay present. Keep the call moving.</span><span class="headline-mobile">Stay present. Keep moving.</span></h1>
         <p class="lead">SlowMeet keeps audio useful and lets video adapt when the network gets difficult.</p>
         <div class="principle-list" aria-label="SlowMeet principles">
           <div>
@@ -52,22 +51,23 @@
           <input id="password" name="password" type="password" autocomplete="current-password">
         </div>
         <section class="device-test" aria-labelledby="device-test-title">
-          <div class="device-test-heading">
-            <div>
-              <p class="eyebrow">Before joining</p>
+          <div class="device-test-summary">
+            <div class="device-test-heading">
               <h3 id="device-test-title">Check your setup</h3>
+              <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
             </div>
-            <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
+            <button id="test-media" class="button-secondary" type="button">Test camera &amp; microphone</button>
           </div>
           <p class="device-test-copy">Preview your camera and confirm microphone access. The test stops before you enter the room.</p>
-          <button id="test-media" class="button-secondary" type="button">Test camera &amp; microphone</button>
-          <video id="device-preview" class="device-preview" autoplay muted playsinline hidden></video>
-          <div class="device-test-results" aria-live="polite">
-            <span id="test-camera" class="device-result">Camera not tested</span>
-            <span id="test-microphone" class="device-result">Microphone not tested</span>
+          <div class="device-test-details">
+            <video id="device-preview" class="device-preview" autoplay muted playsinline hidden></video>
+            <div class="device-test-results" aria-live="polite">
+              <span id="test-camera" class="device-result">Camera not tested</span>
+              <span id="test-microphone" class="device-result">Microphone not tested</span>
+            </div>
+            <button id="stop-media-test" class="button-secondary" type="button" hidden>Stop test</button>
+            <p id="device-test-status" class="device-test-status" role="status"></p>
           </div>
-          <button id="stop-media-test" class="button-secondary" type="button" hidden>Stop test</button>
-          <p id="device-test-status" class="device-test-status" role="status"></p>
         </section>
         <button id="join" class="button-primary" type="submit">Join meeting</button>
         <p id="status" class="status-message" role="status" aria-live="polite"></p>
@@ -214,7 +214,6 @@
     </section>
     <section id="meeting-ended" class="meeting-ended" hidden aria-labelledby="meeting-ended-title">
       <div class="meeting-ended__mark" aria-hidden="true">✓</div>
-      <p class="eyebrow">Session closed</p>
       <h1 id="meeting-ended-title">You left the meeting</h1>
       <p>The room is still available if you want to join again.</p>
       <div class="meeting-ended__actions"><button id="rejoin" class="button-primary" type="button">Rejoin meeting</button><a class="button-secondary" href="/">Return home</a></div>

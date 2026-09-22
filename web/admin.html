@@ -52,12 +52,11 @@
       <section id="overview" class="admin-section" aria-labelledby="overview-title">
         <div class="section-heading section-heading--admin">
           <div>
-            <p class="eyebrow">At a glance</p>
             <h2 id="overview-title">Current meeting health</h2>
           </div>
         </div>
       <section class="admin-summary" aria-label="Service summary">
-        <article class="summary-card">
+        <article class="summary-card summary-card--primary">
           <span class="summary-label">Active participants</span>
           <strong id="active-participants" class="summary-value">No data</strong>
           <span id="capacity-detail" class="summary-detail">Waiting for metrics</span>
@@ -97,11 +96,14 @@
           </div>
           <p class="card-copy">Changes apply to the active meeting and media policy is broadcast to connected clients.</p>
           <form id="admin-form" class="admin-form">
-            <div class="form-field">
-              <label for="password">Admin password</label>
-              <input id="password" type="password" autocomplete="current-password" aria-describedby="password-help">
-              <span id="password-help" class="field-help">Required when the service is protected; never stored or logged.</span>
-            </div>
+            <fieldset class="access-policy">
+              <legend>Access</legend>
+              <div class="form-field">
+                <label for="password">Admin password</label>
+                <input id="password" type="password" autocomplete="current-password" aria-describedby="password-help">
+                <span id="password-help" class="field-help">Required when the service is protected; never stored or logged.</span>
+              </div>
+            </fieldset>
             <p id="validation-summary" class="validation-summary" role="alert" hidden></p>
             <fieldset>
               <legend>Capacity</legend>
@@ -159,8 +161,11 @@
                 </div>
               </div>
             </fieldset>
-            <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span><strong>Allow screen sharing</strong><small>Participants can share their screen during meetings.</small></span></label>
-            <label class="checkbox-row" for="retain-chat-history"><input id="retain-chat-history" type="checkbox"> <span><strong>Retain chat history</strong><small>Keep the last 100 messages in server memory. History is removed 30 minutes after the room becomes empty.</small></span></label>
+            <fieldset class="room-policy">
+              <legend>Room behavior</legend>
+              <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span><strong>Allow screen sharing</strong><small>Participants can share their screen during meetings.</small></span></label>
+              <label class="checkbox-row" for="retain-chat-history"><input id="retain-chat-history" type="checkbox"> <span><strong>Retain chat history</strong><small>Keep the last 100 messages in server memory. History is removed 30 minutes after the room becomes empty.</small></span></label>
+            </fieldset>
             <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>
           </form>
