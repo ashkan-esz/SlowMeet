@@ -9,6 +9,9 @@ const meeting = document.querySelector("#meeting");
 const meetingEnded = document.querySelector("#meeting-ended");
 const rejoin = document.querySelector("#rejoin");
 const participants = document.querySelector("#participants");
+const roomRosterCount = document.querySelector("#room-roster-count");
+const roomRosterStatus = document.querySelector("#room-roster-status");
+const roomRosterList = document.querySelector("#room-roster-list");
 const stagePanel = document.querySelector(".stage-panel");
 const meetingLayoutHost = document.querySelector("#meeting-layout-host");
 const pinnedLayout = document.querySelector("#pinned-layout");
@@ -2158,6 +2161,150 @@ if (storedProfile && [...profile.options].some((option) => option.value === stor
   profile.value = storedProfile;
 }
 if (cameraQuality) cameraQuality.value = selectedCameraQuality;
+
+let roomRosterRefreshTimer;
+let roomRosterDebounceTimer;
+let roomRosterController;
+let roomRosterRequestVersion = 0;
+let roomRosterCanRefresh = false;
+let roomRosterHasLoaded = false;
+
+function clearRoomRoster() {
+  roomRosterCount.textContent = "";
+  roomRosterCount.hidden = true;
+  roomRosterList.replaceChildren();
+  roomRosterList.hidden = true;
+  roomRosterHasLoaded = false;
+}
+
+function setRoomRosterStatus(message, clear = false) {
+  if (clear) clearRoomRoster();
+  roomRosterStatus.textContent = message;
+  roomRosterStatus.hidden = false;
+}
+
+function stopRoomRosterRefresh() {
+  clearTimeout(roomRosterRefreshTimer);
+  roomRosterRefreshTimer = undefined;
+}
+
+function cancelRoomRosterRequest() {
+  roomRosterRequestVersion += 1;
+  roomRosterController?.abort();
+  roomRosterController = undefined;
+}
+
+function stopRoomRoster() {
+  clearTimeout(roomRosterDebounceTimer);
+  roomRosterCanRefresh = false;
+  stopRoomRosterRefresh();
+  cancelRoomRosterRequest();
+}
+
+function renderRoomRoster(activeParticipants) {
+  const rows = activeParticipants
+    .filter((participant) => typeof participant?.name === "string" && participant.name.length > 0)
+    .map((participant) => {
+      const row = document.createElement("li");
+      row.className = "room-roster__item";
+
+      const initials = document.createElement("span");
+      initials.className = "room-roster__initials";
+      initials.setAttribute("aria-hidden", "true");
+      initials.textContent = initialsFor(participant.name);
+
+      const name = document.createElement("span");
+      name.className = "room-roster__name";
+      name.textContent = participant.name;
+
+      row.append(initials, name);
+      return row;
+    });
+
+  roomRosterCount.textContent = `${rows.length} participant${rows.length === 1 ? "" : "s"}`;
+  roomRosterCount.hidden = false;
+  roomRosterList.replaceChildren(...rows);
+  roomRosterList.hidden = rows.length === 0;
+  roomRosterStatus.textContent = rows.length === 0 ? "No one is here yet." : "";
+  roomRosterStatus.hidden = rows.length > 0;
+  roomRosterHasLoaded = true;
+}
+
+function scheduleRoomRosterRefresh() {
+  stopRoomRosterRefresh();
+  if (!roomRosterCanRefresh || document.hidden || welcomeGrid.hidden) return;
+  roomRosterRefreshTimer = setTimeout(refreshRoomRoster, 10000);
+}
+
+async function refreshRoomRoster() {
+  if (document.hidden || welcomeGrid.hidden) return;
+  stopRoomRosterRefresh();
+  roomRosterController?.abort();
+
+  const controller = new AbortController();
+  roomRosterController = controller;
+  const requestVersion = ++roomRosterRequestVersion;
+  if (!roomRosterHasLoaded) setRoomRosterStatus("Loading participants...");
+
+  try {
+    const response = await fetch("/room/participants", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({password: passwordInput.value}),
+      cache: "no-store",
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => null);
+    if (requestVersion !== roomRosterRequestVersion) return;
+
+    if (response.status === 401 || response.status === 403) {
+      roomRosterCanRefresh = false;
+      const message = response.status === 401
+        ? "Enter the meeting password to see who is in the room."
+        : "That password is not correct. Check it and try again.";
+      setRoomRosterStatus(message, true);
+      return;
+    }
+    if (!response.ok || !Array.isArray(payload?.participants)) {
+      throw new Error("participant preview unavailable");
+    }
+
+    renderRoomRoster(payload.participants);
+    roomRosterCanRefresh = true;
+  } catch (error) {
+    if (error.name === "AbortError" || requestVersion !== roomRosterRequestVersion) return;
+    roomRosterCanRefresh = true;
+    const message = roomRosterHasLoaded
+      ? "Could not refresh the participant list. Showing the last update."
+      : "Could not load participants. Try again in a moment.";
+    setRoomRosterStatus(message);
+  } finally {
+    if (roomRosterController === controller) roomRosterController = undefined;
+    if (requestVersion === roomRosterRequestVersion) scheduleRoomRosterRefresh();
+  }
+}
+
+function queueRoomRosterRefresh() {
+  clearTimeout(roomRosterDebounceTimer);
+  roomRosterCanRefresh = false;
+  stopRoomRosterRefresh();
+  cancelRoomRosterRequest();
+  roomRosterDebounceTimer = setTimeout(() => {
+    roomRosterDebounceTimer = undefined;
+    refreshRoomRoster();
+  }, 450);
+}
+
+passwordInput.addEventListener("input", queueRoomRosterRefresh);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopRoomRosterRefresh();
+    return;
+  }
+  if (!welcomeGrid.hidden) refreshRoomRoster();
+});
+refreshRoomRoster();
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (joinButton.disabled) return;
@@ -2276,6 +2423,7 @@ function connectSocket(name, password) {
         reconnectToken = message.reconnect_token;
         brandBar.hidden = true;
         welcomeGrid.hidden = true;
+        stopRoomRoster();
         form.hidden = true;
         meeting.hidden = false;
         if (meetingEnded) meetingEnded.hidden = true;

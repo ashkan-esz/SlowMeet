@@ -167,6 +167,68 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   font-size: .65rem;
   font-weight: 800;
 }
+.room-roster {
+  max-width: 40rem;
+  margin-top: 2rem;
+}
+.room-roster__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.room-roster__heading h2 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: -.02em;
+}
+.room-roster__count {
+  color: var(--text-muted);
+  font-size: .85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.room-roster__status {
+  margin: .75rem 0 0;
+  color: var(--text-muted);
+  font-size: .9rem;
+  line-height: 1.45;
+}
+.room-roster__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .5rem 1rem;
+  margin: .85rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.room-roster__item {
+  display: flex;
+  min-width: 0;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: .65rem;
+  padding: .5rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.room-roster__initials {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 2rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: .72rem;
+  font-weight: 700;
+}
+.room-roster__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: .9rem;
+  line-height: 1.35;
+}
 .join-panel, .stage-panel, .utility-card, .admin-card, .summary-card {
   background: var(--surface);
   border: 1px solid var(--border-subtle);
@@ -249,7 +311,7 @@ input:hover, select:hover { border-color: var(--primary); }
   align-items: center;
   gap: .5rem;
   min-height: 2rem;
-  padding: .45rem .6rem;
+  padding: .5rem .6rem;
   color: var(--text-muted);
   background: var(--surface);
   border: 1px solid var(--border-subtle);
@@ -473,6 +535,9 @@ input:hover, select:hover { border-color: var(--primary); }
   .nav-caption, .nav-footer { display: none; }
   .nav-link { flex: 0 0 auto; white-space: nowrap; }
   .admin-main { grid-column: 1; grid-row: 3; }
+}
+@media (max-width: 48rem) {
+  .room-roster__list { grid-template-columns: 1fr; }
 }
 @media (max-width: 54rem) {
   .welcome-grid { grid-template-columns: 1fr; gap: 2rem; padding-top: 3rem; }
@@ -2726,7 +2791,7 @@ body { overflow-x: hidden; }
     gap: 2px;
     width: calc(100% - 24px);
     margin-inline: auto;
-    height: 68px;
+    height: 64px;
     padding: 6px;
     border-radius: 14px;
     overflow-x: hidden;
@@ -2791,14 +2856,14 @@ body { overflow-x: hidden; }
 /* Keep the compact portrait toolbar inside the narrowest supported viewport. */
 @media (max-width: 320px) and (orientation: portrait) {
   .meeting-shell {
-    grid-template-rows: 52px minmax(0, 1fr) 72px;
+    grid-template-rows: 52px minmax(0, 1fr) 68px;
   }
 
   .meeting-toolbar {
     width: 100%;
     margin-inline: 0;
-    min-height: 72px;
-    height: 72px;
+    min-height: 68px;
+    height: 68px;
     padding-inline: 8px;
     gap: 0;
     border-radius: 0;
@@ -2835,7 +2900,7 @@ body { overflow-x: hidden; }
 
 @media (max-width: 700px) {
   .meeting-shell {
-    grid-template-rows: 52px minmax(0, 1fr) 72px;
+    grid-template-rows: 52px minmax(0, 1fr) 68px;
   }
 }
 

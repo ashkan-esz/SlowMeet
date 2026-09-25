@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,6 +25,18 @@ type Server struct {
 	handler http.Handler
 	hub     *signaling.Hub
 	ready   atomic.Bool
+}
+
+type participantPreviewRequest struct {
+	Password string `json:"password"`
+}
+
+type participantPreviewEntry struct {
+	Name string `json:"name"`
+}
+
+type participantPreviewResponse struct {
+	Participants []participantPreviewEntry `json:"participants"`
 }
 
 func New(cfg config.Config, logger *slog.Logger) *Server {
@@ -72,6 +86,52 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			"screen_share_enabled":  cfg.EnableScreenShare,
 			"retain_chat_history":   cfg.RetainChatHistory,
 		})
+	})
+	participantPreview := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		var request participantPreviewRequest
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			writeAPIJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+
+		if !store.Snapshot().CheckMeetingPassword(request.Password) {
+			status := http.StatusUnauthorized
+			errorCode := "password_required"
+			if request.Password != "" {
+				status = http.StatusForbidden
+				errorCode = "invalid_password"
+			}
+			writeAPIJSON(w, status, map[string]string{"error": errorCode})
+			return
+		}
+
+		active := meetingState.List()
+		slices.SortFunc(active, func(a, b meeting.Participant) int {
+			if order := a.JoinedAt.Compare(b.JoinedAt); order != 0 {
+				return order
+			}
+			return cmp.Compare(a.ID, b.ID)
+		})
+		response := participantPreviewResponse{
+			Participants: make([]participantPreviewEntry, 0, len(active)),
+		}
+		for _, participant := range active {
+			response.Participants = append(response.Participants, participantPreviewEntry{Name: participant.Name})
+		}
+		writeAPIJSON(w, http.StatusOK, response)
+	})
+	mux.Handle("POST /room/participants", participantPreview)
+	mux.HandleFunc("/room/participants", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		requireMethod(w, r, http.MethodPost)
 	})
 	mux.HandleFunc("/ice-config", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -273,6 +333,12 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	w.Header().Set("Allow", method)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	return false
+}
+
+func writeAPIJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func boolMetric(value bool) int {

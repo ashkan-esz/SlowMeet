@@ -31,6 +31,14 @@
             <span><strong>Simple controls</strong><small>Adjust the room without leaving the conversation.</small></span>
           </div>
         </div>
+        <section class="room-roster" aria-labelledby="room-roster-title">
+          <div class="room-roster__heading">
+            <h2 id="room-roster-title">In the room</h2>
+            <span id="room-roster-count" class="room-roster__count" aria-live="polite" hidden></span>
+          </div>
+          <p id="room-roster-status" class="room-roster__status" role="status" aria-live="polite">Checking who is here...</p>
+          <ul id="room-roster-list" class="room-roster__list" hidden></ul>
+        </section>
       </div>
 
       <form id="join-form" class="join-panel">
