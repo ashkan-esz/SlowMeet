@@ -2066,6 +2066,17 @@ body { overflow-x: hidden; }
 }
 .pinned-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); }
 .pinned-layout[data-unpinned-count="0"] { grid-template-rows: minmax(0, 1fr); }
+@media (min-width: 721px) {
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"]:not([data-unpinned-count="0"]) {
+    grid-template-rows:
+      minmax(0, calc((100% - 12px) * 1.35 / 2.35 - 20px))
+      minmax(0, calc((100% - 12px) / 2.35 + 20px));
+  }
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="2"] > .layout-filmstrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
 .layout-main, .layout-filmstrip { min-width: 0; min-height: 0; }
 .layout-main { display: grid; grid-template-columns: repeat(var(--pinned-count, 1), minmax(0, 1fr)); gap: 12px; place-items: stretch; }
 .layout-filmstrip { display: grid; grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr)); grid-template-rows: repeat(var(--filmstrip-rows, 1), minmax(0, 1fr)); gap: 12px; overflow: hidden; overscroll-behavior: contain; }
@@ -2664,8 +2675,15 @@ body { overflow-x: hidden; }
   .layout-filmstrip { scroll-behavior: auto; }
 }
 
-/* Keep the speaking frame inside the clipped grid viewport on every edge. */
+/* Keep the speaking frame inside clipped grid and filmstrip viewports. */
 .meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile.is-speaking {
+  box-sizing: border-box;
+  outline: 0;
+  border: 2px solid var(--lm-accent);
+  box-shadow: none;
+}
+.meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-main > .participant-tile.is-speaking,
+.meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-filmstrip > .participant-tile.is-speaking {
   box-sizing: border-box;
   outline: 0;
   border: 2px solid var(--lm-accent);
@@ -3207,13 +3225,6 @@ body { overflow-x: hidden; }
     aspect-ratio: auto;
   }
 
-  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-main > .participant-tile.is-speaking,
-  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-filmstrip > .participant-tile.is-speaking {
-    box-sizing: border-box;
-    outline: 0;
-    border: 2px solid var(--lm-accent);
-    box-shadow: none;
-  }
 }
 
 /* Keep the primary and secondary control groups compact after responsive overrides. */
