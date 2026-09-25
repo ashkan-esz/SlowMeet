@@ -230,6 +230,7 @@ input:hover, select:hover { border-color: var(--primary); }
 .device-test-heading h3 { margin: 0; font-size: .9rem; letter-spacing: -.015em; }
 .device-test-copy { max-width: 38rem; margin: .45rem 0 0; color: var(--text-muted); font-size: .76rem; line-height: 1.4; }
 .device-test-summary .button-secondary { justify-self: start; min-width: 0; margin: 0; white-space: nowrap; }
+#test-media { min-height: 36px; padding: .4rem .65rem; font-size: .78rem; }
 .device-test-details { display: none; }
 .device-test--active .device-test-details { display: block; }
 .device-preview {
@@ -2666,6 +2667,13 @@ body { overflow-x: hidden; }
 
 .meeting-toolbar .toolbar-spacer { display: none; }
 
+.meeting-toolbar .toolbar-leave {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding-inline-end: 3px;
+}
+
 .meeting-toolbar .control-button {
   flex: 0 0 54px;
   width: 54px;
@@ -2731,6 +2739,7 @@ body { overflow-x: hidden; }
   .meeting-toolbar .toolbar-primary,
   .meeting-toolbar .toolbar-secondary { display: flex !important; }
   .meeting-toolbar .toolbar-session { display: none !important; }
+  .meeting-toolbar .toolbar-leave { display: contents; }
   .meeting-toolbar .toolbar-secondary {
     order: 0;
     padding-inline-start: 4px;
@@ -2800,6 +2809,7 @@ body { overflow-x: hidden; }
   .meeting-toolbar .toolbar-primary,
   .meeting-toolbar .toolbar-secondary,
   .meeting-toolbar .toolbar-session,
+  .meeting-toolbar .toolbar-leave,
   .meeting-toolbar .control-group {
     display: contents !important;
   }
@@ -3128,8 +3138,30 @@ body { overflow-x: hidden; }
   }
 }
 
-/* Final toolbar readability guard. Keep these groups inset after all responsive overrides. */
+/* Keep the primary and secondary control groups compact after responsive overrides. */
 .meeting-toolbar .toolbar-primary,
 .meeting-toolbar .toolbar-secondary {
-  padding: 8px;
+  padding-block: 8px;
+  padding-inline: 4px;
+}
+
+.meeting-toolbar .toolbar-secondary {
+  position: relative;
+  border-inline-start: 0;
+  padding-inline-start: 8px;
+}
+
+.meeting-toolbar .toolbar-secondary::before {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 0;
+  width: 1px;
+  height: 28px;
+  background: var(--lm-border);
+  content: "";
+  transform: translateY(-50%);
+}
+
+@media (max-width: 320px) and (orientation: portrait) {
+  .meeting-toolbar .toolbar-secondary::before { display: none; }
 }
