@@ -3010,6 +3010,18 @@ body { overflow-x: hidden; }
   width: var(--tile-width, 100%) !important;
   justify-self: center;
 }
+.meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile,
+.meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-main > .participant-tile,
+.meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-filmstrip > .participant-tile {
+  max-width: 1000px;
+  justify-self: center;
+}
+@media (max-width: 1299px) {
+  .meeting-layout-host[data-layout-mode="grid"] > .participant-grid > .participant-tile,
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout > .layout-filmstrip > .participant-tile {
+    max-width: 750px;
+  }
+}
 .pinned-layout .layout-filmstrip {
   grid-template-columns: repeat(var(--filmstrip-columns, 1), minmax(0, 1fr));
   grid-template-rows: repeat(var(--filmstrip-rows, 1), minmax(0, 1fr));
