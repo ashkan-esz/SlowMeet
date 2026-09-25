@@ -34,6 +34,7 @@ const (
 	TypeConfigUpdate = "config_update"
 	TypeChat         = "chat_message"
 	TypeReaction     = "emoji_reaction"
+	TypeRoomFull     = "room_full"
 	TypeError        = "error"
 )
 

@@ -3,11 +3,14 @@ package signaling
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +78,7 @@ type Hub struct {
 
 	mu           sync.RWMutex
 	clients      map[*client]struct{}
+	roomMembers  map[*client]struct{}
 	router       *media.Router
 	pending      map[string]*pendingReconnect
 	metrics      *metrics.Metrics
@@ -165,6 +169,7 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		Meeting: m, Config: cfg, Logger: logger,
 		Upgrader:    websocket.Upgrader{CheckOrigin: sameOrigin},
 		clients:     make(map[*client]struct{}),
+		roomMembers: make(map[*client]struct{}),
 		pending:     make(map[string]*pendingReconnect),
 		chatHistory: make(map[string]*roomChatHistory),
 		metrics:     &metrics.Metrics{},
@@ -436,6 +441,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		h.mu.Lock()
 		delete(h.clients, c)
+		delete(h.roomMembers, c)
 		h.mu.Unlock()
 		h.disconnect(c)
 	}()
@@ -567,6 +573,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !resumed {
 			participant, err = h.Meeting.Join(msg.Name)
 			if err != nil {
+				if errors.Is(err, meeting.ErrMeetingFull) {
+					h.broadcastToRoom(Message{Version: ProtocolVersion, Type: TypeRoomFull})
+				}
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				continue
 			}
@@ -629,8 +638,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})
-		_ = c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
-			ReconnectToken: c.reconnectToken, ChatHistory: h.chatHistorySnapshot(chatRoomID)})
+		if err := c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
+			ReconnectToken: c.reconnectToken, ChatHistory: h.chatHistorySnapshot(chatRoomID)}); err != nil {
+			return
+		}
+		h.mu.Lock()
+		h.roomMembers[c] = struct{}{}
+		h.mu.Unlock()
 		for _, existing := range h.Meeting.List() {
 			if existing.ID != participant.ID && !h.isPendingParticipant(existing.ID) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})
@@ -846,6 +860,15 @@ func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 			clients = append(clients, c)
 		}
 	}
+	h.mu.RUnlock()
+	for _, c := range clients {
+		_ = c.write(msg)
+	}
+}
+
+func (h *Hub) broadcastToRoom(msg Message) {
+	h.mu.RLock()
+	clients := slices.Collect(maps.Keys(h.roomMembers))
 	h.mu.RUnlock()
 	for _, c := range clients {
 		_ = c.write(msg)

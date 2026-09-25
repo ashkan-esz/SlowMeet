@@ -780,10 +780,11 @@ document.addEventListener("pointerdown", (event) => {
 participantPagePrevious?.addEventListener("click", () => setParticipantPage(-1));
 participantPageNext?.addEventListener("click", () => setParticipantPage(1));
 
-function showToast(message) {
+function showToast(message, variant) {
   if (!toastRegion) return;
   const toast = document.createElement("div");
   toast.className = "toast";
+  if (variant === "warning") toast.classList.add("toast--warning");
   toast.textContent = message;
   toastRegion.append(toast);
   setTimeout(() => toast.remove(), 4000);
@@ -2370,6 +2371,10 @@ function connectSocket(name, password) {
       if (message.text) addChatMessage(message.name || "Participant", message.text);
       return;
     }
+    if (message.type === "room_full") {
+      showToast("Someone could not join because the room is full.", "warning");
+      return;
+    }
     if (message.type === "emoji_reaction") {
       renderReaction(message);
       return;
@@ -2409,7 +2414,9 @@ function connectSocket(name, password) {
         pendingHandState = undefined;
         updateRaisedHandsUI();
       }
-      status.textContent = message.error;
+      status.textContent = message.error === "meeting is full"
+        ? "This room is full. Try again after someone leaves."
+        : message.error;
       if (meeting.hidden) joinButton.disabled = false;
       return;
     }

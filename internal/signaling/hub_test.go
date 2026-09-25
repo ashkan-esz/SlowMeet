@@ -1,8 +1,10 @@
 package signaling
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -311,7 +313,7 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr:            ":8080",
 		MeetingPassword:     "secret",
-		MaxParticipants:     1,
+		MaxParticipants:     2,
 		DefaultVideoQuality: "low",
 		DefaultVideoFPS:     15,
 		MaxVideoFPS:         30,
@@ -319,7 +321,7 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 		MaxVideoBitrate:     500000,
 		MaxAudioBitrate:     64000,
 	}
-	hub := NewHub(meeting.New(1), config.NewStore(cfg), slog.Default())
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
 	server := httptest.NewServer(hub)
 	defer server.Close()
 	socketURL := "ws" + server.URL[len("http"):]
@@ -345,7 +347,31 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 	if joined.Type != TypeParticipant {
 		t.Fatalf("valid join response = %+v", joined)
 	}
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Sara", Password: "secret",
+	})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	if secondJoined.Type != TypeParticipant {
+		t.Fatalf("second valid join response = %+v", secondJoined)
+	}
+	var secondSeesFirst Message
+	readTestMessage(t, second, &secondSeesFirst)
+	if secondSeesFirst.Type != TypeJoined || secondSeesFirst.Participant == nil ||
+		secondSeesFirst.Participant.Name != "Ashkan" {
+		t.Fatalf("second participant update = %+v", secondSeesFirst)
+	}
+	var firstSeesSecond Message
+	readTestMessage(t, first, &firstSeesSecond)
+	if firstSeesSecond.Type != TypeJoined || firstSeesSecond.Participant == nil ||
+		firstSeesSecond.Participant.Name != "Sara" {
+		t.Fatalf("first participant update = %+v", firstSeesSecond)
+	}
 
+	waiting := dialTestSocket(t, socketURL)
+	defer waiting.Close()
 	full := dialTestSocket(t, socketURL)
 	defer full.Close()
 	writeTestMessage(t, full, Message{
@@ -355,6 +381,37 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 	readTestMessage(t, full, &fullError)
 	if fullError.Type != TypeError || fullError.Error != "meeting is full" {
 		t.Fatalf("full meeting response = %+v", fullError)
+	}
+	for _, member := range []*websocket.Conn{first, second} {
+		var roomFull Message
+		readTestMessage(t, member, &roomFull)
+		if roomFull.Type != TypeRoomFull || roomFull.Name != "" || roomFull.Participant != nil {
+			t.Fatalf("room-full notification = %+v, want anonymous %q event", roomFull, TypeRoomFull)
+		}
+	}
+	assertNoTestMessage(t, waiting)
+	assertNoTestMessage(t, full)
+
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeLeave, ParticipantID: joined.Participant.ID,
+	})
+	deadline := time.Now().Add(time.Second)
+	for hub.Meeting.Count() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := hub.Meeting.Count(); got != 1 {
+		t.Fatalf("meeting count after participant leaves = %d, want 1", got)
+	}
+
+	retry := dialTestSocket(t, socketURL)
+	defer retry.Close()
+	writeTestMessage(t, retry, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ali", Password: "secret",
+	})
+	var retryJoined Message
+	readTestMessage(t, retry, &retryJoined)
+	if retryJoined.Type != TypeParticipant {
+		t.Fatalf("retry after capacity opens = %+v, want participant", retryJoined)
 	}
 }
 
@@ -836,5 +893,21 @@ func readTestMessage(t *testing.T, conn *websocket.Conn, msg *Message) {
 	}
 	if err := conn.ReadJSON(msg); err != nil {
 		t.Fatalf("read message: %v", err)
+	}
+}
+
+func assertNoTestMessage(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var msg Message
+	err := conn.ReadJSON(&msg)
+	if err == nil {
+		t.Fatalf("received unexpected message: %+v", msg)
+	}
+	var networkErr net.Error
+	if !errors.As(err, &networkErr) || !networkErr.Timeout() {
+		t.Fatalf("read without message returned %v, want timeout", err)
 	}
 }
