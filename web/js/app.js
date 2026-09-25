@@ -985,7 +985,6 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
     const focusTarget = chatFocusTrigger;
     chatFocusTrigger = undefined;
     chatRail.classList.remove("is-open");
-    const closeDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180;
     chatCloseTimer = setTimeout(() => {
       chatRail.hidden = true;
       chatRail.setAttribute("aria-hidden", "true");
@@ -993,7 +992,7 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
       if (restoreFocus && hasFocusInside && chatRail.contains(document.activeElement)) {
         restoreFocusTo(focusTarget, chatToggle);
       }
-    }, closeDelay);
+    }, 0);
   }
   chatToggle?.setAttribute("aria-pressed", String(open));
   if (chatToggle) {
