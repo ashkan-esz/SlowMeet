@@ -90,6 +90,7 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 		sourceID: "other",
 		tracks:   map[string]*pion.TrackLocalStaticRTP{"source": nil, "target": nil},
 	}
+	router.SetVideoSubscriptions("source", []string{"other"})
 
 	router.Unregister("source")
 
@@ -99,6 +100,9 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 	if _, exists := router.offerers["source"]; exists {
 		t.Fatal("source offerer was not removed")
 	}
+	if _, exists := router.videoSubscriptionsSet["source"]; exists {
+		t.Fatal("source video subscription preference was not removed")
+	}
 	if _, exists := router.pubs["source/audio"]; exists {
 		t.Fatal("source publication was not removed")
 	}
@@ -107,6 +111,66 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 	}
 	if _, exists := router.pubs["other/audio"].tracks["target"]; !exists {
 		t.Fatal("unrelated subscription was removed")
+	}
+}
+
+func TestVideoSubscriptionPolicyPreservesLegacyAudioAndScreen(t *testing.T) {
+	router := NewRouter()
+	visibleCamera := &publication{sourceID: "visible", role: SourceRoleCamera}
+	hiddenCamera := &publication{sourceID: "hidden", role: SourceRoleCamera}
+	audio := &publication{sourceID: "hidden", role: SourceRoleAudio}
+	screen := &publication{sourceID: "hidden", role: SourceRoleScreen}
+
+	if !router.shouldSubscribeLocked(hiddenCamera, "receiver") {
+		t.Fatal("receivers without preferences should keep legacy all-camera behavior")
+	}
+	router.SetVideoSubscriptions("receiver", []string{"visible"})
+	if !router.shouldSubscribeLocked(visibleCamera, "receiver") {
+		t.Fatal("visible camera was not allowed")
+	}
+	if router.shouldSubscribeLocked(hiddenCamera, "receiver") {
+		t.Fatal("off-page camera was allowed")
+	}
+	if !router.shouldSubscribeLocked(audio, "receiver") {
+		t.Fatal("audio subscription must remain unconditional")
+	}
+	if !router.shouldSubscribeLocked(screen, "receiver") {
+		t.Fatal("screen share subscription must remain unconditional")
+	}
+	router.SetVideoSubscriptions("receiver", nil)
+	if router.shouldSubscribeLocked(visibleCamera, "receiver") {
+		t.Fatal("an empty subscription list should disable all camera tracks")
+	}
+}
+
+func TestSetVideoSubscriptionsAddsAndRemovesCameraTracks(t *testing.T) {
+	router := NewRouter()
+	peer, err := webrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create receiver peer: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	offers := 0
+	router.Register("receiver", peer, func() error {
+		offers++
+		return nil
+	})
+	publication := &publication{
+		key: "camera/camera", sourceID: "camera", role: SourceRoleCamera,
+		trackID: "camera|camera", streamID: "slowmeet-camera-camera",
+		codec:   pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+		tracks:  make(map[string]*pion.TrackLocalStaticRTP),
+		senders: make(map[string]*pion.RTPSender),
+	}
+	router.pubs[publication.key] = publication
+
+	router.SetVideoSubscriptions("receiver", []string{"camera"})
+	if publication.tracks["receiver"] == nil || offers != 1 {
+		t.Fatalf("camera was not added and renegotiated: tracks=%v offers=%d", publication.tracks, offers)
+	}
+	router.SetVideoSubscriptions("receiver", nil)
+	if _, exists := publication.tracks["receiver"]; exists || offers != 2 {
+		t.Fatalf("camera was not removed and renegotiated: tracks=%v offers=%d", publication.tracks, offers)
 	}
 }
 

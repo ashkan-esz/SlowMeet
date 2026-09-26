@@ -204,6 +204,42 @@ func TestValidateHandStateMessage(t *testing.T) {
 	}
 }
 
+func TestVideoSubscriptionsMessageIsBoundedAndAllowsEmptyList(t *testing.T) {
+	message := Message{
+		Version: ProtocolVersion, Type: TypeVideoSubscriptions,
+		CameraParticipantIDs: []string{"camera-1", "camera-2"},
+	}
+	if err := message.Validate(); err != nil {
+		t.Fatalf("valid video subscriptions rejected: %v", err)
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatalf("marshal video subscriptions: %v", err)
+	}
+	var decoded Message
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal video subscriptions: %v", err)
+	}
+	if len(decoded.CameraParticipantIDs) != 2 || decoded.CameraParticipantIDs[1] != "camera-2" {
+		t.Fatalf("decoded camera ids = %v", decoded.CameraParticipantIDs)
+	}
+	if err := (Message{Version: ProtocolVersion, Type: TypeVideoSubscriptions}).Validate(); err != nil {
+		t.Fatalf("empty subscription list should be valid: %v", err)
+	}
+	for _, ids := range [][]string{
+		make([]string, MaxCameraSubscriptions+1),
+		{"   "},
+		{string(make([]byte, 129))},
+	} {
+		if err := (Message{
+			Version: ProtocolVersion, Type: TypeVideoSubscriptions,
+			CameraParticipantIDs: ids,
+		}).Validate(); err == nil {
+			t.Errorf("invalid camera subscription list %v was accepted", ids)
+		}
+	}
+}
+
 func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
 	for _, msg := range []Message{
 		{Version: ProtocolVersion, Type: TypeOffer},

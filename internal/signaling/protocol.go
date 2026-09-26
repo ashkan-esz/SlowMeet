@@ -16,26 +16,28 @@ type ChatHistoryEntry struct {
 }
 
 const (
-	ProtocolVersion  = 1
-	TypeJoin         = "join"
-	TypeLeave        = "leave"
-	TypeParticipant  = "participant"
-	TypeJoined       = "participant_joined"
-	TypeLeft         = "participant_left"
-	TypeOffer        = "offer"
-	TypeAnswer       = "answer"
-	TypeCandidate    = "candidate"
-	TypeICERestart   = "ice_restart"
-	TypeMediaState   = "media_state"
-	TypeHandState    = "hand_state"
-	TypeNetworkState = "network_state"
-	TypeScreenShare  = "screen_share"
-	TypeScreenState  = "screen_share_state"
-	TypeConfigUpdate = "config_update"
-	TypeChat         = "chat_message"
-	TypeReaction     = "emoji_reaction"
-	TypeRoomFull     = "room_full"
-	TypeError        = "error"
+	ProtocolVersion        = 1
+	TypeJoin               = "join"
+	TypeLeave              = "leave"
+	TypeParticipant        = "participant"
+	TypeJoined             = "participant_joined"
+	TypeLeft               = "participant_left"
+	TypeOffer              = "offer"
+	TypeAnswer             = "answer"
+	TypeCandidate          = "candidate"
+	TypeICERestart         = "ice_restart"
+	TypeMediaState         = "media_state"
+	TypeHandState          = "hand_state"
+	TypeNetworkState       = "network_state"
+	TypeVideoSubscriptions = "set_video_subscriptions"
+	TypeScreenShare        = "screen_share"
+	TypeScreenState        = "screen_share_state"
+	TypeConfigUpdate       = "config_update"
+	TypeChat               = "chat_message"
+	TypeReaction           = "emoji_reaction"
+	TypeRoomFull           = "room_full"
+	TypeError              = "error"
+	MaxCameraSubscriptions = 64
 )
 
 var approvedReactionEmojis = map[string]struct{}{
@@ -44,41 +46,42 @@ var approvedReactionEmojis = map[string]struct{}{
 }
 
 type Message struct {
-	Version            int                  `json:"version"`
-	Type               string               `json:"type"`
-	Name               string               `json:"name,omitempty"`
-	Password           string               `json:"password,omitempty"`
-	ReconnectToken     string               `json:"reconnect_token,omitempty"`
-	ParticipantID      string               `json:"participant_id,omitempty"`
-	MediaStreamID      string               `json:"media_stream_id,omitempty"`
-	Error              string               `json:"error,omitempty"`
-	Participant        *meeting.Participant `json:"participant,omitempty"`
-	TargetID           string               `json:"target_id,omitempty"`
-	SDP                string               `json:"sdp,omitempty"`
-	Candidate          string               `json:"candidate,omitempty"`
-	SDPMid             *string              `json:"sdp_mid,omitempty"`
-	SDPMLineIndex      *uint16              `json:"sdp_mline_index,omitempty"`
-	AudioEnabled       *bool                `json:"audio_enabled,omitempty"`
-	VideoEnabled       *bool                `json:"video_enabled,omitempty"`
-	VideoPaused        *bool                `json:"video_paused,omitempty"`
-	HandRaised         *bool                `json:"hand_raised,omitempty"`
-	HandOrder          int                  `json:"hand_order,omitempty"`
-	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
-	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
-	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
-	MaxVideoQuality    string               `json:"max_video_quality,omitempty"`
-	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
-	RetainChatHistory  *bool                `json:"retain_chat_history,omitempty"`
-	RTTMs              int                  `json:"rtt_ms,omitempty"`
-	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
-	JitterMs           int                  `json:"jitter_ms,omitempty"`
-	VideoKbps          int                  `json:"video_kbps,omitempty"`
-	AudioKbps          int                  `json:"audio_kbps,omitempty"`
-	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
-	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
-	ChatText           string               `json:"text,omitempty"`
-	Emoji              string               `json:"emoji,omitempty"`
-	ChatHistory        []ChatHistoryEntry   `json:"chat_history,omitempty"`
+	Version              int                  `json:"version"`
+	Type                 string               `json:"type"`
+	Name                 string               `json:"name,omitempty"`
+	Password             string               `json:"password,omitempty"`
+	ReconnectToken       string               `json:"reconnect_token,omitempty"`
+	ParticipantID        string               `json:"participant_id,omitempty"`
+	CameraParticipantIDs []string             `json:"camera_participant_ids,omitempty"`
+	MediaStreamID        string               `json:"media_stream_id,omitempty"`
+	Error                string               `json:"error,omitempty"`
+	Participant          *meeting.Participant `json:"participant,omitempty"`
+	TargetID             string               `json:"target_id,omitempty"`
+	SDP                  string               `json:"sdp,omitempty"`
+	Candidate            string               `json:"candidate,omitempty"`
+	SDPMid               *string              `json:"sdp_mid,omitempty"`
+	SDPMLineIndex        *uint16              `json:"sdp_mline_index,omitempty"`
+	AudioEnabled         *bool                `json:"audio_enabled,omitempty"`
+	VideoEnabled         *bool                `json:"video_enabled,omitempty"`
+	VideoPaused          *bool                `json:"video_paused,omitempty"`
+	HandRaised           *bool                `json:"hand_raised,omitempty"`
+	HandOrder            int                  `json:"hand_order,omitempty"`
+	MaxVideoBitrate      int                  `json:"max_video_bitrate,omitempty"`
+	MaxVideoFPS          int                  `json:"max_video_fps,omitempty"`
+	MaxAudioBitrate      int                  `json:"max_audio_bitrate,omitempty"`
+	MaxVideoQuality      string               `json:"max_video_quality,omitempty"`
+	ScreenShareEnabled   *bool                `json:"screen_share_enabled,omitempty"`
+	RetainChatHistory    *bool                `json:"retain_chat_history,omitempty"`
+	RTTMs                int                  `json:"rtt_ms,omitempty"`
+	PacketLoss10         int                  `json:"packet_loss10,omitempty"`
+	JitterMs             int                  `json:"jitter_ms,omitempty"`
+	VideoKbps            int                  `json:"video_kbps,omitempty"`
+	AudioKbps            int                  `json:"audio_kbps,omitempty"`
+	ScreenShareActive    *bool                `json:"screen_share_active,omitempty"`
+	ScreenShareOwner     string               `json:"screen_share_owner,omitempty"`
+	ChatText             string               `json:"text,omitempty"`
+	Emoji                string               `json:"emoji,omitempty"`
+	ChatHistory          []ChatHistoryEntry   `json:"chat_history,omitempty"`
 }
 
 func (m Message) Validate() error {
@@ -125,6 +128,15 @@ func (m Message) Validate() error {
 			m.JitterMs < -1 || m.VideoKbps < -1 || m.AudioKbps < -1 ||
 			m.RTTMs > 120000 || m.JitterMs > 120000 {
 			return fmt.Errorf("network state contains invalid values")
+		}
+	case TypeVideoSubscriptions:
+		if len(m.CameraParticipantIDs) > MaxCameraSubscriptions {
+			return fmt.Errorf("too many camera subscriptions")
+		}
+		for _, participantID := range m.CameraParticipantIDs {
+			if strings.TrimSpace(participantID) == "" || len(participantID) > 128 {
+				return fmt.Errorf("camera subscription participant_id is invalid")
+			}
 		}
 	case TypeScreenShare:
 		if m.ParticipantID == "" || m.ScreenShareActive == nil {

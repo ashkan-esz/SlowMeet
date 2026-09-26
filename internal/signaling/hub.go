@@ -499,6 +499,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.broadcastExcept(c, msg)
 				continue
 			}
+			if msg.Type == TypeVideoSubscriptions {
+				h.router.SetVideoSubscriptions(c.participant.ID, msg.CameraParticipantIDs)
+				continue
+			}
 			if msg.Type == TypeHandState {
 				if msg.ParticipantID != c.participant.ID {
 					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "participant_id does not belong to this connection"})

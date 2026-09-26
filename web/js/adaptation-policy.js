@@ -40,6 +40,28 @@ function isBelowBitrate(value, threshold) {
   return Number.isFinite(value) && value >= 0 && value < threshold;
 }
 
+function classifyNetworkSample({ rttMs, packetLoss, jitterMs, inboundKbps, availableOutgoingKbps } = {}) {
+  const rttKnown = Number.isFinite(rttMs) && rttMs >= 0;
+  const lossKnown = Number.isFinite(packetLoss) && packetLoss >= 0;
+  const jitterKnown = Number.isFinite(jitterMs) && jitterMs >= 0;
+  const inboundKnown = Number.isFinite(inboundKbps) && inboundKbps >= 0;
+  const capacityKnown = Number.isFinite(availableOutgoingKbps) && availableOutgoingKbps >= 0;
+  const hasSignal = rttKnown || lossKnown || jitterKnown || inboundKnown || capacityKnown;
+  const poor = (rttKnown && rttMs > 250) || (lossKnown && packetLoss > 5) ||
+    (jitterKnown && jitterMs > 50) || isBelowBitrate(inboundKbps, 80) ||
+    isBelowBitrate(availableOutgoingKbps, 220);
+  const critical = (rttKnown && rttMs > 500) || (lossKnown && packetLoss > 10) ||
+    (jitterKnown && jitterMs > 120) || isBelowBitrate(inboundKbps, 40) ||
+    isBelowBitrate(availableOutgoingKbps, 120);
+  const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
+    (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
+  return { poor, critical, good };
+}
+
+function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, threshold = 3) {
+  return criticalSamples >= threshold && (!isAutomaticProfile || adaptationLevel === 0);
+}
+
 function chooseParticipantLayout({
   width,
   height,
@@ -107,6 +129,8 @@ if (typeof module !== "undefined") {
     resolveCodecName,
     profileNameForQuality,
     isBelowBitrate,
+    classifyNetworkSample,
+    shouldPauseVideo,
     chooseParticipantLayout
   };
 }

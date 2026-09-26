@@ -527,6 +527,10 @@ function updateParticipantPagination() {
   if (participantPagePrevious) participantPagePrevious.disabled = !paginated || participantPage === 0;
   if (participantPageNext) participantPageNext.disabled = !paginated || participantPage >= pageCount - 1;
   requestParticipantLayout();
+  const visibleCameraIDs = [...participantElements.entries()]
+    .filter(([participantID, element]) => participantID !== localParticipantID && !element.item.hidden)
+    .map(([participantID]) => participantID);
+  sendVideoSubscriptions(receiveVideoEnabled ? visibleCameraIDs : []);
 }
 
 function setParticipantPage(delta) {
@@ -1323,6 +1327,8 @@ const connectionMetrics = {
   outgoingVideoKbps: null,
   incomingAudioKbps: null,
   outgoingAudioKbps: null,
+  availableOutgoingKbps: null,
+  icePath: null,
   incomingCameraResolution: null,
   incomingCameraFps: null,
   incomingScreenResolution: null,
@@ -2424,11 +2430,12 @@ function connectSocket(name, password) {
       const participant = message.participant;
       addParticipant(participant);
       if (message.type === "participant_joined") addChatSystem(`${participant.name} joined the room`);
-      if (message.type === "participant") {
-        localParticipantID = participant.id;
-        markLocalParticipant(participant.id);
-        reconnectToken = message.reconnect_token;
-        brandBar.hidden = true;
+        if (message.type === "participant") {
+          localParticipantID = participant.id;
+          markLocalParticipant(participant.id);
+          updateParticipantPagination();
+          reconnectToken = message.reconnect_token;
+          brandBar.hidden = true;
         welcomeGrid.hidden = true;
         stopRoomRoster();
         form.hidden = true;
@@ -2875,6 +2882,8 @@ function updateConnectionMetrics(values) {
     rttMs: values.rttMs,
     jitterMs: values.jitterMs,
     packetLossPct: values.packetLoss,
+    availableOutgoingKbps: values.availableOutgoingKbps,
+    icePath: values.icePath,
     incomingVideoKbps: values.inboundKbps,
     outgoingVideoKbps: values.outboundKbps,
     incomingAudioKbps: values.inboundAudioKbps,
@@ -2891,7 +2900,8 @@ function updateConnectionMetrics(values) {
     if (node.textContent !== rendered) node.textContent = rendered;
   };
   text("metric-status", connectionMetrics.status);
-  text("metric-ice-state", connectionMetrics.iceState || "No sample");
+  text("metric-ice-state", [connectionMetrics.iceState, connectionMetrics.icePath]
+    .filter(Boolean).join(" · ") || "No sample");
   text("metric-rtt", connectionMetrics.rttMs == null ? "No sample" : `${connectionMetrics.rttMs} ms`);
   text("metric-jitter-loss", connectionMetrics.jitterMs == null && connectionMetrics.packetLossPct == null
     ? "No sample"
@@ -2909,9 +2919,13 @@ function updateConnectionMetrics(values) {
   const summary = document.querySelector("#connection-metrics-status");
   if (summary) summary.textContent = connectionMetrics.lastSampleAt ? "Live" : "No sample";
   if (networkSummary) {
-    networkSummary.textContent = connectionMetrics.rttMs == null
-      ? "Waiting for metrics"
-      : `RTT ${connectionMetrics.rttMs} ms`;
+    const summaryParts = [];
+    if (connectionMetrics.rttMs != null) summaryParts.push(`RTT ${connectionMetrics.rttMs} ms`);
+    if (connectionMetrics.icePath) summaryParts.push(connectionMetrics.icePath);
+    if (connectionMetrics.availableOutgoingKbps != null) {
+      summaryParts.push(`${connectionMetrics.availableOutgoingKbps} kbps available`);
+    }
+    networkSummary.textContent = summaryParts.join(" · ") || "Waiting for metrics";
   }
 }
 
@@ -2936,6 +2950,8 @@ async function updateDiagnostics() {
     ice: currentPeer.iceConnectionState,
     iceCandidateType: null,
     iceTransport: null,
+    icePath: null,
+    availableOutgoingKbps: null,
     connection: currentPeer.connectionState
   };
   values.timestamp = Date.now();
@@ -2973,6 +2989,9 @@ async function updateDiagnostics() {
       if (stat.nominated || stat.selected || !selectedCandidatePair) {
         selectedCandidatePair = stat;
         values.rttMs = stat.currentRoundTripTime == null ? null : Math.round(stat.currentRoundTripTime * 1000);
+        values.availableOutgoingKbps = Number.isFinite(stat.availableOutgoingBitrate)
+          ? Math.round(stat.availableOutgoingBitrate / 1000)
+          : null;
       }
     }
     if (stat.type === "outbound-rtp" && stat.kind === "video") {
@@ -3046,6 +3065,14 @@ async function updateDiagnostics() {
         `${remoteCandidate?.candidateType || "unknown"}`;
     }
     values.iceTransport = localCandidate?.protocol || remoteCandidate?.protocol || null;
+    const relayed = localCandidate?.candidateType === "relay" || remoteCandidate?.candidateType === "relay";
+    if (relayed) {
+      const relayProtocol = localCandidate?.relayProtocol || remoteCandidate?.relayProtocol ||
+        localCandidate?.protocol || remoteCandidate?.protocol;
+      values.icePath = relayProtocol ? `TURN/${relayProtocol.toUpperCase()}` : "TURN";
+    } else if (values.iceTransport) {
+      values.icePath = `Direct/${values.iceTransport.toUpperCase()}`;
+    }
   }
   if (previousStats && timestamp > previousStats.timestamp && hasInboundVideo) {
     const seconds = (timestamp - previousStats.timestamp) / 1000;
@@ -3111,25 +3138,16 @@ async function updateDiagnostics() {
     setParticipantQuality(element, classifyParticipantQuality(remoteStats, values.rttMs));
   });
   const packetLoss = values.packetLoss ?? 0;
-  const poor = (values.rttMs != null && values.rttMs > 250) || (lossKnown && packetLoss > 5) ||
-    isBelowBitrate(values.inboundKbps, 80);
-  const critical = (values.rttMs != null && values.rttMs > 500) || (lossKnown && packetLoss > 10) ||
-    isBelowBitrate(values.inboundKbps, 40);
-  const good = (values.rttMs == null || values.rttMs < 120) && (!lossKnown || packetLoss < 1);
+  const networkCondition = classifyNetworkSample({
+    rttMs: values.rttMs,
+    packetLoss: lossKnown ? packetLoss : undefined,
+    jitterMs: values.jitterMs,
+    inboundKbps: values.inboundKbps,
+    availableOutgoingKbps: values.availableOutgoingKbps
+  });
+  const { poor, critical, good } = networkCondition;
   criticalSamples = critical ? criticalSamples + 1 : 0;
   recoverySamples = good ? recoverySamples + 1 : 0;
-  if (criticalSamples >= 2) {
-    criticalSamples = 0;
-    recoverySamples = 0;
-    if (!videoSuspended) {
-      await setVideoSending(false, true);
-      addChatSystem("Auto quality dropped to audio only");
-      showToast("Your video paused to protect audio");
-    }
-  } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, good)) {
-    recoverySamples = 0;
-    await setVideoSending(true);
-  }
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
     goodSamples = good ? goodSamples + 1 : 0;
@@ -3148,6 +3166,18 @@ async function updateDiagnostics() {
       goodSamples = 0;
       await applyProfile(profiles[adaptationLevel].name);
     }
+  }
+  if (shouldPauseVideo(profile.value === "auto", adaptationLevel, criticalSamples)) {
+    criticalSamples = 0;
+    recoverySamples = 0;
+    if (!videoSuspended) {
+      await setVideoSending(false, true);
+      addChatSystem("Auto quality dropped to audio only");
+      showToast("Your video paused to protect audio");
+    }
+  } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, good)) {
+    recoverySamples = 0;
+    await setVideoSending(true);
   }
   diagnostics.textContent = JSON.stringify(values, null, 2);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
@@ -3419,6 +3449,22 @@ function sendMediaState() {
   }
 }
 
+let lastVideoSubscriptionSocket;
+let lastVideoSubscriptionPayload;
+function sendVideoSubscriptions(cameraParticipantIDs) {
+  if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) return;
+  const participantIDs = [...new Set(cameraParticipantIDs)].sort();
+  const payload = JSON.stringify({
+    version: 1,
+    type: "set_video_subscriptions",
+    camera_participant_ids: participantIDs
+  });
+  if (socket === lastVideoSubscriptionSocket && payload === lastVideoSubscriptionPayload) return;
+  socket.send(payload);
+  lastVideoSubscriptionSocket = socket;
+  lastVideoSubscriptionPayload = payload;
+}
+
 function sendHandState(raised) {
   if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) {
     addChatSystem("Hand raising is unavailable while the meeting reconnects.");
@@ -3501,6 +3547,7 @@ function setMoreIncomingVideoState(enabled) {
 
 function setReceiveVideo(enabled) {
   receiveVideoEnabled = enabled;
+  updateParticipantPagination();
   setReceiveVideoControlLabel(receiveVideo, enabled);
   receiveVideo.setAttribute("aria-pressed", String(enabled));
   setMoreIncomingVideoState(enabled);

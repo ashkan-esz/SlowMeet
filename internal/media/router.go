@@ -42,11 +42,13 @@ type publication struct {
 }
 
 type Router struct {
-	mu       sync.RWMutex
-	peers    map[string]*webrtc.Peer
-	offerers map[string]Offerer
-	pubs     map[string]*publication
-	limits   Limits
+	mu                    sync.RWMutex
+	peers                 map[string]*webrtc.Peer
+	offerers              map[string]Offerer
+	pubs                  map[string]*publication
+	videoSubscriptions    map[string]map[string]struct{}
+	videoSubscriptionsSet map[string]bool
+	limits                Limits
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -55,10 +57,12 @@ func NewRouter(config ...Limits) *Router {
 		limits = config[0]
 	}
 	return &Router{
-		peers:    make(map[string]*webrtc.Peer),
-		offerers: make(map[string]Offerer),
-		pubs:     make(map[string]*publication),
-		limits:   limits,
+		peers:                 make(map[string]*webrtc.Peer),
+		offerers:              make(map[string]Offerer),
+		pubs:                  make(map[string]*publication),
+		videoSubscriptions:    make(map[string]map[string]struct{}),
+		videoSubscriptionsSet: make(map[string]bool),
+		limits:                limits,
 	}
 }
 
@@ -94,7 +98,7 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 	r.peers[id] = peer
 	r.offerers[id] = offerer
 	for _, pub := range r.pubs {
-		if pub.sourceID != id && r.addSubscriptionLocked(pub, id) && offerer != nil {
+		if r.shouldSubscribeLocked(pub, id) && r.addSubscriptionLocked(pub, id) && offerer != nil {
 			offers = append(offers, offerer)
 		}
 	}
@@ -109,6 +113,11 @@ func (r *Router) Unregister(id string) {
 	defer r.mu.Unlock()
 	delete(r.peers, id)
 	delete(r.offerers, id)
+	delete(r.videoSubscriptions, id)
+	delete(r.videoSubscriptionsSet, id)
+	for _, subscriptions := range r.videoSubscriptions {
+		delete(subscriptions, id)
+	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
 			delete(r.pubs, key)
@@ -180,7 +189,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 	r.pubs[key] = pub
 	for id := range r.peers {
-		if id != sourceID && r.addSubscriptionLocked(pub, id) {
+		if r.shouldSubscribeLocked(pub, id) && r.addSubscriptionLocked(pub, id) {
 			if offerer := r.offerers[id]; offerer != nil {
 				offers = append(offers, offerer)
 			}
@@ -192,6 +201,63 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 
 	go r.forward(pub)
+}
+
+// SetVideoSubscriptions replaces the camera sources a receiver wants. Audio
+// and screen publications remain subscribed for every receiver. Receivers
+// that have not sent this message retain the legacy all-camera behavior.
+func (r *Router) SetVideoSubscriptions(receiverID string, cameraParticipantIDs []string) {
+	desired := make(map[string]struct{}, len(cameraParticipantIDs))
+	for _, participantID := range cameraParticipantIDs {
+		if participantID != "" && participantID != receiverID {
+			desired[participantID] = struct{}{}
+		}
+	}
+
+	var offer Offerer
+	changed := false
+	r.mu.Lock()
+	r.videoSubscriptions[receiverID] = desired
+	r.videoSubscriptionsSet[receiverID] = true
+	for _, pub := range r.pubs {
+		if pub.sourceID == receiverID {
+			continue
+		}
+		_, subscribed := pub.tracks[receiverID]
+		if r.shouldSubscribeLocked(pub, receiverID) {
+			if r.addSubscriptionLocked(pub, receiverID) {
+				changed = true
+			}
+			continue
+		}
+		if !subscribed {
+			continue
+		}
+		if peer := r.peers[receiverID]; peer != nil {
+			_ = peer.RemoveTrack(pub.senders[receiverID])
+		}
+		delete(pub.tracks, receiverID)
+		delete(pub.senders, receiverID)
+		changed = true
+	}
+	if changed {
+		offer = r.offerers[receiverID]
+	}
+	r.mu.Unlock()
+	if offer != nil {
+		_ = offer()
+	}
+}
+
+func (r *Router) shouldSubscribeLocked(pub *publication, receiverID string) bool {
+	if pub.sourceID == receiverID {
+		return false
+	}
+	if pub.role != SourceRoleCamera || !r.videoSubscriptionsSet[receiverID] {
+		return true
+	}
+	_, subscribed := r.videoSubscriptions[receiverID][pub.sourceID]
+	return subscribed
 }
 
 func roleForKind(kind pion.RTPCodecType) SourceRole {

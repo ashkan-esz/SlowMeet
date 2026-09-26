@@ -5,6 +5,8 @@ const {
   resolveCodecName,
   profileNameForQuality,
   isBelowBitrate,
+  classifyNetworkSample,
+  shouldPauseVideo,
   chooseParticipantLayout
 } = require("../web/js/adaptation-policy.js");
 
@@ -49,6 +51,39 @@ if (isBelowBitrate(20, 40) !== true ||
     isBelowBitrate(null, 40) !== false ||
     isBelowBitrate(undefined, 40) !== false) {
   throw new Error("missing inbound video bitrate must not be treated as critical");
+}
+const missingNetworkSample = classifyNetworkSample({});
+if (missingNetworkSample.poor || missingNetworkSample.critical || missingNetworkSample.good) {
+  throw new Error("missing stats must not trigger adaptation or count as a recovery sample");
+}
+const constrainedCapacity = classifyNetworkSample({
+  rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 100
+});
+if (!constrainedCapacity.poor || !constrainedCapacity.critical || constrainedCapacity.good) {
+  throw new Error("available outgoing bitrate should identify a critical uplink constraint");
+}
+const recoveringCapacity = classifyNetworkSample({
+  rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 500
+});
+if (recoveringCapacity.poor || recoveringCapacity.critical || !recoveringCapacity.good) {
+  throw new Error("healthy measured capacity should count toward recovery");
+}
+const fallbackMetrics = classifyNetworkSample({ rttMs: 90, packetLoss: 0, jitterMs: 10 });
+if (fallbackMetrics.poor || fallbackMetrics.critical || !fallbackMetrics.good) {
+  throw new Error("RTT, loss, and jitter should remain usable when outgoing capacity is unavailable");
+}
+const sustainedLoss = classifyNetworkSample({ rttMs: 180, packetLoss: 12, jitterMs: 40 });
+if (!sustainedLoss.poor || !sustainedLoss.critical || sustainedLoss.good) {
+  throw new Error("sustained packet loss should keep the connection in a critical state");
+}
+const lowInbound = classifyNetworkSample({ inboundKbps: 60 });
+const criticalInbound = classifyNetworkSample({ inboundKbps: 20 });
+if (!lowInbound.poor || lowInbound.good || !criticalInbound.critical || criticalInbound.good) {
+  throw new Error("low inbound video must never count as a good adaptation sample");
+}
+if (shouldPauseVideo(true, 1, 5) || !shouldPauseVideo(true, 0, 3) ||
+    shouldPauseVideo(false, 2, 2) || !shouldPauseVideo(false, 2, 3)) {
+  throw new Error("automatic quality must reach very-slow before sustained critical conditions pause video");
 }
 const sixPersonLayout = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 if (sixPersonLayout.columns !== 3 || sixPersonLayout.rows !== 2 ||
@@ -308,6 +343,18 @@ for (const behavior of [
     throw new Error(`bandwidth status behavior is missing: ${behavior}`);
   }
 }
+for (const behavior of [
+  "availableOutgoingBitrate",
+  "relayProtocol",
+  "set_video_subscriptions",
+  "camera_participant_ids",
+  "receiveVideoEnabled ? visibleCameraIDs : []",
+  "shouldPauseVideo"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`constrained-network behavior is missing: ${behavior}`);
+  }
+}
 for (const style of [
   ".participant-video-paused",
   "rgba(251,191,36,.9)",
@@ -417,6 +464,7 @@ for (const behavior of [
   "participant-you",
   "element.youBadge.hidden = false",
   "(You)",
+  "localParticipantID = participant.id;\n        markLocalParticipant(participant.id);\n        updateParticipantPagination();",
   'setMeasuredConnection("fair", "Unstable connection")',
   'setMeasuredConnection("poor", "Unstable connection")',
   'button.dataset.receiveVideo = enabled ? "on" : "off"',
