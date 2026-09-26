@@ -256,16 +256,17 @@ function updateParticipantLayout() {
   const bounds = layoutContainer.getBoundingClientRect();
   if (bounds.width <= 0 || bounds.height <= 0 || typeof chooseParticipantLayout !== "function") return;
   const computed = getComputedStyle(participants);
-  const gap = parseFloat(computed.columnGap) || 12;
+  const rowGap = parseFloat(computed.rowGap);
   const layout = chooseParticipantLayout({
     width: bounds.width,
     height: bounds.height,
     count: visibleItems.length,
-    gap,
+    gap: Number.isFinite(rowGap) ? rowGap : 12,
     preferredColumns: preferredLayoutColumns,
     maxColumns: 0,
     minTileWidth: Math.min(180, Math.max(160, bounds.width / 2.6)),
-    minTileHeight: 82
+    minTileHeight: 82,
+    maxTileWidth: window.innerWidth > 1400 ? 1000 : 720
   });
   preferredLayoutColumns = layout.columns;
   layoutContainer.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);

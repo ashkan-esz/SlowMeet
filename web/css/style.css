@@ -2494,7 +2494,7 @@ body { overflow-x: hidden; }
     grid-row: auto;
     width: auto !important;
     height: auto !important;
-    max-width: none;
+    max-width: 1000px;
     aspect-ratio: auto !important;
   }
 }
@@ -3002,9 +3002,11 @@ body { overflow-x: hidden; }
 
 /* Runtime layout variables must win over the legacy count-based grid rules. */
 .meeting-layout-host[data-layout-mode="grid"] > .participant-grid {
-  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr)) !important;
+  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, var(--tile-width, 1fr))) !important;
   grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;
   grid-auto-rows: unset !important;
+  column-gap: 4px;
+  row-gap: var(--lm-gap);
   align-content: start;
   justify-content: center;
   overflow: hidden !important;
@@ -3016,7 +3018,7 @@ body { overflow-x: hidden; }
   align-self: start;
 }
 .meeting-layout-host[data-layout-mode="grid"] > .participant-grid[data-columns] {
-  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, 1fr)) !important;
+  grid-template-columns: repeat(var(--layout-columns, 1), minmax(0, var(--tile-width, 1fr))) !important;
   grid-template-rows: repeat(var(--layout-rows, 1), minmax(0, 1fr)) !important;
   grid-auto-rows: unset !important;
 }
