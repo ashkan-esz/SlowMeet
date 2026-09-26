@@ -930,6 +930,7 @@ function addChatMessage(author, body, system = false, own = false, timestampValu
   meta.append(authorLabel, timestamp);
   const content = document.createElement("div");
   content.className = "chat-message__body";
+  content.dir = "auto";
   content.textContent = body;
   message.append(meta, content);
   chatMessages.append(message);
@@ -1058,7 +1059,6 @@ chatEmojiPicker?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-emoji]");
   if (!button) return;
   insertChatEmoji(button.dataset.emoji);
-  setChatEmojiPickerOpen(false);
 });
 connection?.addEventListener("click", () => {
   setConnectionPopoverOpen(connectionPopover?.hidden !== false, connection);
