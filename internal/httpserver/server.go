@@ -138,10 +138,16 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			return
 		}
 		cfg := store.Snapshot()
+		iceTransportPolicy := cfg.ICETransportPolicy
+		if iceTransportPolicy == "" {
+			iceTransportPolicy = "all"
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ice_servers": browserICEServers(cfg, time.Now()),
+			"ice_servers":          browserICEServers(cfg, time.Now()),
+			"ice_transport_policy": iceTransportPolicy,
+			"simulcast_enabled":    cfg.SimulcastEnabled,
 		})
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {

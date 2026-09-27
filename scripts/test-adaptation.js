@@ -1,6 +1,7 @@
 const {
   chooseAdaptationLevel,
   shouldRecoverVideo,
+  chooseCameraLayer,
   applyServerDefaults,
   resolveCodecName,
   profileNameForQuality,
@@ -12,6 +13,30 @@ const {
 
 const transition = (level, poor, good) =>
   chooseAdaptationLevel(level, poor, good, 4);
+
+let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
+layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 5, null);
+if (layerState.layer !== "high" || layerState.poorSamples !== 1) {
+  throw new Error("a single poor camera sample must not change the selected layer");
+}
+layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 5, null);
+if (layerState.layer !== "medium" || layerState.poorSamples !== 0) {
+  throw new Error("two consecutive poor camera samples should lower one layer");
+}
+layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 2, null);
+if (layerState.layer !== "medium" || layerState.poorSamples !== 0) {
+  throw new Error("intermediate camera measurements should hold the layer and reset the streak");
+}
+layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, null, null);
+if (layerState.layer !== "medium" || layerState.goodSamples !== 0) {
+  throw new Error("missing camera measurements should hold the layer");
+}
+for (let sample = 0; sample < 5; sample += 1) {
+  layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 0.5, null);
+}
+if (layerState.layer !== "high") {
+  throw new Error("five consecutive healthy camera samples should raise one layer");
+}
 
 if (transition(2, 2, 0).level !== 1) throw new Error("poor network should downgrade normal to slow");
 if (transition(1, 2, 0).level !== 0) throw new Error("poor network should downgrade slow to very-slow");
@@ -148,8 +173,22 @@ const fs = require("node:fs");
 const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
-if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers });\n  restartRequested = false;")) {
+if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
+}
+for (const behavior of [
+  "config.ice_transport_policy",
+  "config.simulcast_enabled === true",
+  'rid: "low"',
+  'rid: "medium"',
+  'rid: "high"',
+  "message.camera_layer = cameraLayer",
+  "cameraPacketLossPct",
+  "cameraDroppedFramesPct"
+]) {
+  if (!appSource.includes(behavior)) {
+    throw new Error(`simulcast configuration or layer adaptation is missing: ${behavior}`);
+  }
 }
 if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
     !appSource.includes('setConnection("poor", "Offline");')) {
@@ -464,7 +503,6 @@ for (const behavior of [
   "participant-you",
   "element.youBadge.hidden = false",
   "(You)",
-  "localParticipantID = participant.id;\n        markLocalParticipant(participant.id);\n        updateParticipantPagination();",
   'setMeasuredConnection("fair", "Unstable connection")',
   'setMeasuredConnection("poor", "Unstable connection")',
   'button.dataset.receiveVideo = enabled ? "on" : "off"',
@@ -480,6 +518,9 @@ for (const behavior of [
   if (!appSource.includes(behavior)) {
     throw new Error(`meeting state semantics are missing: ${behavior}`);
   }
+}
+if (!/localParticipantID = participant\.id;\s+markLocalParticipant\(participant\.id\);\s+updateParticipantPagination\(\);/.test(appSource)) {
+  throw new Error("local participant setup must mark the participant before refreshing pagination");
 }
 for (const behavior of [
   "speakerThresholdDb = -50",

@@ -31,6 +31,7 @@ type publication struct {
 	key      string
 	sourceID string
 	role     SourceRole
+	layer    string
 	trackID  string
 	streamID string
 	codec    pion.RTPCodecCapability
@@ -48,6 +49,7 @@ type Router struct {
 	pubs                  map[string]*publication
 	videoSubscriptions    map[string]map[string]struct{}
 	videoSubscriptionsSet map[string]bool
+	cameraLayers          map[string]string
 	limits                Limits
 }
 
@@ -62,6 +64,7 @@ func NewRouter(config ...Limits) *Router {
 		pubs:                  make(map[string]*publication),
 		videoSubscriptions:    make(map[string]map[string]struct{}),
 		videoSubscriptionsSet: make(map[string]bool),
+		cameraLayers:          make(map[string]string),
 		limits:                limits,
 	}
 }
@@ -109,27 +112,40 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 }
 
 func (r *Router) Unregister(id string) {
+	offers := make(map[string]Offerer)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.peers, id)
 	delete(r.offerers, id)
 	delete(r.videoSubscriptions, id)
 	delete(r.videoSubscriptionsSet, id)
+	delete(r.cameraLayers, id)
 	for _, subscriptions := range r.videoSubscriptions {
 		delete(subscriptions, id)
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
+			for targetID, sender := range pub.senders {
+				if peer := r.peers[targetID]; peer != nil && sender != nil {
+					_ = peer.RemoveTrack(sender)
+					if offerer := r.offerers[targetID]; offerer != nil {
+						offers[targetID] = offerer
+					}
+				}
+			}
 			delete(r.pubs, key)
 			continue
 		}
 		delete(pub.tracks, id)
 		delete(pub.senders, id)
 	}
+	r.mu.Unlock()
+	for _, offer := range offers {
+		_ = offer()
+	}
 }
 
-// Publish accepts the role-aware form (sourceID, role, source, remote). The
-// legacy (sourceID, source, remote) form remains supported for older callers.
+// Publish accepts the role-aware form (sourceID, role, source, remote[, layer]).
+// The legacy (sourceID, source, remote) form remains supported for older callers.
 func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...interface{}) {
 	var role SourceRole
 	var source *webrtc.Peer
@@ -162,13 +178,24 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	if role == "" {
 		role = roleForKind(remote.Kind())
 	}
-	key := sourceID + "/" + string(role)
+	layer := ""
+	if role == SourceRoleCamera && len(args) >= 3 {
+		layer, _ = args[2].(string)
+	}
+	if role != SourceRoleCamera {
+		layer = ""
+	}
+	key := publicationKey(sourceID, role, layer)
 	trackID := fmt.Sprintf("%s|%s", sourceID, role)
+	if layer != "" {
+		trackID += "|" + layer
+	}
 	streamID := fmt.Sprintf("slowmeet-%s-%s", sourceID, role)
 	pub := &publication{
 		key:      key,
 		sourceID: sourceID,
 		role:     role,
+		layer:    layer,
 		trackID:  trackID,
 		streamID: streamID,
 		codec:    remote.Codec().RTPCodecCapability,
@@ -207,6 +234,13 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 // and screen publications remain subscribed for every receiver. Receivers
 // that have not sent this message retain the legacy all-camera behavior.
 func (r *Router) SetVideoSubscriptions(receiverID string, cameraParticipantIDs []string) {
+	r.SetVideoSubscriptionsWithLayer(receiverID, cameraParticipantIDs, "medium")
+}
+
+// SetVideoSubscriptionsWithLayer replaces the visible camera sources and the
+// receiver's preferred simulcast layer. Layer changes only affect packet
+// forwarding; subscribed layer tracks are negotiated when the camera appears.
+func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraParticipantIDs []string, cameraLayer string) {
 	desired := make(map[string]struct{}, len(cameraParticipantIDs))
 	for _, participantID := range cameraParticipantIDs {
 		if participantID != "" && participantID != receiverID {
@@ -217,8 +251,12 @@ func (r *Router) SetVideoSubscriptions(receiverID string, cameraParticipantIDs [
 	var offer Offerer
 	changed := false
 	r.mu.Lock()
+	if !validCameraLayer(cameraLayer) {
+		cameraLayer = "medium"
+	}
 	r.videoSubscriptions[receiverID] = desired
 	r.videoSubscriptionsSet[receiverID] = true
+	r.cameraLayers[receiverID] = cameraLayer
 	for _, pub := range r.pubs {
 		if pub.sourceID == receiverID {
 			continue
@@ -249,6 +287,34 @@ func (r *Router) SetVideoSubscriptions(receiverID string, cameraParticipantIDs [
 	}
 }
 
+func CameraLayerFromRID(rid string) string {
+	if validCameraLayer(rid) {
+		return rid
+	}
+	switch rid {
+	case "q":
+		return "low"
+	case "h":
+		return "medium"
+	case "f":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+func validCameraLayer(layer string) bool {
+	return layer == "low" || layer == "medium" || layer == "high"
+}
+
+func publicationKey(sourceID string, role SourceRole, layer string) string {
+	key := sourceID + "/" + string(role)
+	if role == SourceRoleCamera && layer != "" {
+		key += "/" + layer
+	}
+	return key
+}
+
 func (r *Router) shouldSubscribeLocked(pub *publication, receiverID string) bool {
 	if pub.sourceID == receiverID {
 		return false
@@ -268,20 +334,19 @@ func roleForKind(kind pion.RTPCodecType) SourceRole {
 }
 
 func (r *Router) Unpublish(sourceID string, role SourceRole) {
-	key := sourceID + "/" + string(role)
 	var offers []Offerer
 	r.mu.Lock()
-	pub, exists := r.pubs[key]
-	if !exists {
-		r.mu.Unlock()
-		return
-	}
-	delete(r.pubs, key)
-	for targetID, sender := range pub.senders {
-		if peer := r.peers[targetID]; peer != nil {
-			_ = peer.RemoveTrack(sender)
-			if offerer := r.offerers[targetID]; offerer != nil {
-				offers = append(offers, offerer)
+	for key, pub := range r.pubs {
+		if pub.sourceID != sourceID || pub.role != role {
+			continue
+		}
+		delete(r.pubs, key)
+		for targetID, sender := range pub.senders {
+			if peer := r.peers[targetID]; peer != nil {
+				_ = peer.RemoveTrack(sender)
+				if offerer := r.offerers[targetID]; offerer != nil {
+					offers = append(offers, offerer)
+				}
 			}
 		}
 	}
@@ -354,12 +419,18 @@ func (r *Router) forward(pub *publication) {
 			continue
 		}
 		r.mu.RLock()
-		tracks := make([]*pion.TrackLocalStaticRTP, 0, len(pub.tracks))
-		for _, track := range pub.tracks {
-			tracks = append(tracks, track)
+		targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
+		for targetID, track := range pub.tracks {
+			selectedLayer := r.cameraLayers[targetID]
+			if selectedLayer == "" {
+				selectedLayer = "medium"
+			}
+			if pub.layer == "" || selectedLayer == pub.layer {
+				targetTracks[targetID] = track
+			}
 		}
 		r.mu.RUnlock()
-		for _, track := range tracks {
+		for _, track := range targetTracks {
 			_ = track.WriteRTP(packet)
 		}
 	}

@@ -147,6 +147,8 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	cfg.TURNUsername = "legacy-user"
 	cfg.TURNPassword = "legacy-password"
 	cfg.TURNCredentialTTL = time.Hour
+	cfg.ICETransportPolicy = "relay"
+	cfg.SimulcastEnabled = true
 	handler := New(cfg, NewLogger("error"))
 
 	response := httptest.NewRecorder()
@@ -155,7 +157,9 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 		t.Fatalf("ICE config status = %d, body = %s", response.Code, response.Body.String())
 	}
 	var values struct {
-		ICEServers []struct {
+		ICETransportPolicy string `json:"ice_transport_policy"`
+		SimulcastEnabled   bool   `json:"simulcast_enabled"`
+		ICEServers         []struct {
 			URLs       []string `json:"urls"`
 			Username   string   `json:"username"`
 			Credential string   `json:"credential"`
@@ -166,6 +170,9 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	}
 	if len(values.ICEServers) != 2 {
 		t.Fatalf("ICE server count = %d, want 2: %#v", len(values.ICEServers), values)
+	}
+	if values.ICETransportPolicy != "relay" || !values.SimulcastEnabled {
+		t.Fatalf("ICE/simulcast settings were not returned: policy=%q simulcast=%t", values.ICETransportPolicy, values.SimulcastEnabled)
 	}
 	if values.ICEServers[0].URLs[0] != "stun:stun.example.com:3478" {
 		t.Fatalf("unexpected STUN server: %#v", values.ICEServers[0])

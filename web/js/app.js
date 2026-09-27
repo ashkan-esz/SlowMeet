@@ -1338,6 +1338,9 @@ const connectionMetrics = {
 let adaptationLevel = 2;
 let poorSamples = 0;
 let goodSamples = 0;
+let cameraLayer = "medium";
+let cameraLayerPoorSamples = 0;
+let cameraLayerGoodSamples = 0;
 let criticalSamples = 0;
 let recoverySamples = 0;
 let videoSuspended = false;
@@ -1382,12 +1385,18 @@ const hostDefaults = {
   audioBitrate: 32000
 };
 let iceServers = [];
+let iceTransportPolicy = "all";
+let simulcastEnabled = false;
 const iceConfigReady = fetch("/ice-config", { cache: "no-store" })
   .then((response) => {
     if (!response.ok) throw new Error("ICE configuration unavailable");
     return response.json();
   })
   .then((config) => {
+    if (config.ice_transport_policy === "relay" || config.ice_transport_policy === "all") {
+      iceTransportPolicy = config.ice_transport_policy;
+    }
+    simulcastEnabled = config.simulcast_enabled === true;
     if (!Array.isArray(config.ice_servers)) return;
     iceServers = config.ice_servers.map((server) => {
       const urls = Array.isArray(server.urls) ?
@@ -1409,6 +1418,7 @@ const remoteAudioElements = new Set();
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
+const remoteCameraLayerTracks = new Map();
 const participantQualityLabels = {
   good: "good",
   degraded: "degraded",
@@ -1756,7 +1766,24 @@ async function enableCameraOnce() {
   cameraTrack = track;
   track.enabled = !videoSuspended && !audioOnly?.checked;
   localStream?.addTrack(track);
-  cameraSender = peer.addTrack(track, stream);
+  if (simulcastEnabled && typeof peer.addTransceiver === "function") {
+    try {
+      const transceiver = peer.addTransceiver(track, {
+        direction: "sendonly",
+        streams: [stream],
+        sendEncodings: [
+          { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
+          { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
+          { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
+        ]
+      });
+      cameraSender = transceiver.sender;
+    } catch (_) {
+      cameraSender = peer.addTrack(track, stream);
+    }
+  } else {
+    cameraSender = peer.addTrack(track, stream);
+  }
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = stream;
   cameraRequested = true;
@@ -1877,8 +1904,36 @@ function remoteParticipantID(streams, track) {
 function remoteMediaRole(streams, track) {
   const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
   if (/-screen$/.test(streamID) || /\|screen$/.test(track?.id || "")) return "screen";
-  if (/-camera$/.test(streamID) || /\|camera$/.test(track?.id || "")) return "camera";
+  if (/-camera$/.test(streamID) || /\|camera(?:\|(low|medium|high))?$/.test(track?.id || "")) return "camera";
   return track?.kind === "audio" ? "audio" : "camera";
+}
+
+function remoteCameraLayer(track) {
+  const match = /\|camera\|(low|medium|high)$/.exec(track?.id || "");
+  return match?.[1] || "";
+}
+
+function showSelectedRemoteCamera(element) {
+  const participantID = element.item.dataset.participantId;
+  const tracks = remoteCameraLayerTracks.get(participantID);
+  if (!tracks) return false;
+  const track = tracks.get(cameraLayer);
+  element.cameraVideo.srcObject = track ? new MediaStream([track]) : null;
+  updateParticipantVideoVisibility(element);
+  if (track) element.cameraVideo.play().catch(() => {});
+  return true;
+}
+
+function setCameraLayer(layer) {
+  if (!simulcastEnabled || !["low", "medium", "high"].includes(layer) || cameraLayer === layer) return;
+  cameraLayer = layer;
+  participantElements.forEach((element, id) => {
+    if (id !== localParticipantID) showSelectedRemoteCamera(element);
+  });
+  const visibleCameraIDs = [...participantElements.entries()]
+    .filter(([id, element]) => id !== localParticipantID && !element.item.hidden)
+    .map(([id]) => id);
+  sendVideoSubscriptions(receiveVideoEnabled ? visibleCameraIDs : []);
 }
 
 function rememberRemoteTrack(participantID, track, receiver) {
@@ -2459,6 +2514,7 @@ function connectSocket(name, password) {
         remoteAudioElements.delete(element.audio);
         removeSpeakerAnalyzer(message.participant.id);
         forgetRemoteTracks(element, message.participant.id);
+        remoteCameraLayerTracks.delete(message.participant.id);
         element.item.classList.remove("is-speaking");
         element.item.classList.add("is-disconnected");
         element.item.dataset.connection = "left";
@@ -2473,6 +2529,7 @@ function connectSocket(name, password) {
           if (participantElements.get(message.participant.id)?.item === element.item) {
             element.item.remove();
             participantElements.delete(message.participant.id);
+            remoteCameraLayerTracks.delete(message.participant.id);
             const orderIndex = participantOrder.indexOf(message.participant.id);
             if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);
             updateParticipantCount();
@@ -2573,6 +2630,8 @@ function resetMediaConnection() {
   renegotiationPending = false;
   restartRequested = false;
   previousStats = undefined;
+  cameraLayerPoorSamples = 0;
+  cameraLayerGoodSamples = 0;
   criticalSamples = 0;
   recoverySamples = 0;
   videoSuspended = preserveVideoSuspension || Boolean(audioOnly?.checked);
@@ -2588,7 +2647,7 @@ async function startWebRTC() {
   }
   await iceConfigReady;
   if (generation !== socketGeneration || socket !== currentSocket) return;
-  const currentPeer = new RTCPeerConnection({ iceServers });
+  const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });
   restartRequested = false;
   peer = currentPeer;
   currentPeer.oniceconnectionstatechange = () => {
@@ -2635,8 +2694,21 @@ async function startWebRTC() {
     rememberRemoteTrack(participantID, track, receiver);
     const stream = remoteMediaStream(streams, track);
     if (track.kind === "video") {
+      const layer = role === "camera" ? remoteCameraLayer(track) : "";
       const video = role === "screen" ? element.screenVideo : element.cameraVideo;
-      video.srcObject = stream;
+      if (layer) {
+        const tracks = remoteCameraLayerTracks.get(participantID) || new Map();
+        tracks.set(layer, track);
+        remoteCameraLayerTracks.set(participantID, tracks);
+        track.addEventListener("ended", () => {
+          if (tracks.get(layer) === track) tracks.delete(layer);
+          if (tracks.size === 0) remoteCameraLayerTracks.delete(participantID);
+          showSelectedRemoteCamera(element);
+        }, { once: true });
+        showSelectedRemoteCamera(element);
+      } else {
+        video.srcObject = stream;
+      }
       video.autoplay = true;
       video.playsInline = true;
       video.dataset.mediaRole = role;
@@ -2644,7 +2716,7 @@ async function startWebRTC() {
       video.classList.toggle("is-screen-content", role === "screen");
       updateParticipantVideoVisibility(element);
       updateVideoOrientation(participantID);
-      video.play().catch(() => {});
+      if (!layer) video.play().catch(() => {});
       if (role === "camera") element.video.play().catch(() => {});
     } else {
       element.audio.srcObject = stream;
@@ -2952,6 +3024,8 @@ async function updateDiagnostics() {
     iceTransport: null,
     icePath: null,
     availableOutgoingKbps: null,
+    cameraPacketLossPct: null,
+    cameraDroppedFramesPct: null,
     connection: currentPeer.connectionState
   };
   values.timestamp = Date.now();
@@ -2963,6 +3037,12 @@ async function updateDiagnostics() {
   let hasFrameDropStats = false;
   let totalLost = 0;
   let totalReceived = 0;
+  let cameraLost = 0;
+  let cameraReceived = 0;
+  let cameraFramesDropped = 0;
+  let cameraFramesDecoded = 0;
+  let hasCameraLossStats = false;
+  let hasCameraFrameStats = false;
   let timestamp = 0;
   let hasInboundVideo = false;
   const codecById = new Map();
@@ -3024,6 +3104,14 @@ async function updateDiagnostics() {
       } else if (role === "camera") {
         values.cameraResolution = `${stat.frameWidth || "?"}x${stat.frameHeight || "?"}`;
         values.cameraFps = stat.framesPerSecond ?? null;
+        cameraLost += Math.max(0, Number(stat.packetsLost) || 0);
+        cameraReceived += Math.max(0, Number(stat.packetsReceived) || 0);
+        hasCameraLossStats = true;
+        if (Number.isFinite(stat.framesDropped) && Number.isFinite(stat.framesDecoded)) {
+          cameraFramesDropped += Math.max(0, stat.framesDropped);
+          cameraFramesDecoded += Math.max(0, stat.framesDecoded);
+          hasCameraFrameStats = true;
+        }
       }
       totalLost += stat.packetsLost || 0;
       totalReceived += stat.packetsReceived || 0;
@@ -3089,8 +3177,25 @@ async function updateDiagnostics() {
   if (totalLost + totalReceived > 0) {
     values.packetLoss = Number((totalLost / (totalLost + totalReceived) * 100).toFixed(1));
   }
+  if (previousStats && timestamp > previousStats.timestamp && hasCameraLossStats) {
+    const lostDelta = Math.max(0, cameraLost - previousStats.cameraLost);
+    const receivedDelta = Math.max(0, cameraReceived - previousStats.cameraReceived);
+    if (lostDelta + receivedDelta > 0) {
+      values.cameraPacketLossPct = Number((lostDelta / (lostDelta + receivedDelta) * 100).toFixed(1));
+    }
+  }
+  if (previousStats && timestamp > previousStats.timestamp && hasCameraFrameStats && previousStats.hasCameraFrameStats) {
+    const droppedDelta = Math.max(0, cameraFramesDropped - previousStats.cameraFramesDropped);
+    const decodedDelta = Math.max(0, cameraFramesDecoded - previousStats.cameraFramesDecoded);
+    if (droppedDelta + decodedDelta > 0) {
+      values.cameraDroppedFramesPct = Number((droppedDelta / (droppedDelta + decodedDelta) * 100).toFixed(1));
+    }
+  }
   values.framesDropped = hasFrameDropStats ? framesDropped : null;
-  previousStats = { timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes };
+  previousStats = {
+    timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes,
+    cameraLost, cameraReceived, cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats
+  };
   const lossKnown = values.packetLoss != null;
   const connectionHasMetrics = values.rttMs != null || lossKnown;
   if (connectionHasMetrics) {
@@ -3167,6 +3272,15 @@ async function updateDiagnostics() {
       await applyProfile(profiles[adaptationLevel].name);
     }
   }
+  if (simulcastEnabled) {
+    const layerDecision = chooseCameraLayer(
+      cameraLayer, cameraLayerPoorSamples, cameraLayerGoodSamples,
+      values.cameraPacketLossPct, values.cameraDroppedFramesPct
+    );
+    cameraLayerPoorSamples = layerDecision.poorSamples;
+    cameraLayerGoodSamples = layerDecision.goodSamples;
+    setCameraLayer(layerDecision.layer);
+  }
   if (shouldPauseVideo(profile.value === "auto", adaptationLevel, criticalSamples)) {
     criticalSamples = 0;
     recoverySamples = 0;
@@ -3226,8 +3340,16 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
     const parameters = sender.getParameters();
     parameters.degradationPreference = "maintain-framerate";
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-    parameters.encodings[0].maxBitrate = bitrate;
-    parameters.encodings[0].maxFramerate = fps;
+    if (sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3) {
+      const shares = [0.15, 0.3, 0.55];
+      parameters.encodings.forEach((encoding, index) => {
+        encoding.maxBitrate = Math.max(30000, Math.floor(bitrate * shares[index]));
+        encoding.maxFramerate = fps;
+      });
+    } else {
+      parameters.encodings[0].maxBitrate = bitrate;
+      parameters.encodings[0].maxFramerate = fps;
+    }
     await sender.setParameters(parameters).catch(() => {});
   }
   for (const sender of targetPeer.getSenders()) {
@@ -3454,11 +3576,13 @@ let lastVideoSubscriptionPayload;
 function sendVideoSubscriptions(cameraParticipantIDs) {
   if (socket?.readyState !== WebSocket.OPEN || !localParticipantID) return;
   const participantIDs = [...new Set(cameraParticipantIDs)].sort();
-  const payload = JSON.stringify({
+  const message = {
     version: 1,
     type: "set_video_subscriptions",
     camera_participant_ids: participantIDs
-  });
+  };
+  if (simulcastEnabled) message.camera_layer = cameraLayer;
+  const payload = JSON.stringify(message);
   if (socket === lastVideoSubscriptionSocket && payload === lastVideoSubscriptionPayload) return;
   socket.send(payload);
   lastVideoSubscriptionSocket = socket;
@@ -3879,12 +4003,16 @@ leave.addEventListener("click", () => {
   remoteTrackOwners.clear();
   remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
+  remoteCameraLayerTracks.clear();
   previousStats = undefined;
   criticalSamples = 0;
   recoverySamples = 0;
   adaptationLevel = 2;
   poorSamples = 0;
   goodSamples = 0;
+  cameraLayer = "medium";
+  cameraLayerPoorSamples = 0;
+  cameraLayerGoodSamples = 0;
   participantPage = 0;
   focusedParticipantID = undefined;
   profile.value = "auto";

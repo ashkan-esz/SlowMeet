@@ -114,6 +114,49 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 	}
 }
 
+func TestUnregisterRemovesPublisherLayerSendersFromReceivers(t *testing.T) {
+	router := NewRouter()
+	receiver, err := webrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create receiver peer: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	offers := 0
+	router.Register("receiver", receiver, func() error {
+		offers++
+		return nil
+	})
+	track, err := pion.NewTrackLocalStaticRTP(
+		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+		"publisher|camera|low", "slowmeet-publisher-camera",
+	)
+	if err != nil {
+		t.Fatalf("create layer track: %v", err)
+	}
+	sender, err := receiver.AddTrack(track)
+	if err != nil {
+		t.Fatalf("add layer sender: %v", err)
+	}
+	key := publicationKey("publisher", SourceRoleCamera, "low")
+	router.pubs[key] = &publication{
+		key: key, sourceID: "publisher", role: SourceRoleCamera, layer: "low",
+		tracks:  map[string]*pion.TrackLocalStaticRTP{"receiver": track},
+		senders: map[string]*pion.RTPSender{"receiver": sender},
+	}
+
+	router.Unregister("publisher")
+
+	if _, exists := router.pubs[key]; exists {
+		t.Fatal("publisher layer remained after unregister")
+	}
+	if got := len(receiver.Connection().GetSenders()); got != 0 {
+		t.Fatalf("receiver retained %d sender(s), want 0", got)
+	}
+	if offers != 1 {
+		t.Fatalf("receiver offers = %d, want one renegotiation", offers)
+	}
+}
+
 func TestVideoSubscriptionPolicyPreservesLegacyAudioAndScreen(t *testing.T) {
 	router := NewRouter()
 	visibleCamera := &publication{sourceID: "visible", role: SourceRoleCamera}
@@ -174,6 +217,46 @@ func TestSetVideoSubscriptionsAddsAndRemovesCameraTracks(t *testing.T) {
 	}
 }
 
+func TestSetVideoSubscriptionsLayerSwitchDoesNotRenegotiate(t *testing.T) {
+	router := NewRouter()
+	peer, err := webrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create receiver peer: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	offers := 0
+	router.Register("receiver", peer, func() error {
+		offers++
+		return nil
+	})
+	for _, layer := range []string{"low", "medium", "high"} {
+		key := publicationKey("camera", SourceRoleCamera, layer)
+		router.pubs[key] = &publication{
+			key: key, sourceID: "camera", role: SourceRoleCamera, layer: layer,
+			trackID: "camera|camera|" + layer, streamID: "slowmeet-camera-camera",
+			codec:  pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+			tracks: make(map[string]*pion.TrackLocalStaticRTP), senders: make(map[string]*pion.RTPSender),
+		}
+	}
+
+	router.SetVideoSubscriptionsWithLayer("receiver", []string{"camera"}, "medium")
+	if offers != 1 {
+		t.Fatalf("offers after pre-negotiating 3 layer tracks = %d, want 1", offers)
+	}
+	for _, layer := range []string{"low", "medium", "high"} {
+		if router.pubs[publicationKey("camera", SourceRoleCamera, layer)].tracks["receiver"] == nil {
+			t.Errorf("camera %s layer was not pre-negotiated", layer)
+		}
+	}
+	router.SetVideoSubscriptionsWithLayer("receiver", []string{"camera"}, "low")
+	if offers != 1 {
+		t.Fatalf("layer switch caused renegotiation: offers = %d, want 1", offers)
+	}
+	if got := router.cameraLayers["receiver"]; got != "low" {
+		t.Fatalf("selected camera layer = %q, want low", got)
+	}
+}
+
 func TestRemovePublicationDoesNotDeleteReplacement(t *testing.T) {
 	router := NewRouter()
 	old := &publication{
@@ -230,5 +313,36 @@ func TestUnpublishRemovesOnlySelectedRole(t *testing.T) {
 	}
 	if _, exists := router.pubs["p1/camera"]; !exists {
 		t.Fatal("camera publication was removed with screen")
+	}
+}
+
+func TestUnpublishRemovesEveryCameraLayer(t *testing.T) {
+	router := NewRouter()
+	for _, layer := range []string{"low", "medium", "high"} {
+		key := publicationKey("p1", SourceRoleCamera, layer)
+		router.pubs[key] = &publication{key: key, sourceID: "p1", role: SourceRoleCamera, layer: layer}
+	}
+	router.pubs["p1/audio"] = &publication{key: "p1/audio", sourceID: "p1", role: SourceRoleAudio}
+
+	router.Unpublish("p1", SourceRoleCamera)
+
+	for _, layer := range []string{"low", "medium", "high"} {
+		if _, exists := router.pubs[publicationKey("p1", SourceRoleCamera, layer)]; exists {
+			t.Errorf("camera %s publication remains after unpublish", layer)
+		}
+	}
+	if _, exists := router.pubs["p1/audio"]; !exists {
+		t.Fatal("audio publication was removed with camera layers")
+	}
+}
+
+func TestCameraLayerFromRID(t *testing.T) {
+	for _, test := range []struct{ rid, want string }{
+		{"low", "low"}, {"medium", "medium"}, {"high", "high"},
+		{"q", "low"}, {"h", "medium"}, {"f", "high"}, {"", ""}, {"unknown", ""},
+	} {
+		if got := CameraLayerFromRID(test.rid); got != test.want {
+			t.Errorf("CameraLayerFromRID(%q) = %q, want %q", test.rid, got, test.want)
+		}
 	}
 }

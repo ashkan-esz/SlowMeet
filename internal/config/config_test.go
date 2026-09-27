@@ -24,6 +24,8 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("TURN_SHARED_SECRET", "")
 	t.Setenv("TURN_CREDENTIAL_TTL_SECONDS", "")
 	t.Setenv("ICE_IPV4_ONLY", "")
+	t.Setenv("ICE_TRANSPORT_POLICY", "")
+	t.Setenv("SIMULCAST_ENABLED", "")
 	t.Setenv("ICE_UDP_PORT_MIN", "")
 	t.Setenv("ICE_UDP_PORT_MAX", "")
 	t.Setenv("LOG_LEVEL", "")
@@ -56,6 +58,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	if !cfg.ICEIPv4Only {
 		t.Fatal("expected IPv4-only ICE default")
 	}
+	if cfg.ICETransportPolicy != "all" || cfg.SimulcastEnabled {
+		t.Fatalf("unexpected ICE and simulcast defaults: policy=%q simulcast=%t", cfg.ICETransportPolicy, cfg.SimulcastEnabled)
+	}
 	if cfg.ReconnectTimeout != 30*time.Second {
 		t.Fatalf("unexpected reconnect timeout: %s", cfg.ReconnectTimeout)
 	}
@@ -70,6 +75,8 @@ func TestLoadFromEnvParsesTURNAndIPv4Settings(t *testing.T) {
 	t.Setenv("TURN_SHARED_SECRET", "shared-secret")
 	t.Setenv("TURN_CREDENTIAL_TTL_SECONDS", "600")
 	t.Setenv("ICE_IPV4_ONLY", "false")
+	t.Setenv("ICE_TRANSPORT_POLICY", "relay")
+	t.Setenv("SIMULCAST_ENABLED", "true")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -81,6 +88,16 @@ func TestLoadFromEnvParsesTURNAndIPv4Settings(t *testing.T) {
 	}
 	if cfg.TURNCredentialTTL != 10*time.Minute || cfg.ICEIPv4Only {
 		t.Fatalf("unexpected TURN/IPv4 settings: %+v", cfg)
+	}
+	if cfg.ICETransportPolicy != "relay" || !cfg.SimulcastEnabled {
+		t.Fatalf("unexpected ICE policy or simulcast setting: %+v", cfg)
+	}
+}
+
+func TestLoadFromEnvRejectsInvalidICETransportPolicy(t *testing.T) {
+	t.Setenv("ICE_TRANSPORT_POLICY", "udp")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected invalid ICE transport policy to fail")
 	}
 }
 

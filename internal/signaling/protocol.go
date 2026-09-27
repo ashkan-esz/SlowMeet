@@ -53,6 +53,7 @@ type Message struct {
 	ReconnectToken       string               `json:"reconnect_token,omitempty"`
 	ParticipantID        string               `json:"participant_id,omitempty"`
 	CameraParticipantIDs []string             `json:"camera_participant_ids,omitempty"`
+	CameraLayer          string               `json:"camera_layer,omitempty"`
 	MediaStreamID        string               `json:"media_stream_id,omitempty"`
 	Error                string               `json:"error,omitempty"`
 	Participant          *meeting.Participant `json:"participant,omitempty"`
@@ -130,6 +131,9 @@ func (m Message) Validate() error {
 			return fmt.Errorf("network state contains invalid values")
 		}
 	case TypeVideoSubscriptions:
+		if m.CameraLayer != "" && m.CameraLayer != "low" && m.CameraLayer != "medium" && m.CameraLayer != "high" {
+			return fmt.Errorf("camera_layer must be low, medium, or high")
+		}
 		if len(m.CameraParticipantIDs) > MaxCameraSubscriptions {
 			return fmt.Errorf("too many camera subscriptions")
 		}

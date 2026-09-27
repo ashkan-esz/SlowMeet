@@ -500,7 +500,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if msg.Type == TypeVideoSubscriptions {
-				h.router.SetVideoSubscriptions(c.participant.ID, msg.CameraParticipantIDs)
+				h.router.SetVideoSubscriptionsWithLayer(c.participant.ID, msg.CameraParticipantIDs, msg.CameraLayer)
 				continue
 			}
 			if msg.Type == TypeHandState {
@@ -596,9 +596,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			turnUsername = username
 			turnPassword = password
 		}
-		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRange(
+		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRangeAndPolicy(
 			cfg.STUNServers, cfg.EffectiveTURNURLs(), turnUsername, turnPassword,
-			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only,
+			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy,
 		)
 		if err != nil {
 			if resumed {
@@ -637,7 +637,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					role = media.SourceRoleScreen
 				}
 			}
-			h.router.Publish(c.participant.ID, role, c.peer, track)
+			layer := ""
+			if role == media.SourceRoleCamera {
+				layer = media.CameraLayerFromRID(track.RID())
+			}
+			h.router.Publish(c.participant.ID, role, c.peer, track, layer)
 		})
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)

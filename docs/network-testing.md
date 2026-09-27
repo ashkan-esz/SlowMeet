@@ -81,3 +81,32 @@ allocation to ports `50000-50100`. Docker Compose and podman-compose publish
 the configured range automatically; if you change `ICE_UDP_PORT_MIN` or
 `ICE_UDP_PORT_MAX`, allow the resulting range through the host firewall. Use
 TURN when direct UDP is blocked by the network or NAT.
+
+## ICE path and simulcast staging
+
+Keep production on `ICE_TRANSPORT_POLICY=all` and
+`SIMULCAST_ENABLED=false` until the staging matrix passes. The ICE policy is
+returned by `/ice-config` for browsers and also applied to the server peer
+connections.
+
+Compare one path at a time:
+
+| Test | ICE policy | TURN configuration |
+| --- | --- | --- |
+| Direct UDP | `all` | Disable TURN URLs |
+| TURN/UDP | `relay` | Configure one `turn:` URL with `transport=udp` |
+| TURN/TLS on 443 | `relay` | Configure one `turns:` URL on port 443 with `transport=tcp` |
+
+TURN/TLS can cross networks that block UDP. TCP can add delay when packets are
+lost, so compare it with TURN/UDP on the same access network. Do not combine
+multiple TURN URLs during an individual comparison.
+
+After ICE path comparisons, enable `SIMULCAST_ENABLED=true` in staging and
+compare calls with 2, 4, and 8 participants on desktop Chrome, Android Chrome,
+and iOS Safari. Confirm layer switching, audio continuity, screen share, and
+single-layer fallback. Record publisher uplink, SFU load, receiver bitrate,
+frame drops, RTT, loss, and reconnects for each network profile above. Repeat
+on available Iranian mobile and fixed connections and record provider and
+access type. A regional pilot should move the SFU and TURN together; retain a
+move only when p95 RTT improves by at least 20% without lower connection
+success.

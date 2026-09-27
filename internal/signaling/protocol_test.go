@@ -226,6 +226,14 @@ func TestVideoSubscriptionsMessageIsBoundedAndAllowsEmptyList(t *testing.T) {
 	if err := (Message{Version: ProtocolVersion, Type: TypeVideoSubscriptions}).Validate(); err != nil {
 		t.Fatalf("empty subscription list should be valid: %v", err)
 	}
+	for _, layer := range []string{"low", "medium", "high"} {
+		if err := (Message{Version: ProtocolVersion, Type: TypeVideoSubscriptions, CameraLayer: layer}).Validate(); err != nil {
+			t.Errorf("camera layer %q rejected: %v", layer, err)
+		}
+	}
+	if err := (Message{Version: ProtocolVersion, Type: TypeVideoSubscriptions, CameraLayer: "ultra"}).Validate(); err == nil {
+		t.Fatal("unknown camera layer was accepted")
+	}
 	for _, ids := range [][]string{
 		make([]string, MaxCameraSubscriptions+1),
 		{"   "},

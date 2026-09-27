@@ -12,6 +12,32 @@ function shouldRecoverVideo(goodSamples, isGood, threshold = 5) {
   return isGood && goodSamples >= threshold;
 }
 
+function chooseCameraLayer(layer, poorSamples, goodSamples, packetLossPct, droppedFramesPct) {
+  const layers = ["low", "medium", "high"];
+  const current = layers.includes(layer) ? layer : "medium";
+  const measurements = [packetLossPct, droppedFramesPct]
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const poor = measurements.some((value) => value >= 5);
+  const good = measurements.length > 0 && measurements.every((value) => value < 1);
+  if (poor) {
+    const nextPoorSamples = poorSamples + 1;
+    return {
+      layer: nextPoorSamples >= 2 && current !== "low" ? layers[layers.indexOf(current) - 1] : current,
+      poorSamples: nextPoorSamples >= 2 ? 0 : nextPoorSamples,
+      goodSamples: 0
+    };
+  }
+  if (good) {
+    const nextGoodSamples = goodSamples + 1;
+    return {
+      layer: nextGoodSamples >= 5 && current !== "high" ? layers[layers.indexOf(current) + 1] : current,
+      poorSamples: 0,
+      goodSamples: nextGoodSamples >= 5 ? 0 : nextGoodSamples
+    };
+  }
+  return { layer: current, poorSamples: 0, goodSamples: 0 };
+}
+
 function applyServerDefaults(profile, defaults, enabled) {
   if (!enabled || !profile) return profile;
   return {
@@ -125,6 +151,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     chooseAdaptationLevel,
     shouldRecoverVideo,
+    chooseCameraLayer,
     applyServerDefaults,
     resolveCodecName,
     profileNameForQuality,

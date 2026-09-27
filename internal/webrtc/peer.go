@@ -34,7 +34,19 @@ func NewPeerWithTURNAndPortRange(iceServers []string, turnURL, username, passwor
 }
 
 func NewPeerWithTURNURLsAndPortRange(iceServers, turnURLs []string, username, password string, portMin, portMax int, ipv4Only bool) (*Peer, error) {
+	return NewPeerWithTURNURLsAndPortRangeAndPolicy(iceServers, turnURLs, username, password, portMin, portMax, ipv4Only, "all")
+}
+
+func NewPeerWithTURNURLsAndPortRangeAndPolicy(iceServers, turnURLs []string, username, password string, portMin, portMax int, ipv4Only bool, transportPolicy string) (*Peer, error) {
 	configuration := pion.Configuration{}
+	switch transportPolicy {
+	case "", "all":
+		configuration.ICETransportPolicy = pion.ICETransportPolicyAll
+	case "relay":
+		configuration.ICETransportPolicy = pion.ICETransportPolicyRelay
+	default:
+		return nil, fmt.Errorf("ICE transport policy must be all or relay")
+	}
 	for _, server := range iceServers {
 		configuration.ICEServers = append(configuration.ICEServers, pion.ICEServer{URLs: []string{server}})
 	}

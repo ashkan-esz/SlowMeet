@@ -26,6 +26,8 @@ type Config struct {
 	TURNSharedSecret    string
 	TURNCredentialTTL   time.Duration
 	ICEIPv4Only         bool
+	ICETransportPolicy  string
+	SimulcastEnabled    bool
 	ICEUDPPortMin       int
 	ICEUDPPortMax       int
 	MaxParticipants     int
@@ -93,6 +95,11 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	iceTransportPolicy := envString("ICE_TRANSPORT_POLICY", "all")
+	simulcastEnabled, err := envBool("SIMULCAST_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
@@ -107,6 +114,8 @@ func LoadFromEnv() (Config, error) {
 		TURNSharedSecret:    os.Getenv("TURN_SHARED_SECRET"),
 		TURNCredentialTTL:   time.Duration(turnCredentialTTLSeconds) * time.Second,
 		ICEIPv4Only:         iceIPv4Only,
+		ICETransportPolicy:  iceTransportPolicy,
+		SimulcastEnabled:    simulcastEnabled,
 		ICEUDPPortMin:       iceUDPPortMin,
 		ICEUDPPortMax:       iceUDPPortMax,
 		MaxParticipants:     maxParticipants,
@@ -130,6 +139,9 @@ func LoadFromEnv() (Config, error) {
 func (c Config) Validate() error {
 	if c.HTTPAddr == "" {
 		return fmt.Errorf("HTTP_ADDR must not be empty")
+	}
+	if c.ICETransportPolicy != "" && c.ICETransportPolicy != "all" && c.ICETransportPolicy != "relay" {
+		return fmt.Errorf("ICE_TRANSPORT_POLICY must be all or relay")
 	}
 	if (c.ICEUDPPortMin == 0) != (c.ICEUDPPortMax == 0) ||
 		(c.ICEUDPPortMin != 0 &&
