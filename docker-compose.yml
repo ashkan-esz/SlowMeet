@@ -22,7 +22,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${SLOWMEET_CPUS:-1.0}"
+          cpus: "${SLOWMEET_CPUS:-0.75}"
           memory: "${SLOWMEET_MEMORY_LIMIT:-256m}"
           pids: ${SLOWMEET_PIDS_LIMIT:-128}
     logging:
@@ -58,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${TURN_CPUS:-0.5}"
+          cpus: "${TURN_CPUS:-0.20}"
           memory: "${TURN_MEMORY_LIMIT:-128m}"
           pids: ${TURN_PIDS_LIMIT:-128}
     logging:

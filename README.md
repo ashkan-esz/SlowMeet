@@ -49,22 +49,31 @@ The complete starter configuration is in `.env.example`.
 
 On a fresh Ubuntu or Debian VPS, point an A record for your domain to the VPS
 IPv4 address. If the domain has an AAAA record, point it to the VPS IPv6 address
-or remove it. Then run this command as a user with `sudo` access:
+or remove it. Then run this command as a user with `sudo` access. Run the same
+command on a standard existing SlowMeet installation to update it in place:
 
 ```sh
 sudo bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://raw.githubusercontent.com/ashkan-esz/SlowMeet/master/deploy/install.sh | bash'
 ```
 
-The installer asks for the domain and whether to enable optional TURN. It
-installs Docker Compose and Caddy, configures HTTPS and the host firewall,
-generates secure admin credentials, builds and starts SlowMeet, and waits for
-the health check. If you enable TURN, it also configures coturn with short-lived
-credentials and TLS. The installer prints the meeting URL and generated
-passwords when setup completes.
+For a fresh installation, the installer asks for the domain and whether to
+enable optional TURN. It installs Docker Compose and Caddy, configures HTTPS and
+the host firewall, generates secure admin credentials, builds and starts
+SlowMeet, and waits for the health check. If you enable TURN, it also configures
+coturn with short-lived credentials and TLS. The installer prints the meeting
+URL and generated passwords when setup completes.
 
-If setup fails after provisioning starts, fix the reported issue and run the
-same command again. The installer resumes with the saved domain and options,
-preserving any configuration and credentials it already created.
+When it detects an existing installation, it fetches the latest source, rebuilds
+and restarts SlowMeet, and preserves the existing environment, credentials,
+application data, Caddy certificates, and TURN configuration. It prints the
+existing credentials when the health checks pass. The service is briefly
+unavailable while the updated container starts. Existing installations must use
+the standard `/opt/slowmeet` checkout and Caddy configuration.
+
+If installation or update fails after provisioning starts, fix the reported
+issue and run the same command again. The installer resumes with the saved
+domain and options, preserving any configuration and credentials it already
+created.
 
 The domain must already resolve to the VPS before installation so HTTPS
 certificates can be issued. The installer opens the VPS host firewall for SSH,
@@ -163,6 +172,12 @@ The equivalent Make targets are `make docker-up`, `make docker-turn-up`,
 `podman compose` and do not auto-select the standalone `podman-compose`
 executable.
 
+The default CPU limits are 0.75 for SlowMeet and 0.20 for coturn, for a combined
+total of 0.95 CPU when the optional TURN profile is enabled. The memory limits
+remain 256 MiB and 128 MiB respectively (384 MiB combined). These are defaults;
+custom `.env` values can raise them. Existing `.env` files keep their current
+values when updated.
+
 The application listens on port `8080`. Health endpoints are `/health` and
 `/ready`.
 
@@ -187,10 +202,8 @@ profile uses host networking so coturn can expose its full relay range without
 mapping thousands of ports. Rootless Podman may need a host-level permission
 change or a non-privileged TLS port for TCP 443.
 
-The default container limits are one CPU, 256 MiB of memory, and 128 PIDs for
-SlowMeet; coturn defaults to half a CPU, 128 MiB, and 128 PIDs. Override them
-with the `SLOWMEET_*` and `TURN_*` variables in `.env` when hosting larger
-meetings.
+The same `SLOWMEET_*` and `TURN_*` variables in `.env` can override these
+defaults when hosting larger meetings.
 
 ### Published images and releases
 

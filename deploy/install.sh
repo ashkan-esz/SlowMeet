@@ -17,8 +17,9 @@ write_install_state() {
     install -d -o root -g root -m 0700 "$STATE_DIR"
     temp=$(mktemp "$STATE_DIR/.state.XXXXXX")
     {
-        printf 'version=1\n'
+        printf 'version=2\n'
         printf 'status=%s\n' "$status"
+        printf 'operation=%s\n' "$install_operation"
         printf 'domain=%s\n' "$domain"
         printf 'enable_turn=%s\n' "$enable_turn"
         printf 'enable_meeting_password=%s\n' "$enable_meeting_password"
@@ -29,9 +30,10 @@ write_install_state() {
 
 read_install_state() {
     local key value
-    local seen_version= seen_status= seen_domain= seen_turn= seen_meeting_password=
+    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password=
     state_version=
     state_status=
+    install_operation=
     domain=
     enable_turn=
     enable_meeting_password=
@@ -40,14 +42,22 @@ read_install_state() {
         case "$key" in
             version) [[ -z "$seen_version" ]] || fail 'Installer state contains a duplicate version.'; seen_version=yes; state_version=$value ;;
             status) [[ -z "$seen_status" ]] || fail 'Installer state contains a duplicate status.'; seen_status=yes; state_status=$value ;;
+            operation) [[ -z "$seen_operation" ]] || fail 'Installer state contains a duplicate operation.'; seen_operation=yes; install_operation=$value ;;
             domain) [[ -z "$seen_domain" ]] || fail 'Installer state contains a duplicate domain.'; seen_domain=yes; domain=$value ;;
             enable_turn) [[ -z "$seen_turn" ]] || fail 'Installer state contains a duplicate TURN setting.'; seen_turn=yes; enable_turn=$value ;;
             enable_meeting_password) [[ -z "$seen_meeting_password" ]] || fail 'Installer state contains a duplicate meeting-password setting.'; seen_meeting_password=yes; enable_meeting_password=$value ;;
             *) fail "Installer state contains an unsupported field: $key" ;;
         esac
     done < "$STATE_FILE"
-    [[ "$seen_version" == yes && "$state_version" == 1 ]] || fail 'Installer state has a missing or unsupported version.'
+    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 ) ]] || fail 'Installer state has a missing or unsupported version.'
     [[ "$seen_status" == yes && ( "$state_status" == incomplete || "$state_status" == complete ) ]] || fail 'Installer state has a missing or invalid status.'
+    if [[ "$state_version" == 1 ]]; then
+        [[ -z "$seen_operation" ]] || fail 'Version 1 installer state cannot contain an operation.'
+        install_operation=install
+    else
+        [[ "$seen_operation" == yes && ( "$install_operation" == install || "$install_operation" == update ) ]] \
+            || fail 'Installer state has a missing or invalid operation.'
+    fi
     [[ "$seen_domain" == yes && "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || fail 'Installer state has a missing or invalid domain.'
     [[ "$seen_turn" == yes && ( "$enable_turn" == yes || "$enable_turn" == no ) ]] || fail 'Installer state has a missing or invalid TURN setting.'
     [[ "$seen_meeting_password" == yes && ( "$enable_meeting_password" == yes || "$enable_meeting_password" == no ) ]] || fail 'Installer state has a missing or invalid meeting-password setting.'
@@ -57,6 +67,133 @@ read_env_value() {
     local key=$1
     [[ -f "$ENV_FILE" ]] || return 0
     awk -v key="$key" 'index($0, key "=") == 1 { value=substr($0, length(key) + 2); found=1 } END { if (found) print value }' "$ENV_FILE"
+}
+
+set_env() {
+    local key=$1 value=$2 temp
+    temp=$(mktemp)
+    awk -v key="$key" -v value="$value" '
+        BEGIN { found=0 }
+        index($0, key "=") == 1 { print key "=" value; found=1; next }
+        { print }
+        END { if (!found) print key "=" value }
+    ' "$ENV_FILE" > "$temp"
+    install -m 0600 "$temp" "$ENV_FILE"
+    rm -f "$temp"
+}
+
+set_env_if_empty() {
+    local key=$1 value=$2
+    [[ -n "$(read_env_value "$key")" ]] || set_env "$key" "$value"
+}
+
+is_canonical_install() {
+    local origin
+    [[ -d "$INSTALL_DIR/.git" && -f "$ENV_FILE" && -f "$INSTALL_DIR/docker-compose.yml" && -f /etc/caddy/Caddyfile ]] || return 1
+    origin=$(git -C "$INSTALL_DIR" config --get remote.origin.url 2>/dev/null) || return 1
+    case "$origin" in
+        "$REPOSITORY"|git@github.com:ashkan-esz/SlowMeet.git|https://github.com/ashkan-esz/SlowMeet) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+load_legacy_install_settings() {
+    local turn_config
+    local -a caddy_domains
+    mapfile -t caddy_domains < <(
+        sed -nE 's/^[[:space:]]*https?:\/\/([^[:space:]{]+)[[:space:]]*\{.*/\1/p' /etc/caddy/Caddyfile \
+            | tr '[:upper:]' '[:lower:]' | sort -u
+    )
+    [[ "${#caddy_domains[@]}" -eq 1 ]] || fail 'Could not identify exactly one SlowMeet domain from /etc/caddy/Caddyfile; refusing to update an ambiguous installation.'
+    domain=${caddy_domains[0]}
+    [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || fail "The configured Caddy host '$domain' is not a valid SlowMeet domain."
+
+    enable_turn=no
+    if [[ -f "$INSTALL_DIR/.turn-enabled" ]]; then
+        enable_turn=yes
+    else
+        turn_config=$(read_env_value TURN_CONFIG_FILE)
+        if [[ -n "$turn_config" ]]; then
+            [[ "$turn_config" == /* ]] || turn_config="$INSTALL_DIR/${turn_config#./}"
+            [[ -f "$turn_config" ]] && enable_turn=yes
+        fi
+    fi
+
+    enable_meeting_password=no
+    if [[ -n "$(read_env_value MEETING_PASSWORD)" ]]; then
+        enable_meeting_password=yes
+    fi
+}
+
+wait_for_updated_service() {
+    local healthy=no
+    log 'Waiting for SlowMeet to become healthy.'
+    for _ in $(seq 1 60); do
+        if docker compose exec -T slowmeet wget -qO- http://127.0.0.1:8080/ready >/dev/null 2>&1; then
+            healthy=yes
+            break
+        fi
+        sleep 2
+    done
+    [[ "$healthy" == yes ]] || {
+        docker compose ps
+        fail 'SlowMeet did not become ready. Review: docker compose logs --tail=100'
+    }
+    curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
+        || fail 'The local HTTPS health check failed.'
+}
+
+update_existing_install() {
+    local existing_ice admin_password meeting_password turn_urls
+
+    command -v git >/dev/null || fail 'Git is required to update this existing installation.'
+    command -v docker >/dev/null || fail 'Docker is required to update this existing installation.'
+    docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required to update this existing installation.'
+    git -C "$INSTALL_DIR" diff --quiet && git -C "$INSTALL_DIR" diff --cached --quiet \
+        || fail "$INSTALL_DIR has local tracked changes. Save or revert them before updating."
+
+    existing_ice=$(read_env_value ICE_PUBLIC_IP)
+    if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
+        fail 'Could not discover this VPS public IPv4 address, and ICE_PUBLIC_IP is not configured.'
+    fi
+
+    write_install_state incomplete
+    log 'Updating the existing SlowMeet checkout; preserving its environment, data volume, Caddy certificates, and TURN configuration.'
+    systemctl enable --now docker
+    systemctl enable --now caddy
+    git -C "$INSTALL_DIR" fetch --depth=1 origin master
+    git -C "$INSTALL_DIR" checkout -B master FETCH_HEAD
+
+    set_env_if_empty HTTP_PUBLISH_ADDRESS 127.0.0.1
+    if [[ -z "$existing_ice" ]]; then
+        set_env ICE_PUBLIC_IP "$public_ipv4"
+    fi
+
+    cd "$INSTALL_DIR"
+    if [[ "$enable_turn" == yes ]]; then
+        docker compose --profile turn up -d --build
+    else
+        docker compose up -d --build
+    fi
+    wait_for_updated_service
+
+    admin_password=$(read_env_value ADMIN_PASSWORD)
+    meeting_password=$(read_env_value MEETING_PASSWORD)
+    turn_urls=$(read_env_value TURN_URLS)
+    printf '\nSlowMeet is updated and ready at https://%s/\nAdmin: https://%s/admin\n' "$domain" "$domain"
+    if [[ -n "$admin_password" ]]; then
+        printf 'Admin password: %s\n' "$admin_password"
+    else
+        printf 'Admin access is disabled because ADMIN_PASSWORD is empty.\n'
+    fi
+    if [[ -n "$meeting_password" ]]; then
+        printf 'Meeting password: %s\n' "$meeting_password"
+    fi
+    if [[ "$enable_turn" == yes && -n "$turn_urls" ]]; then
+        printf 'TURN URLs: %s\n' "$turn_urls"
+    fi
+    printf '\nExisting credentials and application data were preserved.\n'
+    write_install_state complete
 }
 
 [[ "$(id -u)" -eq 0 ]] || fail 'Run this installer as root, for example through the README one-line command.'
@@ -91,14 +228,37 @@ case "${ID:-}" in
 esac
 command -v apt-get >/dev/null || fail 'This operating system does not provide apt-get.'
 
-resume_install=no
+install_mode=fresh
+install_operation=install
 if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
     read_install_state
-    [[ "$state_status" == incomplete ]] || fail 'SlowMeet is already installed by this installer; refusing to run a fresh installation over it.'
-    resume_install=yes
-    log "Resuming the incomplete installation for $domain with its saved options."
+    if [[ "$state_status" == incomplete && "$install_operation" == install ]]; then
+        if [[ -e "$ENV_FILE" ]]; then
+            is_canonical_install || fail "$ENV_FILE exists, but this is not a recognized SlowMeet installation. Refusing to resume it."
+        fi
+        install_mode=fresh-resume
+        log "Resuming the incomplete installation for $domain with its saved options."
+    elif [[ -e "$ENV_FILE" ]]; then
+        is_canonical_install || fail "$ENV_FILE exists, but this is not a recognized SlowMeet installation. Refusing to update it."
+        load_legacy_install_settings
+        install_mode=update
+        install_operation=update
+        if [[ "$state_status" == incomplete ]]; then
+            log "Resuming the interrupted update for $domain with its current options."
+        else
+            log "Updating the existing SlowMeet installation for $domain."
+        fi
+    elif [[ "$state_status" == complete ]]; then
+        fail 'Installer state says SlowMeet is installed, but its environment file is missing. Refusing to overwrite the installation.'
+    else
+        fail 'Installer state marks an update incomplete, but the SlowMeet environment file is missing.'
+    fi
 elif [[ -e "$ENV_FILE" ]]; then
-    fail "$ENV_FILE already exists without matching installer state. This command is for a fresh install; it will not overwrite an existing configuration."
+    is_canonical_install || fail "$ENV_FILE exists, but this is not a recognized SlowMeet installation. Refusing to update it."
+    load_legacy_install_settings
+    install_mode=update
+    install_operation=update
+    log "Detected a legacy SlowMeet installation for $domain; its existing options will be preserved."
 else
     domain=$(prompt 'Domain for SlowMeet (for example, meet.example.com)' '')
     domain=${domain,,}
@@ -116,21 +276,30 @@ else
     fi
 fi
 
-public_ipv4=$(curl -4fsS --max-time 15 https://api.ipify.org) || fail 'Could not discover this VPS public IPv4 address.'
-resolved_ipv4=$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u || true)
-[[ -n "$resolved_ipv4" ]] || fail "$domain has no IPv4 DNS record yet. Point its A record to $public_ipv4, wait for DNS, then rerun."
-if [[ "$resolved_ipv4" != "$public_ipv4" ]]; then
-    fail "$domain resolves to $(tr '\n' ' ' <<<"$resolved_ipv4"), not this VPS IPv4 ($public_ipv4). Fix DNS and rerun."
-fi
-resolved_ipv6=$(getent ahostsv6 "$domain" | awk '{print $1}' | sort -u || true)
-if [[ -n "$resolved_ipv6" ]]; then
-    public_ipv6=$(curl -6fsS --max-time 15 https://api64.ipify.org || true)
-    if [[ -z "$public_ipv6" ]] || [[ "$resolved_ipv6" != "$public_ipv6" ]]; then
-        fail "$domain also has an AAAA record that does not match this VPS IPv6 address. Remove it or point it to this VPS, then rerun."
+if [[ "$install_mode" == update ]]; then
+    public_ipv4=$(curl -4fsS --max-time 15 https://api.ipify.org || true)
+else
+    public_ipv4=$(curl -4fsS --max-time 15 https://api.ipify.org) || fail 'Could not discover this VPS public IPv4 address.'
+    resolved_ipv4=$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u || true)
+    [[ -n "$resolved_ipv4" ]] || fail "$domain has no IPv4 DNS record yet. Point its A record to $public_ipv4, wait for DNS, then rerun."
+    if [[ "$resolved_ipv4" != "$public_ipv4" ]]; then
+        fail "$domain resolves to $(tr '\n' ' ' <<<"$resolved_ipv4"), not this VPS IPv4 ($public_ipv4). Fix DNS and rerun."
+    fi
+    resolved_ipv6=$(getent ahostsv6 "$domain" | awk 'tolower($1) !~ /^::ffff:/ {print $1}' | sort -u || true)
+    if [[ -n "$resolved_ipv6" ]]; then
+        public_ipv6=$(curl -6fsS --max-time 15 https://api64.ipify.org || true)
+        if [[ -z "$public_ipv6" ]] || [[ "$resolved_ipv6" != "$public_ipv6" ]]; then
+            fail "$domain also has an AAAA record that does not match this VPS IPv6 address. Remove it or point it to this VPS, then rerun."
+        fi
     fi
 fi
 
-if [[ "$resume_install" == no ]]; then
+if [[ "$install_mode" == update ]]; then
+    update_existing_install
+    exit 0
+fi
+
+if [[ "$install_mode" == fresh ]]; then
     write_install_state incomplete
 fi
 
@@ -261,24 +430,12 @@ https://$domain {
 EOF
 
 if [[ -e "$ENV_FILE" ]]; then
-    [[ "$resume_install" == yes && -f "$ENV_FILE" ]] || fail "$ENV_FILE appeared during installation; refusing to overwrite it."
-    log 'Preserving the existing SlowMeet environment configuration and credentials.'
+    [[ "$install_mode" == fresh-resume && -f "$ENV_FILE" ]] \
+        || fail "$ENV_FILE appeared during installation; refusing to overwrite it."
+    log 'Preserving the environment and credentials created by the interrupted installation.'
 else
     install -m 0600 "$INSTALL_DIR/.env.example" "$ENV_FILE"
 fi
-
-set_env() {
-    local key=$1 value=$2 temp
-    temp=$(mktemp)
-    awk -v key="$key" -v value="$value" '
-        BEGIN { found=0 }
-        index($0, key "=") == 1 { print key "=" value; found=1; next }
-        { print }
-        END { if (!found) print key "=" value }
-    ' "$ENV_FILE" > "$temp"
-    install -m 0600 "$temp" "$ENV_FILE"
-    rm -f "$temp"
-}
 
 set_env ADMIN_PASSWORD "$admin_password"
 set_env MEETING_PASSWORD "$meeting_password"
