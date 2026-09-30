@@ -2,8 +2,10 @@ package webrtc
 
 import (
 	"fmt"
+	"net"
 	"sync"
 
+	ice "github.com/pion/ice/v4"
 	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
 )
@@ -38,6 +40,12 @@ func NewPeerWithTURNURLsAndPortRange(iceServers, turnURLs []string, username, pa
 }
 
 func NewPeerWithTURNURLsAndPortRangeAndPolicy(iceServers, turnURLs []string, username, password string, portMin, portMax int, ipv4Only bool, transportPolicy string) (*Peer, error) {
+	return NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
+		iceServers, turnURLs, username, password, portMin, portMax, ipv4Only, transportPolicy, "",
+	)
+}
+
+func NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(iceServers, turnURLs []string, username, password string, portMin, portMax int, ipv4Only bool, transportPolicy, publicIP string) (*Peer, error) {
 	configuration := pion.Configuration{}
 	switch transportPolicy {
 	case "", "all":
@@ -57,7 +65,7 @@ func NewPeerWithTURNURLsAndPortRangeAndPolicy(iceServers, turnURLs []string, use
 			Credential: password,
 		})
 	}
-	return newPeerWithPortRange(configuration, portMin, portMax, ipv4Only)
+	return newPeerWithPortRange(configuration, portMin, portMax, ipv4Only, publicIP)
 }
 
 func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
@@ -65,10 +73,10 @@ func NewPeerWithConfiguration(configuration pion.Configuration) (*Peer, error) {
 }
 
 func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int) (*Peer, error) {
-	return newPeerWithPortRange(configuration, portMin, portMax, false)
+	return newPeerWithPortRange(configuration, portMin, portMax, false, "")
 }
 
-func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool) (*Peer, error) {
+func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool, publicIP string) (*Peer, error) {
 	settingEngine := pion.SettingEngine{}
 	if portMin != 0 || portMax != 0 {
 		if portMin < 1 || portMin > 65535 || portMax < 1 || portMax > 65535 || portMin > portMax {
@@ -80,6 +88,13 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	}
 	if ipv4Only {
 		settingEngine.SetNetworkTypes([]pion.NetworkType{pion.NetworkTypeUDP4})
+	}
+	if publicIP != "" {
+		if net.ParseIP(publicIP) == nil {
+			return nil, fmt.Errorf("ICE public IP must be a valid IP address")
+		}
+		settingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+		settingEngine.SetNAT1To1IPs([]string{publicIP}, pion.ICECandidateTypeHost)
 	}
 	api := pion.NewAPI(pion.WithSettingEngine(settingEngine))
 	connection, err := api.NewPeerConnection(configuration)

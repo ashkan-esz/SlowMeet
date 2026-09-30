@@ -57,6 +57,27 @@ func TestNewPeerWithTURNURLsAndIPv4OnlyCreatesConnection(t *testing.T) {
 	defer peer.Close()
 }
 
+func TestNewPeerWithPublicIPCreatesConnection(t *testing.T) {
+	peer, err := NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
+		nil, nil, "", "", 50000, 50010, true, "all", "203.0.113.42",
+	)
+	if err != nil {
+		t.Fatalf("NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP() error = %v", err)
+	}
+	defer peer.Close()
+	if peer.Connection() == nil {
+		t.Fatal("Connection() returned nil")
+	}
+}
+
+func TestNewPeerWithInvalidPublicIPFails(t *testing.T) {
+	if _, err := NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
+		nil, nil, "", "", 50000, 50010, true, "all", "not-an-ip",
+	); err == nil {
+		t.Fatal("expected invalid public IP to fail")
+	}
+}
+
 func TestNewPeerWithPortRangeRejectsInvalidRange(t *testing.T) {
 	if _, err := NewPeerWithPortRange(pion.Configuration{}, 50010, 50000); err == nil {
 		t.Fatal("expected invalid ICE UDP port range to fail")

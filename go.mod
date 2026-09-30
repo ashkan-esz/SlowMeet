@@ -11,7 +11,7 @@ require (
 require (
 	github.com/pion/datachannel v1.5.9 // indirect
 	github.com/pion/dtls/v3 v3.0.3 // indirect
-	github.com/pion/ice/v4 v4.0.2 // indirect
+	github.com/pion/ice/v4 v4.0.2
 	github.com/pion/interceptor v0.1.37 // indirect
 	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/mdns/v2 v2.0.7 // indirect

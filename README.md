@@ -45,6 +45,35 @@ Run the local HTTP smoke test:
 
 The complete starter configuration is in `.env.example`.
 
+## One-command VPS deployment
+
+On a fresh Ubuntu or Debian VPS, point an A record for your domain to the VPS
+IPv4 address. If the domain has an AAAA record, point it to the VPS IPv6 address
+or remove it. Then run this command as a user with `sudo` access:
+
+```sh
+sudo bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://raw.githubusercontent.com/ashkan-esz/SlowMeet/master/deploy/install.sh | bash'
+```
+
+The installer asks for the domain and whether to enable optional TURN. It
+installs Docker Compose and Caddy, configures HTTPS and the host firewall,
+generates secure admin credentials, builds and starts SlowMeet, and waits for
+the health check. If you enable TURN, it also configures coturn with short-lived
+credentials and TLS. The installer prints the meeting URL and generated
+passwords when setup completes.
+
+If setup fails after provisioning starts, fix the reported issue and run the
+same command again. The installer resumes with the saved domain and options,
+preserving any configuration and credentials it already created.
+
+The domain must already resolve to the VPS before installation so HTTPS
+certificates can be issued. The installer opens the VPS host firewall for SSH,
+HTTP, HTTPS, and the UDP ports used for WebRTC. If you enable TURN, it also
+opens TCP/UDP 3478, TLS/TCP 5349, and the configured TURN relay range. If your
+provider has a separate cloud firewall, it must already allow those same
+ports; the installer cannot change provider dashboard rules. Keep the
+generated admin password somewhere safe.
+
 Set `MEETING_PASSWORD` to require a password at join time. Set
 `ADMIN_PASSWORD` separately to enable `/admin` and protect runtime settings.
 Passwords are never sent to the frontend or written to logs.
@@ -65,7 +94,7 @@ include UDP, TCP, and TLS/TCP transports. A typical production list is:
 ```text
 turn:turn.example.com:3478?transport=udp
 turn:turn.example.com:3478?transport=tcp
-turns:turn.example.com:443?transport=tcp
+turns:turn.example.com:5349?transport=tcp
 ```
 
 Set `TURN_SHARED_SECRET` to enable short-lived browser and server credentials;
@@ -77,7 +106,8 @@ browsers.
 
 `ICE_IPV4_ONLY=true` is the default because it avoids broken or slow IPv6
 paths. Set it to `false` only after IPv6 has been tested from your target
-networks.
+networks. `ICE_PUBLIC_IP` optionally rewrites host ICE candidates for servers
+behind 1:1 NAT; the VPS installer detects and sets the public IPv4 address.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and
 `MAX_AUDIO_BITRATE` are enforced as hard ceilings. The quality ceiling limits
@@ -144,10 +174,11 @@ The Compose example publishes the configured `ICE_UDP_PORT_MIN` through
 connectivity. Allow that range through the VPS firewall. TURN remains
 recommended for restrictive NATs and networks that block inbound UDP.
 
-TURN is optional and can run as the Compose `turn` profile. Open its client listeners on UDP/TCP 3478 and
-TLS/TCP 443, plus the coturn UDP relay range configured by `min-port` and
-`max-port`. If HTTPS already uses TCP 443 on the same address, use a separate
-TURN IP or TCP passthrough routing.
+TURN is optional and can run as the Compose `turn` profile. Open its client
+listeners on UDP/TCP 3478 and TLS/TCP 5349, plus the coturn UDP relay range
+configured by `min-port` and `max-port`. If you need TURN over TCP 443 while
+HTTPS already uses that port on the same address, use a separate TURN IP or TCP
+passthrough routing.
 
 The optional `turn` profile expects a local copy of
 `deploy/coturn/turnserver.conf.example` at `deploy/coturn/turnserver.conf` and

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type Config struct {
 	SimulcastEnabled    bool
 	ICEUDPPortMin       int
 	ICEUDPPortMax       int
+	ICEPublicIP         string
 	MaxParticipants     int
 	DefaultVideoQuality string
 	MaxVideoQuality     string
@@ -95,6 +97,7 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	icePublicIP := os.Getenv("ICE_PUBLIC_IP")
 	iceTransportPolicy := envString("ICE_TRANSPORT_POLICY", "all")
 	simulcastEnabled, err := envBool("SIMULCAST_ENABLED", false)
 	if err != nil {
@@ -118,6 +121,7 @@ func LoadFromEnv() (Config, error) {
 		SimulcastEnabled:    simulcastEnabled,
 		ICEUDPPortMin:       iceUDPPortMin,
 		ICEUDPPortMax:       iceUDPPortMax,
+		ICEPublicIP:         icePublicIP,
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
 		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
@@ -139,6 +143,9 @@ func LoadFromEnv() (Config, error) {
 func (c Config) Validate() error {
 	if c.HTTPAddr == "" {
 		return fmt.Errorf("HTTP_ADDR must not be empty")
+	}
+	if c.ICEPublicIP != "" && net.ParseIP(c.ICEPublicIP) == nil {
+		return fmt.Errorf("ICE_PUBLIC_IP must be a valid IP address")
 	}
 	if c.ICETransportPolicy != "" && c.ICETransportPolicy != "all" && c.ICETransportPolicy != "relay" {
 		return fmt.Errorf("ICE_TRANSPORT_POLICY must be all or relay")

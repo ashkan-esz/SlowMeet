@@ -4,7 +4,7 @@
 # TLS-over-TCP fallback for browsers on restrictive networks.
 
 listening-port=3478
-tls-listening-port=443
+tls-listening-port=5349
 
 fingerprint
 use-auth-secret

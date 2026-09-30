@@ -596,9 +596,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			turnUsername = username
 			turnPassword = password
 		}
-		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRangeAndPolicy(
+		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
 			cfg.STUNServers, cfg.EffectiveTURNURLs(), turnUsername, turnPassword,
-			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy,
+			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy, cfg.ICEPublicIP,
 		)
 		if err != nil {
 			if resumed {
