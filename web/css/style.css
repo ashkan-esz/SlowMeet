@@ -3366,3 +3366,17 @@ body { overflow-x: hidden; }
     grid-template-rows: minmax(0, 1fr);
   }
 }
+
+@media (min-width: 1601px) {
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="4"] > .layout-filmstrip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="4"] > .layout-filmstrip > .participant-tile {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    align-self: center;
+  }
+}
