@@ -56,19 +56,24 @@ command on a standard existing SlowMeet installation to update it in place:
 sudo bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://raw.githubusercontent.com/ashkan-esz/SlowMeet/master/deploy/install.sh | bash'
 ```
 
-For a fresh installation, the installer asks for the domain and whether to
-enable optional TURN. It installs Docker Compose and Caddy, configures HTTPS and
-the host firewall, generates secure admin credentials, builds and starts
-SlowMeet, and waits for the health check. If you enable TURN, it also configures
-coturn with short-lived credentials and TLS. The installer prints the meeting
-URL and generated passwords when setup completes.
+For a fresh installation, the installer asks for the domain, optional TURN and
+meeting-password settings, the container engine (`docker` by default or
+`podman`), the local app port (default `8080`), and an admin password. Admin
+password entry is hidden; leave it blank to generate one. Podman installs use
+`podman-compose` and a SlowMeet-specific systemd unit to start containers after
+reboot. If Nginx is already running, the installer adds a dedicated virtual
+host and uses Certbot for HTTPS
+without replacing other Nginx sites. Otherwise, it configures Caddy. It builds
+and starts SlowMeet, waits for health checks, and prints the chosen credentials
+when setup completes.
 
 When it detects an existing installation, it fetches the latest source, rebuilds
 and restarts SlowMeet, and preserves the existing environment, credentials,
-application data, Caddy certificates, and TURN configuration. It prints the
-existing credentials when the health checks pass. The service is briefly
-unavailable while the updated container starts. Existing installations must use
-the standard `/opt/slowmeet` checkout and Caddy configuration.
+application data, container engine, proxy choice, certificates, and TURN
+configuration. It prints the existing credentials when the health checks pass.
+The service is briefly unavailable while the updated container starts. Existing
+installations must use the standard `/opt/slowmeet` checkout and
+installer-managed proxy configuration.
 
 If installation or update fails after provisioning starts, fix the reported
 issue and run the same command again. The installer resumes with the saved
