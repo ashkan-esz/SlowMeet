@@ -22,8 +22,10 @@ function unpinParticipant(pinnedParticipantIds, participantId) {
     .filter((id) => id !== participantId);
 }
 
-function visibleParticipantIds(participantOrder, localParticipantId, showSelfView) {
-  return (participantOrder || []).filter((id) => showSelfView || id !== localParticipantId);
+function visibleParticipantIds(participantOrder, localParticipantId, showSelfView, hiddenParticipantIds = []) {
+  const hidden = new Set(hiddenParticipantIds || []);
+  return (participantOrder || []).filter((id) =>
+    !hidden.has(id) && (showSelfView || id !== localParticipantId));
 }
 
 function parseDebugMode(search = "") {

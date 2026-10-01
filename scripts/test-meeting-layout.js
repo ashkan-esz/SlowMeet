@@ -88,6 +88,10 @@ if (visibleParticipantIds(["local", "p1", "p2"], "local", false).join(",") !== "
 if (visibleParticipantIds(["local", "p1"], "local", true).length !== 2) {
   throw new Error("self-view enabled should preserve all participants");
 }
+if (visibleParticipantIds(["local", "p1", "p2"], "local", true, ["p2"]).join(",") !== "local,p1" ||
+    visibleParticipantIds(["local", "p1", "p2"], "local", false, ["p1"]).join(",") !== "p2") {
+  throw new Error("hidden participant tiles should be excluded without changing the remaining order or self-view");
+}
 const five = chooseParticipantLayout({ width: 1200, height: 620, count: 5 });
 if (five.columns !== 3 || five.rows !== 2 || five.rowCounts.join(",") !== "3,2") {
   throw new Error("five tiles should use the largest fitting responsive layout");
@@ -132,6 +136,16 @@ if (state.speaking) throw new Error("speaker deactivation should occur after the
 
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+if (!indexSource.includes('data-action="hide-tile"') ||
+    !appSource.includes("const hiddenParticipantIDs = new Set()") ||
+    !appSource.includes('showTile.dataset.action = "show-tile"') ||
+    !appSource.includes("hiddenParticipantIDs.has(participantID)")) {
+  throw new Error("local tile hiding must be available from the tile menu and restorable from the People list");
+}
+if (!appSource.includes("pinnedParticipantIDs = unpinParticipant(pinnedParticipantIDs, participantID)") ||
+    !appSource.includes("(!element.item.hidden || hiddenParticipantIDs.has(participantID))")) {
+  throw new Error("hiding a pinned tile must clear its pin while preserving its video subscription");
+}
 const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
 for (const element of [
   'class="mobile-more-actions"',

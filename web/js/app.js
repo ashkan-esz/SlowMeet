@@ -100,6 +100,7 @@ const participantPageStatus = document.querySelector("#participant-page-status")
 const participantFocusStatus = document.querySelector("#participant-focus-status");
 const participantMenu = document.querySelector("#participant-menu");
 const participantMenuPin = document.querySelector("#participant-menu-pin");
+const participantMenuHideTile = document.querySelector("#participant-menu-hide-tile");
 const participantMenuSelfView = document.querySelector("#participant-menu-self-view");
 const networkLabel = document.querySelector("[data-network-label]");
 const networkSummary = document.querySelector("[data-network-summary]");
@@ -145,6 +146,7 @@ let participantPage = 0;
 let focusedParticipantID;
 let pipDragState;
 let pinnedParticipantIDs = [];
+const hiddenParticipantIDs = new Set();
 let participantMenuOwner;
 let layoutFrame;
 let preferredLayoutColumns = 0;
@@ -172,10 +174,12 @@ function renderMeetingLayout() {
   meetingLayoutHost.dataset.layoutMode = mode;
   participants.hidden = mode !== "grid";
   pinnedLayout.hidden = mode !== "pinned";
+  const visibleIDs = new Set(typeof visibleParticipantIds === "function"
+    ? visibleParticipantIds(participantOrder, localParticipantID, meetingViewState.showSelfView, hiddenParticipantIDs)
+    : participantOrder.filter((id) => !hiddenParticipantIDs.has(id)));
   const visible = participantOrder
     .map((id) => participantElements.get(id))
-    .filter((element) => element && !element.item.hidden &&
-      (meetingViewState.showSelfView || !element.item.classList.contains("is-local")));
+    .filter((element) => element && !element.item.hidden && visibleIDs.has(element.item.dataset.participantId));
   const excluded = participantOrder
     .map((id) => participantElements.get(id))
     .filter((element) => element && !visible.includes(element));
@@ -417,6 +421,16 @@ function renderPeopleList() {
       ? `${baseState}, Hand raised${raisedHandCount() > 1 && handOrder > 0 ? ` #${handOrder}` : ""}`
       : baseState;
     row.append(name, state);
+    if (hiddenParticipantIDs.has(participantID)) {
+      const showTile = document.createElement("button");
+      showTile.type = "button";
+      showTile.className = "text-button people-list__tile-action";
+      showTile.dataset.action = "show-tile";
+      showTile.dataset.participantId = participantID;
+      showTile.textContent = "Show tile";
+      showTile.setAttribute("aria-label", `Show ${element.name.textContent} tile`);
+      row.append(showTile);
+    }
     peopleList.append(row);
   });
   if (peopleCount) peopleCount.textContent = String(participantElements.size);
@@ -474,7 +488,7 @@ function updateParticipantVideoVisibility(element) {
 function updateParticipantPagination() {
   if (!participants) return;
   const remoteEntries = [...participantElements.entries()]
-    .filter(([participantID]) => participantID !== localParticipantID);
+    .filter(([participantID]) => participantID !== localParticipantID && !hiddenParticipantIDs.has(participantID));
   const pageCount = Math.max(1, Math.ceil(remoteEntries.length / participantPageSize));
   if (screenShareOwner && remoteEntries.length > participantPageSize) {
     const ownerIndex = remoteEntries.findIndex(([participantID]) => participantID === screenShareOwner);
@@ -499,7 +513,7 @@ function updateParticipantPagination() {
   participantElements.forEach((element, participantID) => {
     const localVisible = participantID === localParticipantID && selfViewVisible;
     const pinned = pinnedParticipantIDs.includes(participantID);
-    const visible = localVisible || (participantID !== localParticipantID &&
+    const visible = localVisible || (participantID !== localParticipantID && !hiddenParticipantIDs.has(participantID) &&
       (remoteEntries.length === 0 || visibleRemoteIDs.has(participantID) || pinned));
     element.item.hidden = !visible;
     if (!visible && participantID === focusedParticipantID) {
@@ -530,7 +544,8 @@ function updateParticipantPagination() {
   if (participantPageNext) participantPageNext.disabled = !paginated || participantPage >= pageCount - 1;
   requestParticipantLayout();
   const visibleCameraIDs = [...participantElements.entries()]
-    .filter(([participantID, element]) => participantID !== localParticipantID && !element.item.hidden)
+    .filter(([participantID, element]) => participantID !== localParticipantID &&
+      (!element.item.hidden || hiddenParticipantIDs.has(participantID)))
     .map(([participantID]) => participantID);
   sendVideoSubscriptions(receiveVideoEnabled ? visibleCameraIDs : []);
 }
@@ -632,9 +647,43 @@ function setPinnedParticipant(participantID) {
   renderMeetingLayout();
 }
 
+function setParticipantTileHidden(participantID, hidden) {
+  const element = participantElements.get(participantID);
+  if (!element || participantID === localParticipantID) return;
+  const shouldHide = Boolean(hidden);
+  if (hiddenParticipantIDs.has(participantID) === shouldHide) return;
+
+  if (shouldHide) {
+    hiddenParticipantIDs.add(participantID);
+    if (pinnedParticipantIDs.includes(participantID)) {
+      pinnedParticipantIDs = unpinParticipant(pinnedParticipantIDs, participantID);
+      meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs];
+      element.item.classList.remove("is-pinned");
+      participants.classList.toggle("has-pinned", pinnedParticipantIDs.length > 0);
+      participants.dataset.pinned = pinnedParticipantIDs.length > 0 ? "true" : "false";
+    }
+  } else {
+    hiddenParticipantIDs.delete(participantID);
+    const remoteIndex = [...participantElements.keys()]
+      .filter((id) => id !== localParticipantID && !hiddenParticipantIDs.has(id))
+      .indexOf(participantID);
+    if (remoteIndex >= 0) participantPage = Math.floor(remoteIndex / participantPageSize);
+  }
+
+  updateParticipantPagination();
+  renderMeetingLayout();
+  renderPeopleList();
+  const name = element.name.textContent || "Participant";
+  if (participantFocusStatus) participantFocusStatus.textContent = shouldHide
+    ? `${name}'s tile hidden for you.`
+    : `${name}'s tile shown.`;
+  if (shouldHide) participantsButton?.focus();
+  else element.item.querySelector(".participant-menu-trigger")?.focus();
+}
+
 function openParticipantMenu(participantID, trigger) {
   const element = participantElements.get(participantID);
-  if (!element || !participantMenu || !participantMenuPin || !participantMenuSelfView) return;
+  if (!element || !participantMenu || !participantMenuPin || !participantMenuHideTile || !participantMenuSelfView) return;
   if (participantMenuOwner?.trigger === trigger) {
     closeParticipantMenu(false);
     return;
@@ -644,6 +693,8 @@ function openParticipantMenu(participantID, trigger) {
   participantMenu.setAttribute("aria-label", `${element.name.textContent} actions`);
   participantMenuPin.textContent = pinnedParticipantIDs.includes(participantID)
     ? "Unpin participant" : "Pin participant";
+  participantMenuHideTile.hidden = participantID === localParticipantID;
+  participantMenuHideTile.textContent = hiddenParticipantIDs.has(participantID) ? "Show tile" : "Hide tile";
   participantMenuSelfView.hidden = participantID !== localParticipantID;
   participantMenuSelfView.textContent = selfViewVisible ? "Hide self-view" : "Show self-view";
   participantMenu.hidden = false;
@@ -743,8 +794,16 @@ participantMenu?.addEventListener("click", (event) => {
       : `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} unpinned.`;
   } else if (action === "self-view" && owner.participantID === localParticipantID) {
     setSelfViewVisibility(false);
+  } else if (action === "hide-tile" && owner.participantID !== localParticipantID) {
+    setParticipantTileHidden(owner.participantID, true);
   }
   closeParticipantMenu(true);
+});
+
+peopleList?.addEventListener("click", (event) => {
+  const button = event.target.closest?.('[data-action="show-tile"]');
+  if (!button) return;
+  setParticipantTileHidden(button.dataset.participantId, false);
 });
 
 participantMenu?.addEventListener("keydown", (event) => {
@@ -3995,6 +4054,7 @@ screen.addEventListener("click", toggleScreenShare);
 receiveVideo.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 
 leave.addEventListener("click", () => {
+  hiddenParticipantIDs.clear();
   intentionalClose = true;
   socketGeneration++;
   clearTimeout(reconnectTimer);
@@ -4098,11 +4158,13 @@ leave.addEventListener("click", () => {
   welcomeGrid.hidden = true;
   meeting.hidden = true;
   form.hidden = true;
+  hiddenParticipantIDs.clear();
   if (meetingEnded) meetingEnded.hidden = false;
   joinButton.disabled = false;
 });
 
 rejoin?.addEventListener("click", () => {
+  hiddenParticipantIDs.clear();
   meetingEnded.hidden = true;
   welcomeGrid.hidden = false;
   form.hidden = false;
