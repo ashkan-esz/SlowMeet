@@ -12,9 +12,19 @@ readonly NGINX_SITE=/etc/nginx/conf.d/slowmeet-installer.conf
 readonly PROXY_MODE_FILE=/etc/slowmeet/proxy-mode
 readonly CONTAINER_ENGINE_FILE=/etc/slowmeet/container-engine
 readonly PODMAN_SERVICE_FILE=/etc/systemd/system/slowmeet-podman.service
+readonly CADDY_BEGIN_MARKER='# BEGIN SlowMeet installer managed site'
+readonly CADDY_END_MARKER='# END SlowMeet installer managed site'
 
 log() { printf '[slowmeet] %s\n' "$*"; }
 fail() { printf '[slowmeet] ERROR: %s\n' "$*" >&2; exit 1; }
+
+report_unexpected_error() {
+    local status=$? line=${BASH_LINENO[0]:-unknown}
+    printf '[slowmeet] ERROR: command failed near line %s (exit %s).\n' "$line" "$status" >&2
+    exit "$status"
+}
+
+trap report_unexpected_error ERR
 
 compose() (
     cd "$INSTALL_DIR"
@@ -319,6 +329,9 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     log "Updating the existing SlowMeet checkout behind $proxy_mode; preserving its environment, app port, certificates, data volume, and TURN configuration."
     enable_container_engine
     systemctl enable --now "$proxy_mode"
+    if [[ "$proxy_mode" == nginx ]]; then
+        ensure_nginx_ipv6_listeners
+    fi
     git -C "$INSTALL_DIR" fetch --depth=1 origin master
     git -C "$INSTALL_DIR" checkout -B master FETCH_HEAD
 
@@ -409,14 +422,21 @@ EOF
 }
 
 caddy_config_matches_install() {
-    local expected phase marker
-    [[ -f /etc/caddy/Caddyfile ]] || return 0
-    [[ ! -L /etc/caddy/Caddyfile ]] || return 1
+    local caddyfile=${1:-/etc/caddy/Caddyfile} expected phase marker
+    [[ -f "$caddyfile" ]] || return 0
+    [[ ! -L "$caddyfile" ]] || return 1
+
+    if grep -Fxq "$CADDY_BEGIN_MARKER" "$caddyfile" \
+        || grep -Fxq "$CADDY_END_MARKER" "$caddyfile"; then
+        caddy_managed_block_matches_install "$caddyfile"
+        return
+    fi
+
     expected=$(mktemp)
     for phase in bootstrap final; do
         for marker in yes no; do
             write_expected_caddyfile "$phase" "$marker" > "$expected"
-            if cmp -s "$expected" /etc/caddy/Caddyfile; then
+            if cmp -s "$expected" "$caddyfile"; then
                 rm -f "$expected"
                 return 0
             fi
@@ -426,8 +446,200 @@ caddy_config_matches_install() {
     return 1
 }
 
+write_caddy_managed_block() {
+    local phase=$1
+    printf '%s\n' "$CADDY_BEGIN_MARKER"
+    write_expected_caddyfile "$phase" no
+    printf '%s\n' "$CADDY_END_MARKER"
+}
+
+extract_caddy_managed_block() {
+    local caddyfile=$1 output=$2
+    awk -v begin="$CADDY_BEGIN_MARKER" -v end="$CADDY_END_MARKER" '
+        $0 == begin {
+            if (inside || seen) bad = 1
+            inside = 1
+            seen = 1
+            print
+            next
+        }
+        $0 == end {
+            if (!inside) bad = 1
+            inside = 0
+            print
+            next
+        }
+        inside { print }
+        END { if (!seen || inside || bad) exit 1 }
+    ' "$caddyfile" > "$output"
+}
+
+strip_caddy_managed_block() {
+    local caddyfile=$1 output=$2
+    awk -v begin="$CADDY_BEGIN_MARKER" -v end="$CADDY_END_MARKER" '
+        $0 == begin {
+            if (inside || seen) bad = 1
+            inside = 1
+            seen = 1
+            next
+        }
+        $0 == end {
+            if (!inside) bad = 1
+            inside = 0
+            next
+        }
+        !inside { print }
+        END { if (!seen || inside || bad) exit 1 }
+    ' "$caddyfile" > "$output"
+}
+
+caddy_managed_block_matches_install() {
+    local caddyfile=$1 extracted expected phase matches=no
+    extracted=$(mktemp)
+    expected=$(mktemp)
+    if ! extract_caddy_managed_block "$caddyfile" "$extracted"; then
+        rm -f "$extracted" "$expected"
+        return 1
+    fi
+    for phase in bootstrap final; do
+        write_caddy_managed_block "$phase" > "$expected"
+        if cmp -s "$extracted" "$expected"; then
+            matches=yes
+            break
+        fi
+    done
+    rm -f "$extracted" "$expected"
+    [[ "$matches" == yes ]]
+}
+
+legacy_caddy_config_matches_install() {
+    local caddyfile=$1 expected phase marker matches=no
+    expected=$(mktemp)
+    for phase in bootstrap final; do
+        for marker in yes no; do
+            write_expected_caddyfile "$phase" "$marker" > "$expected"
+            if cmp -s "$expected" "$caddyfile"; then
+                matches=yes
+                break 2
+            fi
+        done
+    done
+    rm -f "$expected"
+    [[ "$matches" == yes ]]
+}
+
+write_caddy_site() (
+    local phase=$1 caddyfile=${2:-/etc/caddy/Caddyfile} dir temp base block
+    temp= base= block=
+    trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" "${base:-}" "${block:-}" || true; exit "$cleanup_status"' EXIT
+    dir=$(dirname "$caddyfile")
+    [[ ! -L "$caddyfile" && ( ! -e "$caddyfile" || -f "$caddyfile" ) ]] \
+        || fail "Caddy configuration at $caddyfile is not a regular file; refusing to replace it."
+
+    temp=$(mktemp "$dir/.Caddyfile.slowmeet.XXXXXX")
+    base=$(mktemp "$dir/.Caddyfile.slowmeet.base.XXXXXX")
+    block=$(mktemp "$dir/.Caddyfile.slowmeet.block.XXXXXX")
+    write_caddy_managed_block "$phase" > "$block"
+
+    if [[ -f "$caddyfile" ]]; then
+        if grep -Fxq "$CADDY_BEGIN_MARKER" "$caddyfile" \
+            || grep -Fxq "$CADDY_END_MARKER" "$caddyfile"; then
+            caddy_managed_block_matches_install "$caddyfile" \
+                || fail 'The managed SlowMeet block in the Caddyfile was modified; refusing to replace it.'
+            strip_caddy_managed_block "$caddyfile" "$base" \
+                || fail 'The managed SlowMeet block in the Caddyfile is malformed.'
+        elif legacy_caddy_config_matches_install "$caddyfile"; then
+            : > "$base"
+        else
+            cp -- "$caddyfile" "$base"
+        fi
+    else
+        : > "$base"
+    fi
+
+    if [[ -s "$base" ]]; then
+        cat "$base" > "$temp"
+        printf '\n' >> "$temp"
+    fi
+    cat "$block" >> "$temp"
+    if ! caddy validate --config "$temp" --adapter caddyfile; then
+        rm -f "$temp" "$base" "$block"
+        fail 'The merged Caddy configuration is invalid; the active configuration was left unchanged.'
+    fi
+    chown root:caddy "$temp" || fail 'Could not set ownership on the merged Caddy configuration.'
+    chmod 0640 "$temp" || fail 'Could not set permissions on the merged Caddy configuration.'
+    mv -f "$temp" "$caddyfile"
+)
+
+remove_caddy_site() (
+    local caddyfile=${1:-/etc/caddy/Caddyfile} dir temp base fallback backup preserve_backup=no
+    [[ -f "$caddyfile" ]] || return 0
+    temp= base= fallback= backup=
+    trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" "${base:-}" "${fallback:-}" || true; if [[ "${preserve_backup:-no}" != yes ]]; then rm -f -- "${backup:-}" || true; fi; exit "$cleanup_status"' EXIT
+    [[ ! -L "$caddyfile" ]] || fail "Caddy configuration at $caddyfile is a symlink; refusing to modify it."
+
+    dir=$(dirname "$caddyfile")
+    temp=$(mktemp "$dir/.Caddyfile.slowmeet.XXXXXX")
+    base=$(mktemp "$dir/.Caddyfile.slowmeet.base.XXXXXX")
+    fallback=$(mktemp "$dir/.Caddyfile.slowmeet.fallback.XXXXXX")
+    if grep -Fxq "$CADDY_BEGIN_MARKER" "$caddyfile" \
+        || grep -Fxq "$CADDY_END_MARKER" "$caddyfile"; then
+        caddy_managed_block_matches_install "$caddyfile" \
+            || fail 'The managed SlowMeet block in the Caddyfile was modified; refusing to remove it.'
+        strip_caddy_managed_block "$caddyfile" "$base" \
+            || fail 'The managed SlowMeet block in the Caddyfile is malformed.'
+    elif legacy_caddy_config_matches_install "$caddyfile"; then
+        : > "$base"
+    else
+        rm -f "$temp" "$base" "$fallback"
+        fail 'The Caddyfile no longer contains the recognized SlowMeet configuration; refusing to modify it.'
+    fi
+
+    if [[ -s "$base" ]]; then
+        cp -- "$base" "$temp"
+    else
+        cat > "$fallback" <<'EOF'
+:80 {
+    respond 404
+}
+EOF
+        cp -- "$fallback" "$temp"
+    fi
+    if ! caddy validate --config "$temp" --adapter caddyfile; then
+        rm -f "$temp" "$base" "$fallback"
+        fail 'The remaining Caddy configuration is invalid; the active configuration was left unchanged.'
+    fi
+    chown root:caddy "$temp" || fail 'Could not set ownership on the remaining Caddy configuration.'
+    chmod 0640 "$temp" || fail 'Could not set permissions on the remaining Caddy configuration.'
+    backup=$(mktemp "$dir/.Caddyfile.slowmeet.backup.XXXXXX")
+    cp -p -- "$caddyfile" "$backup"
+    mv -f "$temp" "$caddyfile"
+    if ! reload_caddy_after_config_change; then
+        if ! mv -f "$backup" "$caddyfile"; then
+            preserve_backup=yes
+            fail "Caddy reload failed and the previous configuration could not be restored; backup remains at $backup."
+        fi
+        backup=
+        if caddy validate --config "$caddyfile" --adapter caddyfile \
+            && reload_caddy_after_config_change; then
+            fail 'Caddy reload failed; the previous Caddyfile was restored and reloaded. Retry the uninstall.'
+        fi
+        fail 'Caddy reload failed; the previous Caddyfile was restored, but its validation or recovery reload also failed. Retry the uninstall.'
+    fi
+    rm -f -- "$backup"
+    backup=
+)
+
+reload_caddy_after_config_change() {
+    if systemctl is-active --quiet caddy; then
+        systemctl reload caddy
+    else
+        systemctl enable --now caddy
+    fi
+}
+
 uninstall_existing_install() {
-    local remove_data=no compose_available=no caddyfile_tmp
+    local remove_data=no compose_available=no
 
     [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
         || fail 'Could not identify a valid SlowMeet domain; refusing to uninstall an ambiguous installation.'
@@ -510,18 +722,7 @@ uninstall_existing_install() {
             systemctl reload nginx
         fi
     elif [[ "$proxy_mode" == caddy && -f /etc/caddy/Caddyfile ]]; then
-        caddyfile_tmp=$(mktemp /etc/caddy/.Caddyfile.slowmeet.XXXXXX)
-        cat > "$caddyfile_tmp" <<'EOF'
-:80 {
-    respond 404
-}
-EOF
-        caddy validate --config "$caddyfile_tmp" --adapter caddyfile
-        install -o root -g caddy -m 0644 "$caddyfile_tmp" /etc/caddy/Caddyfile
-        rm -f "$caddyfile_tmp"
-        if systemctl is-active --quiet caddy; then
-            systemctl reload caddy
-        fi
+        remove_caddy_site
     fi
 
     rm -f "$CERT_HOOK"
@@ -659,6 +860,140 @@ detect_proxy_mode() {
     fi
 }
 
+ipv6_stack_available() {
+    [[ -r /proc/net/if_inet6 && -s /proc/net/if_inet6 ]]
+}
+
+nginx_ipv6_listener_lines() {
+    local port=$1 suffix=${2:-}
+    ipv6_stack_available || return 0
+    printf '    listen [::]:%s%s;\n' "$port" "$suffix"
+}
+
+restore_nginx_ipv6_backup() {
+    local backup_file=$1
+    mv -f -- "$backup_file" "$NGINX_SITE" || return 2
+    nginx -t && systemctl reload nginx
+}
+
+ensure_nginx_ipv6_listeners() (
+    local temp backup mode preserve_backup=no rollback_status
+    [[ "$proxy_mode" == nginx && -f "$NGINX_SITE" ]] || return 0
+    ipv6_stack_available || return 0
+    grep -Fxq '# Managed by SlowMeet installer' "$NGINX_SITE" \
+        || fail "The Nginx configuration at $NGINX_SITE is not recognized as installer-managed."
+
+    temp= backup=
+    trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" || true; if [[ "${preserve_backup:-no}" != yes ]]; then rm -f -- "${backup:-}" || true; fi; exit "$cleanup_status"' EXIT
+    temp=$(mktemp "$(dirname "$NGINX_SITE")/.slowmeet-nginx.XXXXXX")
+    backup=$(mktemp "$(dirname "$NGINX_SITE")/.slowmeet-nginx-backup.XXXXXX")
+    mode=$(stat -c '%a' "$NGINX_SITE")
+    cp -p -- "$NGINX_SITE" "$backup"
+    if ! awk -v domain="$domain" '
+        function brace_delta(line, clean, opens, closes) {
+            clean = line
+            sub(/#.*/, "", clean)
+            opens = gsub(/\{/, "", clean)
+            closes = gsub(/\}/, "", clean)
+            return opens - closes
+        }
+        function process_server(    i, line, has_http6, has_https6) {
+            if (server_has_domain) {
+                matched_domain = 1
+                for (i = 1; i <= count; i++) {
+                    line = server_lines[i]
+                    if (line ~ /^[[:space:]]*listen[[:space:]]+\[::\]:80;[[:space:]]*$/) has_http6 = 1
+                    if (line ~ /^[[:space:]]*listen[[:space:]]+\[::\]:443[[:space:]]+ssl;[[:space:]]*$/) has_https6 = 1
+                }
+                if (has_http6) target_http6 = 1
+                if (has_https6) target_https6 = 1
+                for (i = 1; i <= count; i++) {
+                    line = server_lines[i]
+                    print line
+                    if (!has_http6 && line ~ /^[[:space:]]*listen[[:space:]]+80;[[:space:]]*$/) {
+                        print "    listen [::]:80;"
+                        added_http = 1
+                    }
+                    if (!has_https6 && line ~ /^[[:space:]]*listen[[:space:]]+443[[:space:]]+ssl;[[:space:]]*$/) {
+                        print "    listen [::]:443 ssl;"
+                        added_https = 1
+                    }
+                }
+            } else {
+                for (i = 1; i <= count; i++) print server_lines[i]
+            }
+            delete server_lines
+            count = 0
+            server_has_domain = 0
+            in_server = 0
+        }
+        {
+            if (!in_server && $0 ~ /^[[:space:]]*server[[:space:]]*\{/) {
+                in_server = 1
+                depth = 0
+                count = 0
+                server_has_domain = 0
+            }
+            if (in_server) {
+                server_lines[++count] = $0
+                clean = $0
+                sub(/#.*/, "", clean)
+                if (clean ~ /^[[:space:]]*server_name[[:space:]]/) {
+                    sub(/^[[:space:]]*server_name[[:space:]]+/, "", clean)
+                    gsub(/[;]/, "", clean)
+                    n = split(clean, names, /[[:space:]]+/)
+                    for (i = 1; i <= n; i++) if (names[i] == domain) server_has_domain = 1
+                }
+                depth += brace_delta($0)
+                if (depth == 0) process_server()
+                next
+            }
+            print
+        }
+        END {
+            if (in_server) process_server()
+            if (!matched_domain || (!added_http && !target_http6) || (!added_https && !target_https6)) exit 1
+        }
+    ' "$NGINX_SITE" > "$temp"; then
+        rm -f "$temp" "$backup"
+        fail 'Could not identify the SlowMeet HTTP and HTTPS server blocks for IPv6 migration.'
+    fi
+    if cmp -s "$NGINX_SITE" "$temp"; then
+        rm -f "$temp" "$backup"
+        return 0
+    fi
+    chmod "$mode" "$temp"
+    mv -f "$temp" "$NGINX_SITE"
+    if ! nginx -t; then
+        rollback_status=0
+        restore_nginx_ipv6_backup "$backup" || rollback_status=$?
+        if [[ "$rollback_status" -eq 2 ]]; then
+            preserve_backup=yes
+            fail "Nginx rejected the IPv6 configuration and the previous file could not be restored; backup remains at $backup."
+        fi
+        backup=
+        if [[ "$rollback_status" -eq 0 ]]; then
+            fail 'Nginx rejected the IPv6 configuration; the previous configuration was restored and reloaded.'
+        fi
+        fail 'Nginx rejected the IPv6 configuration; the previous file was restored, but its validation or recovery reload also failed.'
+    fi
+    if ! systemctl reload nginx; then
+        rollback_status=0
+        restore_nginx_ipv6_backup "$backup" || rollback_status=$?
+        if [[ "$rollback_status" -eq 2 ]]; then
+            preserve_backup=yes
+            fail "Nginx reload failed and the previous file could not be restored; backup remains at $backup."
+        fi
+        backup=
+        if [[ "$rollback_status" -eq 0 ]]; then
+            fail 'Nginx reload failed; the previous configuration was restored and reloaded.'
+        fi
+        fail 'Nginx reload failed; the previous file was restored, but its validation or recovery reload also failed.'
+    fi
+    rm -f -- "$backup"
+    backup=
+)
+
 assert_nginx_domain_available() {
     local config_dump managed=no
     if [[ -e "$NGINX_SITE" || -L "$NGINX_SITE" ]]; then
@@ -678,13 +1013,15 @@ assert_nginx_domain_available() {
 }
 
 write_nginx_acme_site() {
-    local config_dump
+    local config_dump ipv6_http
     assert_nginx_domain_available
     install -d -o root -g root -m 0755 /var/www/letsencrypt
+    ipv6_http=$(nginx_ipv6_listener_lines 80)
     cat > "$NGINX_SITE" <<EOF
 # Managed by SlowMeet installer
 server {
     listen 80;
+$ipv6_http
     server_name $domain;
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
@@ -704,6 +1041,9 @@ EOF
 }
 
 write_nginx_site() {
+    local ipv6_http ipv6_https
+    ipv6_http=$(nginx_ipv6_listener_lines 80)
+    ipv6_https=$(nginx_ipv6_listener_lines 443 ' ssl')
     cat > "$NGINX_SITE" <<EOF
 # Managed by SlowMeet installer
 map \$http_upgrade \$slowmeet_connection_upgrade {
@@ -713,6 +1053,7 @@ map \$http_upgrade \$slowmeet_connection_upgrade {
 
 server {
     listen 80;
+$ipv6_http
     server_name $domain;
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/letsencrypt;
@@ -724,6 +1065,7 @@ server {
 
 server {
     listen 443 ssl;
+$ipv6_https
     server_name $domain;
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
@@ -877,9 +1219,6 @@ if [[ "$proxy_mode" == caddy ]]; then
 fi
 apt-get install -y "${runtime_packages[@]}"
 enable_container_engine
-if [[ "$proxy_mode" == caddy ]]; then
-    systemctl stop caddy || true
-fi
 
 meeting_password=$(read_env_value MEETING_PASSWORD)
 if [[ "$enable_meeting_password" == yes ]]; then
@@ -926,21 +1265,8 @@ ufw --force enable
 
 if [[ "$proxy_mode" == caddy ]]; then
     install -d -o root -g caddy -m 0755 /var/www/letsencrypt
-    cat > /etc/caddy/Caddyfile <<EOF
-# Managed by SlowMeet installer
-
-http://$domain {
-    root * /var/www/letsencrypt
-    route {
-        handle /.well-known/acme-challenge/* {
-            file_server
-        }
-        redir https://{host}{uri} permanent
-    }
-}
-EOF
-    caddy validate --config /etc/caddy/Caddyfile
-    systemctl enable --now caddy
+    write_caddy_site bootstrap
+    reload_caddy_after_config_change
 else
     write_nginx_acme_site
 fi
@@ -960,36 +1286,8 @@ else
 fi
 
 if [[ "$proxy_mode" == caddy ]]; then
-    cat > /etc/caddy/Caddyfile <<EOF
-# Managed by SlowMeet installer
-
-http://$domain {
-    root * /var/www/letsencrypt
-    route {
-        handle /.well-known/acme-challenge/* {
-            file_server
-        }
-        redir https://{host}{uri} permanent
-    }
-}
-
-https://$domain {
-    tls $CERT_DIR/fullchain.pem $CERT_DIR/privkey.pem
-    route {
-        handle /.well-known/acme-challenge/* {
-            root * /var/www/letsencrypt
-            file_server
-        }
-        handle {
-            reverse_proxy 127.0.0.1:$app_port {
-                transport http {
-                    keepalive 2m
-                }
-            }
-        }
-    }
-}
-EOF
+    write_caddy_site final
+    reload_caddy_after_config_change
 else
     write_nginx_site
 fi

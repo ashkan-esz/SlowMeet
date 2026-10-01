@@ -56,6 +56,10 @@ command on a standard existing SlowMeet installation to update it in place:
 sudo bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://raw.githubusercontent.com/ashkan-esz/SlowMeet/master/deploy/install.sh | bash'
 ```
 
+This command downloads and immediately runs the current installer from the
+`master` branch with root privileges. It is not pinned to a release; review the
+repository and installer source before running it.
+
 For a fresh installation, the installer asks for the domain, optional TURN and
 meeting-password settings, the container engine (`docker` by default or
 `podman`), the local app port (default `8080`), and an admin password. Admin
