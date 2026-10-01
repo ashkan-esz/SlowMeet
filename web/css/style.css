@@ -3339,6 +3339,71 @@ body { overflow-x: hidden; }
     max-width: min(100%, 177.78cqh);
   }
 
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] {
+    container-type: inline-size;
+    grid-template-rows:
+      minmax(0, calc(100% - ((100cqw - 48px) * .225 + 24px)))
+      minmax(0, calc((100cqw - 48px) * .225 + 12px));
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] > .layout-filmstrip {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] > .layout-filmstrip > .participant-tile {
+    width: 100%;
+    max-width: none;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    grid-column: span 2;
+    align-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] > .layout-filmstrip > .participant-tile:nth-child(n + 6) {
+    grid-row: 2;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] > .layout-filmstrip > .participant-tile:nth-child(6) {
+    grid-column: 4 / span 2;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="7"] > .layout-filmstrip > .participant-tile:nth-child(7) {
+    grid-column: 6 / span 2;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] {
+    container-type: inline-size;
+    grid-template-rows:
+      minmax(0, calc(100% - ((100cqw - 48px) * .28125 + 24px)))
+      minmax(0, calc((100cqw - 48px) * .28125 + 12px));
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] > .layout-filmstrip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] > .layout-filmstrip > .participant-tile {
+    height: auto;
+    aspect-ratio: 16 / 9;
+    align-self: center;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] > .layout-filmstrip > .participant-tile:nth-child(n + 5) {
+    grid-row: 2;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] > .layout-filmstrip > .participant-tile:nth-child(5) {
+    grid-column: 2;
+  }
+
+  .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="2"][data-unpinned-count="6"] > .layout-filmstrip > .participant-tile:nth-child(6) {
+    grid-column: 3;
+  }
+
   .meeting-layout-host[data-layout-mode="pinned"] > .pinned-layout[data-pinned-count="1"][data-unpinned-count="1"] > .layout-filmstrip {
     container-type: size;
     place-items: center;
