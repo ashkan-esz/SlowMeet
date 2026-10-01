@@ -11,9 +11,13 @@ readonly REPOSITORY=https://github.com/ashkan-esz/SlowMeet.git
 readonly NGINX_SITE=/etc/nginx/conf.d/slowmeet-installer.conf
 readonly PROXY_MODE_FILE=/etc/slowmeet/proxy-mode
 readonly CONTAINER_ENGINE_FILE=/etc/slowmeet/container-engine
+readonly CADDY_APT_SOURCE_FILE=/etc/apt/sources.list.d/caddy-stable.list
 readonly PODMAN_SERVICE_FILE=/etc/systemd/system/slowmeet-podman.service
 readonly CADDY_BEGIN_MARKER='# BEGIN SlowMeet installer managed site'
 readonly CADDY_END_MARKER='# END SlowMeet installer managed site'
+readonly COSIGN_VERSION=v3.0.2
+readonly CADDY_BINARY_DIR=/usr/bin
+readonly CADDY_UNIT_FILE=/etc/systemd/system/caddy.service
 
 log() { printf '[slowmeet] %s\n' "$*"; }
 fail() { printf '[slowmeet] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -82,7 +86,7 @@ write_install_state() {
     install -d -o root -g root -m 0700 "$STATE_DIR"
     temp=$(mktemp "$STATE_DIR/.state.XXXXXX")
     {
-        printf 'version=4\n'
+        printf 'version=5\n'
         printf 'status=%s\n' "$status"
         printf 'operation=%s\n' "$install_operation"
         printf 'domain=%s\n' "$domain"
@@ -91,6 +95,7 @@ write_install_state() {
         printf 'proxy_mode=%s\n' "$proxy_mode"
         printf 'app_port=%s\n' "$app_port"
         printf 'container_engine=%s\n' "$container_engine"
+        printf 'caddy_install_method=%s\n' "$caddy_install_method"
     } > "$temp"
     chmod 0600 "$temp"
     mv -f "$temp" "$STATE_FILE"
@@ -98,7 +103,7 @@ write_install_state() {
 
 read_install_state() {
     local key value
-    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_app_port= seen_container_engine=
+    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_app_port= seen_container_engine= seen_caddy_install_method=
     state_version=
     state_status=
     install_operation=
@@ -108,6 +113,7 @@ read_install_state() {
     proxy_mode=
     app_port=
     container_engine=
+    caddy_install_method=apt
     [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || fail "Installer state at $STATE_FILE is not a regular file."
     while IFS='=' read -r key value; do
         case "$key" in
@@ -120,10 +126,11 @@ read_install_state() {
             proxy_mode) [[ -z "$seen_proxy_mode" ]] || fail 'Installer state contains a duplicate proxy mode.'; seen_proxy_mode=yes; proxy_mode=$value ;;
             app_port) [[ -z "$seen_app_port" ]] || fail 'Installer state contains a duplicate app port.'; seen_app_port=yes; app_port=$value ;;
             container_engine) [[ -z "$seen_container_engine" ]] || fail 'Installer state contains a duplicate container engine.'; seen_container_engine=yes; container_engine=$value ;;
+            caddy_install_method) [[ -z "$seen_caddy_install_method" ]] || fail 'Installer state contains a duplicate Caddy install method.'; seen_caddy_install_method=yes; caddy_install_method=$value ;;
             *) fail "Installer state contains an unsupported field: $key" ;;
         esac
     done < "$STATE_FILE"
-    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 ) ]] || fail 'Installer state has a missing or unsupported version.'
+    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 ) ]] || fail 'Installer state has a missing or unsupported version.'
     [[ "$seen_status" == yes && ( "$state_status" == incomplete || "$state_status" == complete ) ]] || fail 'Installer state has a missing or invalid status.'
     if [[ "$state_version" == 1 ]]; then
         [[ -z "$seen_operation" ]] || fail 'Version 1 installer state cannot contain an operation.'
@@ -132,7 +139,7 @@ read_install_state() {
         [[ "$seen_operation" == yes && ( "$install_operation" == install || "$install_operation" == update ) ]] \
             || fail 'Installer state has a missing or invalid operation.'
     fi
-    if [[ "$state_version" == 3 || "$state_version" == 4 ]]; then
+    if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 ]]; then
         [[ "$seen_proxy_mode" == yes && ( "$proxy_mode" == caddy || "$proxy_mode" == nginx ) ]] \
             || fail 'Installer state has a missing or invalid proxy mode.'
         [[ "$seen_app_port" == yes && "$app_port" =~ ^[0-9]{1,5}$ ]] \
@@ -143,16 +150,179 @@ read_install_state() {
         proxy_mode=caddy
         app_port=8080
     fi
-    if [[ "$state_version" == 4 ]]; then
+    if [[ "$state_version" == 4 || "$state_version" == 5 ]]; then
         [[ "$seen_container_engine" == yes && ( "$container_engine" == docker || "$container_engine" == podman ) ]] \
             || fail 'Installer state has a missing or invalid container engine.'
     else
         [[ -z "$seen_container_engine" ]] || fail 'Legacy installer state cannot contain a container engine.'
         container_engine=docker
     fi
+    if [[ "$state_version" == 5 ]]; then
+        [[ "$seen_caddy_install_method" == yes && ( "$caddy_install_method" == apt || "$caddy_install_method" == binary ) ]] \
+            || fail 'Installer state has a missing or invalid Caddy install method.'
+        [[ "$proxy_mode" == caddy || "$caddy_install_method" == apt ]] \
+            || fail 'Installer state selects a Caddy binary while Caddy is not the selected proxy.'
+    else
+        [[ -z "$seen_caddy_install_method" ]] || fail 'Legacy installer state cannot contain a Caddy install method.'
+        caddy_install_method=apt
+    fi
     [[ "$seen_domain" == yes && "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || fail 'Installer state has a missing or invalid domain.'
     [[ "$seen_turn" == yes && ( "$enable_turn" == yes || "$enable_turn" == no ) ]] || fail 'Installer state has a missing or invalid TURN setting.'
     [[ "$seen_meeting_password" == yes && ( "$enable_meeting_password" == yes || "$enable_meeting_password" == no ) ]] || fail 'Installer state has a missing or invalid meeting-password setting.'
+}
+
+apt_failure_is_caddy_only() {
+    local output_file=$1
+    ! grep -Eiq 'NO_PUBKEY|BADSIG|EXPKEYSIG|The following signatures couldn.t be verified|repository is not signed|not signed by' "$output_file" \
+        || return 1
+    awk '
+        /^(Err:|W: Failed to fetch|E: Failed to fetch|E: The repository)/ {
+            if (index($0, "https://dl.cloudsmith.io/public/caddy/stable") > 0) {
+                caddy_errors++
+            } else {
+                other_errors++
+            }
+        }
+        END { exit !(caddy_errors > 0 && other_errors == 0) }
+    ' "$output_file"
+}
+
+install_verified_caddy_binary() {
+    local cosign_arch caddy_arch temp_dir release_tag archive checksums checksum_line checksum
+
+    case "$(dpkg --print-architecture)" in
+        amd64) cosign_arch=amd64; caddy_arch=amd64 ;;
+        arm64) cosign_arch=arm64; caddy_arch=arm64 ;;
+        *) fail "The verified Caddy fallback does not support architecture $(dpkg --print-architecture)." ;;
+    esac
+
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf -- "$temp_dir"' EXIT
+    curl -fsSL "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-$cosign_arch" \
+        -o "$temp_dir/cosign"
+    curl -fsSL "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-$cosign_arch-kms.sigstore.json" \
+        -o "$temp_dir/cosign.sigstore.json"
+
+    cat > "$temp_dir/cosign-artifact.pub" <<'KEY'
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEhyQCx0E9wQWSFI9ULGwy3BuRklnt
+IqozONbbdbqz11hlRJy9c7SG+hdcFl9jE9uE/dwtuwU2MqU9T/cN0YkWww==
+-----END PUBLIC KEY-----
+KEY
+    jq -er '.messageSignature.signature' "$temp_dir/cosign.sigstore.json" \
+        | base64 -d > "$temp_dir/cosign.sig"
+    openssl dgst -sha256 -verify "$temp_dir/cosign-artifact.pub" \
+        -signature "$temp_dir/cosign.sig" "$temp_dir/cosign" >/dev/null \
+        || fail 'Sigstore artifact-key verification failed for the pinned Cosign binary.'
+    chmod 0700 "$temp_dir/cosign"
+
+    release_tag=$(curl -fsSL https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -er '.tag_name')
+    [[ "$release_tag" =~ ^v2\.[0-9]+\.[0-9]+$ ]] || fail 'The latest official Caddy release tag was not a stable v2 release.'
+    release_tag=${release_tag#v}
+    archive="caddy_${release_tag}_linux_${caddy_arch}.tar.gz"
+    checksums="caddy_${release_tag}_checksums.txt"
+    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v$release_tag/$checksums" \
+        -o "$temp_dir/$checksums"
+    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v$release_tag/$checksums.sig" \
+        -o "$temp_dir/$checksums.sig.b64"
+    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v$release_tag/$checksums.pem" \
+        -o "$temp_dir/$checksums.pem.b64"
+    base64 -d "$temp_dir/$checksums.sig.b64" > "$temp_dir/$checksums.sig"
+    base64 -d "$temp_dir/$checksums.pem.b64" > "$temp_dir/$checksums.pem"
+    "$temp_dir/cosign" verify-blob "$temp_dir/$checksums" \
+        --signature "$temp_dir/$checksums.sig" \
+        --certificate "$temp_dir/$checksums.pem" \
+        --certificate-identity "https://github.com/caddyserver/caddy/.github/workflows/release.yml@refs/tags/v$release_tag" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        || fail 'Cosign could not verify the Caddy release checksum signature and signer identity.'
+
+    checksum_line=$(awk -v archive="$archive" '$2 == archive || $2 == "*" archive { print; count++ } END { if (count != 1) exit 1 }' "$temp_dir/$checksums") \
+        || fail "The signed Caddy checksum file does not contain exactly one entry for $archive."
+    checksum=${checksum_line%% *}
+    [[ "$checksum" =~ ^[[:xdigit:]]{64}$ ]] || fail 'The signed Caddy checksum entry is malformed.'
+    printf '%s  %s\n' "$checksum" "$archive" > "$temp_dir/archive.sha256"
+    curl -fsSL "https://github.com/caddyserver/caddy/releases/download/v$release_tag/$archive" \
+        -o "$temp_dir/$archive"
+    (cd "$temp_dir" && sha256sum --check --status archive.sha256) \
+        || fail 'The downloaded Caddy release archive does not match its signed checksum.'
+    tar -xzf "$temp_dir/$archive" -C "$temp_dir" caddy
+    [[ -x "$temp_dir/caddy" ]] || fail 'The verified Caddy archive did not contain its executable.'
+    "$temp_dir/caddy" version | grep -Eq "^v${release_tag}([[:space:]]|$)" \
+        || fail 'The Caddy executable version does not match the signed release tag.'
+
+    if ! getent group caddy >/dev/null; then
+        groupadd --system caddy
+    fi
+    if ! id -u caddy >/dev/null 2>&1; then
+        useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
+            --shell /usr/sbin/nologin --comment 'Caddy web server' caddy
+    elif [[ "$(id -gn caddy)" != caddy ]]; then
+        fail 'The existing caddy user does not use the caddy group.'
+    fi
+
+    [[ ! -L "$CADDY_UNIT_FILE" ]] || fail "Caddy service unit at $CADDY_UNIT_FILE is a symlink; refusing to replace it."
+    install -d -o root -g caddy -m 0750 /etc/caddy
+    install -d -o caddy -g caddy -m 0750 /var/lib/caddy /var/log/caddy
+    install -m 0755 "$temp_dir/caddy" "$CADDY_BINARY_DIR/caddy"
+    cat > "$temp_dir/caddy.service" <<'UNIT'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    install -m 0644 "$temp_dir/caddy.service" "$CADDY_UNIT_FILE"
+    systemctl daemon-reload
+    caddy_install_method=binary
+    write_install_state incomplete
+    log "Installed Caddy v$release_tag from the verified static release."
+    rm -rf -- "$temp_dir"
+    trap - EXIT
+}
+
+apt_update_with_caddy_fallback() {
+    local output_file disabled_source
+    output_file=$(mktemp)
+    if apt-get update > "$output_file" 2>&1; then
+        cat "$output_file"
+        rm -f "$output_file"
+        return 0
+    fi
+
+    cat "$output_file" >&2
+    if [[ "$proxy_mode" != caddy || "$caddy_install_method" != apt ]] \
+        || ! apt_failure_is_caddy_only "$output_file"; then
+        rm -f "$output_file"
+        fail 'APT update failed for a source other than the installer-managed Caddy repository; no binary fallback was attempted.'
+    fi
+    rm -f "$output_file"
+
+    [[ -f "$CADDY_APT_SOURCE_FILE" && ! -L "$CADDY_APT_SOURCE_FILE" ]] \
+        || fail "The failing Caddy APT source at $CADDY_APT_SOURCE_FILE is missing or not a regular file."
+    disabled_source="$CADDY_APT_SOURCE_FILE.disabled"
+    [[ ! -e "$disabled_source" && ! -L "$disabled_source" ]] \
+        || fail "Cannot disable the failing Caddy APT source because $disabled_source already exists."
+    mv -- "$CADDY_APT_SOURCE_FILE" "$disabled_source"
+    log 'The installer-managed Caddy APT repository was the only failing APT source; disabled it and retrying APT update.'
+    apt-get update || fail 'APT update still fails after disabling the Caddy repository.'
+    install_verified_caddy_binary
 }
 
 read_env_value() {
@@ -369,6 +539,9 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
         printf 'TURN URLs: %s\n' "$turn_urls"
     fi
     printf '\nExisting credentials and application data were preserved.\n'
+    if [[ "$proxy_mode" == caddy ]]; then
+        log "Caddy installation method remains: $caddy_install_method."
+    fi
     write_install_state complete
 }
 
@@ -1100,6 +1273,7 @@ command -v apt-get >/dev/null || fail 'This operating system does not provide ap
 install_mode=fresh
 install_operation=install
 container_engine=docker
+caddy_install_method=apt
 if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
     read_install_state
     if [[ "$state_status" == incomplete && "$install_operation" == install ]]; then
@@ -1185,7 +1359,7 @@ fi
 log "Installing prerequisites on ${PRETTY_NAME:-$ID}."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl git gnupg iproute2 openssl certbot ufw
+apt-get install -y ca-certificates curl git gnupg iproute2 jq openssl certbot ufw
 private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)
 
 if [[ "$container_engine" == docker ]]; then
@@ -1197,7 +1371,7 @@ if [[ "$container_engine" == docker ]]; then
         > /etc/apt/sources.list.d/docker.list
 fi
 
-if [[ "$proxy_mode" == caddy ]]; then
+if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
     install -m 0755 -d /usr/share/keyrings
     curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
         | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -1205,16 +1379,16 @@ if [[ "$proxy_mode" == caddy ]]; then
     caddy_repo_id=debian
     [[ "$ID" == ubuntu ]] && caddy_repo_id=ubuntu
     curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/$caddy_repo_id.deb.txt" \
-        -o /etc/apt/sources.list.d/caddy-stable.list
+        -o "$CADDY_APT_SOURCE_FILE"
 fi
 
-apt-get update
+apt_update_with_caddy_fallback
 runtime_packages=()
 case "$container_engine" in
     docker) runtime_packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin) ;;
     podman) runtime_packages=(podman podman-compose) ;;
 esac
-if [[ "$proxy_mode" == caddy ]]; then
+if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
     runtime_packages+=(caddy)
 fi
 apt-get install -y "${runtime_packages[@]}"
@@ -1410,4 +1584,7 @@ if [[ "$enable_turn" == yes ]]; then
     printf 'TURN URLs: turn:%s:3478 (UDP/TCP), turns:%s:5349 (TLS/TCP)\n' "$domain" "$domain"
 fi
 printf '\nKeep these credentials somewhere safe.\n'
+if [[ "$proxy_mode" == caddy ]]; then
+    log "Caddy installation method: $caddy_install_method."
+fi
 write_install_state complete
