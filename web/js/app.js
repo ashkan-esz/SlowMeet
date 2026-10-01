@@ -99,9 +99,11 @@ const participantPageNext = document.querySelector("#participant-page-next");
 const participantPageStatus = document.querySelector("#participant-page-status");
 const participantFocusStatus = document.querySelector("#participant-focus-status");
 const participantMenu = document.querySelector("#participant-menu");
+const participantMenuStageFocus = document.querySelector("#participant-menu-stage-focus");
 const participantMenuPin = document.querySelector("#participant-menu-pin");
 const participantMenuHideTile = document.querySelector("#participant-menu-hide-tile");
 const participantMenuSelfView = document.querySelector("#participant-menu-self-view");
+const stageFocusExit = document.querySelector("#participant-stage-focus-exit");
 const networkLabel = document.querySelector("[data-network-label]");
 const networkSummary = document.querySelector("[data-network-summary]");
 const statRTT = document.querySelector("#stat-rtt");
@@ -148,6 +150,8 @@ let pipDragState;
 let pinnedParticipantIDs = [];
 const hiddenParticipantIDs = new Set();
 let participantMenuOwner;
+let stageFocusParticipantID;
+let stageFocusReturnTrigger;
 let layoutFrame;
 let preferredLayoutColumns = 0;
 let participantResizeObserver;
@@ -166,6 +170,62 @@ function currentMeetingLayoutMode() {
   return typeof deriveMeetingLayoutMode === "function"
     ? deriveMeetingLayoutMode(meetingViewState)
     : (meetingViewState.pinnedParticipantIds.length ? "pinned" : "grid");
+}
+
+function updateStageFocusState() {
+  let active = false;
+  if (stageFocusParticipantID) {
+    const element = participantElements.get(stageFocusParticipantID);
+    active = Boolean(element && !element.item.hidden && element.item.isConnected);
+    if (!active) {
+      clearStageFocus(true);
+      return false;
+    }
+  }
+  if (meetingLayoutHost) {
+    meetingLayoutHost.dataset.stageFocus = active ? "true" : "false";
+    if (active) meetingLayoutHost.dataset.stageFocusParticipantId = stageFocusParticipantID;
+    else delete meetingLayoutHost.dataset.stageFocusParticipantId;
+  }
+  if (stageFocusExit) stageFocusExit.hidden = !active;
+  participantElements.forEach((element, participantID) => {
+    const focused = active && participantID === stageFocusParticipantID;
+    element.item.classList.toggle("is-stage-focused", focused);
+    element.item.classList.toggle("is-stage-suppressed", active && !focused);
+  });
+  return active;
+}
+
+function clearStageFocus(restoreFocus = true) {
+  if (!stageFocusParticipantID) return;
+  const previousParticipantID = stageFocusParticipantID;
+  const returnTrigger = stageFocusReturnTrigger || participantElements.get(previousParticipantID)?.menuTrigger;
+  stageFocusParticipantID = undefined;
+  stageFocusReturnTrigger = undefined;
+  updateStageFocusState();
+  requestParticipantLayout();
+  if (participantFocusStatus) participantFocusStatus.textContent = "Expanded tile closed.";
+  const previousElement = participantElements.get(previousParticipantID);
+  if (!restoreFocus) return;
+  if (returnTrigger?.isConnected && previousElement && !previousElement.item.hidden &&
+      !hiddenParticipantIDs.has(previousParticipantID) &&
+      (previousParticipantID !== localParticipantID || meetingViewState.showSelfView)) {
+    returnTrigger.focus();
+  } else {
+    participantsButton?.focus();
+  }
+}
+
+function setStageFocusParticipant(participantID, trigger) {
+  const element = participantElements.get(participantID);
+  if (!element || element.item.hidden || hiddenParticipantIDs.has(participantID) ||
+      (participantID === localParticipantID && !meetingViewState.showSelfView)) return;
+  stageFocusParticipantID = participantID;
+  stageFocusReturnTrigger = trigger || element.menuTrigger;
+  updateStageFocusState();
+  requestParticipantLayout();
+  if (participantFocusStatus) participantFocusStatus.textContent =
+    `${element.name.textContent || "Participant"} expanded.`;
 }
 
 function renderMeetingLayout() {
@@ -203,6 +263,7 @@ function renderMeetingLayout() {
     visible.filter((element) => !pinned.includes(element)).forEach((element) => append(pinnedFilmstrip, element));
   }
   excluded.forEach((element) => append(layoutParking, element));
+  updateStageFocusState();
   positionParticipantMenu();
   requestParticipantLayout();
 }
@@ -683,7 +744,8 @@ function setParticipantTileHidden(participantID, hidden) {
 
 function openParticipantMenu(participantID, trigger) {
   const element = participantElements.get(participantID);
-  if (!element || !participantMenu || !participantMenuPin || !participantMenuHideTile || !participantMenuSelfView) return;
+  if (!element || !participantMenu || !participantMenuStageFocus || !participantMenuPin ||
+      !participantMenuHideTile || !participantMenuSelfView) return;
   if (participantMenuOwner?.trigger === trigger) {
     closeParticipantMenu(false);
     return;
@@ -691,6 +753,8 @@ function openParticipantMenu(participantID, trigger) {
   closeParticipantMenu(false);
   participantMenuOwner = { participantID, trigger, item: element.item };
   participantMenu.setAttribute("aria-label", `${element.name.textContent} actions`);
+  participantMenuStageFocus.textContent = stageFocusParticipantID === participantID
+    ? "Exit expanded view" : "Expand tile";
   participantMenuPin.textContent = pinnedParticipantIDs.includes(participantID)
     ? "Unpin participant" : "Pin participant";
   participantMenuHideTile.hidden = participantID === localParticipantID;
@@ -786,6 +850,16 @@ participantMenu?.addEventListener("click", (event) => {
   const action = event.target.closest?.("[data-action]")?.dataset.action;
   const owner = participantMenuOwner;
   if (!action || !owner) return;
+  if (action === "stage-focus") {
+    if (stageFocusParticipantID === owner.participantID) {
+      clearStageFocus(true);
+    } else {
+      setStageFocusParticipant(owner.participantID, owner.trigger);
+      stageFocusExit?.focus({ preventScroll: true });
+    }
+    closeParticipantMenu(false);
+    return;
+  }
   if (action === "pin") {
     const shouldPin = !pinnedParticipantIDs.includes(owner.participantID);
     setPinnedParticipant(owner.participantID);
@@ -799,6 +873,8 @@ participantMenu?.addEventListener("click", (event) => {
   }
   closeParticipantMenu(true);
 });
+
+stageFocusExit?.addEventListener("click", () => clearStageFocus(true));
 
 peopleList?.addEventListener("click", (event) => {
   const button = event.target.closest?.('[data-action="show-tile"]');
@@ -1252,6 +1328,10 @@ document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
   if (event.key === "Escape") {
+    if (stageFocusParticipantID) {
+      clearStageFocus(true);
+      return;
+    }
     if (document.fullscreenElement === meeting) {
       document.exitFullscreen().catch(() => showToast("Could not exit full screen.", "warning"));
       return;
@@ -2632,6 +2712,7 @@ function connectSocket(name, password) {
           if (participantElements.get(message.participant.id)?.item === element.item) {
             element.item.remove();
             participantElements.delete(message.participant.id);
+            if (stageFocusParticipantID === message.participant.id) clearStageFocus(true);
             remoteCameraLayerTracks.delete(message.participant.id);
             const orderIndex = participantOrder.indexOf(message.participant.id);
             if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);

@@ -1102,6 +1102,27 @@ html:has(.meeting-shell:not([hidden])) #root {
   background: var(--lm-surface-3);
   border-color: var(--lm-border);
 }
+.stage-focus-exit {
+  position: absolute;
+  inset-block-start: 16px;
+  inset-inline-start: 50%;
+  z-index: calc(var(--lm-z-menu) - 1);
+  min-height: 44px;
+  padding: 0 14px;
+  color: var(--lm-text);
+  background: rgba(22, 27, 34, .92);
+  border: 1px solid var(--lm-border);
+  border-radius: 999px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .28);
+  font-size: 12px;
+  font-weight: 750;
+  transform: translateX(-50%);
+}
+.stage-focus-exit:hover, .stage-focus-exit:focus-visible {
+  background: var(--lm-surface-3);
+  border-color: var(--lm-accent);
+}
+.stage-focus-exit[hidden] { display: none !important; }
 .participant-mic.is-off { color: var(--lm-text); background: var(--lm-danger); border-radius: var(--lm-radius-sm); }
 .participant-quality { border-color: var(--lm-bg); }
 .participant-tile[data-quality="good"] .participant-quality { background: var(--lm-success); }
@@ -2045,6 +2066,7 @@ body { overflow-x: hidden; }
   padding: 12px 16px;
 }
 .meeting-layout-host {
+  position: relative;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -2122,6 +2144,31 @@ body { overflow-x: hidden; }
 }
 .layout-filmstrip .participant-tile { width: 100%; height: 100%; aspect-ratio: auto; }
 .layout-main .participant-tile { width: 100%; height: 100%; }
+.meeting-layout-host[data-stage-focus="true"][data-layout-mode="grid"] > .participant-grid,
+.meeting-layout-host[data-stage-focus="true"][data-layout-mode="pinned"] > .pinned-layout {
+  display: block;
+}
+.meeting-layout-host[data-stage-focus="true"] .layout-main,
+.meeting-layout-host[data-stage-focus="true"] .layout-filmstrip {
+  display: contents;
+}
+.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-suppressed {
+  display: none !important;
+}
+.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100% !important;
+  height: 100% !important;
+  aspect-ratio: auto;
+}
+.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused .participant-video {
+  height: 100%;
+}
+.meeting-layout-host[data-stage-focus="true"] ~ .participant-pagination {
+  display: none !important;
+}
 .participant-tile.is-screen-main .camera-video { display: none; }
 .participant-tile.is-screen-main .screen-video { display: block; }
 .participant-tile[data-sharing="true"] .camera-video { object-fit: cover; }
@@ -3578,4 +3625,21 @@ body { overflow-x: hidden; }
     padding-inline: 8px;
     font-size: 11px;
   }
+}
+
+/* Keep a focused tile independent from the grid sizing rules above. */
+#meeting .meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  aspect-ratio: auto !important;
+}
+
+#meeting .meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused .participant-video {
+  width: 100%;
+  height: 100%;
 }

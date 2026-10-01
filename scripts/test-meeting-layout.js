@@ -147,6 +147,23 @@ if (!appSource.includes("pinnedParticipantIDs = unpinParticipant(pinnedParticipa
   throw new Error("hiding a pinned tile must clear its pin while preserving its video subscription");
 }
 const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
+if (!indexSource.includes('id="participant-menu-stage-focus"') ||
+    !indexSource.includes('id="participant-stage-focus-exit"') ||
+    !appSource.includes("let stageFocusParticipantID") ||
+    !appSource.includes("function setStageFocusParticipant(participantID, trigger)") ||
+    !appSource.includes('stageFocusParticipantID === owner.participantID') ||
+    !appSource.includes('stageFocusExit?.addEventListener("click", () => clearStageFocus(true));') ||
+    !appSource.includes('if (stageFocusParticipantID) {\n      clearStageFocus(true);\n      return;\n    }') ||
+    !appSource.includes('if (stageFocusParticipantID === participantID) clearStageFocus(true);') ||
+    !styleSource.includes('.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused') ||
+    !styleSource.includes('.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-suppressed') ||
+    !styleSource.includes('.stage-focus-exit')) {
+  throw new Error("single-tile expanded stage view must be available from the tile menu and exit safely");
+}
+if ((indexSource.match(/id="participant-menu-stage-focus"/g) || []).length !== 1 ||
+    (indexSource.match(/id="participant-stage-focus-exit"/g) || []).length !== 1) {
+  throw new Error("single-tile expanded view controls must not be duplicated");
+}
 for (const element of [
   'class="mobile-more-actions"',
   'id="mobile-chat"',
@@ -176,7 +193,14 @@ for (const behavior of [
   'closeChat?.addEventListener("click", () => closeOpenPanel());',
   'closeSidebar.addEventListener("click", () => {\n  closeOpenPanel();\n});',
   'sidebarBackdrop.addEventListener("click", () => {\n  closeOpenPanel();\n});',
-  'if (event.key === "Escape") {\n    if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);\n    if (reactionPicker && !reactionPicker.hidden) setReactionPickerOpen(false);\n    if (chatEmojiPicker && !chatEmojiPicker.hidden) setChatEmojiPickerOpen(false);\n    closeOpenPanel();',
+  'if (event.key === "Escape") {',
+  'if (stageFocusParticipantID) {',
+  'clearStageFocus(true);',
+  'if (document.fullscreenElement === meeting) {',
+  'if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);',
+  'if (reactionPicker && !reactionPicker.hidden) setReactionPickerOpen(false);',
+  'if (chatEmojiPicker && !chatEmojiPicker.hidden) setChatEmojiPickerOpen(false);',
+  'closeOpenPanel();',
 ]) {
   if (!appSource.includes(behavior)) {
     throw new Error(`panel close behavior is missing: ${behavior}`);
