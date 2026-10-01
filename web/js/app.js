@@ -69,6 +69,8 @@ const participantsButton = document.querySelector("#participants-button");
 const mobileChat = document.querySelector("#mobile-chat");
 const mobilePeople = document.querySelector("#mobile-people");
 const mobileScreen = document.querySelector("#mobile-screen");
+const fullscreenToggle = document.querySelector("#fullscreen");
+const mobileFullscreenToggle = document.querySelector("#mobile-fullscreen");
 const mobileRaiseHand = document.querySelector("#mobile-raise-hand");
 const mobileReceiveVideo = document.querySelector("#mobile-receive-video");
 const chatRail = document.querySelector("#chat-rail");
@@ -795,6 +797,42 @@ function showToast(message, variant) {
   setTimeout(() => toast.remove(), 4000);
 }
 
+const fullscreenControls = [fullscreenToggle, mobileFullscreenToggle].filter(Boolean);
+const supportsMeetingFullscreen = Boolean(
+  meeting &&
+  typeof meeting.requestFullscreen === "function" &&
+  typeof document.exitFullscreen === "function"
+);
+
+function syncFullscreenControls() {
+  const isFullscreen = document.fullscreenElement === meeting;
+  const label = isFullscreen ? "Full screen" : "Full screen";
+  fullscreenControls.forEach((button) => {
+    button.setAttribute("aria-pressed", String(isFullscreen));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    const text = button.querySelector("[data-fullscreen-label]");
+    if (text) text.textContent = label;
+    else button.textContent = label;
+  });
+}
+
+async function toggleMeetingFullscreen() {
+  const entering = document.fullscreenElement !== meeting;
+  try {
+    if (entering) await meeting.requestFullscreen();
+    else await document.exitFullscreen();
+  } catch {
+    showToast(entering ? "Could not enter full screen." : "Could not exit full screen.", "warning");
+  }
+}
+
+if (supportsMeetingFullscreen) {
+  fullscreenControls.forEach((button) => { button.hidden = false; });
+  document.addEventListener("fullscreenchange", syncFullscreenControls);
+  syncFullscreenControls();
+}
+
 let unreadMessages = 0;
 let chatPinnedToBottom = true;
 let pushToTalkActive = false;
@@ -1147,12 +1185,18 @@ function openPeoplePanel(trigger = participantsButton) {
 participantsButton?.addEventListener("click", openPeoplePanel);
 mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
 mobileScreen?.addEventListener("click", () => screen?.click());
+fullscreenToggle?.addEventListener("click", toggleMeetingFullscreen);
+mobileFullscreenToggle?.addEventListener("click", toggleMeetingFullscreen);
 mobileRaiseHand?.addEventListener("click", () => raiseHand?.click());
 mobileReceiveVideo?.addEventListener("click", () => receiveVideo?.click());
 document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
   const isFormField = event.target.matches("input, textarea, select");
   if (event.key === "Escape") {
+    if (document.fullscreenElement === meeting) {
+      document.exitFullscreen().catch(() => showToast("Could not exit full screen.", "warning"));
+      return;
+    }
     if (connectionPopover && !connectionPopover.hidden) setConnectionPopoverOpen(false);
     if (reactionPicker && !reactionPicker.hidden) setReactionPickerOpen(false);
     if (chatEmojiPicker && !chatEmojiPicker.hidden) setChatEmojiPickerOpen(false);

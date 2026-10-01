@@ -2754,7 +2754,7 @@ body { overflow-x: hidden; }
   align-items: center;
   justify-content: center;
   gap: 10px;
-  width: min(calc(100% - 32px), 662px);
+  width: min(calc(100% - 32px), 720px);
   height: 74px;
   min-width: 0;
   margin-inline: auto;
@@ -3551,4 +3551,17 @@ body { overflow-x: hidden; }
     grid-column: 8 / span 2;
     grid-row: 2;
   }
+}
+
+#meeting:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  margin: 0;
+  border-radius: 0;
+}
+
+#meeting:fullscreen::backdrop {
+  background: var(--lm-bg);
 }
