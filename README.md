@@ -62,18 +62,23 @@ meeting-password settings, the container engine (`docker` by default or
 password entry is hidden; leave it blank to generate one. Podman installs use
 `podman-compose` and a SlowMeet-specific systemd unit to start containers after
 reboot. If Nginx is already running, the installer adds a dedicated virtual
-host and uses Certbot for HTTPS
-without replacing other Nginx sites. Otherwise, it configures Caddy. It builds
-and starts SlowMeet, waits for health checks, and prints the chosen credentials
-when setup completes.
+host and uses Certbot for HTTPS without replacing other Nginx sites. Otherwise,
+it configures Caddy. It builds and starts SlowMeet, waits for health checks,
+and prints the chosen credentials when setup completes.
 
-When it detects an existing installation, it fetches the latest source, rebuilds
-and restarts SlowMeet, and preserves the existing environment, credentials,
-application data, container engine, proxy choice, certificates, and TURN
-configuration. It prints the existing credentials when the health checks pass.
-The service is briefly unavailable while the updated container starts. Existing
+When it detects an existing installation, the installer offers update (the
+default) or uninstall. Update fetches the latest source, rebuilds and restarts
+SlowMeet, and preserves its environment, credentials, application data,
+container engine, proxy choice, certificates, and TURN configuration. Existing
 installations must use the standard `/opt/slowmeet` checkout and
 installer-managed proxy configuration.
+
+Uninstall requires typing the installation domain. It removes the SlowMeet
+containers, application files, and installer-managed proxy integration while
+leaving shared container/proxy packages, firewall rules, and Let's Encrypt
+certificates in place. The persistent application data volume is preserved
+unless you separately confirm its permanent deletion. An interrupted install
+offers resume (the default) or uninstall.
 
 If installation or update fails after provisioning starts, fix the reported
 issue and run the same command again. The installer resumes with the saved

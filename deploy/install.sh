@@ -209,6 +209,16 @@ is_canonical_install() {
     esac
 }
 
+is_known_slowmeet_checkout() {
+    local origin
+    [[ -d "$INSTALL_DIR/.git" && -f "$INSTALL_DIR/docker-compose.yml" ]] || return 1
+    origin=$(git -C "$INSTALL_DIR" config --get remote.origin.url 2>/dev/null) || return 1
+    case "$origin" in
+        "$REPOSITORY"|git@github.com:ashkan-esz/SlowMeet.git|https://github.com/ashkan-esz/SlowMeet) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 load_legacy_install_settings() {
     local turn_config env_port
     local -a proxy_domains
@@ -347,6 +357,211 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     fi
     printf '\nExisting credentials and application data were preserved.\n'
     write_install_state complete
+}
+
+write_expected_caddyfile() {
+    local phase=$1 include_marker=$2
+    if [[ "$include_marker" == yes ]]; then
+        printf '# Managed by SlowMeet installer\n\n'
+    fi
+    if [[ "$phase" == bootstrap ]]; then
+        cat <<EOF
+http://$domain {
+    root * /var/www/letsencrypt
+    route {
+        handle /.well-known/acme-challenge/* {
+            file_server
+        }
+        redir https://{host}{uri} permanent
+    }
+}
+EOF
+        return
+    fi
+    cat <<EOF
+http://$domain {
+    root * /var/www/letsencrypt
+    route {
+        handle /.well-known/acme-challenge/* {
+            file_server
+        }
+        redir https://{host}{uri} permanent
+    }
+}
+
+https://$domain {
+    tls $CERT_DIR/fullchain.pem $CERT_DIR/privkey.pem
+    route {
+        handle /.well-known/acme-challenge/* {
+            root * /var/www/letsencrypt
+            file_server
+        }
+        handle {
+            reverse_proxy 127.0.0.1:$app_port {
+                transport http {
+                    keepalive 2m
+                }
+            }
+        }
+    }
+}
+EOF
+}
+
+caddy_config_matches_install() {
+    local expected phase marker
+    [[ -f /etc/caddy/Caddyfile ]] || return 0
+    [[ ! -L /etc/caddy/Caddyfile ]] || return 1
+    expected=$(mktemp)
+    for phase in bootstrap final; do
+        for marker in yes no; do
+            write_expected_caddyfile "$phase" "$marker" > "$expected"
+            if cmp -s "$expected" /etc/caddy/Caddyfile; then
+                rm -f "$expected"
+                return 0
+            fi
+        done
+    done
+    rm -f "$expected"
+    return 1
+}
+
+uninstall_existing_install() {
+    local remove_data=no compose_available=no caddyfile_tmp
+
+    [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+        || fail 'Could not identify a valid SlowMeet domain; refusing to uninstall an ambiguous installation.'
+    [[ ! -L "$CERT_DIR" ]] \
+        || fail "Certificate directory $CERT_DIR is a symlink; refusing to remove files outside the SlowMeet directory."
+    if [[ -d "$INSTALL_DIR" ]]; then
+        is_known_slowmeet_checkout \
+            || fail "$INSTALL_DIR is not a recognized SlowMeet checkout; refusing to remove it."
+        case "$container_engine" in
+            docker)
+                command -v docker >/dev/null && docker compose version >/dev/null 2>&1 \
+                    || fail 'Docker Compose v2 is required to remove the SlowMeet containers.'
+                ;;
+            podman)
+                command -v podman >/dev/null && command -v podman-compose >/dev/null \
+                    && podman-compose --version >/dev/null 2>&1 \
+                    || fail 'Podman and podman-compose are required to remove the SlowMeet containers.'
+                ;;
+            *) fail "Unsupported saved container engine: ${container_engine:-unset}." ;;
+        esac
+        compose_available=yes
+    fi
+
+    if [[ "$proxy_mode" == nginx && -e "$NGINX_SITE" ]]; then
+        command -v nginx >/dev/null || fail 'Nginx is required to remove the installer-managed Nginx configuration.'
+        grep -Fxq '# Managed by SlowMeet installer' "$NGINX_SITE" \
+            || fail "The Nginx configuration at $NGINX_SITE is not recognized as installer-managed; refusing to remove it."
+        awk -v domain="$domain" '$1 == "server_name" && $2 == domain ";" { found = 1 } END { exit !found }' "$NGINX_SITE" \
+            || fail "The Nginx configuration at $NGINX_SITE does not match $domain; refusing to remove it."
+    elif [[ "$proxy_mode" == caddy ]]; then
+        caddy_config_matches_install \
+            || fail 'The Caddyfile differs from the installer-managed SlowMeet configuration; refusing to modify shared proxy settings.'
+        if [[ -f /etc/caddy/Caddyfile ]]; then
+            command -v caddy >/dev/null || fail 'Caddy is required to remove the installer-managed Caddy configuration.'
+            getent group caddy >/dev/null || fail 'The caddy group is required to write the remaining Caddy configuration.'
+        fi
+    else
+        [[ "$proxy_mode" == caddy || "$proxy_mode" == nginx ]] \
+            || fail "Unsupported saved proxy mode: ${proxy_mode:-unset}."
+    fi
+
+    printf 'This will remove the SlowMeet service and its installer-managed configuration for %s.\n' "$domain"
+    printf 'The persistent application data volume will be kept unless you separately choose to purge it.\n'
+    local confirmation
+    read -r -p "Type $domain to confirm uninstall: " confirmation <&3
+    [[ "$confirmation" == "$domain" ]] || {
+        log 'Uninstall cancelled; no changes were made.'
+        return 0
+    }
+    if yes_no 'Permanently delete the SlowMeet application data volume?' no; then
+        remove_data=yes
+    fi
+
+    if [[ "$container_engine" == podman ]] && systemctl cat slowmeet-podman.service >/dev/null 2>&1; then
+        systemctl disable --now slowmeet-podman.service
+    fi
+    if [[ "$compose_available" == yes ]]; then
+        if [[ "$enable_turn" == yes ]]; then
+            if [[ "$remove_data" == yes ]]; then
+                compose --profile turn down --volumes
+            else
+                compose --profile turn down
+            fi
+        elif [[ "$remove_data" == yes ]]; then
+            compose down --volumes
+        else
+            compose down
+        fi
+    fi
+
+    if [[ "$container_engine" == podman ]]; then
+        rm -f "$PODMAN_SERVICE_FILE"
+        systemctl daemon-reload
+    fi
+
+    if [[ "$proxy_mode" == nginx && -e "$NGINX_SITE" ]]; then
+        rm -f "$NGINX_SITE"
+        if systemctl is-active --quiet nginx; then
+            nginx -t
+            systemctl reload nginx
+        fi
+    elif [[ "$proxy_mode" == caddy && -f /etc/caddy/Caddyfile ]]; then
+        caddyfile_tmp=$(mktemp /etc/caddy/.Caddyfile.slowmeet.XXXXXX)
+        cat > "$caddyfile_tmp" <<'EOF'
+:80 {
+    respond 404
+}
+EOF
+        caddy validate --config "$caddyfile_tmp" --adapter caddyfile
+        install -o root -g caddy -m 0644 "$caddyfile_tmp" /etc/caddy/Caddyfile
+        rm -f "$caddyfile_tmp"
+        if systemctl is-active --quiet caddy; then
+            systemctl reload caddy
+        fi
+    fi
+
+    rm -f "$CERT_HOOK"
+    rm -f "$CERT_DIR/fullchain.pem" "$CERT_DIR/privkey.pem"
+    rmdir "$CERT_DIR" 2>/dev/null || true
+    rm -f "$PROXY_MODE_FILE" "$CONTAINER_ENGINE_FILE"
+    rmdir /etc/slowmeet 2>/dev/null || true
+    rm -rf "$INSTALL_DIR"
+    rm -f "$STATE_FILE"
+    rmdir "$STATE_DIR" 2>/dev/null || true
+
+    printf '\nSlowMeet was uninstalled from %s.\n' "$domain"
+    if [[ "$remove_data" == yes ]]; then
+        printf 'The application data volume was permanently deleted.\n'
+    else
+        printf 'The application data volume was preserved.\n'
+    fi
+    printf 'Shared container and proxy packages, host firewall rules, and Let’s Encrypt certificates were left in place.\n'
+}
+
+choose_existing_install_action() {
+    local answer action_default action_label
+    if [[ "$install_mode" == fresh-resume ]]; then
+        action_default=resume
+        action_label='Existing incomplete installation (resume/uninstall)'
+    else
+        action_default=update
+        action_label='Existing installation (update/uninstall)'
+    fi
+    while true; do
+        answer=$(prompt "$action_label" "$action_default")
+        case "${answer,,}" in
+            "$action_default") return 0 ;;
+            uninstall|delete|remove)
+                uninstall_existing_install
+                exit 0
+                ;;
+            *) log "Enter $action_default or uninstall." ;;
+        esac
+    done
 }
 
 [[ "$(id -u)" -eq 0 ]] || fail 'Run this installer as root, for example through the README one-line command.'
@@ -594,6 +809,10 @@ else
     prompt_app_port
 fi
 
+if [[ "$install_mode" == update || "$install_mode" == fresh-resume ]]; then
+    choose_existing_install_action
+fi
+
 if [[ "$install_mode" == update ]]; then
     public_ipv4=$(curl -4fsS --max-time 15 https://api.ipify.org || true)
 else
@@ -708,6 +927,8 @@ ufw --force enable
 if [[ "$proxy_mode" == caddy ]]; then
     install -d -o root -g caddy -m 0755 /var/www/letsencrypt
     cat > /etc/caddy/Caddyfile <<EOF
+# Managed by SlowMeet installer
+
 http://$domain {
     root * /var/www/letsencrypt
     route {
@@ -740,6 +961,8 @@ fi
 
 if [[ "$proxy_mode" == caddy ]]; then
     cat > /etc/caddy/Caddyfile <<EOF
+# Managed by SlowMeet installer
+
 http://$domain {
     root * /var/www/letsencrypt
     route {
