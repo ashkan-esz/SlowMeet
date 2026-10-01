@@ -3565,3 +3565,17 @@ body { overflow-x: hidden; }
 #meeting:fullscreen::backdrop {
   background: var(--lm-bg);
 }
+
+@media (max-width: 480px) {
+  .participant-menu {
+    min-width: 144px;
+    max-width: min(190px, calc(100% - 16px));
+    gap: 2px;
+    padding: 4px;
+  }
+
+  .participant-menu button {
+    padding-inline: 8px;
+    font-size: 11px;
+  }
+}
