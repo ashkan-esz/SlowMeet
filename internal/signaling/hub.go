@@ -46,9 +46,13 @@ type roomChatHistory struct {
 
 type client struct {
 	conn                      *websocket.Conn
+	finished                  chan struct{}
 	writeMu                   sync.Mutex
 	participant               meeting.Participant
+	participantID             string
 	reconnectToken            string
+	resumed                   bool
+	joined                    bool
 	intentionalLeave          bool
 	joinAttempts              int
 	peer                      *webrtc.Peer
@@ -67,6 +71,7 @@ type client struct {
 type pendingReconnect struct {
 	participant meeting.Participant
 	token       string
+	client      *client
 	timer       *time.Timer
 }
 
@@ -81,6 +86,8 @@ type Hub struct {
 	roomMembers  map[*client]struct{}
 	router       *media.Router
 	pending      map[string]*pendingReconnect
+	activeTokens map[string]*client
+	mediaStates  map[string]Message
 	metrics      *metrics.Metrics
 	screenSharer *client
 	chatHistory  map[string]*roomChatHistory
@@ -104,6 +111,7 @@ func (h *Hub) Close() {
 		}
 	}
 	h.chatHistory = make(map[string]*roomChatHistory)
+	h.mediaStates = make(map[string]Message)
 	pending := make([]*pendingReconnect, 0, len(h.pending))
 	for token, reconnect := range h.pending {
 		delete(h.pending, token)
@@ -167,12 +175,14 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	snapshot := cfg.Snapshot()
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
-		Upgrader:    websocket.Upgrader{CheckOrigin: sameOrigin},
-		clients:     make(map[*client]struct{}),
-		roomMembers: make(map[*client]struct{}),
-		pending:     make(map[string]*pendingReconnect),
-		chatHistory: make(map[string]*roomChatHistory),
-		metrics:     &metrics.Metrics{},
+		Upgrader:     websocket.Upgrader{CheckOrigin: sameOrigin},
+		clients:      make(map[*client]struct{}),
+		roomMembers:  make(map[*client]struct{}),
+		pending:      make(map[string]*pendingReconnect),
+		activeTokens: make(map[string]*client),
+		mediaStates:  make(map[string]Message),
+		chatHistory:  make(map[string]*roomChatHistory),
+		metrics:      &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
@@ -266,16 +276,64 @@ func (h *Hub) disconnect(c *client) {
 	if c.peer != nil {
 		_ = c.peer.Close()
 	}
-	h.metrics.PeerLeft()
+	if c.joined {
+		h.metrics.PeerLeft()
+	}
 	h.releaseScreenShare(c)
-	h.mu.RLock()
-	closed := h.closed
-	h.mu.RUnlock()
-	if c.intentionalLeave || closed {
+
+	h.mu.Lock()
+	if c.reconnectToken != "" && h.activeTokens[c.reconnectToken] != c {
+		h.mu.Unlock()
+		return
+	}
+	if c.reconnectToken != "" {
+		delete(h.activeTokens, c.reconnectToken)
+	}
+	if c.intentionalLeave || h.closed || c.reconnectToken == "" || (!c.joined && !c.resumed) {
+		h.mu.Unlock()
 		h.removeParticipant(c.participant)
 		return
 	}
-	h.deferReconnect(c.participant, c.reconnectToken)
+
+	timeout := h.Config.Snapshot().ReconnectTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	pending := &pendingReconnect{
+		participant: c.participant,
+		token:       c.reconnectToken,
+		client:      c,
+	}
+	h.pending[c.reconnectToken] = pending
+	clients := make([]*client, 0, len(h.clients))
+	for client := range h.clients {
+		if client.participant.ID != "" && client.participant.ID != c.participant.ID {
+			clients = append(clients, client)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, client := range clients {
+		_ = client.write(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant})
+	}
+	h.mu.Lock()
+	if h.pending[c.reconnectToken] == pending {
+		pending.timer = time.AfterFunc(timeout, func() {
+			h.mu.Lock()
+			current, exists := h.pending[c.reconnectToken]
+			if exists && current == pending {
+				delete(h.pending, c.reconnectToken)
+			}
+			h.mu.Unlock()
+			if exists && current == pending {
+				_ = h.Meeting.Leave(c.participant.ID)
+				h.forgetMediaState(c.participant.ID)
+				h.scheduleChatHistoryExpiry(chatRoomID)
+				h.Logger.Info("participant_reconnect_expired", "participant_id", c.participant.ID)
+			}
+		})
+	}
+	h.mu.Unlock()
 	h.Logger.Info("participant_disconnected", "participant_id", c.participant.ID, "name", c.participant.Name)
 }
 
@@ -334,63 +392,52 @@ func (h *Hub) releaseScreenShare(c *client) {
 	h.broadcast(h.screenShareMessage(active, ""))
 }
 
-func (h *Hub) deferReconnect(participant meeting.Participant, token string) {
+func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool) {
 	if token == "" {
-		h.removeParticipant(participant)
-		return
-	}
-	timeout := h.Config.Snapshot().ReconnectTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	pending := &pendingReconnect{participant: participant, token: token}
-	timer := time.NewTimer(timeout)
-	pending.timer = timer
-	h.mu.Lock()
-	h.pending[token] = pending
-	clients := make([]*client, 0, len(h.clients))
-	for client := range h.clients {
-		if client.participant.ID != "" && client.participant.ID != participant.ID {
-			clients = append(clients, client)
-		}
-	}
-	h.mu.Unlock()
-	for _, client := range clients {
-		_ = client.write(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &participant})
-	}
-	go func() {
-		<-timer.C
-		h.mu.Lock()
-		current, exists := h.pending[token]
-		if exists && current == pending {
-			delete(h.pending, token)
-		}
-		h.mu.Unlock()
-		if exists && current == pending {
-			_ = h.Meeting.Leave(participant.ID)
-			h.scheduleChatHistoryExpiry(chatRoomID)
-			h.Logger.Info("participant_reconnect_expired", "participant_id", participant.ID)
-		}
-	}()
-}
-
-func (h *Hub) reclaim(token string) (meeting.Participant, bool) {
-	if token == "" {
-		return meeting.Participant{}, false
+		return meeting.Participant{}, false, false
 	}
 	h.mu.Lock()
-	pending, exists := h.pending[token]
-	if exists {
+	var previous *client
+	var pending *pendingReconnect
+	activeTakeover := false
+	if reconnect, exists := h.pending[token]; exists {
 		delete(h.pending, token)
+		if reconnect.timer != nil {
+			reconnect.timer.Stop()
+		}
+		pending = reconnect
+		previous = reconnect.client
+	} else if active := h.activeTokens[token]; active != nil {
+		previous = active
+		activeTakeover = true
+	} else {
+		h.mu.Unlock()
+		return meeting.Participant{}, false, false
 	}
+	if pending != nil {
+		c.participantID = pending.participant.ID
+	} else {
+		c.participantID = previous.participantID
+	}
+	c.reconnectToken = token
+	c.resumed = true
+	h.activeTokens[token] = c
 	h.mu.Unlock()
-	if !exists {
-		return meeting.Participant{}, false
+
+	if previous != nil {
+		if previous.conn != nil {
+			_ = previous.conn.Close()
+		}
+		if previous.finished != nil {
+			<-previous.finished
+		}
 	}
-	if pending.timer != nil {
-		pending.timer.Stop()
+	if pending != nil {
+		c.participant = pending.participant
+	} else {
+		c.participant = previous.participant
 	}
-	return pending.participant, true
+	return c.participant, true, activeTakeover
 }
 
 func (h *Hub) isPendingParticipant(id string) bool {
@@ -405,11 +452,18 @@ func (h *Hub) isPendingParticipant(id string) bool {
 }
 
 func (h *Hub) removeParticipant(participant meeting.Participant) {
+	h.forgetMediaState(participant.ID)
 	if h.Meeting.Leave(participant.ID) {
 		h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &participant})
 		h.scheduleChatHistoryExpiry(chatRoomID)
 		h.Logger.Info("participant_left", "participant_id", participant.ID, "name", participant.Name)
 	}
+}
+
+func (h *Hub) forgetMediaState(participantID string) {
+	h.mu.Lock()
+	delete(h.mediaStates, participantID)
+	h.mu.Unlock()
 }
 
 func sameOrigin(r *http.Request) bool {
@@ -431,7 +485,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
 	})
-	c := &client{conn: conn}
+	c := &client{conn: conn, finished: make(chan struct{})}
 	done := make(chan struct{})
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
@@ -444,6 +498,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		delete(h.roomMembers, c)
 		h.mu.Unlock()
 		h.disconnect(c)
+		close(c.finished)
 	}()
 	go func() {
 		ticker := time.NewTicker(websocketPingPeriod)
@@ -496,6 +551,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.Type == TypeMediaState {
 				msg.ParticipantID = c.participant.ID
+				h.mu.Lock()
+				h.mediaStates[c.participant.ID] = msg
+				h.mu.Unlock()
 				h.broadcastExcept(c, msg)
 				continue
 			}
@@ -572,7 +630,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "invalid meeting password"})
 			continue
 		}
-		participant, resumed := h.reclaim(msg.ReconnectToken)
+		participant, resumed, activeTakeover := h.reclaim(c, msg.ReconnectToken)
 		var err error
 		if !resumed {
 			participant, err = h.Meeting.Join(msg.Name)
@@ -583,13 +641,15 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				continue
 			}
+			c.participant = participant
+			c.participantID = participant.ID
+			c.reconnectToken = uuid.NewString()
+			h.mu.Lock()
+			h.activeTokens[c.reconnectToken] = c
+			h.mu.Unlock()
 		}
 		c.participant = participant
 		h.cancelChatHistoryExpiry(chatRoomID)
-		c.reconnectToken = msg.ReconnectToken
-		if !resumed {
-			c.reconnectToken = uuid.NewString()
-		}
 		turnUsername := cfg.TURNUsername
 		turnPassword := cfg.TURNPassword
 		if username, password, ok := cfg.TURNCredentials(participant.ID, time.Now()); ok {
@@ -601,11 +661,6 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy, cfg.ICEPublicIP,
 		)
 		if err != nil {
-			if resumed {
-				h.deferReconnect(participant, c.reconnectToken)
-			} else {
-				_ = h.Meeting.Leave(participant.ID)
-			}
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return
 		}
@@ -659,6 +714,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.mu.RLock()
+		for _, state := range h.mediaStates {
+			_ = c.write(state)
+		}
+		h.mu.RUnlock()
+		h.mu.RLock()
 		screenOwner := ""
 		if h.screenSharer != nil {
 			screenOwner = h.screenSharer.participant.ID
@@ -667,8 +727,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if screenOwner != "" {
 			_ = c.write(h.screenShareMessage(true, screenOwner))
 		}
-		h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+		if !activeTakeover {
+			h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+		}
 		h.Logger.Info("participant_joined", "participant_id", participant.ID, "name", participant.Name)
+		c.joined = true
 		h.metrics.PeerJoined()
 		if resumed {
 			h.metrics.Reconnected()

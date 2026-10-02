@@ -311,6 +311,7 @@ input:hover, select:hover { border-color: var(--primary); }
   aspect-ratio: 16 / 10;
   margin-top: .75rem;
   object-fit: cover;
+  transform: scaleX(-1);
   background: var(--surface-inverse);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
@@ -1001,7 +1002,7 @@ html:has(.meeting-shell:not([hidden])) #root {
 .participant-video { background: #11151b; }
 .participant-video video { object-fit: cover; }
 .participant-grid video.local-camera-preview { transform: scaleX(-1); }
-.participant-grid video.remote-camera-preview { transform: none; }
+.participant-grid video.remote-camera-preview { transform: scaleX(-1); }
 .participant-tile[data-sharing="true"] .participant-video,
 .participant-tile[data-sharing="true"] .participant-video video { background: #090c11; }
 .participant-tile[data-sharing="true"] .participant-video video { object-fit: contain; }

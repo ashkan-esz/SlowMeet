@@ -104,6 +104,97 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	}
 }
 
+func TestHubReplaysLatestMediaStateToLateJoiners(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		MaxParticipants:     3,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(3), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	initialAudio, initialVideo := true, true
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeMediaState, ParticipantID: firstJoined.Participant.ID,
+		AudioEnabled: &initialAudio, VideoEnabled: &initialVideo,
+	})
+	latestAudio, latestVideo, latestPaused := false, false, true
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeMediaState, ParticipantID: firstJoined.Participant.ID,
+		AudioEnabled: &latestAudio, VideoEnabled: &latestVideo, VideoPaused: &latestPaused,
+	})
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	var secondSeesFirst Message
+	readTestMessage(t, second, &secondSeesFirst)
+	if secondSeesFirst.Type != TypeJoined || secondSeesFirst.Participant.ID != firstJoined.Participant.ID {
+		t.Fatalf("second existing participant = %+v", secondSeesFirst)
+	}
+	var secondSeesFirstState Message
+	readTestMessage(t, second, &secondSeesFirstState)
+	if secondSeesFirstState.Type != TypeMediaState || secondSeesFirstState.ParticipantID != firstJoined.Participant.ID ||
+		secondSeesFirstState.AudioEnabled == nil || *secondSeesFirstState.AudioEnabled ||
+		secondSeesFirstState.VideoEnabled == nil || *secondSeesFirstState.VideoEnabled ||
+		secondSeesFirstState.VideoPaused == nil || !*secondSeesFirstState.VideoPaused {
+		t.Fatalf("replayed media state = %+v, want latest state from first participant", secondSeesFirstState)
+	}
+
+	updatedAudio, updatedVideo := true, false
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeMediaState, ParticipantID: firstJoined.Participant.ID,
+		AudioEnabled: &updatedAudio, VideoEnabled: &updatedVideo,
+	})
+	var secondSeesUpdate Message
+	readTestMessage(t, second, &secondSeesUpdate)
+	if secondSeesUpdate.Type != TypeMediaState || secondSeesUpdate.ParticipantID != firstJoined.Participant.ID ||
+		secondSeesUpdate.AudioEnabled == nil || !*secondSeesUpdate.AudioEnabled ||
+		secondSeesUpdate.VideoEnabled == nil || *secondSeesUpdate.VideoEnabled {
+		t.Fatalf("broadcast media state = %+v, want updated state from first participant", secondSeesUpdate)
+	}
+
+	third := dialTestSocket(t, socketURL)
+	defer third.Close()
+	writeTestMessage(t, third, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Sara"})
+	var thirdJoined Message
+	readTestMessage(t, third, &thirdJoined)
+	joinedIDs := make(map[string]bool)
+	for range 2 {
+		var existing Message
+		readTestMessage(t, third, &existing)
+		if existing.Type != TypeJoined || existing.Participant == nil {
+			t.Fatalf("third participant roster message = %+v", existing)
+		}
+		joinedIDs[existing.Participant.ID] = true
+	}
+	if !joinedIDs[firstJoined.Participant.ID] || !joinedIDs[secondJoined.Participant.ID] {
+		t.Fatalf("third participant roster IDs = %v", joinedIDs)
+	}
+	var thirdSeesState Message
+	readTestMessage(t, third, &thirdSeesState)
+	if thirdSeesState.Type != TypeMediaState || thirdSeesState.ParticipantID != firstJoined.Participant.ID ||
+		thirdSeesState.AudioEnabled == nil || !*thirdSeesState.AudioEnabled ||
+		thirdSeesState.VideoEnabled == nil || *thirdSeesState.VideoEnabled {
+		t.Fatalf("third participant state replay = %+v, want only first participant state", thirdSeesState)
+	}
+}
+
 func TestChatHistoryRetentionIsRoomScopedCappedAndExpiring(t *testing.T) {
 	oldExpiry := chatHistoryExpiry
 	chatHistoryExpiry = 20 * time.Millisecond
@@ -417,11 +508,11 @@ func TestHubRejectsWrongPasswordAndFullMeeting(t *testing.T) {
 
 func TestHubRejectsMessagesBeforeJoin(t *testing.T) {
 	cfg := config.Config{
-		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		HTTPAddr: ":8080", MaxParticipants: 3, DefaultVideoQuality: "low",
 		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
 		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
 	}
-	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	hub := NewHub(meeting.New(3), config.NewStore(cfg), slog.Default())
 	server := httptest.NewServer(hub)
 	defer server.Close()
 
@@ -649,6 +740,88 @@ func TestHubReconnectReclaimsParticipantDuringGracePeriod(t *testing.T) {
 	if rejoined.Type != TypeParticipant || rejoined.Participant.ID != joined.Participant.ID {
 		t.Fatalf("reconnect response = %+v, want participant %q", rejoined, joined.Participant.ID)
 	}
+}
+
+func TestHubReconnectTakesOverStillConnectedParticipant(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 3, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: time.Second,
+	}
+	hub := NewHub(meeting.New(3), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	defer hub.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, first, &joined)
+	if joined.Type != TypeParticipant || joined.ReconnectToken == "" {
+		t.Fatalf("initial join response = %+v", joined)
+	}
+
+	observer := dialTestSocket(t, socketURL)
+	defer observer.Close()
+	writeTestMessage(t, observer, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var observerJoined Message
+	readTestMessage(t, observer, &observerJoined)
+	if observerJoined.Type != TypeParticipant {
+		t.Fatalf("observer join response = %+v", observerJoined)
+	}
+	var observerSeesOriginal Message
+	readTestMessage(t, observer, &observerSeesOriginal)
+	if observerSeesOriginal.Type != TypeJoined || observerSeesOriginal.Participant.ID != joined.Participant.ID {
+		t.Fatalf("observer existing participant = %+v", observerSeesOriginal)
+	}
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan",
+		ReconnectToken: joined.ReconnectToken,
+	})
+	var rejoined Message
+	readTestMessage(t, second, &rejoined)
+	if rejoined.Type != TypeParticipant || rejoined.Participant.ID != joined.Participant.ID {
+		t.Fatalf("reconnect response = %+v, want participant %q", rejoined, joined.Participant.ID)
+	}
+	var secondSeesObserver Message
+	readTestMessage(t, second, &secondSeesObserver)
+	if secondSeesObserver.Type != TypeJoined || secondSeesObserver.Participant.ID != observerJoined.Participant.ID {
+		t.Fatalf("reconnecting participant roster = %+v", secondSeesObserver)
+	}
+	if got := hub.ActiveParticipants(); got != 2 {
+		t.Fatalf("active participants after reconnect = %d, want 2", got)
+	}
+	if err := observer.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set observer read deadline: %v", err)
+	}
+	var unexpected Message
+	if err := observer.ReadJSON(&unexpected); err == nil {
+		t.Fatalf("observer received duplicate reconnect event: %+v", unexpected)
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("observer read after active reconnect: %v", err)
+	}
+
+	first.Close()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.RLock()
+		pending := len(hub.pending)
+		hub.mu.RUnlock()
+		if pending == 0 {
+			if got := hub.ActiveParticipants(); got != 2 {
+				t.Fatalf("active participants after old connection cleanup = %d, want 2", got)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("superseded connection created a pending reconnect")
 }
 
 func TestHubHidesDisconnectedParticipantDuringGracePeriod(t *testing.T) {

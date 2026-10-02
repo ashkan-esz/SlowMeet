@@ -102,7 +102,6 @@ const participantMenuHideTile = document.querySelector("#participant-menu-hide-t
 const participantMenuSelfView = document.querySelector("#participant-menu-self-view");
 const stageFocusExit = document.querySelector("#participant-stage-focus-exit");
 const networkLabel = document.querySelector("[data-network-label]");
-const networkSummary = document.querySelector("[data-network-summary]");
 const statRTT = document.querySelector("#stat-rtt");
 const statJitter = document.querySelector("#stat-jitter");
 const statLoss = document.querySelector("#stat-loss");
@@ -2996,7 +2995,6 @@ function syncConnectionPopoverStats() {
     "stat-rtt": "popover-stat-rtt",
     "stat-jitter": "popover-stat-jitter",
     "stat-loss": "popover-stat-loss",
-    "stat-bitrate": "popover-stat-bitrate",
     "stat-resolution": "popover-stat-resolution"
   };
   let available = false;
@@ -3010,6 +3008,24 @@ function syncConnectionPopoverStats() {
     if (targetRow) targetRow.hidden = !visible;
     available ||= visible;
   });
+
+  const renderMetric = (key, value) => {
+    const target = document.querySelector(`#popover-stat-${key}`);
+    const row = target?.closest("[data-popover-stat]");
+    const visible = value !== null && value !== undefined && value !== "";
+    if (target && visible) target.textContent = value;
+    if (row) row.hidden = !visible;
+    available ||= visible;
+  };
+  renderMetric("path", connectionMetrics.icePath);
+  renderMetric("ice", connectionMetrics.iceState && connectionMetrics.iceState !== "new"
+    ? connectionMetrics.iceState : null);
+  renderMetric("video", connectionMetrics.incomingVideoKbps == null && connectionMetrics.outgoingVideoKbps == null
+    ? null : `${connectionMetrics.incomingVideoKbps ?? "-"} / ${connectionMetrics.outgoingVideoKbps ?? "-"} kbps`);
+  renderMetric("audio", connectionMetrics.incomingAudioKbps == null && connectionMetrics.outgoingAudioKbps == null
+    ? null : `${connectionMetrics.incomingAudioKbps ?? "-"} / ${connectionMetrics.outgoingAudioKbps ?? "-"} kbps`);
+  renderMetric("available", connectionMetrics.availableOutgoingKbps == null
+    ? null : `${connectionMetrics.availableOutgoingKbps} kbps`);
   if (connectionPopoverEmpty) connectionPopoverEmpty.hidden = available;
 }
 
@@ -3036,7 +3052,7 @@ function setConnectionPopoverOpen(open, trigger = null, restoreFocus = true) {
     connectionPopover.hidden = false;
     connectionPopover.setAttribute("aria-hidden", "false");
     connection.setAttribute("aria-expanded", "true");
-    updateConnectionPopover(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
+    updateConnectionPopover(lastConnectionLevel || "connecting", connectionMetrics.status || "Connecting");
     setTimeout(() => {
       connectionPopover.classList.add("is-open");
       closeConnectionPopover?.focus();
@@ -3105,7 +3121,7 @@ function setMeasuredConnection(level, label) {
   if (level === lastConnectionLevel) {
     pendingConnectionLevel = "";
     pendingConnectionSamples = 0;
-    updateConnectionSummary(level, networkLabel?.textContent || label);
+    updateConnectionSummary(level, connectionMetrics.status || label);
     return;
   }
   if (pendingConnectionLevel === level) pendingConnectionSamples += 1;
@@ -3130,15 +3146,18 @@ function updateConnectionMetrics(values) {
     ...connectionMetrics,
     iceState: values.ice || connectionMetrics.iceState,
     lastSampleAt: values.timestamp || Date.now(),
-    rttMs: values.rttMs,
-    jitterMs: values.jitterMs,
-    packetLossPct: values.packetLoss,
-    availableOutgoingKbps: values.availableOutgoingKbps,
-    icePath: values.icePath,
-    incomingVideoKbps: values.inboundKbps,
-    outgoingVideoKbps: values.outboundKbps,
-    incomingAudioKbps: values.inboundAudioKbps,
-    outgoingAudioKbps: values.outboundAudioKbps,
+    rttMs: values.rttMs === undefined ? connectionMetrics.rttMs : values.rttMs,
+    jitterMs: values.jitterMs === undefined ? connectionMetrics.jitterMs : values.jitterMs,
+    packetLossPct: values.packetLoss === undefined ? connectionMetrics.packetLossPct : values.packetLoss,
+    availableOutgoingKbps: values.availableOutgoingKbps === undefined
+      ? connectionMetrics.availableOutgoingKbps : values.availableOutgoingKbps,
+    icePath: values.icePath === undefined ? connectionMetrics.icePath : values.icePath,
+    incomingVideoKbps: values.inboundKbps === undefined ? connectionMetrics.incomingVideoKbps : values.inboundKbps,
+    outgoingVideoKbps: values.outboundKbps === undefined ? connectionMetrics.outgoingVideoKbps : values.outboundKbps,
+    incomingAudioKbps: values.inboundAudioKbps === undefined
+      ? connectionMetrics.incomingAudioKbps : values.inboundAudioKbps,
+    outgoingAudioKbps: values.outboundAudioKbps === undefined
+      ? connectionMetrics.outgoingAudioKbps : values.outboundAudioKbps,
     incomingVideoState: values.inboundKbps == null ? "No sample" : "Receiving",
     outgoingVideoState: values.outboundKbps == null ? (cameraRequested ? "No sample" : "Not active") : "Sending",
     audioState: values.inboundAudioKbps == null && values.outboundAudioKbps == null ? "No sample" : "Connected"
@@ -3169,15 +3188,14 @@ function updateConnectionMetrics(values) {
   text("metric-reconnects", connectionMetrics.reconnects);
   const summary = document.querySelector("#connection-metrics-status");
   if (summary) summary.textContent = connectionMetrics.lastSampleAt ? "Live" : "No sample";
-  if (networkSummary) {
-    const summaryParts = [];
-    if (connectionMetrics.rttMs != null) summaryParts.push(`RTT ${connectionMetrics.rttMs} ms`);
-    if (connectionMetrics.icePath) summaryParts.push(connectionMetrics.icePath);
-    if (connectionMetrics.availableOutgoingKbps != null) {
-      summaryParts.push(`${connectionMetrics.availableOutgoingKbps} kbps available`);
-    }
-    networkSummary.textContent = summaryParts.join(" · ") || "Waiting for metrics";
-  }
+  const chipLabel = lastConnectionLevel === "good" && connectionMetrics.rttMs != null
+    ? `${connectionMetrics.rttMs} ms` : connectionMetrics.status;
+  if (networkLabel && networkLabel.textContent !== chipLabel) networkLabel.textContent = chipLabel;
+  const connectionDescription = lastConnectionLevel === "good" && connectionMetrics.rttMs != null
+    ? `Connection status: ${connectionMetrics.status}, round-trip time ${connectionMetrics.rttMs} milliseconds`
+    : `Connection status: ${connectionMetrics.status}`;
+  connection?.setAttribute("aria-label", connectionDescription);
+  syncConnectionPopoverStats();
 }
 
 async function updateDiagnostics() {

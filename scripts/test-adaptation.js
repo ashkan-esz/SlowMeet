@@ -203,14 +203,14 @@ if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther |
     appSource.includes("screen.disabled = false;")) {
   throw new Error("disabled screen sharing must remain disabled after UI refresh");
 }
-if (!styleSource.includes(".participant-grid video.local-camera-preview") ||
-    !styleSource.includes(".participant-grid video.remote-camera-preview") ||
-    !styleSource.includes("transform: scaleX(-1);") ||
+if (!/\.device-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
+    !/\.participant-grid video\.local-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
+    !/\.participant-grid video\.remote-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
     !appSource.includes("setLocalVideoMirror(true);") ||
     !appSource.includes("setLocalVideoMirror(false);") ||
     !appSource.includes("updateVideoOrientation(previousScreenShareOwner);") ||
     !appSource.includes("updateVideoOrientation(screenShareOwner);")) {
-  throw new Error("camera previews should be mirrored without mirroring screen shares");
+  throw new Error("device and participant camera previews should be mirrored without changing self-view or screen shares");
 }
 if (!appSource.includes('const streamPrefix = "slowmeet-";') ||
     !appSource.includes('return track.id?.split("|")[0] || "";') ||

@@ -95,7 +95,7 @@
         </div>
         <div class="meeting-header-actions">
           <button id="connection" class="network-chip connection" type="button" aria-label="Connection status: Connecting" aria-controls="connection-popover" aria-haspopup="dialog" aria-expanded="false">
-            <span class="network-chip__icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 15h1M7 12h1M11 9h1M15 6h1"/></svg></span><span class="network-chip__copy"><span data-network-label role="status" aria-live="polite">Connecting</span><small data-network-summary>Waiting for metrics</small></span>
+            <span class="network-chip__icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 15h1M7 12h1M11 9h1M15 6h1"/></svg></span><span class="network-chip__copy"><span data-network-label role="status" aria-live="polite">Connecting</span></span>
           </button>
         </div>
       </header>
@@ -110,10 +110,14 @@
         </div>
         <p id="connection-popover-copy" class="connection-popover__copy">Waiting for a live media sample.</p>
         <dl class="connection-popover__stats">
+          <div data-popover-stat="path" hidden><dt>Network path</dt><dd id="popover-stat-path"></dd></div>
+          <div data-popover-stat="ice" hidden><dt>ICE state</dt><dd id="popover-stat-ice"></dd></div>
           <div data-popover-stat="rtt" hidden><dt>Latency</dt><dd id="popover-stat-rtt"></dd></div>
           <div data-popover-stat="jitter" hidden><dt>Jitter</dt><dd id="popover-stat-jitter"></dd></div>
           <div data-popover-stat="loss" hidden><dt>Packet loss</dt><dd id="popover-stat-loss"></dd></div>
-          <div data-popover-stat="bitrate" hidden><dt>In / out</dt><dd id="popover-stat-bitrate"></dd></div>
+          <div data-popover-stat="video" hidden><dt>Video in / out</dt><dd id="popover-stat-video"></dd></div>
+          <div data-popover-stat="audio" hidden><dt>Audio in / out</dt><dd id="popover-stat-audio"></dd></div>
+          <div data-popover-stat="available" hidden><dt>Outgoing capacity</dt><dd id="popover-stat-available"></dd></div>
           <div data-popover-stat="resolution" hidden><dt>Resolution</dt><dd id="popover-stat-resolution"></dd></div>
         </dl>
         <p id="connection-popover-empty" class="connection-popover__empty">No live network sample yet.</p>
