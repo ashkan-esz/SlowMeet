@@ -25,8 +25,6 @@ const receiveVideo = document.querySelector("#receive-video");
 const screen = document.querySelector("#screen");
 const leave = document.querySelector("#leave");
 const connection = document.querySelector("#connection");
-const toggleSidebar = document.querySelector("#toggle-sidebar");
-const toggleSidebarLabel = document.querySelector("#toggle-sidebar-label");
 const meetingSidebar = document.querySelector("#meeting-sidebar");
 const closeSidebar = document.querySelector("#close-sidebar");
 const sidebarBackdrop = document.querySelector("#sidebar-backdrop");
@@ -64,14 +62,13 @@ const testCamera = document.querySelector("#test-camera");
 const testMicrophone = document.querySelector("#test-microphone");
 const stopMediaTest = document.querySelector("#stop-media-test");
 const deviceTestStatus = document.querySelector("#device-test-status");
+const secureOriginWarning = document.querySelector("#secure-origin-warning");
 const chatToggle = document.querySelector("#chat");
 const participantsButton = document.querySelector("#participants-button");
-const mobileChat = document.querySelector("#mobile-chat");
 const mobilePeople = document.querySelector("#mobile-people");
 const mobileScreen = document.querySelector("#mobile-screen");
 const fullscreenToggle = document.querySelector("#fullscreen");
 const mobileFullscreenToggle = document.querySelector("#mobile-fullscreen");
-const mobileRaiseHand = document.querySelector("#mobile-raise-hand");
 const mobileReceiveVideo = document.querySelector("#mobile-receive-video");
 const chatRail = document.querySelector("#chat-rail");
 const closeChat = document.querySelector("#close-chat");
@@ -663,7 +660,7 @@ function closeParticipantMenu(restoreFocus = true) {
   owner.trigger.setAttribute("aria-expanded", "false");
   if (!restoreFocus) return;
   if (owner.trigger.isConnected && !owner.item.hidden) owner.trigger.focus();
-  else if (owner.participantID === localParticipantID) toggleSidebar?.focus();
+  else if (owner.participantID === localParticipantID) (participantsButton || more)?.focus();
 }
 
 function positionParticipantMenu() {
@@ -1223,7 +1220,6 @@ function autoGrowChat() {
 }
 
 chatToggle?.addEventListener("click", () => setOpenPanel("chat", chatToggle));
-mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));
 closeChat?.addEventListener("click", () => closeOpenPanel());
 reactions?.addEventListener("click", () => setReactionPickerOpen(reactionPicker?.hidden !== false));
 window.addEventListener("resize", positionReactionPicker);
@@ -1322,7 +1318,6 @@ mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));
 mobileScreen?.addEventListener("click", () => screen?.click());
 fullscreenToggle?.addEventListener("click", toggleMeetingFullscreen);
 mobileFullscreenToggle?.addEventListener("click", toggleMeetingFullscreen);
-mobileRaiseHand?.addEventListener("click", () => raiseHand?.click());
 mobileReceiveVideo?.addEventListener("click", () => receiveVideo?.click());
 document.addEventListener("keydown", (event) => {
   if (meeting.hidden) return;
@@ -1792,7 +1787,9 @@ async function runDeviceTest() {
   if (!navigator.mediaDevices?.getUserMedia) {
     setDeviceResult(testCamera, "error", "Camera unavailable");
     setDeviceResult(testMicrophone, "error", "Microphone unavailable");
-    deviceTestStatus.textContent = "This browser does not support camera and microphone checks.";
+    deviceTestStatus.textContent = window.isSecureContext
+      ? "This browser does not support camera and microphone checks."
+      : "Camera and microphone access needs trusted HTTPS on another device. Open SlowMeet using its HTTPS address.";
     stopMediaTest.hidden = true;
     testMedia.disabled = false;
     return;
@@ -1857,6 +1854,10 @@ settingsCamera?.addEventListener("change", () => replaceLocalDevice("video", set
 settingsSpeaker?.addEventListener("change", () => setSpeakerOutput(settingsSpeaker.value));
 navigator.mediaDevices?.addEventListener?.("devicechange", refreshDeviceSelectors);
 void refreshDeviceSelectors();
+
+if (secureOriginWarning && !window.isSecureContext) {
+  secureOriginWarning.hidden = false;
+}
 
 function setLocalMediaControls() {
   const audioTrack = localStream?.getAudioTracks()[0];
@@ -2006,7 +2007,6 @@ function setSidebarOpen(open, trigger = null, restoreFocus = true) {
   if (open) sidebarFocusTrigger = trigger || document.activeElement;
   if (open && chatRail && !chatRail.hidden) setChatOpen(false, null, false);
   meeting.classList.toggle("sidebar-open", open);
-  toggleSidebar.setAttribute("aria-expanded", String(open));
   connection.setAttribute("aria-expanded", String(open));
   participantsButton?.setAttribute("aria-expanded", String(open));
   if (participantsButton) updateControlLabel(participantsButton, open ? "Close meeting controls" : "Open participants");
@@ -2019,10 +2019,6 @@ function setSidebarOpen(open, trigger = null, restoreFocus = true) {
         : "Open more meeting controls";
     updateControlLabel(more, moreLabel);
   }
-  const sidebarLabel = open ? "Close meeting controls" : "Open meeting controls";
-  toggleSidebar.setAttribute("aria-label", sidebarLabel);
-  toggleSidebar.title = sidebarLabel;
-  toggleSidebarLabel.textContent = sidebarLabel;
   meetingSidebar.setAttribute("aria-hidden", String(!open));
   meeting.classList.toggle("has-rail", open || !chatRail?.hidden);
   sidebarBackdrop.hidden = !open;
@@ -2032,11 +2028,10 @@ function setSidebarOpen(open, trigger = null, restoreFocus = true) {
   } else {
     const focusTarget = sidebarFocusTrigger;
     sidebarFocusTrigger = undefined;
-    if (restoreFocus) restoreFocusTo(focusTarget, toggleSidebar);
+    if (restoreFocus) restoreFocusTo(focusTarget, participantsButton || more);
   }
 }
 
-toggleSidebar.addEventListener("click", () => setOpenPanel("settings", toggleSidebar));
 closeSidebar.addEventListener("click", () => {
   closeOpenPanel();
 });

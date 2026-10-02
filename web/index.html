@@ -50,6 +50,7 @@
           <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
         </div>
         <p class="panel-copy">Use a name your teammates will recognize. A password is only needed when the room is protected.</p>
+        <p id="secure-origin-warning" class="secure-origin-warning" role="status" aria-live="polite" hidden>This address cannot access your camera or microphone because it is not using trusted HTTPS. Open SlowMeet using its HTTPS address. Plain HTTP addresses on another device cannot show a media permission prompt.</p>
         <div class="form-field">
           <label for="name">Name</label>
           <input id="name" name="name" maxlength="32" autocomplete="name" required>
@@ -88,17 +89,13 @@
         <div class="room-identity">
           <span class="room-mark" aria-hidden="true">L</span>
           <div>
-            <h1 id="meeting-title">SlowMeet room</h1>
+            <h1 id="meeting-title">SlowMeet</h1>
             <p id="participant-count" class="room-meta">1 participant</p>
           </div>
         </div>
         <div class="meeting-header-actions">
           <button id="connection" class="network-chip connection" type="button" aria-label="Connection status: Connecting" aria-controls="connection-popover" aria-haspopup="dialog" aria-expanded="false">
             <span class="network-chip__icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 15h1M7 12h1M11 9h1M15 6h1"/></svg></span><span class="network-chip__copy"><span data-network-label role="status" aria-live="polite">Connecting</span><small data-network-summary>Waiting for metrics</small></span>
-          </button>
-          <button id="toggle-sidebar" class="icon-button" type="button" aria-controls="meeting-sidebar" aria-haspopup="dialog" aria-expanded="false" aria-label="Open meeting controls" title="More meeting controls">
-            <span aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></svg></span>
-            <span id="toggle-sidebar-label" class="sr-only">More meeting controls</span>
           </button>
         </div>
       </header>
@@ -131,10 +128,8 @@
             <h3 id="mobile-more-actions-title">Quick actions</h3>
             <div class="more-action-list">
               <button id="mobile-people" class="more-action" type="button" aria-controls="meeting-sidebar" aria-haspopup="dialog">View participants</button>
-              <button id="mobile-chat" class="more-action" type="button" aria-controls="chat-rail" aria-haspopup="dialog">Open chat</button>
               <button id="mobile-fullscreen" class="more-action fullscreen-control" type="button" aria-pressed="false" hidden>full screen</button>
               <button id="mobile-screen" class="more-action" type="button" aria-controls="participants">Share screen</button>
-              <button id="mobile-raise-hand" class="more-action" type="button" aria-pressed="false">Raise hand</button>
               <button id="mobile-receive-video" class="more-action" type="button" aria-pressed="true">Turn off incoming video</button>
             </div>
           </section>

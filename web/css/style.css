@@ -291,6 +291,16 @@ input:hover, select:hover { border-color: var(--primary); }
 .device-test-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; }
 .device-test-heading h3 { margin: 0; font-size: .9rem; letter-spacing: -.015em; }
 .device-test-copy { max-width: 38rem; margin: .45rem 0 0; color: var(--text-muted); font-size: .76rem; line-height: 1.4; }
+.secure-origin-warning {
+  margin: .75rem 0;
+  padding: .7rem .8rem;
+  border: 1px solid #dfbd75;
+  border-radius: var(--radius-card);
+  background: #fff7e5;
+  color: #543c0d;
+  font-size: .8rem;
+  line-height: 1.45;
+}
 .device-test-summary .button-secondary { justify-self: start; min-width: 0; margin: 0; white-space: nowrap; }
 #test-media { min-height: 36px; padding: .4rem .65rem; font-size: .78rem; }
 .device-test-details { display: none; }
@@ -1397,7 +1407,7 @@ html:has(.meeting-shell:not([hidden])) #root {
 .room-identity h1 {
   max-width: 100%;
   color: var(--lm-text);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 650;
 }
 .room-meta { color: var(--lm-text-muted); white-space: nowrap; }
@@ -1736,7 +1746,6 @@ button.control-button:disabled { color: var(--lm-text-subtle); background: trans
   .toolbar-primary #screen { display: none; }
 }
 @container toolbar (max-width: 430px) {
-  .toolbar-secondary #chat,
   .toolbar-secondary #participants-button,
   .toolbar-session #receive-video { display: none; }
 }
@@ -1753,8 +1762,6 @@ button.control-button:disabled { color: var(--lm-text-subtle); background: trans
   }
   .meeting-toolbar #screen,
   .controls #screen,
-  .meeting-toolbar #chat,
-  .controls #chat,
   .meeting-toolbar #participants-button,
   .controls #participants-button,
   .meeting-toolbar #receive-video,
@@ -2900,7 +2907,8 @@ body { overflow-x: hidden; }
     height: 64px;
     padding: 6px;
     border-radius: 14px;
-    overflow-x: hidden;
+    overflow-x: clip;
+    overflow-y: visible;
   }
 
   .meeting-toolbar .toolbar-primary,
@@ -2947,8 +2955,6 @@ body { overflow-x: hidden; }
     gap: 1px;
     padding-inline: 4px;
   }
-
-  .meeting-toolbar #chat { display: none !important; }
 
   .meeting-toolbar .control-button,
   .meeting-toolbar .control-button--danger,
@@ -3342,6 +3348,27 @@ body { overflow-x: hidden; }
 
 @media (max-width: 320px) and (orientation: portrait) {
   .meeting-toolbar .toolbar-secondary::before { display: none; }
+}
+
+@media (max-width: 700px) {
+  .meeting-shell { grid-template-rows: 52px minmax(0, 1fr) 56px; }
+
+  .meeting-toolbar {
+    min-height: 56px;
+    height: 56px;
+    padding-block: 4px;
+  }
+
+  .meeting-toolbar .toolbar-primary,
+  .meeting-toolbar .toolbar-secondary {
+    padding-block: 4px;
+  }
+
+  .meeting-toolbar .control-button,
+  .meeting-toolbar .control-button--danger,
+  .meeting-toolbar > #leave {
+    height: 44px;
+  }
 }
 
 /* Keep the solo participant tile at the size selected by the layout policy. */

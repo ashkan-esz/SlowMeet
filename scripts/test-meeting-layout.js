@@ -166,17 +166,17 @@ if ((indexSource.match(/id="participant-menu-stage-focus"/g) || []).length !== 1
 }
 for (const element of [
   'class="mobile-more-actions"',
-  'id="mobile-chat"',
   'id="mobile-people"'
 ]) {
   if (!indexSource.includes(element)) {
     throw new Error(`mobile meeting action is missing: ${element}`);
   }
 }
+if (indexSource.includes('id="mobile-chat"') || indexSource.includes('id="mobile-raise-hand"')) {
+  throw new Error("chat and raise-hand actions must stay in the meeting toolbar, not quick actions");
+}
 for (const behavior of [
-  'const mobileChat = document.querySelector("#mobile-chat");',
   'const mobilePeople = document.querySelector("#mobile-people");',
-  'mobileChat?.addEventListener("click", () => setOpenPanel("chat", mobileChat));',
   'function openPeoplePanel(trigger = participantsButton)',
   'mobilePeople?.addEventListener("click", () => openPeoplePanel(mobilePeople));'
 ]) {
