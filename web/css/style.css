@@ -3670,3 +3670,9 @@ body { overflow-x: hidden; }
   width: 100%;
   height: 100%;
 }
+
+.meeting-toolbar #reactions[aria-expanded="true"] {
+  color: var(--lm-accent);
+  background: var(--lm-accent-soft);
+  border-color: var(--lm-accent);
+}
