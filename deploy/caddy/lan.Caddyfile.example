@@ -1,0 +1,5 @@
+# Replace this IP with the SlowMeet host's LAN IPv4 address.
+https://192.168.254.4:8443 {
+	tls internal
+	reverse_proxy 127.0.0.1:8080
+}

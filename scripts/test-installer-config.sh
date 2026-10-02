@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 readonly INSTALLER=deploy/install.sh
+readonly CADDY_XRAY_BACKEND_PORT=9080
 TEMP_DIR=$(mktemp -d)
 readonly TEMP_DIR
 trap 'rm -rf "$TEMP_DIR"' EXIT
@@ -70,6 +71,15 @@ readonly CERT_DIR=/etc/slowmeet/certs
 source <(sed -n '/^write_expected_caddyfile() {/,/^uninstall_existing_install() {/p' "$INSTALLER" | sed '$d')
 # shellcheck disable=SC1090
 source <(sed -n '/^detect_proxy_mode() {/,/^assert_nginx_domain_available() {/p' "$INSTALLER" | sed '$d')
+# shellcheck disable=SC1090
+source <(sed -n '/^mark_https_unavailable() {/,/^print_https_warning() {/p' "$INSTALLER" | sed '$d')
+# shellcheck disable=SC1090
+source <(sed -n '/^reload_caddy_after_config_change() {/,/^uninstall_existing_install() {/p' "$INSTALLER" | sed '$d')
+# shellcheck disable=SC1090
+source <(awk '/^write_nginx_site\(\) \{/ { copying=1 } copying { if (/^\[\[ -r \/etc\/os-release/) exit; print }' "$INSTALLER")
+
+log() { :; }
+caddy_https_port_conflicts() { printf '%s\n' "${HTTPS_CONFLICTS:-}"; }
 
 caddyfile="$TEMP_DIR/caddy/Caddyfile"
 cat > "$caddyfile" <<'CADDY'
@@ -251,6 +261,13 @@ ipv6_stack_available() { return 1; }
 ensure_nginx_ipv6_listeners
 cmp -s "$NGINX_SITE" "$TEMP_DIR/nginx/with-ipv6.conf" || fail 'IPv6-disabled update changed the Nginx configuration'
 
+caddy_tls_mode=http-only
+write_nginx_site
+assert_contains "$NGINX_SITE" 'proxy_pass http://127.0.0.1:8080;'
+assert_contains "$NGINX_SITE" 'proxy_set_header X-Forwarded-Proto http;'
+assert_not_contains "$NGINX_SITE" 'listen 443 ssl;'
+assert_not_contains "$NGINX_SITE" 'return 301 https://'
+
 sed -n '/^report_unexpected_error() {/,/^}/p' "$INSTALLER" > "$TEMP_DIR/error-trap.sh"
 set +e
 bash -c 'set -Eeuo pipefail; source "$1"; trap report_unexpected_error ERR; false' _ "$TEMP_DIR/error-trap.sh" \
@@ -261,5 +278,52 @@ set -e
 grep -Eq 'command failed near line [0-9]+ \(exit 1\)\.' "$TEMP_DIR/error-trap-output" \
     || fail 'unexpected-error trap did not report the failing line and status'
 assert_not_contains "$TEMP_DIR/error-trap-output" 'false'
+
+caddy_tls_mode=xray
+caddyfile="$TEMP_DIR/caddy/xray-Caddyfile"
+write_caddy_site final "$caddyfile"
+caddy_config_matches_install "$caddyfile" || fail 'expected Xray backend Caddy config to be recognized'
+assert_contains "$caddyfile" 'http://meet.example.com:9080'
+assert_contains "$caddyfile" 'bind 127.0.0.1'
+assert_contains "$caddyfile" 'header_up X-Forwarded-Proto https'
+assert_not_contains "$caddyfile" 'https://meet.example.com {'
+
+caddy_tls_mode=direct
+write_caddy_site final "$caddyfile"
+caddy_config_matches_install "$caddyfile" || fail 'expected Xray-to-direct Caddy config migration to be recognized'
+assert_contains "$caddyfile" 'https://meet.example.com {'
+assert_not_contains "$caddyfile" 'http://meet.example.com:9080'
+
+caddy_tls_mode=http-only
+write_caddy_site final "$caddyfile"
+assert_contains "$caddyfile" 'http://meet.example.com {'
+assert_contains "$caddyfile" 'reverse_proxy 127.0.0.1:8080'
+assert_not_contains "$caddyfile" 'https://meet.example.com {'
+assert_not_contains "$caddyfile" 'redir https://'
+caddy_config_matches_install "$caddyfile" || fail 'expected HTTP-only Caddy config to be recognized'
+
+caddy_tls_mode=direct
+https_reason=
+HTTPS_CONFLICTS='nipovpn (PID 301)'
+export HTTPS_CONFLICTS
+FAIL_CADDY_RELOAD_ONCE=yes
+RELOAD_COUNT_FILE="$TEMP_DIR/caddy/reload-failed"
+export FAIL_CADDY_RELOAD_ONCE RELOAD_COUNT_FILE
+activate_caddy_site final "$caddyfile"
+[[ "$caddy_tls_mode" == http-only ]] || fail 'a Caddy 443 bind failure did not select HTTP-only mode'
+[[ "$https_reason" == 'Caddy could not bind TCP port 443 because it is held by nipovpn (PID 301).' ]] \
+    || fail 'a Caddy 443 bind failure did not retain its cause'
+assert_not_contains "$caddyfile" 'redir https://'
+unset FAIL_CADDY_RELOAD_ONCE RELOAD_COUNT_FILE HTTPS_CONFLICTS
+
+caddy_tls_mode=direct
+https_reason=
+FAIL_CADDY_RELOAD_ONCE=yes
+RELOAD_COUNT_FILE="$TEMP_DIR/caddy/unrelated-reload-failed"
+export FAIL_CADDY_RELOAD_ONCE RELOAD_COUNT_FILE
+if (HTTPS_CONFLICTS=; activate_caddy_site final "$caddyfile") >/dev/null 2>&1; then
+    fail 'a Caddy activation failure without a 443 conflict was accepted'
+fi
+unset FAIL_CADDY_RELOAD_ONCE RELOAD_COUNT_FILE
 
 printf 'Installer configuration checks passed.\n'

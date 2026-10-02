@@ -33,11 +33,33 @@ case "$APT_SCENARIO:$count" in
         ;;
 esac
 APT
+cat > "$TEST_DIR/bin/ss" <<'SS'
+#!/usr/bin/env bash
+case "$SS_SCENARIO" in
+    empty) ;;
+    caddy) printf '%s\n' 'LISTEN 0 1024 *:443 *:* users:(("caddy",pid=334366,fd=3))' ;;
+    xray) printf '%s\n' 'LISTEN 0 128 *:443 *:* users:(("xray",pid=912,fd=4))' ;;
+    nginx) printf '%s\n' 'LISTEN 0 128 *:443 *:* users:(("nginx",pid=811,fd=4),("nginx",pid=812,fd=4))' ;;
+    shared) printf '%s\n' 'LISTEN 0 128 *:443 *:* users:(("caddy",pid=334366,fd=3),("xray",pid=912,fd=4))' ;;
+    unknown) printf '%s\n' 'LISTEN 0 128 *:443 *:*' ;;
+    *) exit 91 ;;
+esac
+SS
+cat > "$TEST_DIR/bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+if [[ "$*" == 'show -p MainPID --value caddy' ]]; then
+    printf '%s\n' "$CADDY_MAIN_PID"
+elif [[ "$*" == 'show -p MainPID --value nginx' ]]; then
+    printf '%s\n' "$NGINX_MAIN_PID"
+fi
+SYSTEMCTL
 chmod +x "$TEST_DIR/bin/apt-get"
+chmod +x "$TEST_DIR/bin/ss" "$TEST_DIR/bin/systemctl"
 export PATH="$TEST_DIR/bin:$PATH"
 
 source <(sed -n '/^apt_failure_is_caddy_only() {/,/^read_env_value() {/p' "$INSTALLER" | sed '$d')
 source <(sed -n '/^read_install_state() {/,/^apt_failure_is_caddy_only() {/p' "$INSTALLER" | sed '$d')
+source <(sed -n '/^caddy_https_port_conflicts() {/,/^detect_proxy_mode() {/p' "$INSTALLER" | sed '$d')
 
 fail() {
     printf 'Caddy fallback test failed: %s\n' "$*" >&2
@@ -46,6 +68,49 @@ fail() {
 
 log() { :; }
 write_install_state() { :; }
+
+SS_SCENARIO=empty
+CADDY_MAIN_PID=0
+export SS_SCENARIO CADDY_MAIN_PID
+NGINX_MAIN_PID=811
+export NGINX_MAIN_PID
+[[ -z "$(caddy_https_port_conflicts)" ]] || fail 'An unused HTTPS port was reported as occupied'
+if xray_https_port_443_is_active; then
+    fail 'An unused HTTPS port was identified as an Xray listener'
+fi
+
+SS_SCENARIO=caddy
+CADDY_MAIN_PID=334366
+[[ -z "$(caddy_https_port_conflicts)" ]] || fail 'The active Caddy service listener was not allowed'
+
+SS_SCENARIO=shared
+conflicts=$(caddy_https_port_conflicts)
+[[ "$conflicts" == 'xray (PID 912)' ]] || fail "Expected the non-Caddy owner, got: $conflicts"
+xray_https_port_443_is_active || fail 'The shared Caddy/Xray listener was not recognized as Xray-owned'
+if (check_caddy_https_port_available; : > "$TEST_DIR/after-preflight") 2>/dev/null; then
+    fail 'The Caddy preflight continued while Xray owned port 443'
+fi
+[[ ! -e "$TEST_DIR/after-preflight" ]] || fail 'The Caddy preflight ran later setup after detecting Xray'
+
+SS_SCENARIO=unknown
+CADDY_MAIN_PID=0
+conflicts=$(caddy_https_port_conflicts)
+[[ "$conflicts" == 'unknown process (PID unavailable)' ]] || fail "Expected an unidentified listener to block setup, got: $conflicts"
+if xray_https_port_443_is_active; then
+    fail 'An unidentified listener was accepted as an Xray listener'
+fi
+
+SS_SCENARIO=xray
+xray_https_port_443_is_active || fail 'The active Xray listener was not detected'
+
+SS_SCENARIO=nginx
+[[ -z "$(caddy_https_port_conflicts nginx)" ]] || fail 'The active Nginx HTTPS listener was reported as a conflict'
+
+prerequisite_line=$(awk '/^apt-get install -y ca-certificates/{print NR; exit}' "$INSTALLER")
+preflight_line=$(awk '$0 == "detect_caddy_tls_mode" {print NR; exit}' "$INSTALLER")
+caddy_source_line=$(awk '$0 == "        -o \"$CADDY_APT_SOURCE_FILE\"" {print NR; exit}' "$INSTALLER")
+(( prerequisite_line < preflight_line && preflight_line < caddy_source_line )) \
+    || fail 'The Caddy port preflight is not before Caddy repository setup'
 
 STATE_FILE="$TEST_DIR/state"
 cat > "$STATE_FILE" <<'STATE'
@@ -62,6 +127,45 @@ caddy_install_method=binary
 STATE
 read_install_state
 [[ "$caddy_install_method" == binary ]] || fail 'A resumed install did not retain the binary Caddy method'
+
+cat > "$STATE_FILE" <<'STATE'
+version=6
+status=incomplete
+operation=install
+domain=meet.example.com
+enable_turn=no
+enable_meeting_password=no
+proxy_mode=caddy
+caddy_tls_mode=xray
+xray_fallback_managed=yes
+xray_alpn_added=yes
+app_port=8080
+container_engine=docker
+caddy_install_method=binary
+STATE
+read_install_state
+[[ "$caddy_tls_mode" == xray && "$xray_fallback_managed" == yes && "$xray_alpn_added" == yes ]] \
+    || fail 'An interrupted Xray-mode install did not retain its fallback settings'
+
+cat > "$STATE_FILE" <<'STATE'
+version=7
+status=complete
+operation=install
+domain=meet.example.com
+enable_turn=no
+enable_meeting_password=no
+proxy_mode=caddy
+caddy_tls_mode=http-only
+xray_fallback_managed=no
+xray_alpn_added=no
+https_reason=TCP port 443 is held by nipovpn (PID 301).
+app_port=8080
+container_engine=docker
+caddy_install_method=apt
+STATE
+read_install_state
+[[ "$caddy_tls_mode" == http-only && "$https_reason" == 'TCP port 443 is held by nipovpn (PID 301).' ]] \
+    || fail 'A completed HTTP-only install did not retain its HTTPS warning reason'
 
 cat > "$STATE_FILE" <<'STATE'
 version=4

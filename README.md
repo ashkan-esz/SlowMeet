@@ -70,6 +70,20 @@ host and uses Certbot for HTTPS without replacing other Nginx sites. Otherwise,
 it configures Caddy. It builds and starts SlowMeet, waits for health checks,
 and prints the chosen credentials when setup completes.
 
+If Xray owns TCP port 443, the installer can keep it there when it finds one
+VLESS or Trojan TCP+TLS inbound in a single JSON config. It adds a hostname
+fallback to Caddy on `127.0.0.1:9080`, validates and restarts Xray, and uses
+Xray's existing TLS certificate and renewal process. The restart briefly
+disconnects active Xray clients. REALITY, multi-file Xray configs, and other
+inbound types are left unchanged and prevent HTTPS setup; the installer reports
+that condition and continues with HTTP if the proxy can start safely.
+
+If TCP port 443 remains unavailable, installation can still complete with the
+app served over HTTP when the selected proxy can safely start on port 80. The
+installer prints the reason at completion and retries HTTPS setup on a later
+resume or update. Browsers may restrict meeting media features until HTTPS is
+available.
+
 When it detects an existing installation, the installer offers update (the
 default) or uninstall. Update fetches the latest source, rebuilds and restarts
 SlowMeet, and preserves its environment, credentials, application data,
@@ -262,6 +276,32 @@ least-privilege service template.
 The proxy must preserve WebSocket upgrade headers and allow long-lived
 connections. Configure DNS and certificates for your actual hostname before
 using the examples.
+
+### Testing from a phone on your LAN
+
+Opening `http://<computer-LAN-IP>:8080` on a phone loads the app, but browsers
+block camera and microphone access on that insecure origin. Use HTTPS with a
+certificate trusted by the phone. For a local test, run SlowMeet with `go run .`
+and use Caddy as a LAN-only HTTPS reverse proxy:
+
+1. Copy `deploy/caddy/lan.Caddyfile.example` to a temporary file and replace
+   `192.168.1.20` with the computer's LAN IPv4 address.
+2. Start Caddy with `caddy run --config /path/to/lan.Caddyfile --adapter caddyfile`.
+   The example listens on port `8443` and proxies to SlowMeet on `8080`.
+3. Find Caddy's local root certificate at
+   `pki/authorities/local/root.crt` under its data directory. Transfer that
+   public certificate to the phone and install it as a trusted CA in the
+   phone's certificate settings. For a manually run Caddy process, the default
+   data directory is `~/.local/share/caddy` on Linux, `~/Library/Application
+   Support/Caddy` on macOS, or `%AppData%\Caddy` on Windows. If
+   `XDG_DATA_HOME` is set, use `$XDG_DATA_HOME/caddy` instead.
+4. On the phone, open `https://<computer-LAN-IP>:8443/`. The phone and computer
+   must be on a network that allows devices to reach each other.
+
+Do not bypass the browser's certificate warning; install and trust Caddy's root
+certificate. Keep Caddy's CA private key on the computer. Remove the CA from
+the phone when you no longer need this local setup. For regular use, prefer a
+hostname with a publicly trusted certificate.
 
 For low-bandwidth validation scenarios using Linux `tc netem`, see
 `docs/network-testing.md`.

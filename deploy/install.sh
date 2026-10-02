@@ -15,12 +15,26 @@ readonly CADDY_APT_SOURCE_FILE=/etc/apt/sources.list.d/caddy-stable.list
 readonly PODMAN_SERVICE_FILE=/etc/systemd/system/slowmeet-podman.service
 readonly CADDY_BEGIN_MARKER='# BEGIN SlowMeet installer managed site'
 readonly CADDY_END_MARKER='# END SlowMeet installer managed site'
+readonly CADDY_XRAY_BACKEND_PORT=9080
 readonly COSIGN_VERSION=v3.0.2
 readonly CADDY_BINARY_DIR=/usr/bin
 readonly CADDY_UNIT_FILE=/etc/systemd/system/caddy.service
 
 log() { printf '[slowmeet] %s\n' "$*"; }
 fail() { printf '[slowmeet] ERROR: %s\n' "$*" >&2; exit 1; }
+
+mark_https_unavailable() {
+    caddy_tls_mode=http-only
+    https_reason=$1
+    log "HTTPS is unavailable; continuing with the HTTP site: $https_reason"
+}
+
+print_https_warning() {
+    [[ "${caddy_tls_mode:-direct}" == http-only ]] || return 0
+    printf '\nWARNING: SlowMeet was installed and its local app health check passed, but public HTTPS is unavailable.\n' >&2
+    printf 'Reason: %s\n' "$https_reason" >&2
+    printf 'The site is available at http://%s/; browsers may restrict meeting media features without HTTPS.\n' "$domain" >&2
+}
 
 report_unexpected_error() {
     local status=$? line=${BASH_LINENO[0]:-unknown}
@@ -86,13 +100,17 @@ write_install_state() {
     install -d -o root -g root -m 0700 "$STATE_DIR"
     temp=$(mktemp "$STATE_DIR/.state.XXXXXX")
     {
-        printf 'version=5\n'
+        printf 'version=7\n'
         printf 'status=%s\n' "$status"
         printf 'operation=%s\n' "$install_operation"
         printf 'domain=%s\n' "$domain"
         printf 'enable_turn=%s\n' "$enable_turn"
         printf 'enable_meeting_password=%s\n' "$enable_meeting_password"
         printf 'proxy_mode=%s\n' "$proxy_mode"
+        printf 'caddy_tls_mode=%s\n' "${caddy_tls_mode:-direct}"
+        printf 'https_reason=%s\n' "${https_reason:-}"
+        printf 'xray_fallback_managed=%s\n' "${xray_fallback_managed:-no}"
+        printf 'xray_alpn_added=%s\n' "${xray_alpn_added:-no}"
         printf 'app_port=%s\n' "$app_port"
         printf 'container_engine=%s\n' "$container_engine"
         printf 'caddy_install_method=%s\n' "$caddy_install_method"
@@ -103,7 +121,7 @@ write_install_state() {
 
 read_install_state() {
     local key value
-    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_app_port= seen_container_engine= seen_caddy_install_method=
+    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_caddy_tls_mode= seen_https_reason= seen_xray_fallback_managed= seen_xray_alpn_added= seen_app_port= seen_container_engine= seen_caddy_install_method=
     state_version=
     state_status=
     install_operation=
@@ -111,6 +129,10 @@ read_install_state() {
     enable_turn=
     enable_meeting_password=
     proxy_mode=
+    caddy_tls_mode=direct
+    https_reason=
+    xray_fallback_managed=no
+    xray_alpn_added=no
     app_port=
     container_engine=
     caddy_install_method=apt
@@ -124,13 +146,17 @@ read_install_state() {
             enable_turn) [[ -z "$seen_turn" ]] || fail 'Installer state contains a duplicate TURN setting.'; seen_turn=yes; enable_turn=$value ;;
             enable_meeting_password) [[ -z "$seen_meeting_password" ]] || fail 'Installer state contains a duplicate meeting-password setting.'; seen_meeting_password=yes; enable_meeting_password=$value ;;
             proxy_mode) [[ -z "$seen_proxy_mode" ]] || fail 'Installer state contains a duplicate proxy mode.'; seen_proxy_mode=yes; proxy_mode=$value ;;
+            caddy_tls_mode) [[ -z "$seen_caddy_tls_mode" ]] || fail 'Installer state contains a duplicate Caddy TLS mode.'; seen_caddy_tls_mode=yes; caddy_tls_mode=$value ;;
+            https_reason) [[ -z "$seen_https_reason" ]] || fail 'Installer state contains a duplicate HTTPS warning reason.'; seen_https_reason=yes; https_reason=$value ;;
+            xray_fallback_managed) [[ -z "$seen_xray_fallback_managed" ]] || fail 'Installer state contains a duplicate Xray fallback setting.'; seen_xray_fallback_managed=yes; xray_fallback_managed=$value ;;
+            xray_alpn_added) [[ -z "$seen_xray_alpn_added" ]] || fail 'Installer state contains a duplicate Xray ALPN setting.'; seen_xray_alpn_added=yes; xray_alpn_added=$value ;;
             app_port) [[ -z "$seen_app_port" ]] || fail 'Installer state contains a duplicate app port.'; seen_app_port=yes; app_port=$value ;;
             container_engine) [[ -z "$seen_container_engine" ]] || fail 'Installer state contains a duplicate container engine.'; seen_container_engine=yes; container_engine=$value ;;
             caddy_install_method) [[ -z "$seen_caddy_install_method" ]] || fail 'Installer state contains a duplicate Caddy install method.'; seen_caddy_install_method=yes; caddy_install_method=$value ;;
             *) fail "Installer state contains an unsupported field: $key" ;;
         esac
     done < "$STATE_FILE"
-    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 ) ]] || fail 'Installer state has a missing or unsupported version.'
+    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ) ]] || fail 'Installer state has a missing or unsupported version.'
     [[ "$seen_status" == yes && ( "$state_status" == incomplete || "$state_status" == complete ) ]] || fail 'Installer state has a missing or invalid status.'
     if [[ "$state_version" == 1 ]]; then
         [[ -z "$seen_operation" ]] || fail 'Version 1 installer state cannot contain an operation.'
@@ -139,7 +165,7 @@ read_install_state() {
         [[ "$seen_operation" == yes && ( "$install_operation" == install || "$install_operation" == update ) ]] \
             || fail 'Installer state has a missing or invalid operation.'
     fi
-    if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 ]]; then
+    if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
         [[ "$seen_proxy_mode" == yes && ( "$proxy_mode" == caddy || "$proxy_mode" == nginx ) ]] \
             || fail 'Installer state has a missing or invalid proxy mode.'
         [[ "$seen_app_port" == yes && "$app_port" =~ ^[0-9]{1,5}$ ]] \
@@ -150,14 +176,36 @@ read_install_state() {
         proxy_mode=caddy
         app_port=8080
     fi
-    if [[ "$state_version" == 4 || "$state_version" == 5 ]]; then
+    if [[ "$state_version" == 6 || "$state_version" == 7 ]]; then
+        [[ "$seen_caddy_tls_mode" == yes && ( "$caddy_tls_mode" == direct || "$caddy_tls_mode" == xray || ( "$state_version" == 7 && "$caddy_tls_mode" == http-only ) ) ]] \
+            || fail 'Installer state has a missing or invalid Caddy TLS mode.'
+        [[ "$seen_xray_fallback_managed" == yes && ( "$xray_fallback_managed" == yes || "$xray_fallback_managed" == no ) ]] \
+            || fail 'Installer state has a missing or invalid Xray fallback ownership flag.'
+        [[ "$seen_xray_alpn_added" == yes && ( "$xray_alpn_added" == yes || "$xray_alpn_added" == no ) ]] \
+            || fail 'Installer state has a missing or invalid Xray ALPN ownership flag.'
+        [[ "$proxy_mode" == caddy || "$caddy_tls_mode" == direct || ( "$state_version" == 7 && "$caddy_tls_mode" == http-only ) ]] \
+            || fail 'Installer state has an invalid Xray TLS mode for the selected proxy.'
+        if [[ "$state_version" == 7 ]]; then
+            [[ "$seen_https_reason" == yes ]] || fail 'Installer state has a missing HTTPS warning reason.'
+            if [[ "$caddy_tls_mode" == http-only ]]; then
+                [[ -n "$https_reason" ]] || fail 'HTTP-only installer state has no HTTPS warning reason.'
+            else
+                [[ -z "$https_reason" ]] || fail 'HTTPS warning reason is set while HTTPS is enabled.'
+            fi
+        fi
+    else
+        [[ -z "$seen_caddy_tls_mode" && -z "$seen_https_reason" && -z "$seen_xray_fallback_managed" && -z "$seen_xray_alpn_added" ]] \
+            || fail 'Legacy installer state cannot contain Xray proxy settings.'
+        caddy_tls_mode=direct
+    fi
+    if [[ "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
         [[ "$seen_container_engine" == yes && ( "$container_engine" == docker || "$container_engine" == podman ) ]] \
             || fail 'Installer state has a missing or invalid container engine.'
     else
         [[ -z "$seen_container_engine" ]] || fail 'Legacy installer state cannot contain a container engine.'
         container_engine=docker
     fi
-    if [[ "$state_version" == 5 ]]; then
+    if [[ "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
         [[ "$seen_caddy_install_method" == yes && ( "$caddy_install_method" == apt || "$caddy_install_method" == binary ) ]] \
             || fail 'Installer state has a missing or invalid Caddy install method.'
         [[ "$proxy_mode" == caddy || "$caddy_install_method" == apt ]] \
@@ -467,12 +515,14 @@ wait_for_updated_service() {
         compose ps
         fail 'SlowMeet did not become ready. Review the container logs with the selected Compose command.'
     }
-    curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
-        || fail 'The local HTTPS health check failed.'
+    if [[ "${caddy_tls_mode:-direct}" != http-only ]]; then
+        curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
+            || fail 'The local HTTPS health check failed.'
+    fi
 }
 
 update_existing_install() {
-    local existing_ice admin_password meeting_password turn_urls
+    local existing_ice admin_password meeting_password turn_urls previous_tls_mode
 
     command -v git >/dev/null || fail 'Git is required to update this existing installation.'
     case "$container_engine" in
@@ -487,6 +537,8 @@ update_existing_install() {
                 || fail 'Podman and podman-compose must be available to update this existing installation.'
             ;;
     esac
+    previous_tls_mode=${caddy_tls_mode:-direct}
+    detect_caddy_tls_mode
     git -C "$INSTALL_DIR" diff --quiet && git -C "$INSTALL_DIR" diff --cached --quiet \
         || fail "$INSTALL_DIR has local tracked changes. Save or revert them before updating."
 
@@ -497,6 +549,11 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
 
     write_install_state incomplete
     log "Updating the existing SlowMeet checkout behind $proxy_mode; preserving its environment, app port, certificates, data volume, and TURN configuration."
+    if [[ "$proxy_mode" == caddy ]]; then
+        activate_caddy_site final
+    elif [[ "$previous_tls_mode" == http-only || "$caddy_tls_mode" == http-only ]]; then
+        activate_nginx_site
+    fi
     enable_container_engine
     systemctl enable --now "$proxy_mode"
     if [[ "$proxy_mode" == nginx ]]; then
@@ -521,12 +578,20 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     if [[ "$container_engine" == podman ]]; then
         systemctl enable --now slowmeet-podman.service
     fi
+    if [[ "$caddy_tls_mode" == xray ]] && ! configure_xray_fallback; then
+        mark_https_unavailable "$https_reason"
+        activate_caddy_site final
+    fi
     wait_for_updated_service
 
     admin_password=$(read_env_value ADMIN_PASSWORD)
     meeting_password=$(read_env_value MEETING_PASSWORD)
     turn_urls=$(read_env_value TURN_URLS)
-    printf '\nSlowMeet is updated and ready at https://%s/\nAdmin: https://%s/admin\n' "$domain" "$domain"
+    if [[ "$caddy_tls_mode" == http-only ]]; then
+        printf '\nSlowMeet is updated and its local app health check passed.\n'
+    else
+        printf '\nSlowMeet is updated and ready at https://%s/\nAdmin: https://%s/admin\n' "$domain" "$domain"
+    fi
     if [[ -n "$admin_password" ]]; then
         printf 'Admin password: %s\n' "$admin_password"
     else
@@ -543,12 +608,29 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
         log "Caddy installation method remains: $caddy_install_method."
     fi
     write_install_state complete
+    print_https_warning
 }
 
 write_expected_caddyfile() {
     local phase=$1 include_marker=$2
     if [[ "$include_marker" == yes ]]; then
         printf '# Managed by SlowMeet installer\n\n'
+    fi
+    if [[ "$phase" == bootstrap && "${caddy_tls_mode:-direct}" == http-only ]]; then
+        cat <<EOF
+http://$domain {
+    root * /var/www/letsencrypt
+    route {
+        handle /.well-known/acme-challenge/* {
+            file_server
+        }
+        handle {
+            respond "SlowMeet setup in progress" 503
+        }
+    }
+}
+EOF
+        return
     fi
     if [[ "$phase" == bootstrap ]]; then
         cat <<EOF
@@ -559,6 +641,50 @@ http://$domain {
             file_server
         }
         redir https://{host}{uri} permanent
+    }
+}
+EOF
+        return
+    fi
+    if [[ "${caddy_tls_mode:-direct}" == http-only ]]; then
+        cat <<EOF
+http://$domain {
+    root * /var/www/letsencrypt
+    route {
+        handle /.well-known/acme-challenge/* {
+            file_server
+        }
+        handle {
+            reverse_proxy 127.0.0.1:$app_port {
+                transport http {
+                    keepalive 2m
+                }
+            }
+        }
+    }
+}
+EOF
+        return
+    fi
+    if [[ "${caddy_tls_mode:-direct}" == xray ]]; then
+        cat <<EOF
+http://$domain {
+    root * /var/www/letsencrypt
+    route {
+        handle /.well-known/acme-challenge/* {
+            file_server
+        }
+        redir https://{host}{uri} permanent
+    }
+}
+
+http://$domain:$CADDY_XRAY_BACKEND_PORT {
+    bind 127.0.0.1
+    reverse_proxy 127.0.0.1:$app_port {
+        transport http {
+            keepalive 2m
+        }
+        header_up X-Forwarded-Proto https
     }
 }
 EOF
@@ -595,7 +721,7 @@ EOF
 }
 
 caddy_config_matches_install() {
-    local caddyfile=${1:-/etc/caddy/Caddyfile} expected phase marker
+    local caddyfile=${1:-/etc/caddy/Caddyfile} expected phase marker mode saved_mode=${caddy_tls_mode:-direct}
     [[ -f "$caddyfile" ]] || return 0
     [[ ! -L "$caddyfile" ]] || return 1
 
@@ -606,15 +732,20 @@ caddy_config_matches_install() {
     fi
 
     expected=$(mktemp)
-    for phase in bootstrap final; do
-        for marker in yes no; do
-            write_expected_caddyfile "$phase" "$marker" > "$expected"
-            if cmp -s "$expected" "$caddyfile"; then
-                rm -f "$expected"
-                return 0
-            fi
+    for mode in "$saved_mode" direct xray http-only; do
+        caddy_tls_mode=$mode
+        for phase in bootstrap final; do
+            for marker in yes no; do
+                write_expected_caddyfile "$phase" "$marker" > "$expected"
+                if cmp -s "$expected" "$caddyfile"; then
+                    caddy_tls_mode=$saved_mode
+                    rm -f "$expected"
+                    return 0
+                fi
+            done
         done
     done
+    caddy_tls_mode=$saved_mode
     rm -f "$expected"
     return 1
 }
@@ -667,36 +798,44 @@ strip_caddy_managed_block() {
 }
 
 caddy_managed_block_matches_install() {
-    local caddyfile=$1 extracted expected phase matches=no
+    local caddyfile=$1 extracted expected phase mode matches=no saved_mode=${caddy_tls_mode:-direct}
     extracted=$(mktemp)
     expected=$(mktemp)
     if ! extract_caddy_managed_block "$caddyfile" "$extracted"; then
         rm -f "$extracted" "$expected"
         return 1
     fi
-    for phase in bootstrap final; do
-        write_caddy_managed_block "$phase" > "$expected"
-        if cmp -s "$extracted" "$expected"; then
-            matches=yes
-            break
-        fi
-    done
-    rm -f "$extracted" "$expected"
-    [[ "$matches" == yes ]]
-}
-
-legacy_caddy_config_matches_install() {
-    local caddyfile=$1 expected phase marker matches=no
-    expected=$(mktemp)
-    for phase in bootstrap final; do
-        for marker in yes no; do
-            write_expected_caddyfile "$phase" "$marker" > "$expected"
-            if cmp -s "$expected" "$caddyfile"; then
+    for mode in "$saved_mode" direct xray http-only; do
+        caddy_tls_mode=$mode
+        for phase in bootstrap final; do
+            write_caddy_managed_block "$phase" > "$expected"
+            if cmp -s "$extracted" "$expected"; then
                 matches=yes
                 break 2
             fi
         done
     done
+    caddy_tls_mode=$saved_mode
+    rm -f "$extracted" "$expected"
+    [[ "$matches" == yes ]]
+}
+
+legacy_caddy_config_matches_install() {
+    local caddyfile=$1 expected phase marker mode matches=no saved_mode=${caddy_tls_mode:-direct}
+    expected=$(mktemp)
+    for mode in "$saved_mode" direct xray http-only; do
+        caddy_tls_mode=$mode
+        for phase in bootstrap final; do
+            for marker in yes no; do
+                write_expected_caddyfile "$phase" "$marker" > "$expected"
+                if cmp -s "$expected" "$caddyfile"; then
+                    matches=yes
+                    break 3
+                fi
+            done
+        done
+    done
+    caddy_tls_mode=$saved_mode
     rm -f "$expected"
     [[ "$matches" == yes ]]
 }
@@ -811,6 +950,41 @@ reload_caddy_after_config_change() {
     fi
 }
 
+activate_caddy_site() {
+    local phase=$1 caddyfile=${2:-/etc/caddy/Caddyfile} conflicts
+    write_caddy_site "$phase" "$caddyfile"
+    if reload_caddy_after_config_change; then
+        return 0
+    fi
+    [[ "${caddy_tls_mode:-direct}" != http-only ]] \
+        || fail 'Caddy could not start its HTTP-only configuration; the port 80 proxy is unavailable.'
+    if ! conflicts=$(caddy_https_port_conflicts); then
+        fail 'Caddy failed to activate, and TCP port 443 could not be inspected to identify a TLS bind conflict.'
+    fi
+    [[ -n "$conflicts" ]] \
+        || fail 'Caddy failed to activate for a reason other than a TCP port 443 conflict.'
+    mark_https_unavailable "Caddy could not bind TCP port 443 because it is held by $conflicts."
+    write_caddy_site "$phase" "$caddyfile"
+    reload_caddy_after_config_change \
+        || fail 'Caddy could not activate its HTTP-only configuration after the HTTPS bind conflict.'
+}
+
+activate_nginx_site() {
+    local conflicts
+    if write_nginx_site; then
+        return 0
+    fi
+    [[ "${caddy_tls_mode:-direct}" != http-only ]] \
+        || fail 'Nginx could not activate its HTTP-only configuration.'
+    if ! conflicts=$(caddy_https_port_conflicts nginx); then
+        fail 'Nginx failed to activate, and TCP port 443 could not be inspected to identify a TLS bind conflict.'
+    fi
+    [[ -n "$conflicts" ]] \
+        || fail 'Nginx failed to activate for a reason other than a TCP port 443 conflict.'
+    mark_https_unavailable "Nginx could not bind TCP port 443 because it is held by $conflicts."
+    write_nginx_site
+}
+
 uninstall_existing_install() {
     local remove_data=no compose_available=no
 
@@ -864,6 +1038,13 @@ uninstall_existing_install() {
     }
     if yes_no 'Permanently delete the SlowMeet application data volume?' no; then
         remove_data=yes
+    fi
+
+    if [[ "$caddy_tls_mode" == xray && ( "$xray_fallback_managed" == yes || "$xray_alpn_added" == yes ) ]]; then
+        local xray_config
+        xray_config=$(xray_config_path)
+        remove_xray_fallback_from_config "$xray_config" "$domain" "$CADDY_XRAY_BACKEND_PORT" \
+            "$xray_fallback_managed" "$xray_alpn_added"
     fi
 
     if [[ "$container_engine" == podman ]] && systemctl cat slowmeet-podman.service >/dev/null 2>&1; then
@@ -1021,6 +1202,302 @@ prompt_admin_password() {
     done
 }
 
+caddy_https_port_conflicts() {
+    local service=${1:-caddy} listener_output service_main_pid line owner_data process_name process_pid found_owner
+    local -a conflicts=()
+    local owner_regex='\(?\("([^"]+)",pid=([0-9]+)'
+
+    command -v ss >/dev/null || return 1
+    listener_output=$(ss -H -ltnp 'sport = :443') || return 1
+    [[ -n "$listener_output" ]] || return 0
+    service_main_pid=$(systemctl show -p MainPID --value "$service" 2>/dev/null || true)
+
+    while IFS= read -r line; do
+        owner_data=${line#*users:}
+        if [[ "$owner_data" == "$line" ]]; then
+            conflicts+=("unknown process (PID unavailable)")
+            continue
+        fi
+
+        found_owner=no
+        while [[ "$owner_data" =~ $owner_regex ]]; do
+            found_owner=yes
+            process_name=${BASH_REMATCH[1]}
+            process_pid=${BASH_REMATCH[2]}
+            if [[ "$process_name" != "$service" || ( "$service" != nginx && "$process_pid" != "$service_main_pid" ) ]]; then
+                conflicts+=("$process_name (PID $process_pid)")
+            fi
+            owner_data=${owner_data#*"pid=$process_pid"}
+        done
+        [[ "$found_owner" == yes ]] || conflicts+=("unknown process (PID unavailable)")
+    done <<< "$listener_output"
+
+    if (( ${#conflicts[@]} > 0 )); then
+        local joined=${conflicts[0]}
+        for process_name in "${conflicts[@]:1}"; do
+            [[ ",$joined," == *",$process_name,"* ]] || joined+=", $process_name"
+        done
+        printf '%s\n' "$joined"
+    fi
+}
+
+check_caddy_https_port_available() {
+    local conflicts
+    if ! conflicts=$(caddy_https_port_conflicts); then
+        fail 'Could not inspect TCP port 443 before configuring Caddy.'
+    fi
+    [[ -z "$conflicts" ]] || fail "TCP port 443 is already in use by $conflicts. Caddy cannot load the SlowMeet HTTPS listener; the existing service was left untouched."
+}
+
+xray_https_port_443_is_active() {
+    local listeners line owner_data process_name process_pid caddy_main_pid found_owner found_xray=no
+    local owner_regex='\(?\("([^"]+)",pid=([0-9]+)'
+    command -v ss >/dev/null || return 1
+    listeners=$(ss -H -ltnp 'sport = :443') || return 1
+    [[ -n "$listeners" ]] || return 1
+    caddy_main_pid=$(systemctl show -p MainPID --value caddy 2>/dev/null || true)
+    while IFS= read -r line; do
+        owner_data=${line#*users:}
+        [[ "$owner_data" != "$line" ]] || return 1
+        found_owner=no
+        while [[ "$owner_data" =~ $owner_regex ]]; do
+            found_owner=yes
+            process_name=${BASH_REMATCH[1]}
+            process_pid=${BASH_REMATCH[2]}
+            case "$process_name" in
+                xray) found_xray=yes ;;
+                caddy) [[ "$process_pid" == "$caddy_main_pid" ]] || return 1 ;;
+                *) return 1 ;;
+            esac
+            owner_data=${owner_data#*"pid=$process_pid"}
+        done
+        [[ "$found_owner" == yes ]] || return 1
+    done <<< "$listeners"
+    [[ "$found_xray" == yes ]]
+}
+
+validate_xray_fallback_config() {
+    local config=$1 domain=$2 backend_port=$3
+    [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+        && [[ "$backend_port" =~ ^[0-9]{1,5}$ ]] \
+        && ((10#$backend_port >= 1024 && 10#$backend_port <= 65535)) \
+        || fail 'The Xray fallback domain or backend port is invalid.'
+    jq -e '
+        if (.inbounds | type) != "array" then false
+        else
+            [.inbounds[] | select(.port == 443 or .port == "443")] as $https |
+            ($https | length) == 1 and
+            ($https[0].protocol == "vless" or $https[0].protocol == "trojan") and
+            $https[0].streamSettings.network == "tcp" and
+            $https[0].streamSettings.security == "tls" and
+            ($https[0].settings | type) == "object" and
+            ($https[0].streamSettings | type) == "object" and
+            (($https[0].streamSettings.tlsSettings // {}) | type) == "object" and
+            (($https[0].streamSettings.tlsSettings.alpn // []) | type) == "array" and
+            (($https[0].settings.fallbacks // []) | type) == "array"
+        end
+    ' "$config" >/dev/null 2>&1 \
+        || fail 'Xray must have exactly one VLESS or Trojan TCP+TLS inbound on port 443 with valid fallback and ALPN settings.'
+}
+
+apply_xray_fallback_to_config() {
+    local config=$1 domain=$2 backend_port=$3 temp backup existing_route has_alpn
+    if [[ ! -f "$config" || -L "$config" ]]; then
+        https_reason="Xray config at $config is not a regular file; it was left unchanged."
+        return 1
+    fi
+    if [[ ! "$backend_port" =~ ^[0-9]{1,5}$ ]] || ((10#$backend_port < 1024 || 10#$backend_port > 65535)); then
+        https_reason='The Xray fallback backend port is invalid; its config was left unchanged.'
+        return 1
+    fi
+    if ! reason=$(validate_xray_fallback_config "$config" "$domain" "$backend_port" 2>&1); then
+        https_reason=${reason#\[slowmeet\] ERROR: }
+        return 1
+    fi
+    existing_route=$(jq -r --arg domain "$domain" '
+        [.inbounds[] | select(.port == 443 or .port == "443") | .settings.fallbacks[]? |
+            select((.name // "") == $domain and (.path // "") == "" and (.alpn // "") == "")]
+        | if length == 0 then "none" elif length == 1 then (.[0].dest | tostring) else "multiple" end
+    ' "$config")
+    if [[ "$existing_route" == multiple ]]; then
+        https_reason="Xray has multiple general fallbacks for $domain; its config was left unchanged."
+        return 1
+    fi
+    if [[ "$existing_route" != none && "$existing_route" != "$backend_port" ]]; then
+        https_reason="Xray already has a general fallback for $domain pointing elsewhere; its config was left unchanged."
+        return 1
+    fi
+    if [[ "$existing_route" == none ]]; then
+        xray_fallback_managed=yes
+    fi
+    has_alpn=$(jq -r '
+        [.inbounds[] | select(.port == 443 or .port == "443")][0].streamSettings.tlsSettings.alpn // []
+        | if index("http/1.1") == null then "no" else "yes" end
+    ' "$config")
+    if [[ "$has_alpn" == no ]]; then
+        xray_alpn_added=yes
+    fi
+    if declare -F write_install_state >/dev/null; then
+        write_install_state incomplete
+    fi
+
+    temp=$(mktemp "$(dirname "$config")/.xray-slowmeet.XXXXXX")
+    backup=
+    trap 'rm -f -- "${temp:-}" "${backup:-}"' RETURN
+    jq --arg domain "$domain" --argjson backend_port "$backend_port" '
+        .inbounds |= map(
+            if (.port == 443 or .port == "443") then
+                .streamSettings.tlsSettings = (.streamSettings.tlsSettings // {})
+                |
+                .settings.fallbacks = (
+                    (.settings.fallbacks // [])
+                    | if any(.[]; (.name // "") == $domain and (.path // "") == "" and (.alpn // "") == "") then
+                        map(if (.name // "") == $domain and (.path // "") == "" and (.alpn // "") == "" then .dest = $backend_port else . end)
+                      else . + [{"name":$domain,"dest":$backend_port}]
+                      end
+                )
+                | .streamSettings.tlsSettings.alpn = (
+                    (.streamSettings.tlsSettings.alpn // [])
+                    | if index("http/1.1") == null then . + ["http/1.1"] else . end
+                )
+            else . end
+        )
+    ' "$config" > "$temp" || { https_reason='Could not prepare the Xray fallback config; the active config was left unchanged.'; return 1; }
+    chmod --reference="$config" "$temp" \
+        || { https_reason='Could not preserve Xray config permissions; the active config was left unchanged.'; return 1; }
+    chown --reference="$config" "$temp" \
+        || { https_reason='Could not preserve Xray config ownership; the active config was left unchanged.'; return 1; }
+    if cmp -s "$config" "$temp"; then
+        rm -f -- "$temp"
+        temp=
+        trap - RETURN
+        return 0
+    fi
+
+    if ! command -v xray >/dev/null; then
+        https_reason='The Xray executable is unavailable for fallback validation; its active config was left unchanged.'
+        return 1
+    fi
+    if ! xray run -test -config "$temp" >/dev/null; then
+        https_reason='Xray rejected the proposed fallback config; its active config was left unchanged.'
+        return 1
+    fi
+
+    backup=$(mktemp "$(dirname "$config")/.xray-slowmeet.backup.XXXXXX")
+    cp -p -- "$config" "$backup"
+    mv -f -- "$temp" "$config"
+    temp=
+    if ! systemctl restart xray.service; then
+        mv -f -- "$backup" "$config" \
+            || fail "Xray restart failed and the original configuration could not be restored; backup remains at $backup."
+        backup=
+        systemctl restart xray.service \
+            || fail 'Xray restart and recovery restart failed after restoring the previous configuration; inspect xray.service immediately.'
+        https_reason='Xray rejected the fallback restart; the original configuration was restored and Xray restarted.'
+        trap - RETURN
+        return 1
+    fi
+    rm -f -- "$backup"
+    backup=
+    trap - RETURN
+}
+
+remove_xray_fallback_from_config() {
+    local config=$1 domain=$2 backend_port=$3 remove_route=$4 remove_alpn=$5 temp backup
+    [[ "$remove_route" == yes || "$remove_alpn" == yes ]] || return 0
+    [[ -f "$config" && ! -L "$config" ]] \
+        || fail "Xray config at $config is not a regular file; refusing to modify it."
+    temp=$(mktemp "$(dirname "$config")/.xray-slowmeet.remove.XXXXXX")
+    backup=
+    trap 'rm -f -- "${temp:-}" "${backup:-}"' RETURN
+    jq --arg domain "$domain" --argjson backend_port "$backend_port" \
+        --arg remove_route "$remove_route" --arg remove_alpn "$remove_alpn" '
+        .inbounds |= map(
+            if (.port == 443 or .port == "443") then
+                if $remove_route == "yes" then
+                    .settings.fallbacks = ((.settings.fallbacks // []) | map(
+                        select(
+                            (.name // "") != $domain or
+                            (.path // "") != "" or
+                            (.alpn // "") != "" or
+                            ((.dest | tostring) != ($backend_port | tostring))
+                        )
+                    ))
+                else . end
+                | if $remove_alpn == "yes" then
+                    .streamSettings.tlsSettings.alpn = ((.streamSettings.tlsSettings.alpn // []) | map(select(. != "http/1.1")))
+                  else . end
+            else . end
+        )
+    ' "$config" > "$temp" || fail 'Could not prepare the Xray fallback removal.'
+    chmod --reference="$config" "$temp"
+    chown --reference="$config" "$temp"
+    if cmp -s "$config" "$temp"; then
+        rm -f -- "$temp"
+        temp=
+        trap - RETURN
+        return 0
+    fi
+    command -v xray >/dev/null || fail 'The xray executable is required to validate fallback removal.'
+    xray run -test -config "$temp" >/dev/null \
+        || fail 'Xray rejected the proposed fallback removal; its active config was left unchanged.'
+    backup=$(mktemp "$(dirname "$config")/.xray-slowmeet.backup.XXXXXX")
+    cp -p -- "$config" "$backup"
+    mv -f -- "$temp" "$config"
+    temp=
+    if ! systemctl restart xray.service; then
+        mv -f -- "$backup" "$config" \
+            || fail "Xray restart failed and the original configuration could not be restored; backup remains at $backup."
+        backup=
+        systemctl restart xray.service \
+            || log 'Xray restart also failed after restoring its previous configuration; inspect xray.service immediately.'
+        fail 'Xray restart failed; the previous configuration was restored.'
+    fi
+    rm -f -- "$backup"
+    backup=
+    trap - RETURN
+}
+
+xray_config_path() {
+    local pid arg next config= count=0 i
+    local -a args=()
+    pid=$(systemctl show -p MainPID --value xray.service 2>/dev/null) \
+        || fail 'Could not identify the running Xray service process.'
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] \
+        || fail 'Xray must be running so its active configuration path can be identified safely.'
+    mapfile -d '' -t args < "/proc/$pid/cmdline"
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        arg=${args[i]}
+        case "$arg" in
+            -confdir|-confdir=*) fail 'Xray config directories are not supported; use one JSON config file.' ;;
+            -config|-c)
+                ((i + 1 < ${#args[@]})) || fail 'Xray command line has a config flag without a path.'
+                next=${args[i + 1]}
+                config=$next
+                ((count += 1))
+                ((i += 1))
+                ;;
+            -config=*|-c=*) config=${arg#*=}; ((count += 1)) ;;
+        esac
+    done
+    [[ "$count" -eq 1 && "$config" == /* && -f "$config" && ! -L "$config" ]] \
+        || fail 'Could not identify exactly one regular Xray JSON config file from the running service command.'
+    printf '%s\n' "$config"
+}
+
+configure_xray_fallback() {
+    local config reason
+    if ! config=$(xray_config_path 2>&1); then
+        https_reason="Xray config path could not be confirmed: ${config#\[slowmeet\] ERROR: }"
+        return 1
+    fi
+    if ! reason=$(validate_xray_fallback_config "$config" "$domain" "$CADDY_XRAY_BACKEND_PORT" 2>&1); then
+        https_reason="Xray fallback is unsupported: ${reason#\[slowmeet\] ERROR: }"
+        return 1
+    fi
+    apply_xray_fallback_to_config "$config" "$domain" "$CADDY_XRAY_BACKEND_PORT"
+}
+
 detect_proxy_mode() {
     if systemctl is-active --quiet nginx; then
         command -v nginx >/dev/null || fail 'Nginx is active but its nginx command was not found.'
@@ -1030,6 +1507,56 @@ detect_proxy_mode() {
     else
         proxy_mode=caddy
         log 'No active Nginx detected; SlowMeet will use Caddy.'
+    fi
+}
+
+detect_caddy_tls_mode() {
+    local config listeners caddy_main_pid reason conflicts
+    https_reason=
+    if [[ "$proxy_mode" != caddy ]]; then
+        if xray_https_port_443_is_active; then
+            mark_https_unavailable 'Xray owns TCP port 443, but the selected Nginx proxy cannot use the supported Caddy-to-Xray fallback.'
+            return 0
+        fi
+        if ! conflicts=$(caddy_https_port_conflicts nginx); then
+            mark_https_unavailable 'Could not inspect TCP port 443 for the selected Nginx proxy.'
+            return 0
+        fi
+        if [[ -n "$conflicts" ]]; then
+            mark_https_unavailable "TCP port 443 is already in use by $conflicts."
+            return 0
+        fi
+        caddy_tls_mode=direct
+        return 0
+    fi
+    if xray_https_port_443_is_active; then
+        listeners=$(ss -H -ltnp "sport = :$CADDY_XRAY_BACKEND_PORT") \
+            || { mark_https_unavailable 'Could not inspect the selected Caddy loopback backend port.'; return 0; }
+        caddy_main_pid=$(systemctl show -p MainPID --value caddy 2>/dev/null || true)
+        if [[ -n "$listeners" && ! "$listeners" == *"\"caddy\",pid=$caddy_main_pid,"* ]]; then
+            mark_https_unavailable "Caddy fallback port $CADDY_XRAY_BACKEND_PORT is already in use; Xray and Caddy were left untouched."
+            return 0
+        fi
+        if ! config=$(xray_config_path 2>&1); then
+            reason=${config#\[slowmeet\] ERROR: }
+            mark_https_unavailable "Xray fallback could not be configured: $reason"
+            return 0
+        fi
+        if ! reason=$(validate_xray_fallback_config "$config" "$domain" "$CADDY_XRAY_BACKEND_PORT" 2>&1); then
+            reason=${reason#\[slowmeet\] ERROR: }
+            mark_https_unavailable "Xray fallback is unsupported: $reason"
+            return 0
+        fi
+        caddy_tls_mode=xray
+        log "Detected Xray on TCP port 443; SlowMeet will use a Caddy HTTP backend on 127.0.0.1:$CADDY_XRAY_BACKEND_PORT."
+    else
+        if ! conflicts=$(caddy_https_port_conflicts); then
+            mark_https_unavailable 'Could not inspect TCP port 443 before activating the HTTPS proxy.'
+        elif [[ -n "$conflicts" ]]; then
+            mark_https_unavailable "TCP port 443 is already in use by $conflicts."
+        else
+            caddy_tls_mode=direct
+        fi
     fi
 }
 
@@ -1216,6 +1743,39 @@ EOF
 write_nginx_site() {
     local ipv6_http ipv6_https
     ipv6_http=$(nginx_ipv6_listener_lines 80)
+    if [[ "${caddy_tls_mode:-direct}" == http-only ]]; then
+        cat > "$NGINX_SITE" <<EOF
+# Managed by SlowMeet installer
+map \$http_upgrade \$slowmeet_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 80;
+$ipv6_http
+    server_name $domain;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:$app_port;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$slowmeet_connection_upgrade;
+        proxy_read_timeout 2h;
+        proxy_send_timeout 2h;
+    }
+}
+EOF
+        chmod 0644 "$NGINX_SITE" || return 1
+        nginx -t || return 1
+        systemctl reload nginx
+        return
+    fi
     ipv6_https=$(nginx_ipv6_listener_lines 443 ' ssl')
     cat > "$NGINX_SITE" <<EOF
 # Managed by SlowMeet installer
@@ -1256,8 +1816,8 @@ $ipv6_https
     }
 }
 EOF
-    chmod 0644 "$NGINX_SITE"
-    nginx -t
+    chmod 0644 "$NGINX_SITE" || return 1
+    nginx -t || return 1
     systemctl reload nginx
 }
 
@@ -1274,6 +1834,7 @@ install_mode=fresh
 install_operation=install
 container_engine=docker
 caddy_install_method=apt
+caddy_tls_mode=direct
 if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
     read_install_state
     if [[ "$state_status" == incomplete && "$install_operation" == install ]]; then
@@ -1360,6 +1921,8 @@ log "Installing prerequisites on ${PRETTY_NAME:-$ID}."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl git gnupg iproute2 jq openssl certbot ufw
+detect_caddy_tls_mode
+write_install_state incomplete
 private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)
 
 if [[ "$container_engine" == docker ]]; then
@@ -1439,17 +2002,20 @@ ufw --force enable
 
 if [[ "$proxy_mode" == caddy ]]; then
     install -d -o root -g caddy -m 0755 /var/www/letsencrypt
-    write_caddy_site bootstrap
-    reload_caddy_after_config_change
+    activate_caddy_site bootstrap
 else
     write_nginx_acme_site
 fi
 
-log 'Requesting the HTTPS certificate.'
-certbot certonly --webroot --webroot-path /var/www/letsencrypt --non-interactive --agree-tos \
-    --register-unsafely-without-email --keep-until-expiring -d "$domain"
+if [[ "$caddy_tls_mode" != xray || "$proxy_mode" == nginx ]]; then
+    log 'Requesting the HTTPS certificate.'
+    certbot certonly --webroot --webroot-path /var/www/letsencrypt --non-interactive --agree-tos \
+        --register-unsafely-without-email --keep-until-expiring -d "$domain"
+else
+    log 'Using the existing Xray TLS certificate; certificate renewal remains managed by Xray.'
+fi
 
-if [[ "$proxy_mode" == caddy ]]; then
+if [[ "$proxy_mode" == caddy && "$caddy_tls_mode" == direct ]]; then
     install -d -o root -g caddy -m 0750 "$CERT_DIR"
     install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/fullchain.pem" "$CERT_DIR/fullchain.pem"
     install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/privkey.pem" "$CERT_DIR/privkey.pem"
@@ -1460,10 +2026,9 @@ else
 fi
 
 if [[ "$proxy_mode" == caddy ]]; then
-    write_caddy_site final
-    reload_caddy_after_config_change
+    activate_caddy_site final
 else
-    write_nginx_site
+    activate_nginx_site
 fi
 
 if [[ -e "$ENV_FILE" ]]; then
@@ -1559,6 +2124,11 @@ if [[ "$container_engine" == podman ]]; then
     systemctl enable --now slowmeet-podman.service
 fi
 
+if [[ "$caddy_tls_mode" == xray ]] && ! configure_xray_fallback; then
+    mark_https_unavailable "$https_reason"
+    activate_caddy_site final
+fi
+
 log 'Waiting for SlowMeet to become healthy.'
 healthy=no
 for _ in $(seq 1 60); do
@@ -1572,11 +2142,17 @@ done
     compose ps
     fail 'SlowMeet did not become ready. Review the container logs with the selected Compose command.'
 }
-curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
-    || fail 'The local HTTPS health check failed.'
+if [[ "$caddy_tls_mode" != http-only ]]; then
+    curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
+        || fail 'The local HTTPS health check failed.'
+fi
 
-printf '\nSlowMeet is ready at https://%s/\nAdmin: https://%s/admin\nAdmin password: %s\n' \
-    "$domain" "$domain" "$admin_password"
+if [[ "$caddy_tls_mode" == http-only ]]; then
+    printf '\nSlowMeet is installed and its local app health check passed.\nAdmin password: %s\n' "$admin_password"
+else
+    printf '\nSlowMeet is ready at https://%s/\nAdmin: https://%s/admin\nAdmin password: %s\n' \
+        "$domain" "$domain" "$admin_password"
+fi
 if [[ "$enable_meeting_password" == yes ]]; then
     printf 'Meeting password: %s\n' "$meeting_password"
 fi
@@ -1588,3 +2164,4 @@ if [[ "$proxy_mode" == caddy ]]; then
     log "Caddy installation method: $caddy_install_method."
 fi
 write_install_state complete
+print_https_warning
