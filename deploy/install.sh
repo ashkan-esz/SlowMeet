@@ -31,6 +31,12 @@ mark_https_unavailable() {
 
 print_https_warning() {
     [[ "${caddy_tls_mode:-direct}" == http-only ]] || return 0
+    if [[ "${https_required:-yes}" == no ]]; then
+        printf '\nHTTPS was disabled by your choice; the site is available at http://%s/.\n' "$domain" >&2
+        printf 'Certificate setup and TCP port 443 were skipped.\n' >&2
+        printf 'Browsers may restrict meeting media features without HTTPS.\n' >&2
+        return 0
+    fi
     printf '\nWARNING: SlowMeet was installed and its local app health check passed, but public HTTPS is unavailable.\n' >&2
     printf 'Reason: %s\n' "$https_reason" >&2
     printf 'The site is available at http://%s/; browsers may restrict meeting media features without HTTPS.\n' "$domain" >&2
@@ -100,13 +106,14 @@ write_install_state() {
     install -d -o root -g root -m 0700 "$STATE_DIR"
     temp=$(mktemp "$STATE_DIR/.state.XXXXXX")
     {
-        printf 'version=7\n'
+        printf 'version=8\n'
         printf 'status=%s\n' "$status"
         printf 'operation=%s\n' "$install_operation"
         printf 'domain=%s\n' "$domain"
         printf 'enable_turn=%s\n' "$enable_turn"
         printf 'enable_meeting_password=%s\n' "$enable_meeting_password"
         printf 'proxy_mode=%s\n' "$proxy_mode"
+        printf 'https_required=%s\n' "$https_required"
         printf 'caddy_tls_mode=%s\n' "${caddy_tls_mode:-direct}"
         printf 'https_reason=%s\n' "${https_reason:-}"
         printf 'xray_fallback_managed=%s\n' "${xray_fallback_managed:-no}"
@@ -121,7 +128,7 @@ write_install_state() {
 
 read_install_state() {
     local key value
-    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_caddy_tls_mode= seen_https_reason= seen_xray_fallback_managed= seen_xray_alpn_added= seen_app_port= seen_container_engine= seen_caddy_install_method=
+    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_https_required= seen_caddy_tls_mode= seen_https_reason= seen_xray_fallback_managed= seen_xray_alpn_added= seen_app_port= seen_container_engine= seen_caddy_install_method=
     state_version=
     state_status=
     install_operation=
@@ -129,6 +136,7 @@ read_install_state() {
     enable_turn=
     enable_meeting_password=
     proxy_mode=
+    https_required=
     caddy_tls_mode=direct
     https_reason=
     xray_fallback_managed=no
@@ -146,6 +154,7 @@ read_install_state() {
             enable_turn) [[ -z "$seen_turn" ]] || fail 'Installer state contains a duplicate TURN setting.'; seen_turn=yes; enable_turn=$value ;;
             enable_meeting_password) [[ -z "$seen_meeting_password" ]] || fail 'Installer state contains a duplicate meeting-password setting.'; seen_meeting_password=yes; enable_meeting_password=$value ;;
             proxy_mode) [[ -z "$seen_proxy_mode" ]] || fail 'Installer state contains a duplicate proxy mode.'; seen_proxy_mode=yes; proxy_mode=$value ;;
+            https_required) [[ -z "$seen_https_required" ]] || fail 'Installer state contains a duplicate HTTPS setting.'; seen_https_required=yes; https_required=$value ;;
             caddy_tls_mode) [[ -z "$seen_caddy_tls_mode" ]] || fail 'Installer state contains a duplicate Caddy TLS mode.'; seen_caddy_tls_mode=yes; caddy_tls_mode=$value ;;
             https_reason) [[ -z "$seen_https_reason" ]] || fail 'Installer state contains a duplicate HTTPS warning reason.'; seen_https_reason=yes; https_reason=$value ;;
             xray_fallback_managed) [[ -z "$seen_xray_fallback_managed" ]] || fail 'Installer state contains a duplicate Xray fallback setting.'; seen_xray_fallback_managed=yes; xray_fallback_managed=$value ;;
@@ -156,7 +165,7 @@ read_install_state() {
             *) fail "Installer state contains an unsupported field: $key" ;;
         esac
     done < "$STATE_FILE"
-    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ) ]] || fail 'Installer state has a missing or unsupported version.'
+    [[ "$seen_version" == yes && ( "$state_version" == 1 || "$state_version" == 2 || "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ) ]] || fail 'Installer state has a missing or unsupported version.'
     [[ "$seen_status" == yes && ( "$state_status" == incomplete || "$state_status" == complete ) ]] || fail 'Installer state has a missing or invalid status.'
     if [[ "$state_version" == 1 ]]; then
         [[ -z "$seen_operation" ]] || fail 'Version 1 installer state cannot contain an operation.'
@@ -165,7 +174,7 @@ read_install_state() {
         [[ "$seen_operation" == yes && ( "$install_operation" == install || "$install_operation" == update ) ]] \
             || fail 'Installer state has a missing or invalid operation.'
     fi
-    if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
+    if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ]]; then
         [[ "$seen_proxy_mode" == yes && ( "$proxy_mode" == caddy || "$proxy_mode" == nginx ) ]] \
             || fail 'Installer state has a missing or invalid proxy mode.'
         [[ "$seen_app_port" == yes && "$app_port" =~ ^[0-9]{1,5}$ ]] \
@@ -176,16 +185,16 @@ read_install_state() {
         proxy_mode=caddy
         app_port=8080
     fi
-    if [[ "$state_version" == 6 || "$state_version" == 7 ]]; then
-        [[ "$seen_caddy_tls_mode" == yes && ( "$caddy_tls_mode" == direct || "$caddy_tls_mode" == xray || ( "$state_version" == 7 && "$caddy_tls_mode" == http-only ) ) ]] \
+    if [[ "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ]]; then
+        [[ "$seen_caddy_tls_mode" == yes && ( "$caddy_tls_mode" == direct || "$caddy_tls_mode" == xray || ( ( "$state_version" == 7 || "$state_version" == 8 ) && "$caddy_tls_mode" == http-only ) ) ]] \
             || fail 'Installer state has a missing or invalid Caddy TLS mode.'
         [[ "$seen_xray_fallback_managed" == yes && ( "$xray_fallback_managed" == yes || "$xray_fallback_managed" == no ) ]] \
             || fail 'Installer state has a missing or invalid Xray fallback ownership flag.'
         [[ "$seen_xray_alpn_added" == yes && ( "$xray_alpn_added" == yes || "$xray_alpn_added" == no ) ]] \
             || fail 'Installer state has a missing or invalid Xray ALPN ownership flag.'
-        [[ "$proxy_mode" == caddy || "$caddy_tls_mode" == direct || ( "$state_version" == 7 && "$caddy_tls_mode" == http-only ) ]] \
+        [[ "$proxy_mode" == caddy || "$caddy_tls_mode" == direct || ( ( "$state_version" == 7 || "$state_version" == 8 ) && "$caddy_tls_mode" == http-only ) ]] \
             || fail 'Installer state has an invalid Xray TLS mode for the selected proxy.'
-        if [[ "$state_version" == 7 ]]; then
+        if [[ "$state_version" == 7 || "$state_version" == 8 ]]; then
             [[ "$seen_https_reason" == yes ]] || fail 'Installer state has a missing HTTPS warning reason.'
             if [[ "$caddy_tls_mode" == http-only ]]; then
                 [[ -n "$https_reason" ]] || fail 'HTTP-only installer state has no HTTPS warning reason.'
@@ -198,14 +207,24 @@ read_install_state() {
             || fail 'Legacy installer state cannot contain Xray proxy settings.'
         caddy_tls_mode=direct
     fi
-    if [[ "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
+    if [[ "$state_version" == 8 ]]; then
+        [[ "$seen_https_required" == yes && ( "$https_required" == yes || "$https_required" == no ) ]] \
+            || fail 'Installer state has a missing or invalid HTTPS setting.'
+        if [[ "$https_required" == no ]]; then
+            [[ "$caddy_tls_mode" == http-only ]] || fail 'Installer state disables HTTPS but has a TLS-enabled mode.'
+        fi
+    else
+        [[ -z "$seen_https_required" ]] || fail 'Legacy installer state cannot contain an HTTPS setting.'
+        https_required=
+    fi
+    if [[ "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ]]; then
         [[ "$seen_container_engine" == yes && ( "$container_engine" == docker || "$container_engine" == podman ) ]] \
             || fail 'Installer state has a missing or invalid container engine.'
     else
         [[ -z "$seen_container_engine" ]] || fail 'Legacy installer state cannot contain a container engine.'
         container_engine=docker
     fi
-    if [[ "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 ]]; then
+    if [[ "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ]]; then
         [[ "$seen_caddy_install_method" == yes && ( "$caddy_install_method" == apt || "$caddy_install_method" == binary ) ]] \
             || fail 'Installer state has a missing or invalid Caddy install method.'
         [[ "$proxy_mode" == caddy || "$caddy_install_method" == apt ]] \
@@ -518,6 +537,9 @@ wait_for_updated_service() {
     if [[ "${caddy_tls_mode:-direct}" != http-only ]]; then
         curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
             || fail 'The local HTTPS health check failed.'
+    else
+        curl -fsS --max-time 10 --resolve "$domain:80:127.0.0.1" "http://$domain/health" >/dev/null \
+            || fail 'The local HTTP proxy health check failed.'
     fi
 }
 
@@ -538,7 +560,12 @@ update_existing_install() {
             ;;
     esac
     previous_tls_mode=${caddy_tls_mode:-direct}
-    detect_caddy_tls_mode
+    if [[ "$https_required" == yes ]]; then
+        detect_caddy_tls_mode
+    else
+        caddy_tls_mode=http-only
+        https_reason='HTTPS and TCP port 443 were disabled by user choice.'
+    fi
     git -C "$INSTALL_DIR" diff --quiet && git -C "$INSTALL_DIR" diff --cached --quiet \
         || fail "$INSTALL_DIR has local tracked changes. Save or revert them before updating."
 
@@ -587,7 +614,9 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     admin_password=$(read_env_value ADMIN_PASSWORD)
     meeting_password=$(read_env_value MEETING_PASSWORD)
     turn_urls=$(read_env_value TURN_URLS)
-    if [[ "$caddy_tls_mode" == http-only ]]; then
+    if [[ "$https_required" == no ]]; then
+        printf '\nSlowMeet is updated and ready at http://%s/ (HTTPS disabled by choice).\n' "$domain"
+    elif [[ "$caddy_tls_mode" == http-only ]]; then
         printf '\nSlowMeet is updated and its local app health check passed.\n'
     else
         printf '\nSlowMeet is updated and ready at https://%s/\nAdmin: https://%s/admin\n' "$domain" "$domain"
@@ -1140,6 +1169,24 @@ yes_no() {
             *) log 'Enter yes or no.' ;;
         esac
     done
+}
+
+prompt_https_requirement() {
+    if yes_no 'Is HTTPS on TCP port 443 required?' yes; then
+        https_required=yes
+    else
+        https_required=no
+        caddy_tls_mode=http-only
+        https_reason='HTTPS and TCP port 443 were disabled by user choice.'
+        if [[ "${xray_fallback_managed:-no}" == yes || "${xray_alpn_added:-no}" == yes ]]; then
+            local xray_config
+            xray_config=$(xray_config_path)
+            remove_xray_fallback_from_config "$xray_config" "$domain" "$CADDY_XRAY_BACKEND_PORT" \
+                "$xray_fallback_managed" "$xray_alpn_added"
+            xray_fallback_managed=no
+            xray_alpn_added=no
+        fi
+    fi
 }
 
 prompt_container_engine() {
@@ -1866,6 +1913,7 @@ elif [[ -e "$ENV_FILE" ]]; then
     install_operation=update
     log "Detected a legacy SlowMeet installation for $domain; its existing options will be preserved."
 else
+    prompt_https_requirement
     domain=$(prompt 'Domain for SlowMeet (for example, meet.example.com)' '')
     domain=${domain,,}
     domain=${domain%.}
@@ -1884,6 +1932,16 @@ else
     detect_proxy_mode
     app_port=8080
     prompt_app_port
+fi
+
+if [[ -z "$https_required" ]]; then
+    if [[ "$install_mode" == fresh-resume ]]; then
+        prompt_https_requirement
+    else
+        # Older completed installations predate the saved HTTPS preference;
+        # retain their existing HTTPS behavior during updates.
+        https_required=yes
+    fi
 fi
 
 if [[ "$install_mode" == update || "$install_mode" == fresh-resume ]]; then
@@ -1920,8 +1978,17 @@ fi
 log "Installing prerequisites on ${PRETTY_NAME:-$ID}."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl git gnupg iproute2 jq openssl certbot ufw
-detect_caddy_tls_mode
+prerequisite_packages=(ca-certificates curl git gnupg iproute2 jq openssl ufw)
+if [[ "$https_required" == yes ]]; then
+    prerequisite_packages+=(certbot)
+fi
+apt-get install -y "${prerequisite_packages[@]}"
+if [[ "$https_required" == yes ]]; then
+    detect_caddy_tls_mode
+else
+    caddy_tls_mode=http-only
+    https_reason='HTTPS and TCP port 443 were disabled by user choice.'
+fi
 write_install_state incomplete
 private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)
 
@@ -1990,7 +2057,9 @@ if command -v sshd >/dev/null; then
 fi
 ufw allow "$ssh_port/tcp" comment 'SlowMeet installer SSH'
 ufw allow 80/tcp comment 'SlowMeet ACME HTTP'
-ufw allow 443/tcp comment 'SlowMeet HTTPS'
+if [[ "$https_required" == yes ]]; then
+    ufw allow 443/tcp comment 'SlowMeet HTTPS'
+fi
 ufw allow 50000:50100/udp comment 'SlowMeet WebRTC media'
 if [[ "$enable_turn" == yes ]]; then
     ufw allow 3478/udp comment 'SlowMeet TURN UDP'
@@ -2001,28 +2070,45 @@ fi
 ufw --force enable
 
 if [[ "$proxy_mode" == caddy ]]; then
-    install -d -o root -g caddy -m 0755 /var/www/letsencrypt
+    if [[ "$https_required" == yes ]]; then
+        install -d -o root -g caddy -m 0755 /var/www/letsencrypt
+    fi
     activate_caddy_site bootstrap
-else
+elif [[ "$https_required" == yes ]]; then
     write_nginx_acme_site
 fi
 
-if [[ "$caddy_tls_mode" != xray || "$proxy_mode" == nginx ]]; then
+if [[ "$https_required" == yes && ( "$caddy_tls_mode" != xray || "$proxy_mode" == nginx ) ]]; then
     log 'Requesting the HTTPS certificate.'
     certbot certonly --webroot --webroot-path /var/www/letsencrypt --non-interactive --agree-tos \
         --register-unsafely-without-email --keep-until-expiring -d "$domain"
-else
+elif [[ "$https_required" == yes ]]; then
     log 'Using the existing Xray TLS certificate; certificate renewal remains managed by Xray.'
 fi
 
-if [[ "$proxy_mode" == caddy && "$caddy_tls_mode" == direct ]]; then
-    install -d -o root -g caddy -m 0750 "$CERT_DIR"
-    install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/fullchain.pem" "$CERT_DIR/fullchain.pem"
-    install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/privkey.pem" "$CERT_DIR/privkey.pem"
+if [[ "$proxy_mode" == caddy ]]; then
+    # Caddy runs as the caddy user and must be able to traverse this parent
+    # directory to read its group-readable certificate files. Keep directory
+    # listing disabled for that group; the environment file remains mode 0600.
+    install -d /etc/slowmeet
+    chown root:caddy /etc/slowmeet
+    chmod 0710 /etc/slowmeet
 else
-    install -d -o root -g root -m 0750 "$CERT_DIR"
-    install -o root -g root -m 0640 "/etc/letsencrypt/live/$domain/fullchain.pem" "$CERT_DIR/fullchain.pem"
-    install -o root -g root -m 0640 "/etc/letsencrypt/live/$domain/privkey.pem" "$CERT_DIR/privkey.pem"
+    install -d /etc/slowmeet
+    chown root:root /etc/slowmeet
+    chmod 0750 /etc/slowmeet
+fi
+
+if [[ "$https_required" == yes ]]; then
+    if [[ "$proxy_mode" == caddy && "$caddy_tls_mode" == direct ]]; then
+        install -d -o root -g caddy -m 0750 "$CERT_DIR"
+        install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/fullchain.pem" "$CERT_DIR/fullchain.pem"
+        install -o root -g caddy -m 0640 "/etc/letsencrypt/live/$domain/privkey.pem" "$CERT_DIR/privkey.pem"
+    else
+        install -d -o root -g root -m 0750 "$CERT_DIR"
+        install -o root -g root -m 0640 "/etc/letsencrypt/live/$domain/fullchain.pem" "$CERT_DIR/fullchain.pem"
+        install -o root -g root -m 0640 "/etc/letsencrypt/live/$domain/privkey.pem" "$CERT_DIR/privkey.pem"
+    fi
 fi
 
 if [[ "$proxy_mode" == caddy ]]; then
@@ -2072,7 +2158,6 @@ EOF
 fi
 chmod 0600 "$ENV_FILE"
 
-install -d -o root -g root -m 0750 /etc/slowmeet
 printf '%s\n' "$proxy_mode" > "$PROXY_MODE_FILE"
 chmod 0644 "$PROXY_MODE_FILE"
 printf '%s\n' "$container_engine" > "$CONTAINER_ENGINE_FILE"
@@ -2080,7 +2165,8 @@ chmod 0644 "$CONTAINER_ENGINE_FILE"
 
 write_podman_service
 
-cat > "$CERT_HOOK" <<'HOOK'
+if [[ "$https_required" == yes ]]; then
+    cat > "$CERT_HOOK" <<'HOOK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 proxy_mode=$(cat /etc/slowmeet/proxy-mode)
@@ -2104,9 +2190,10 @@ if [[ -f /opt/slowmeet/.turn-enabled ]]; then
     esac
 fi
 HOOK
-chmod 0750 "$CERT_HOOK"
+    chmod 0750 "$CERT_HOOK"
+    systemctl enable --now certbot.timer
+fi
 
-systemctl enable --now certbot.timer
 systemctl enable --now "$proxy_mode"
 if [[ "$proxy_mode" == caddy ]]; then
     caddy validate --config /etc/caddy/Caddyfile
@@ -2145,9 +2232,15 @@ done
 if [[ "$caddy_tls_mode" != http-only ]]; then
     curl -fsS --max-time 10 --resolve "$domain:443:127.0.0.1" "https://$domain/health" >/dev/null \
         || fail 'The local HTTPS health check failed.'
+else
+    curl -fsS --max-time 10 --resolve "$domain:80:127.0.0.1" "http://$domain/health" >/dev/null \
+        || fail 'The local HTTP proxy health check failed.'
 fi
 
-if [[ "$caddy_tls_mode" == http-only ]]; then
+if [[ "$https_required" == no ]]; then
+    printf '\nSlowMeet is installed and ready at http://%s/ (HTTPS disabled by choice).\nAdmin: http://%s/admin\nAdmin password: %s\n' \
+        "$domain" "$domain" "$admin_password"
+elif [[ "$caddy_tls_mode" == http-only ]]; then
     printf '\nSlowMeet is installed and its local app health check passed.\nAdmin password: %s\n' "$admin_password"
 else
     printf '\nSlowMeet is ready at https://%s/\nAdmin: https://%s/admin\nAdmin password: %s\n' \

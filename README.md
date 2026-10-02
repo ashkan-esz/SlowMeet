@@ -60,6 +60,9 @@ This command downloads and immediately runs the current installer from the
 `master` branch with root privileges. It is not pinned to a release; review the
 repository and installer source before running it.
 
+For the installer's full execution flow, system changes, safety checks, and
+update/uninstall behavior, see [the install script guide](docs/install-script.md).
+
 For a fresh installation, the installer asks for the domain, optional TURN and
 meeting-password settings, the container engine (`docker` by default or
 `podman`), the local app port (default `8080`), and an admin password. Admin
