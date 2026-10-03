@@ -6,6 +6,9 @@ const {
   resolveCodecName,
   profileNameForQuality,
   isBelowBitrate,
+  selectedCandidatePair,
+  selectedCandidatePairRTT,
+  formatRTT,
   classifyNetworkSample,
   shouldPauseVideo,
   chooseParticipantLayout
@@ -77,6 +80,41 @@ if (isBelowBitrate(20, 40) !== true ||
     isBelowBitrate(undefined, 40) !== false) {
   throw new Error("missing inbound video bitrate must not be treated as critical");
 }
+const nonselectedPair = {
+  id: "pair-nonselected", type: "candidate-pair", state: "succeeded",
+  currentRoundTripTime: 0.0009, availableOutgoingBitrate: 900000
+};
+const selectedPair = {
+  id: "pair-selected", type: "candidate-pair", state: "succeeded",
+  selected: true,
+  currentRoundTripTime: 0.0004, availableOutgoingBitrate: 600000
+};
+const selectedTransport = {
+  id: "transport-1", type: "transport", selectedCandidatePairId: "pair-selected"
+};
+const candidateReport = [nonselectedPair, selectedTransport, selectedPair];
+if (selectedCandidatePair(candidateReport) !== selectedPair ||
+    selectedCandidatePairRTT(candidateReport) !== 0.4 ||
+    selectedCandidatePair(new Map(candidateReport.map((stat) => [stat.id, stat]))) !== selectedPair ||
+    selectedCandidatePair([nonselectedPair]) !== null ||
+    selectedCandidatePairRTT([nonselectedPair]) !== null) {
+  throw new Error("RTT and capacity must use only an explicitly selected ICE candidate pair");
+}
+const nominatedPair = { ...selectedPair, selected: false, nominated: true };
+if (selectedCandidatePair([nominatedPair]) !== nominatedPair) {
+  throw new Error("nominated candidate pairs should support browsers without transport selection references");
+}
+for (const invalidRTT of [null, undefined, NaN, Infinity, -0.1]) {
+  const pair = { ...selectedPair, currentRoundTripTime: invalidRTT };
+  if (selectedCandidatePairRTT([pair]) !== null) {
+    throw new Error("invalid selected-pair RTT samples must remain unavailable");
+  }
+}
+if (formatRTT(0) !== "<1 ms" || formatRTT(0.4) !== "<1 ms" ||
+    formatRTT(1) !== "1 ms" || formatRTT(12.34) !== "12.3 ms" ||
+    formatRTT(-1) !== null || formatRTT(NaN) !== null) {
+  throw new Error("RTT display must preserve sub-millisecond samples and reject invalid values");
+}
 const missingNetworkSample = classifyNetworkSample({});
 if (missingNetworkSample.poor || missingNetworkSample.critical || missingNetworkSample.good) {
   throw new Error("missing stats must not trigger adaptation or count as a recovery sample");
@@ -103,8 +141,15 @@ if (!sustainedLoss.poor || !sustainedLoss.critical || sustainedLoss.good) {
 }
 const lowInbound = classifyNetworkSample({ inboundKbps: 60 });
 const criticalInbound = classifyNetworkSample({ inboundKbps: 20 });
-if (!lowInbound.poor || lowInbound.good || !criticalInbound.critical || criticalInbound.good) {
-  throw new Error("low inbound video must never count as a good adaptation sample");
+if (lowInbound.poor || lowInbound.critical || lowInbound.good ||
+    criticalInbound.poor || criticalInbound.critical || criticalInbound.good) {
+  throw new Error("inbound video bitrate alone must not determine network quality");
+}
+const quietVideoOnHealthyNetwork = classifyNetworkSample({
+  rttMs: 80, packetLoss: 0, jitterMs: 10, inboundKbps: 20
+});
+if (quietVideoOnHealthyNetwork.poor || quietVideoOnHealthyNetwork.critical || !quietVideoOnHealthyNetwork.good) {
+  throw new Error("low inbound video bitrate must not block recovery when network metrics are healthy");
 }
 if (shouldPauseVideo(true, 1, 5) || !shouldPauseVideo(true, 0, 3) ||
     shouldPauseVideo(false, 2, 2) || !shouldPauseVideo(false, 2, 3)) {
@@ -173,6 +218,23 @@ const fs = require("node:fs");
 const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
+if (!appSource.includes("const selectedPair = selectedCandidatePair(report);") ||
+    !appSource.includes("values.rttMs = selectedCandidatePairRTT(report);") ||
+    appSource.includes("!selectedCandidatePair")) {
+  throw new Error("connection metrics must derive RTT and capacity from selected ICE pair stats only");
+}
+if (!appSource.includes("function enqueuePeerNegotiation(operation)") ||
+    !appSource.includes("return renegotiationQueue.request();") ||
+    !appSource.includes("renegotiationQueue?.answer();") ||
+    !appSource.includes("renegotiationQueue?.fail(error);")) {
+  throw new Error("local media renegotiation must wait for answers and preserve a recoverable operation queue");
+}
+if (!appSource.includes("if (generation !== socketGeneration || peer !== sharePeer) throw new Error(\"media connection changed\");") ||
+    !appSource.includes("Screen share stopped; media renegotiation failed.") ||
+    !appSource.includes("if (screenShareStartPromise) return screenShareStartPromise;") ||
+    !appSource.includes('localScreenTrack.addEventListener("ended", () => {')) {
+  throw new Error("screen share must serialize start/stop, clean up ended capture, and report renegotiation failures");
+}
 if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
 }

@@ -1463,7 +1463,7 @@ let socketGeneration = 0;
 let peer;
 let videoTransceiver;
 let renegotiationChain = Promise.resolve();
-let renegotiationPending = false;
+let renegotiationQueue;
 let localStream;
 let localAudioStream;
 let localCameraStream;
@@ -1480,6 +1480,8 @@ let pendingHandState;
 let reconnectToken;
 let screenShareOwner;
 let screenShareRequest;
+let screenShareStartPromise;
+let screenShareStopPromise;
 let screenShareEnabled = true;
 let serverDefaultProfile = false;
 let remoteDescriptionSet = false;
@@ -1892,21 +1894,15 @@ function setLocalMediaControls() {
   renderPeopleList();
 }
 
-async function renegotiateLocalMedia() {
-  const generation = socketGeneration;
-  const targetPeer = peer;
-  const targetSocket = socket;
-  if (!targetPeer || !isCurrentWebRTC(generation, targetPeer, targetSocket) ||
-      targetPeer.signalingState !== "stable") return;
-  renegotiationChain = renegotiationChain.catch(() => {}).then(async () => {
-    if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
-    const offer = await targetPeer.createOffer();
-    await targetPeer.setLocalDescription(offer);
-    if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
-      targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
-    }
-  }).catch(() => {});
-  return renegotiationChain;
+function enqueuePeerNegotiation(operation) {
+  const queued = renegotiationChain.catch(() => {}).then(operation);
+  renegotiationChain = queued.catch(() => {});
+  return queued;
+}
+
+function renegotiateLocalMedia() {
+  if (!renegotiationQueue) return Promise.reject(new Error("WebRTC negotiation is unavailable"));
+  return renegotiationQueue.request();
 }
 
 function waitForCameraRetry(delayMs) {
@@ -1981,10 +1977,15 @@ async function enableCameraOnce() {
 async function disableCamera() {
   cameraRequested = false;
   meetingViewState.cameraEnabled = false;
+  let negotiationError;
   if (cameraSender && peer) {
     peer.removeTrack(cameraSender);
     cameraSender = undefined;
-    await renegotiateLocalMedia();
+    try {
+      await renegotiateLocalMedia();
+    } catch (error) {
+      negotiationError = error;
+    }
   }
   localCameraTrack?.stop();
   localStream?.removeTrack(localCameraTrack);
@@ -1996,6 +1997,7 @@ async function disableCamera() {
   if (local) local.cameraVideo.srcObject = null;
   setLocalMediaControls();
   sendMediaState();
+  if (negotiationError) status.textContent = "Camera stopped, but media renegotiation failed.";
 }
 
 let sidebarFocusTrigger;
@@ -2778,6 +2780,8 @@ function resetMediaConnection() {
   remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
   enableAudio.hidden = true;
+  renegotiationQueue?.close(new Error("signaling connection closed"));
+  renegotiationQueue = undefined;
   peer?.close();
   peer = undefined;
   videoTransceiver = undefined;
@@ -2805,7 +2809,6 @@ function resetMediaConnection() {
   updateScreenShareUI();
   remoteDescriptionSet = false;
   pendingCandidates.splice(0);
-  renegotiationPending = false;
   restartRequested = false;
   previousStats = undefined;
   cameraLayerPoorSamples = 0;
@@ -2825,9 +2828,44 @@ async function startWebRTC() {
   }
   await iceConfigReady;
   if (generation !== socketGeneration || socket !== currentSocket) return;
+  renegotiationQueue?.close(new Error("WebRTC connection replaced"));
   const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });
   restartRequested = false;
   peer = currentPeer;
+  renegotiationChain = Promise.resolve();
+  renegotiationQueue = createRenegotiationQueue({
+    isCurrent: () => isCurrentWebRTC(generation, currentPeer, currentSocket),
+    isStable: () => currentPeer.signalingState === "stable",
+    offerTimeoutMs: 15000,
+    onTimeout: () => {
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+      status.textContent = "Media negotiation timed out. Reconnecting...";
+      currentSocket.close();
+    },
+    sendOffer: () => enqueuePeerNegotiation(async () => {
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) {
+        throw new Error("stale WebRTC connection");
+      }
+      if (currentPeer.signalingState !== "stable") return false;
+      const offer = await currentPeer.createOffer();
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) {
+        throw new Error("stale WebRTC connection");
+      }
+      await currentPeer.setLocalDescription(offer);
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) {
+        throw new Error("stale WebRTC connection");
+      }
+      try {
+        currentSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
+      } catch (error) {
+        if (currentPeer.signalingState === "have-local-offer") {
+          await currentPeer.setLocalDescription({ type: "rollback" }).catch(() => {});
+        }
+        throw error;
+      }
+      return true;
+    })
+  });
   currentPeer.oniceconnectionstatechange = () => {
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     if (currentPeer.iceConnectionState === "connected" || currentPeer.iceConnectionState === "completed") {
@@ -2862,8 +2900,6 @@ async function startWebRTC() {
   videoTransceiver = currentPeer.addTransceiver("video", {
     direction: receiveVideoEnabled ? "recvonly" : "inactive"
   });
-  renegotiationChain = Promise.resolve();
-  renegotiationPending = false;
   currentPeer.ontrack = ({ streams, track, receiver }) => {
     const participantID = remoteParticipantID(streams, track);
     const role = remoteMediaRole(streams, track);
@@ -2979,11 +3015,7 @@ async function startWebRTC() {
     clearInterval(statsTimer);
     previousStats = undefined;
     statsTimer = setInterval(updateDiagnostics, 1000);
-    const offer = await currentPeer.createOffer();
-    await currentPeer.setLocalDescription(offer);
-    if (isCurrentWebRTC(generation, currentPeer, currentSocket)) {
-      currentSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
-    }
+    await renegotiateLocalMedia();
   } catch (error) {
     status.textContent = `Media unavailable: ${error.message}`;
   }
@@ -3172,7 +3204,7 @@ function updateConnectionMetrics(values) {
   text("metric-status", connectionMetrics.status);
   text("metric-ice-state", [connectionMetrics.iceState, connectionMetrics.icePath]
     .filter(Boolean).join(" · ") || "No sample");
-  text("metric-rtt", connectionMetrics.rttMs == null ? "No sample" : `${connectionMetrics.rttMs} ms`);
+  text("metric-rtt", formatRTT(connectionMetrics.rttMs) || "No sample");
   text("metric-jitter-loss", connectionMetrics.jitterMs == null && connectionMetrics.packetLossPct == null
     ? "No sample"
     : `${connectionMetrics.jitterMs == null ? "Unavailable" : `${connectionMetrics.jitterMs} ms`} / ` +
@@ -3189,10 +3221,10 @@ function updateConnectionMetrics(values) {
   const summary = document.querySelector("#connection-metrics-status");
   if (summary) summary.textContent = connectionMetrics.lastSampleAt ? "Live" : "No sample";
   const chipLabel = lastConnectionLevel === "good" && connectionMetrics.rttMs != null
-    ? `${connectionMetrics.rttMs} ms` : connectionMetrics.status;
+    ? formatRTT(connectionMetrics.rttMs) : connectionMetrics.status;
   if (networkLabel && networkLabel.textContent !== chipLabel) networkLabel.textContent = chipLabel;
   const connectionDescription = lastConnectionLevel === "good" && connectionMetrics.rttMs != null
-    ? `Connection status: ${connectionMetrics.status}, round-trip time ${connectionMetrics.rttMs} milliseconds`
+    ? `Connection status: ${connectionMetrics.status}, round-trip time ${formatRTT(connectionMetrics.rttMs)}`
     : `Connection status: ${connectionMetrics.status}`;
   connection?.setAttribute("aria-label", connectionDescription);
   syncConnectionPopoverStats();
@@ -3246,7 +3278,11 @@ async function updateDiagnostics() {
   const candidatesById = new Map();
   const trackStatsOwners = new Map();
   const participantStats = new Map();
-  let selectedCandidatePair;
+  const selectedPair = selectedCandidatePair(report);
+  values.rttMs = selectedCandidatePairRTT(report);
+  values.availableOutgoingKbps = Number.isFinite(selectedPair?.availableOutgoingBitrate)
+    ? Math.round(selectedPair.availableOutgoingBitrate / 1000)
+    : null;
   report.forEach((stat) => {
     if (stat.type === "codec" && stat.id && stat.mimeType) {
       codecById.set(stat.id, stat.mimeType);
@@ -3262,15 +3298,6 @@ async function updateDiagnostics() {
   });
   report.forEach((stat) => {
     timestamp = Math.max(timestamp, stat.timestamp || 0);
-    if (stat.type === "candidate-pair" && stat.state === "succeeded") {
-      if (stat.nominated || stat.selected || !selectedCandidatePair) {
-        selectedCandidatePair = stat;
-        values.rttMs = stat.currentRoundTripTime == null ? null : Math.round(stat.currentRoundTripTime * 1000);
-        values.availableOutgoingKbps = Number.isFinite(stat.availableOutgoingBitrate)
-          ? Math.round(stat.availableOutgoingBitrate / 1000)
-          : null;
-      }
-    }
     if (stat.type === "outbound-rtp" && stat.kind === "video") {
       sentBytes += stat.bytesSent || 0;
       values.sentFps = stat.framesPerSecond ?? null;
@@ -3404,7 +3431,7 @@ async function updateDiagnostics() {
       setMeasuredConnection("good", "Connected");
     }
   }
-  setStatValue(statRTT, values.rttMs == null ? null : `${values.rttMs} ms`);
+  setStatValue(statRTT, formatRTT(values.rttMs));
   setStatValue(statJitter, values.jitterMs == null ? null : `${values.jitterMs} ms`);
   setStatValue(statLoss, values.packetLoss == null ? null : `${values.packetLoss.toFixed(1)}%`);
   setStatValue(statBitrate, values.inboundKbps == null && values.outboundKbps == null
@@ -3444,7 +3471,6 @@ async function updateDiagnostics() {
     rttMs: values.rttMs,
     packetLoss: lossKnown ? packetLoss : undefined,
     jitterMs: values.jitterMs,
-    inboundKbps: values.inboundKbps,
     availableOutgoingKbps: values.availableOutgoingKbps
   });
   const { poor, critical, good } = networkCondition;
@@ -3883,30 +3909,10 @@ function setReceiveVideo(enabled) {
   const targetTransceiver = videoTransceiver;
   const generation = socketGeneration;
   if (!targetPeer || !targetTransceiver || !isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
-  renegotiationChain = renegotiationChain
-    .catch(() => {})
-    .then(async () => {
-      if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
-      targetTransceiver.direction = enabled ? "recvonly" : "inactive";
-      const offer = await targetPeer.createOffer();
-      await targetPeer.setLocalDescription(offer);
-      if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
-        targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
-      }
-    })
-    .catch(() => {
-      if (generation === socketGeneration) status.textContent = "Unable to change remote video.";
-    });
-}
-
-async function createAndSendLocalOffer(targetPeer, targetSocket, generation) {
-  if (!isCurrentWebRTC(generation, targetPeer, targetSocket) ||
-      targetPeer.signalingState !== "stable") return;
-  const offer = await targetPeer.createOffer();
-  await targetPeer.setLocalDescription(offer);
-  if (isCurrentWebRTC(generation, targetPeer, targetSocket)) {
-    targetSocket.send(JSON.stringify({ version: 1, type: "offer", sdp: offer.sdp }));
-  }
+  targetTransceiver.direction = enabled ? "recvonly" : "inactive";
+  renegotiateLocalMedia().catch(() => {
+    if (generation === socketGeneration) status.textContent = "Unable to change remote video.";
+  });
 }
 
 function updateScreenShareUI() {
@@ -3962,19 +3968,37 @@ function requestScreenShare(active, mediaStreamID = "") {
 }
 
 async function toggleScreenShare() {
+  if (screenShareStopPromise) return screenShareStopPromise;
+  if (screenShareStartPromise) return screenShareStartPromise;
   if (screenStream) {
-    await stopScreenShare();
-    return;
+    return stopScreenShare();
   }
   if (screen.disabled || audioOnly?.checked || !peer || (screenShareOwner && screenShareOwner !== localParticipantID)) return;
+  screenShareStartPromise = startScreenShare().finally(() => {
+    screenShareStartPromise = undefined;
+  });
+  return screenShareStartPromise;
+}
+
+async function startScreenShare() {
+  const sharePeer = peer;
+  const generation = socketGeneration;
   try {
     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
     localScreenStream = screenStream;
     localScreenTrack = screenStream.getVideoTracks()[0];
     if (!localScreenTrack) throw new Error("screen capture is unavailable");
+    localScreenTrack.addEventListener("ended", () => {
+      const stopAfterStart = () => stopScreenShare();
+      if (screenShareStartPromise) screenShareStartPromise.then(stopAfterStart).catch(() => {});
+      else stopAfterStart();
+    }, { once: true });
     await requestScreenShare(true, screenStream.id);
-    screenSender = peer.addTrack(localScreenTrack, screenStream);
+    if (generation !== socketGeneration || peer !== sharePeer) throw new Error("media connection changed");
+    screenSender = sharePeer.addTrack(localScreenTrack, screenStream);
     await setVideoSenderActive(true);
+    await renegotiateLocalMedia();
+    if (localScreenTrack.readyState === "ended") throw new Error("screen capture ended before sharing started");
     const local = participantElements.get(localParticipantID);
     if (local) local.screenVideo.srcObject = screenStream;
     setLocalVideoMirror(false);
@@ -3982,50 +4006,82 @@ async function toggleScreenShare() {
     sendMediaState();
     updateScreenShareUI();
     renderMeetingLayout();
-    localScreenTrack.addEventListener("ended", stopScreenShare, { once: true });
   } catch (error) {
-    screenStream?.getTracks().forEach((track) => track.stop());
+    const failedSender = screenSender;
+    const failedTrack = localScreenTrack;
+    const failedStream = screenStream;
+    screenSender = undefined;
     screenStream = undefined;
     localScreenStream = undefined;
     localScreenTrack = undefined;
-    if (screenShareOwner === localParticipantID) {
+    if (failedSender && sharePeer) {
+      sharePeer.removeTrack(failedSender);
+      if (peer === sharePeer) {
+        renegotiateLocalMedia().catch(() => {});
+      }
+    }
+    failedTrack?.stop();
+    failedStream?.getTracks().forEach((track) => track.stop());
+    if (meetingViewState.activeScreenShareId === localParticipantID) {
+      meetingViewState.activeScreenShareId = screenShareOwner || null;
+    }
+    if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
       socket?.send(JSON.stringify({
         version: 1, type: "screen_share", participant_id: localParticipantID,
         screen_share_active: false, media_stream_id: ""
       }));
     }
+    const local = participantElements.get(localParticipantID);
+    if (local) local.screenVideo.srcObject = null;
+    setLocalVideoMirror(true);
     updateScreenShareUI();
     if (error.name !== "NotAllowedError") status.textContent = `Screen share unavailable: ${error.message}`;
   }
 }
 
 async function stopScreenShare() {
-  if (!screenStream) return;
+  if (screenShareStopPromise) return screenShareStopPromise;
+  const stream = screenStream;
+  if (!stream) return;
+  const sender = screenSender;
+  const track = localScreenTrack;
+  const senderPeer = peer;
   const wasAutomaticallySuspended = videoSuspended && videoSuspendedAutomatically;
-  if (screenSender && peer) {
-    peer.removeTrack(screenSender);
-    screenSender = undefined;
-    await renegotiateLocalMedia();
-  }
-  localScreenTrack?.stop();
-  screenStream.getTracks().forEach((track) => track.stop());
   screenStream = undefined;
   localScreenStream = undefined;
   localScreenTrack = undefined;
-  meetingViewState.activeScreenShareId = screenShareOwner === localParticipantID ? localParticipantID : null;
-  if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
-    socket.send(JSON.stringify({
-      version: 1, type: "screen_share", participant_id: localParticipantID,
-      screen_share_active: false
-    }));
-  }
-  const local = participantElements.get(localParticipantID);
-  if (local) local.screenVideo.srcObject = null;
-  setLocalVideoMirror(true);
-  await setVideoSending(!videoSuspended, wasAutomaticallySuspended).catch(() => {});
-  sendMediaState();
-  updateScreenShareUI();
-  renderMeetingLayout();
+  screenSender = undefined;
+  screenShareStopPromise = (async () => {
+    let negotiation;
+    if (sender && senderPeer) {
+      senderPeer.removeTrack(sender);
+      if (peer === senderPeer) {
+        negotiation = renegotiateLocalMedia();
+      }
+    }
+    track?.stop();
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    meetingViewState.activeScreenShareId = screenShareOwner === localParticipantID ? localParticipantID : null;
+    if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
+      socket.send(JSON.stringify({
+        version: 1, type: "screen_share", participant_id: localParticipantID,
+        screen_share_active: false
+      }));
+    }
+    const local = participantElements.get(localParticipantID);
+    if (local) local.screenVideo.srcObject = null;
+    setLocalVideoMirror(true);
+    await setVideoSending(!videoSuspended, wasAutomaticallySuspended).catch(() => {});
+    sendMediaState();
+    updateScreenShareUI();
+    renderMeetingLayout();
+    negotiation?.catch(() => {
+      status.textContent = "Screen share stopped; media renegotiation failed.";
+    });
+  })().finally(() => {
+    screenShareStopPromise = undefined;
+  });
+  return screenShareStopPromise;
 }
 
 function isCurrentWebRTC(generation, currentPeer, currentSocket) {
@@ -4042,50 +4098,46 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     const currentPeer = peer;
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
-    renegotiationChain = renegotiationChain
-      .catch(() => {})
-      .then(async () => {
-        const collided = currentPeer.signalingState === "have-local-offer";
-        if (collided) {
-          renegotiationPending = true;
-          await currentPeer.setLocalDescription({ type: "rollback" });
-        }
-        await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
-      })
-      .then(() => {
-        if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
-        remoteDescriptionSet = true;
-        return Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
-      })
-      .then(() => currentPeer.createAnswer())
-      .then((answer) => currentPeer.setLocalDescription(answer))
-      .then(async () => {
-        if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-        currentSocket.send(JSON.stringify({
-          version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
-        }));
-        if (renegotiationPending && videoTransceiver) {
-          renegotiationPending = false;
-          videoTransceiver.direction = receiveVideoEnabled ? "recvonly" : "inactive";
-          await createAndSendLocalOffer(currentPeer, currentSocket, generation);
-        }
-      })
-      .catch(() => {});
+    enqueuePeerNegotiation(async () => {
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+      const collided = currentPeer.signalingState === "have-local-offer";
+      if (collided) {
+        await currentPeer.setLocalDescription({ type: "rollback" });
+        renegotiationQueue?.rollback();
+      }
+      await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
+      remoteDescriptionSet = true;
+      await Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
+      const answer = await currentPeer.createAnswer();
+      await currentPeer.setLocalDescription(answer);
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+      currentSocket.send(JSON.stringify({
+        version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
+      }));
+      if (renegotiationQueue?.hasPending() && videoTransceiver) {
+        videoTransceiver.direction = receiveVideoEnabled ? "recvonly" : "inactive";
+      }
+      renegotiationQueue?.resume();
+    }).catch(() => {
+      renegotiationQueue?.resume();
+    });
   }
   if (message.type === "answer") {
     const currentPeer = peer;
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
-    if (currentPeer.signalingState !== "have-local-offer") return;
-    renegotiationChain = renegotiationChain
-      .catch(() => {})
-      .then(() => currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp }))
-      .then(() => {
-        if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
-        remoteDescriptionSet = true;
-        return Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
-      })
-      .catch(() => {});
+    enqueuePeerNegotiation(async () => {
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket) ||
+          currentPeer.signalingState !== "have-local-offer") return;
+      await currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp });
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
+      remoteDescriptionSet = true;
+      await Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
+      renegotiationQueue?.answer();
+    }).catch((error) => {
+      renegotiationQueue?.fail(error);
+    });
   }
   if (message.type === "candidate") {
     const candidate = {

@@ -66,19 +66,43 @@ function isBelowBitrate(value, threshold) {
   return Number.isFinite(value) && value >= 0 && value < threshold;
 }
 
-function classifyNetworkSample({ rttMs, packetLoss, jitterMs, inboundKbps, availableOutgoingKbps } = {}) {
+function selectedCandidatePair(report) {
+  const stats = Array.isArray(report) ? report : Array.from(report?.values?.() || []);
+  const pairs = new Map(stats
+    .filter((stat) => stat.type === "candidate-pair" && stat.state === "succeeded")
+    .map((stat) => [stat.id, stat]));
+
+  for (const stat of stats) {
+    if (stat.type !== "transport" || !stat.selectedCandidatePairId) continue;
+    const selected = pairs.get(stat.selectedCandidatePairId);
+    if (selected) return selected;
+  }
+
+  return stats.find((stat) => stat.type === "candidate-pair" && stat.state === "succeeded" &&
+    (stat.selected === true || stat.nominated === true)) || null;
+}
+
+function selectedCandidatePairRTT(report) {
+  const seconds = selectedCandidatePair(report)?.currentRoundTripTime;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
+}
+
+function formatRTT(rttMs) {
+  if (!Number.isFinite(rttMs) || rttMs < 0) return null;
+  if (rttMs < 1) return "<1 ms";
+  return `${Number(rttMs.toFixed(1))} ms`;
+}
+
+function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingKbps } = {}) {
   const rttKnown = Number.isFinite(rttMs) && rttMs >= 0;
   const lossKnown = Number.isFinite(packetLoss) && packetLoss >= 0;
   const jitterKnown = Number.isFinite(jitterMs) && jitterMs >= 0;
-  const inboundKnown = Number.isFinite(inboundKbps) && inboundKbps >= 0;
   const capacityKnown = Number.isFinite(availableOutgoingKbps) && availableOutgoingKbps >= 0;
-  const hasSignal = rttKnown || lossKnown || jitterKnown || inboundKnown || capacityKnown;
+  const hasSignal = rttKnown || lossKnown || jitterKnown || capacityKnown;
   const poor = (rttKnown && rttMs > 250) || (lossKnown && packetLoss > 5) ||
-    (jitterKnown && jitterMs > 50) || isBelowBitrate(inboundKbps, 80) ||
-    isBelowBitrate(availableOutgoingKbps, 220);
+    (jitterKnown && jitterMs > 50) || isBelowBitrate(availableOutgoingKbps, 220);
   const critical = (rttKnown && rttMs > 500) || (lossKnown && packetLoss > 10) ||
-    (jitterKnown && jitterMs > 120) || isBelowBitrate(inboundKbps, 40) ||
-    isBelowBitrate(availableOutgoingKbps, 120);
+    (jitterKnown && jitterMs > 120) || isBelowBitrate(availableOutgoingKbps, 120);
   const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
     (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
   return { poor, critical, good };
@@ -156,6 +180,9 @@ if (typeof module !== "undefined") {
     resolveCodecName,
     profileNameForQuality,
     isBelowBitrate,
+    selectedCandidatePair,
+    selectedCandidatePairRTT,
+    formatRTT,
     classifyNetworkSample,
     shouldPauseVideo,
     chooseParticipantLayout
