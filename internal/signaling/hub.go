@@ -378,6 +378,15 @@ func (h *Hub) requestScreenShare(c *client, active bool, mediaStreamIDs ...strin
 	return nil
 }
 
+func (h *Hub) screenShareStreamID(c *client) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.screenSharer != c {
+		return ""
+	}
+	return c.activeScreenMediaStreamID
+}
+
 func (h *Hub) releaseScreenShare(c *client) {
 	h.mu.Lock()
 	if h.screenSharer != c {
@@ -688,7 +697,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			role := media.SourceRoleAudio
 			if track.Kind() == pion.RTPCodecTypeVideo {
 				role = media.SourceRoleCamera
-				if c.activeScreenMediaStreamID != "" && track.StreamID() == c.activeScreenMediaStreamID {
+				if streamID := h.screenShareStreamID(c); streamID != "" && track.StreamID() == streamID {
 					role = media.SourceRoleScreen
 				}
 			}

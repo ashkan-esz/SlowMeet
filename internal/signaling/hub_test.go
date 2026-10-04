@@ -678,6 +678,36 @@ func TestHubAllowsScreenShareReleaseWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestHubScreenShareStreamIDTracksLeaseLifecycle(t *testing.T) {
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{
+		HTTPAddr: ":8080", EnableScreenShare: true,
+		DefaultVideoQuality: "low", DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}), slog.Default())
+	owner := &client{participant: meeting.Participant{ID: "owner"}}
+
+	if err := hub.requestScreenShare(owner, true, "screen-stream-1"); err != nil {
+		t.Fatalf("start first share: %v", err)
+	}
+	if got := hub.screenShareStreamID(owner); got != "screen-stream-1" {
+		t.Fatalf("first share stream ID = %q, want screen-stream-1", got)
+	}
+
+	if err := hub.requestScreenShare(owner, false); err != nil {
+		t.Fatalf("stop first share: %v", err)
+	}
+	if got := hub.screenShareStreamID(owner); got != "" {
+		t.Fatalf("stream ID after stop = %q, want empty", got)
+	}
+
+	if err := hub.requestScreenShare(owner, true, "screen-stream-2"); err != nil {
+		t.Fatalf("start restarted share: %v", err)
+	}
+	if got := hub.screenShareStreamID(owner); got != "screen-stream-2" {
+		t.Fatalf("restarted share stream ID = %q, want screen-stream-2", got)
+	}
+}
+
 func TestHubCloseCleansUpJoinedParticipants(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
