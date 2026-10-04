@@ -5,8 +5,34 @@ import (
 	"time"
 
 	"SlowMeet/internal/webrtc"
+	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
 )
+
+func TestRouteRTCPFeedbackTargetsSourceTrack(t *testing.T) {
+	const sourceSSRC = 1234
+	pli := &rtcp.PictureLossIndication{SenderSSRC: 10, MediaSSRC: 20}
+	fir := &rtcp.FullIntraRequest{
+		SenderSSRC: 11,
+		MediaSSRC:  21,
+		FIR:        []rtcp.FIREntry{{SSRC: 22, SequenceNumber: 3}},
+	}
+	routed := routeRTCPFeedback([]rtcp.Packet{pli, fir}, sourceSSRC)
+	if len(routed) != 2 {
+		t.Fatalf("routed packet count = %d, want 2", len(routed))
+	}
+	routedPLI, ok := routed[0].(*rtcp.PictureLossIndication)
+	if !ok || routedPLI.MediaSSRC != sourceSSRC || routedPLI.SenderSSRC != pli.SenderSSRC {
+		t.Fatalf("routed PLI = %+v, want source SSRC %d", routed[0], sourceSSRC)
+	}
+	routedFIR, ok := routed[1].(*rtcp.FullIntraRequest)
+	if !ok || routedFIR.MediaSSRC != sourceSSRC || len(routedFIR.FIR) != 1 || routedFIR.FIR[0].SSRC != sourceSSRC {
+		t.Fatalf("routed FIR = %+v, want source SSRC %d", routed[1], sourceSSRC)
+	}
+	if pli.MediaSSRC != 20 || fir.MediaSSRC != 21 || fir.FIR[0].SSRC != 22 {
+		t.Fatal("routing feedback mutated the receiver's RTCP packets")
+	}
+}
 
 func TestBitrateLimiterDropsWithoutQueueingAndRefills(t *testing.T) {
 	now := time.Unix(0, 0)

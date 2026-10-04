@@ -1598,6 +1598,7 @@ const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
 const remoteCameraLayerTracks = new Map();
+const remoteScreenTracks = new Map();
 const participantQualityLabels = {
   good: "good",
   degraded: "degraded",
@@ -2585,6 +2586,17 @@ function connectSocket(name, password) {
     if (message.type === "screen_share_state") {
       const previousScreenShareOwner = screenShareOwner;
       screenShareOwner = message.screen_share_active === true ? message.screen_share_owner : undefined;
+      if (previousScreenShareOwner && previousScreenShareOwner !== screenShareOwner) {
+        const previousElement = participantElements.get(previousScreenShareOwner);
+        const previousBinding = remoteScreenTracks.get(previousScreenShareOwner);
+        if (previousElement && previousBinding && bindRemoteScreenTrack.clear(
+          previousElement.screenVideo,
+          previousBinding.stream,
+          () => updateParticipantVideoVisibility(previousElement)
+        )) {
+          remoteScreenTracks.delete(previousScreenShareOwner);
+        }
+      }
       meetingViewState.activeScreenShareId = screenShareOwner || (screenStream ? localParticipantID : null);
       updateVideoOrientation(previousScreenShareOwner);
       updateVideoOrientation(screenShareOwner);
@@ -2694,6 +2706,7 @@ function connectSocket(name, password) {
         removeSpeakerAnalyzer(message.participant.id);
         forgetRemoteTracks(element, message.participant.id);
         remoteCameraLayerTracks.delete(message.participant.id);
+        remoteScreenTracks.delete(message.participant.id);
         element.item.classList.remove("is-speaking");
         element.item.classList.add("is-disconnected");
         element.item.dataset.connection = "left";
@@ -2921,7 +2934,17 @@ async function startWebRTC() {
         }, { once: true });
         showSelectedRemoteCamera(element);
       } else {
-        video.srcObject = stream;
+        if (role === "screen") {
+          const stream = bindRemoteScreenTrack(video, track, () => {
+            if (remoteScreenTracks.get(participantID)?.stream === stream) {
+              remoteScreenTracks.delete(participantID);
+            }
+            updateParticipantVideoVisibility(element);
+          });
+          remoteScreenTracks.set(participantID, { track, stream });
+        } else {
+          video.srcObject = stream;
+        }
       }
       video.autoplay = true;
       video.playsInline = true;
@@ -2930,7 +2953,7 @@ async function startWebRTC() {
       video.classList.toggle("is-screen-content", role === "screen");
       updateParticipantVideoVisibility(element);
       updateVideoOrientation(participantID);
-      if (!layer) video.play().catch(() => {});
+      if (!layer && (role !== "screen" || video.srcObject?.getTracks().includes(track))) video.play().catch(() => {});
       if (role === "camera") element.video.play().catch(() => {});
     } else {
       element.audio.srcObject = stream;
@@ -4253,7 +4276,9 @@ leave.addEventListener("click", () => {
   remoteTrackOwners.clear();
   remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
+  remoteScreenTracks.clear();
   remoteCameraLayerTracks.clear();
+  remoteScreenTracks.clear();
   previousStats = undefined;
   criticalSamples = 0;
   recoverySamples = 0;

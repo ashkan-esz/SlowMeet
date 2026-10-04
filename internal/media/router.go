@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"SlowMeet/internal/webrtc"
+	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
 )
 
@@ -388,21 +389,44 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 	pub.tracks[targetID] = local
 	pub.senders[targetID] = sender
 	if pub.source != nil {
-		go relayRTCP(sender, pub.source)
+		go relayRTCP(sender, pub.source, uint32(pub.remote.SSRC()))
 	}
 	return true
 }
 
-func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer) {
+func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC uint32) {
 	for {
 		packets, _, err := sender.ReadRTCP()
 		if err != nil {
 			return
 		}
-		if err := source.WriteRTCP(packets); err != nil {
+		if err := source.WriteRTCP(routeRTCPFeedback(packets, sourceSSRC)); err != nil {
 			return
 		}
 	}
+}
+
+func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
+	routed := make([]rtcp.Packet, 0, len(packets))
+	for _, packet := range packets {
+		switch feedback := packet.(type) {
+		case *rtcp.PictureLossIndication:
+			copy := *feedback
+			copy.MediaSSRC = sourceSSRC
+			routed = append(routed, &copy)
+		case *rtcp.FullIntraRequest:
+			copy := *feedback
+			copy.MediaSSRC = sourceSSRC
+			copy.FIR = append([]rtcp.FIREntry(nil), feedback.FIR...)
+			for index := range copy.FIR {
+				copy.FIR[index].SSRC = sourceSSRC
+			}
+			routed = append(routed, &copy)
+		default:
+			routed = append(routed, packet)
+		}
+	}
+	return routed
 }
 
 func (r *Router) forward(pub *publication) {
