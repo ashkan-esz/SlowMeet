@@ -114,6 +114,21 @@ provider has a separate cloud firewall, it must already allow those same
 ports; the installer cannot change provider dashboard rules. Keep the
 generated admin password somewhere safe.
 
+### Simpler published-image installer
+
+For a smaller setup that runs a published image without downloading or
+building the project on the VPS, use the alternative installer:
+
+```sh
+sudo bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://raw.githubusercontent.com/ashkan-esz/SlowMeet/master/deploy/install-container.sh | bash'
+```
+
+It supports Docker and Podman, installs the selected container runtime if it is
+missing, and offers install, resume, update, and uninstall actions. It prompts
+for the image tag (default `latest`) and HTTP binding. It leaves firewall,
+proxy, and TLS setup to the operator. See the [published-image installer
+guide](docs/install-container-script.md) for its behavior and requirements.
+
 Set `MEETING_PASSWORD` to require a password at join time. Set
 `ADMIN_PASSWORD` separately to enable `/admin` and protect runtime settings.
 Passwords are never sent to the frontend or written to logs.
