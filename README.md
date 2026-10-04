@@ -159,6 +159,69 @@ video ceiling, a 60 FPS ceiling, and a 96 kbps audio ceiling.
 
 ## Docker and Podman
 
+### Deploy a published image
+
+Create a directory on the server with a `compose.yaml`:
+
+```yaml
+services:
+  slowmeet:
+    image: ${SLOWMEET_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${HTTP_PUBLISH_ADDRESS:-127.0.0.1}:${HTTP_PUBLISH_PORT:-8080}:8080"
+      - "${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}:${ICE_UDP_PORT_MIN:-50000}-${ICE_UDP_PORT_MAX:-50100}/udp"
+    volumes:
+      - slowmeet-data:/app/data
+volumes:
+  slowmeet-data:
+```
+
+Create `.env` beside it. Use a released version tag and set a strong admin
+password:
+
+```dotenv
+SLOWMEET_IMAGE=ghcr.io/ashkan-esz/slowmeet:1.2.3
+APP_ENV=production
+HTTP_ADDR=:8080
+CONFIG_FILE=data/config.json
+ADMIN_PASSWORD=replace-with-a-long-random-secret
+HTTP_PUBLISH_ADDRESS=127.0.0.1
+HTTP_PUBLISH_PORT=8080
+ICE_UDP_PORT_MIN=50000
+ICE_UDP_PORT_MAX=50100
+ICE_PUBLIC_IP=
+STUN_SERVERS=
+TURN_URLS=
+TURN_USERNAME=
+TURN_PASSWORD=
+```
+
+Keep `.env` private. For Docker, use the image tag shown. For Podman, append
+`-podman` to the version (for example, `1.2.3-podman`); on SELinux hosts, add
+`:Z` to the data volume mount. Start and check the service with either engine:
+
+```sh
+docker compose up -d
+docker compose ps
+docker compose logs -f slowmeet
+# Or use `podman compose` for each command.
+```
+
+Health checks are at `/health` and `/ready`. To update, change the image tag in
+`.env`, then run `docker compose pull && docker compose up -d` (or the Podman
+equivalent). `docker compose down` stops the service and keeps its data; avoid
+`down --volumes` unless you intend to delete it.
+
+Allow the configured ICE UDP range through the host and cloud firewalls. Put a
+TLS reverse proxy in front of SlowMeet for public use; this example binds HTTP
+to loopback for a proxy on the same host. For direct HTTP access, set
+`HTTP_PUBLISH_ADDRESS=0.0.0.0`. TURN configuration and detailed network notes
+are below.
+
+### Build from source
+
 Docker Compose:
 
 ```sh
@@ -236,33 +299,9 @@ change or a non-privileged TLS port for TCP 443.
 The same `SLOWMEET_*` and `TURN_*` variables in `.env` can override these
 defaults when hosting larger meetings.
 
-### Published images and releases
-
-Container images are published to GHCR when a SemVer tag is pushed. Create a
-release with:
-
-```sh
-git tag -a v1.2.3 -m "Release v1.2.3"
-git push origin v1.2.3
-```
-
-Stable Docker tags include `1.2.3`, `1.2`, `1`, and `latest`. The equivalent
-Podman-engine artifact uses the `-podman` suffix, for example
-`1.2.3-podman`. Prerelease tags such as `v1.2.3-rc.1` publish only the exact
-version tag and its Podman variant.
-
-Pull the published images with either engine:
-
-```sh
-docker pull ghcr.io/ashkan-esz/slowmeet:1.2.3
-podman pull ghcr.io/ashkan-esz/slowmeet:1.2.3
-podman pull ghcr.io/ashkan-esz/slowmeet:1.2.3-podman
-```
-
-Pull requests and pushes to `master` build and test both Docker and Podman
-images without publishing them. Release publishing requires the repository's
-GitHub Actions workflow to have package write permission; GHCR visibility is
-controlled from the package settings.
+Stable GHCR releases publish version, major.minor, major, and `latest` tags;
+Podman images use the same tags with `-podman`. Prereleases publish only their
+exact version tag. Images are published when a SemVer release tag is pushed.
 
 Disconnected participants retain their meeting slot for
 `RECONNECT_TIMEOUT_SECONDS` (default: 30 seconds), allowing the same browser
