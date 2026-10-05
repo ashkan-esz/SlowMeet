@@ -17,20 +17,22 @@ examples are in `deploy/`; operational and network-testing notes are in
 
 ## Build, Test, and Development Commands
 
-Run the service locally with `go run .` and open `http://localhost:8080/`.
-Copy `.env.example` to `.env` before configuring passwords, STUN/TURN, or
-runtime limits.
+Run the service locally with `make run` (or `go run .`) and open
+`http://localhost:8080/`. Copy `.env.example` to `.env` before configuring
+passwords, STUN/TURN, or runtime limits.
 
 ```sh
-go test ./...          # Run all Go unit and integration tests
-go build ./...        # Compile every package
-./scripts/smoke.sh     # Exercise the local HTTP service
-node scripts/test-protocol.js
-node scripts/test-adaptation.js
+make check  # Formatting check, Go tests, vet, build, and standard JS checks
+make smoke  # Exercise the local HTTP service
 ```
 
-Use `docker compose up -d --build` to test the containerized deployment.
-Run `gofmt` on changed Go files before submitting changes.
+`make test-js` runs the admin, protocol, adaptation, and meeting-layout checks.
+For focused changes, run the relevant script in `scripts/`, such as
+`node scripts/test-renegotiation-queue.js` or
+`node scripts/test-remote-screen-video.js`. Installer changes have focused
+shell checks there as well. Use `docker compose up -d --build` to test the
+containerized deployment. Run `gofmt` on changed Go files before submitting
+changes.
 
 ## Coding Style & Naming Conventions
 
@@ -44,9 +46,9 @@ HTML, CSS, or JS module.
 ## Testing Guidelines
 
 Add or update tests beside the implementation using Go’s `testing` package;
-name them `Test<Behavior>` and table-test related cases where useful.
-Media and WebRTC changes should include the narrowest relevant integration
-coverage. Run `go test ./...` plus applicable scripts before opening a PR.
+name them `Test<Behavior>` and table-test related cases where useful. Media and
+WebRTC changes should include the narrowest relevant integration coverage.
+Run `make check` and applicable focused scripts before opening a PR.
 
 ## Commit & Pull Request Guidelines
 
