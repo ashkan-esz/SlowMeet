@@ -18,6 +18,28 @@ The current MVP provides:
 - Single active screen-share lease with disconnect cleanup
 - Connection recovery, diagnostics, and runtime admin limits
 
+## How SlowMeet handles weak connections
+
+SlowMeet uses an SFU: each participant sends one copy of their published media
+to the server, which forwards it to the other participants. This can reduce
+upload demand compared with mesh calls, where participants send separate copies
+to each peer. It does not remove the need for a reliable path to the server or
+enough download capacity for the media a participant receives.
+
+Automatic quality uses network measurements to lower video quality when a
+connection struggles. If conditions become critical, SlowMeet can pause video
+to help audio remain usable. These steps manage the available bandwidth; they
+cannot create more of it or guarantee call quality.
+
+When a network blocks direct UDP, a configured TURN relay can provide another
+connection path. TURN must be configured by the operator, and relaying can add
+latency. Simulcast layer switching is also available, but is disabled by default.
+
+These features are not an Iran-specific optimization. Results depend on each
+participant's access network and routing, as well as the location and quality
+of the SFU and TURN server. Validate performance on Iranian mobile and fixed
+connections before making regional performance claims.
+
 ## Run locally
 
 ```sh
