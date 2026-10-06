@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 readonly INSTALLER=deploy/install.sh
+# Read by installer functions sourced dynamically below.
+# shellcheck disable=SC2034
 readonly CADDY_XRAY_BACKEND_PORT=9080
 TEMP_DIR=$(mktemp -d)
 readonly TEMP_DIR
@@ -59,6 +61,8 @@ done
 export PATH="$TEMP_DIR/bin:$PATH"
 
 readonly CADDY_BEGIN_MARKER='# BEGIN SlowMeet installer managed site'
+# Read by installer functions sourced dynamically below.
+# shellcheck disable=SC2034
 readonly CADDY_END_MARKER='# END SlowMeet installer managed site'
 # shellcheck disable=SC2034
 domain=meet.example.com
@@ -187,6 +191,8 @@ assert_contains "$TEMP_DIR/caddy/legacy" 'respond 404'
 
 NGINX_SITE="$TEMP_DIR/nginx/slowmeet.conf"
 mkdir -p "$(dirname "$NGINX_SITE")"
+# Read by ensure_nginx_ipv6_listeners, sourced dynamically above.
+# shellcheck disable=SC2034
 proxy_mode=nginx
 cat > "$NGINX_SITE" <<'NGINX'
 # Managed by SlowMeet installer
@@ -214,6 +220,8 @@ server {
 }
 NGINX
 cp "$NGINX_SITE" "$TEMP_DIR/nginx/before-reload-failure.conf"
+# Invoked by ensure_nginx_ipv6_listeners, sourced dynamically above.
+# shellcheck disable=SC2317,SC2329
 ipv6_stack_available() { return 0; }
 if FAIL_NGINX_RELOAD_ONCE=yes RELOAD_COUNT_FILE="$TEMP_DIR/nginx/reload-failed" \
     ensure_nginx_ipv6_listeners 2>/dev/null; then

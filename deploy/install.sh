@@ -128,7 +128,10 @@ write_install_state() {
 
 read_install_state() {
     local key value
-    local seen_version= seen_status= seen_operation= seen_domain= seen_turn= seen_meeting_password= seen_proxy_mode= seen_https_required= seen_caddy_tls_mode= seen_https_reason= seen_xray_fallback_managed= seen_xray_alpn_added= seen_app_port= seen_container_engine= seen_caddy_install_method=
+    local seen_version='' seen_status='' seen_operation='' seen_domain='' seen_turn=''
+    local seen_meeting_password='' seen_proxy_mode='' seen_https_required='' seen_caddy_tls_mode=''
+    local seen_https_reason='' seen_xray_fallback_managed='' seen_xray_alpn_added=''
+    local seen_app_port='' seen_container_engine='' seen_caddy_install_method=''
     state_version=
     state_status=
     install_operation=
@@ -177,9 +180,10 @@ read_install_state() {
     if [[ "$state_version" == 3 || "$state_version" == 4 || "$state_version" == 5 || "$state_version" == 6 || "$state_version" == 7 || "$state_version" == 8 ]]; then
         [[ "$seen_proxy_mode" == yes && ( "$proxy_mode" == caddy || "$proxy_mode" == nginx ) ]] \
             || fail 'Installer state has a missing or invalid proxy mode.'
-        [[ "$seen_app_port" == yes && "$app_port" =~ ^[0-9]{1,5}$ ]] \
-            && ((10#$app_port >= 1024 && 10#$app_port <= 65535)) \
-            || fail 'Installer state has a missing or invalid app port.'
+        if [[ "$seen_app_port" != yes || ! "$app_port" =~ ^[0-9]{1,5}$ ]] \
+            || ((10#$app_port < 1024 || 10#$app_port > 65535)); then
+            fail 'Installer state has a missing or invalid app port.'
+        fi
     else
         [[ -z "$seen_proxy_mode" && -z "$seen_app_port" ]] || fail 'Legacy installer state cannot contain proxy settings.'
         proxy_mode=caddy
@@ -434,7 +438,7 @@ set_env_if_empty() {
 }
 
 set_admin_password() {
-    local value=$1 encoded= char i
+    local value=$1 encoded='' char i
     for ((i = 0; i < ${#value}; i++)); do
         char=${value:i:1}
         if [[ "$char" == "'" ]]; then
@@ -490,8 +494,10 @@ load_legacy_install_settings() {
     domain=${proxy_domains[0]}
     [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || fail "The configured proxy host '$domain' is not a valid SlowMeet domain."
     app_port=${app_port:-8080}
-    [[ "$app_port" =~ ^[0-9]{1,5}$ ]] && ((10#$app_port >= 1024 && 10#$app_port <= 65535)) \
-        || fail 'Could not identify a valid SlowMeet app port from the reverse proxy or environment.'
+    if [[ ! "$app_port" =~ ^[0-9]{1,5}$ ]] \
+        || ((10#$app_port < 1024 || 10#$app_port > 65535)); then
+        fail 'Could not identify a valid SlowMeet app port from the reverse proxy or environment.'
+    fi
 
     enable_turn=no
     if [[ -f "$INSTALL_DIR/.turn-enabled" ]]; then
@@ -555,8 +561,9 @@ update_existing_install() {
         podman)
             command -v podman >/dev/null || fail 'Podman is required to update this existing installation.'
             command -v podman-compose >/dev/null || fail 'podman-compose is required to update this existing installation.'
-            podman --version >/dev/null 2>&1 && podman-compose --version >/dev/null 2>&1 \
-                || fail 'Podman and podman-compose must be available to update this existing installation.'
+            if ! podman --version >/dev/null 2>&1 || ! podman-compose --version >/dev/null 2>&1; then
+                fail 'Podman and podman-compose must be available to update this existing installation.'
+            fi
             ;;
     esac
     previous_tls_mode=${caddy_tls_mode:-direct}
@@ -566,8 +573,9 @@ update_existing_install() {
         caddy_tls_mode=http-only
         https_reason='HTTPS and TCP port 443 were disabled by user choice.'
     fi
-    git -C "$INSTALL_DIR" diff --quiet && git -C "$INSTALL_DIR" diff --cached --quiet \
-        || fail "$INSTALL_DIR has local tracked changes. Save or revert them before updating."
+    if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
+        fail "$INSTALL_DIR has local tracked changes. Save or revert them before updating."
+    fi
 
     existing_ice=$(read_env_value ICE_PUBLIC_IP)
 if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
@@ -749,6 +757,7 @@ https://$domain {
 EOF
 }
 
+# Optional path supports testing isolated Caddyfiles; the installer uses the system default.
 caddy_config_matches_install() {
     local caddyfile=${1:-/etc/caddy/Caddyfile} expected phase marker mode saved_mode=${caddy_tls_mode:-direct}
     [[ -f "$caddyfile" ]] || return 0
@@ -871,7 +880,9 @@ legacy_caddy_config_matches_install() {
 
 write_caddy_site() (
     local phase=$1 caddyfile=${2:-/etc/caddy/Caddyfile} dir temp base block
-    temp= base= block=
+    temp='' base='' block=''
+    # cleanup_status is set when this EXIT trap runs.
+    # shellcheck disable=SC2154
     trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" "${base:-}" "${block:-}" || true; exit "$cleanup_status"' EXIT
     dir=$(dirname "$caddyfile")
     [[ ! -L "$caddyfile" && ( ! -e "$caddyfile" || -f "$caddyfile" ) ]] \
@@ -915,7 +926,9 @@ write_caddy_site() (
 remove_caddy_site() (
     local caddyfile=${1:-/etc/caddy/Caddyfile} dir temp base fallback backup preserve_backup=no
     [[ -f "$caddyfile" ]] || return 0
-    temp= base= fallback= backup=
+    temp='' base='' fallback='' backup=''
+    # cleanup_status is set when this EXIT trap runs.
+    # shellcheck disable=SC2154
     trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" "${base:-}" "${fallback:-}" || true; if [[ "${preserve_backup:-no}" != yes ]]; then rm -f -- "${backup:-}" || true; fi; exit "$cleanup_status"' EXIT
     [[ ! -L "$caddyfile" ]] || fail "Caddy configuration at $caddyfile is a symlink; refusing to modify it."
 
@@ -1026,13 +1039,15 @@ uninstall_existing_install() {
             || fail "$INSTALL_DIR is not a recognized SlowMeet checkout; refusing to remove it."
         case "$container_engine" in
             docker)
-                command -v docker >/dev/null && docker compose version >/dev/null 2>&1 \
-                    || fail 'Docker Compose v2 is required to remove the SlowMeet containers.'
+                if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+                    fail 'Docker Compose v2 is required to remove the SlowMeet containers.'
+                fi
                 ;;
             podman)
-                command -v podman >/dev/null && command -v podman-compose >/dev/null \
-                    && podman-compose --version >/dev/null 2>&1 \
-                    || fail 'Podman and podman-compose are required to remove the SlowMeet containers.'
+                if ! command -v podman >/dev/null || ! command -v podman-compose >/dev/null \
+                    || ! podman-compose --version >/dev/null 2>&1; then
+                    fail 'Podman and podman-compose are required to remove the SlowMeet containers.'
+                fi
                 ;;
             *) fail "Unsupported saved container engine: ${container_engine:-unset}." ;;
         esac
@@ -1046,7 +1061,7 @@ uninstall_existing_install() {
         awk -v domain="$domain" '$1 == "server_name" && $2 == domain ";" { found = 1 } END { exit !found }' "$NGINX_SITE" \
             || fail "The Nginx configuration at $NGINX_SITE does not match $domain; refusing to remove it."
     elif [[ "$proxy_mode" == caddy ]]; then
-        caddy_config_matches_install \
+        caddy_config_matches_install /etc/caddy/Caddyfile \
             || fail 'The Caddyfile differs from the installer-managed SlowMeet configuration; refusing to modify shared proxy settings.'
         if [[ -f /etc/caddy/Caddyfile ]]; then
             command -v caddy >/dev/null || fail 'Caddy is required to remove the installer-managed Caddy configuration.'
@@ -1105,7 +1120,7 @@ uninstall_existing_install() {
             systemctl reload nginx
         fi
     elif [[ "$proxy_mode" == caddy && -f /etc/caddy/Caddyfile ]]; then
-        remove_caddy_site
+        remove_caddy_site /etc/caddy/Caddyfile
     fi
 
     rm -f "$CERT_HOOK"
@@ -1123,7 +1138,7 @@ uninstall_existing_install() {
     else
         printf 'The application data volume was preserved.\n'
     fi
-    printf 'Shared container and proxy packages, host firewall rules, and Let’s Encrypt certificates were left in place.\n'
+    printf "Shared container and proxy packages, host firewall rules, and Let's Encrypt certificates were left in place.\n"
 }
 
 choose_existing_install_action() {
@@ -1325,10 +1340,11 @@ xray_https_port_443_is_active() {
 
 validate_xray_fallback_config() {
     local config=$1 domain=$2 backend_port=$3
-    [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
-        && [[ "$backend_port" =~ ^[0-9]{1,5}$ ]] \
-        && ((10#$backend_port >= 1024 && 10#$backend_port <= 65535)) \
-        || fail 'The Xray fallback domain or backend port is invalid.'
+    if [[ ! "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+        || [[ ! "$backend_port" =~ ^[0-9]{1,5}$ ]] \
+        || ((10#$backend_port < 1024 || 10#$backend_port > 65535)); then
+        fail 'The Xray fallback domain or backend port is invalid.'
+    fi
     jq -e '
         if (.inbounds | type) != "array" then false
         else
@@ -1506,7 +1522,7 @@ remove_xray_fallback_from_config() {
 }
 
 xray_config_path() {
-    local pid arg next config= count=0 i
+    local pid arg next config='' count=0 i
     local -a args=()
     pid=$(systemctl show -p MainPID --value xray.service 2>/dev/null) \
         || fail 'Could not identify the running Xray service process.'
@@ -1630,7 +1646,9 @@ ensure_nginx_ipv6_listeners() (
     grep -Fxq '# Managed by SlowMeet installer' "$NGINX_SITE" \
         || fail "The Nginx configuration at $NGINX_SITE is not recognized as installer-managed."
 
-    temp= backup=
+    temp='' backup=''
+    # cleanup_status is set when this EXIT trap runs.
+    # shellcheck disable=SC2154
     trap 'cleanup_status=$?; trap - EXIT; rm -f -- "${temp:-}" || true; if [[ "${preserve_backup:-no}" != yes ]]; then rm -f -- "${backup:-}" || true; fi; exit "$cleanup_status"' EXIT
     temp=$(mktemp "$(dirname "$NGINX_SITE")/.slowmeet-nginx.XXXXXX")
     backup=$(mktemp "$(dirname "$NGINX_SITE")/.slowmeet-nginx-backup.XXXXXX")
