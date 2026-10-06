@@ -1,16 +1,11 @@
 name: Publish container images
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 permissions:
   contents: read
-
-concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -21,8 +16,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
-      docker_tags: ${{ steps.release.outputs.docker_tags }}
-      podman_tags: ${{ steps.release.outputs.podman_tags }}
+      immutable_tags: ${{ steps.release.outputs.immutable_tags }}
+      alias_tags: ${{ steps.release.outputs.alias_tags }}
 
     steps:
       - name: Check out source
@@ -30,20 +25,32 @@ jobs:
 
       - name: Validate release and generate image tags
         id: release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          docker_tags="$(scripts/release-tags.sh "$GITHUB_REF_NAME" docker "$IMAGE_NAME" "$GITHUB_SHA")"
-          podman_tags="$(scripts/release-tags.sh "$GITHUB_REF_NAME" podman "$IMAGE_NAME" "$GITHUB_SHA")"
+          version="${RELEASE_TAG#v}"
+          immutable_tags="$(scripts/release-tags.sh "$RELEASE_TAG" docker "$IMAGE_NAME" "$GITHUB_SHA" immutable)"
+          immutable_tags+=$'\n'"$(scripts/release-tags.sh "$RELEASE_TAG" podman "$IMAGE_NAME" "$GITHUB_SHA" immutable)"
+          alias_tags="$(scripts/release-tags.sh "$RELEASE_TAG" docker "$IMAGE_NAME" "$GITHUB_SHA" aliases)"
+          podman_alias_tags="$(scripts/release-tags.sh "$RELEASE_TAG" podman "$IMAGE_NAME" "$GITHUB_SHA" aliases)"
+          if [[ -n "$podman_alias_tags" ]]; then
+            [[ -z "$alias_tags" ]] || alias_tags+=$'\n'
+            alias_tags+="$podman_alias_tags"
+          fi
 
           {
             echo "version=$version"
-            echo 'docker_tags<<EOF'
-            echo "$docker_tags"
+            echo 'immutable_tags<<EOF'
+            printf '%s\n' "$immutable_tags"
             echo EOF
-            echo 'podman_tags<<EOF'
-            echo "$podman_tags"
-            echo EOF
+            if [[ -n "$alias_tags" ]]; then
+              echo 'alias_tags<<EOF'
+              printf '%s\n' "$alias_tags"
+              echo EOF
+            else
+              echo 'alias_tags='
+            fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
@@ -58,9 +65,7 @@ jobs:
           node-version: 22
 
       - name: Run application checks
-        # test-meeting-layout currently expects mobile-chat/mobile-people
-        # elements that are absent from the existing web/index.html baseline.
-        run: make fmt-check test vet build test-admin test-protocol test-adaptation
+        run: make fmt-check test vet build test-admin test-protocol test-adaptation test-layout
 
       - name: Verify container definition parity
         run: make container-parity
@@ -70,12 +75,15 @@ jobs:
         run: |
           test "$(scripts/release-tags.sh v1.2.3 docker example/image abc | wc -l)" -eq 5
           test "$(scripts/release-tags.sh v1.2.3-rc.1 docker example/image abc | wc -l)" -eq 2
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc immutable | wc -l)" -eq 2
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc aliases | wc -l)" -eq 3
+          test -z "$(scripts/release-tags.sh v1.2.3-rc.1 docker example/image abc aliases)"
           if scripts/release-tags.sh v1.2 docker example/image abc >/dev/null 2>&1; then
             echo "invalid release tag was accepted"
             exit 1
           fi
 
-  publish-docker:
+  publish-immutable:
     needs: validate
     runs-on: ubuntu-24.04
     permissions:
@@ -94,91 +102,151 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Build and publish Docker image
-        uses: docker/build-push-action@v6
+      - name: Build and publish immutable Linux Docker and Podman tags
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ needs.validate.outputs.docker_tags }}
-          cache-from: type=gha,scope=slowmeet-docker
-          cache-to: type=gha,mode=max,scope=slowmeet-docker
+          tags: ${{ needs.validate.outputs.immutable_tags }}
+          cache-from: type=gha,scope=slowmeet
+          cache-to: type=gha,mode=max,scope=slowmeet
           build-args: |
             VERSION=${{ needs.validate.outputs.version }}
             VCS_REF=${{ github.sha }}
-            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+            BUILD_DATE=${{ github.event.release.published_at }}
+
+  smoke:
+    needs: [validate, publish-immutable]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Log in to GHCR for first-publish-safe smoke tests
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Smoke test Docker image
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          set -e
+          set -euo pipefail
           docker pull "$IMAGE_NAME:$VERSION"
           docker run --detach --name slowmeet-docker-smoke --publish 18080:8080 "$IMAGE_NAME:$VERSION"
-          trap 'docker rm --force slowmeet-docker-smoke' EXIT
+          trap 'docker rm --force slowmeet-docker-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:18080/health && exit 0
+            if curl --fail --silent http://127.0.0.1:18080/health; then
+              break
+            fi
             sleep 1
           done
-          docker logs slowmeet-docker-smoke
-          exit 1
-
-  publish-podman:
-    needs: validate
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+          if ! curl --fail --silent http://127.0.0.1:18080/health; then
+            docker logs slowmeet-docker-smoke
+            exit 1
+          fi
+          docker rm --force slowmeet-docker-smoke >/dev/null
+          trap - EXIT
 
       - name: Install Podman
         run: |
           sudo apt-get update
           sudo apt-get install --yes podman
 
-      - name: Log in to GHCR
+      - name: Log in to GHCR for Podman smoke test
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GHCR_TOKEN" | podman login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
-
-      - name: Build Podman image
-        run: |
-          podman build \
-            --format docker \
-            --file Containerfile \
-            --tag "$IMAGE_NAME:podman-local" \
-            --build-arg VERSION="${{ needs.validate.outputs.version }}" \
-            --build-arg VCS_REF="${{ github.sha }}" \
-            --build-arg BUILD_DATE="${{ github.event.head_commit.timestamp || '' }}" \
-            .
-
-      - name: Publish Podman image tags
-        env:
-          TAGS: ${{ needs.validate.outputs.podman_tags }}
-        shell: bash
-        run: |
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            podman tag "$IMAGE_NAME:podman-local" "$tag"
-            podman push "$tag"
-          done <<< "$TAGS"
 
       - name: Smoke test Podman image
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          set -e
+          set -euo pipefail
           podman pull "$IMAGE_NAME:$VERSION-podman"
           podman run --detach --name slowmeet-podman-smoke --publish 18081:8080 "$IMAGE_NAME:$VERSION-podman"
-          trap 'podman rm --force slowmeet-podman-smoke' EXIT
+          trap 'podman rm --force slowmeet-podman-smoke >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:18081/health && exit 0
+            if curl --fail --silent http://127.0.0.1:18081/health; then
+              break
+            fi
             sleep 1
           done
-          podman logs slowmeet-podman-smoke
-          exit 1
+          if ! curl --fail --silent http://127.0.0.1:18081/health; then
+            podman logs slowmeet-podman-smoke
+            exit 1
+          fi
+
+  promote-aliases:
+    needs: [validate, smoke, verify-public]
+    if: needs.validate.outputs.alias_tags != ''
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: publish-aliases-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote stable aliases after smoke tests
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ALIAS_TAGS: ${{ needs.validate.outputs.alias_tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r alias; do
+            [[ -n "$alias" ]] || continue
+            if [[ "$alias" == *-podman ]]; then
+              source="$IMAGE_NAME:$VERSION-podman"
+            else
+              source="$IMAGE_NAME:$VERSION"
+            fi
+            docker buildx imagetools create --tag "$alias" "$source"
+          done <<< "$ALIAS_TAGS"
+
+  verify-public:
+    needs: [validate, smoke]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Verify anonymous Docker pull
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if ! docker pull "$IMAGE_NAME:$VERSION"; then
+            echo "::error::GHCR image is not anonymously pullable. Set the package visibility to Public, then rerun this workflow."
+            exit 1
+          fi
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+
+      - name: Verify anonymous Podman pull
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if ! podman pull "$IMAGE_NAME:$VERSION-podman"; then
+            echo "::error::GHCR image is not anonymously pullable. Set the package visibility to Public, then rerun this workflow."
+            exit 1
+          fi

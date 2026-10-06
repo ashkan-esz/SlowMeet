@@ -33,12 +33,26 @@ jobs:
           node-version: 22
 
       - name: Run application checks
-        # test-meeting-layout currently expects mobile-chat/mobile-people
-        # elements that are absent from the existing web/index.html baseline.
-        run: make fmt-check test vet build test-admin test-protocol test-adaptation
+        run: make fmt-check test vet build test-admin test-protocol test-adaptation test-layout
+
+      - name: Verify release tag behavior
+        shell: bash
+        run: |
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc | wc -l)" -eq 5
+          test "$(scripts/release-tags.sh v1.2.3-rc.1 docker example/image abc | wc -l)" -eq 2
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc immutable | wc -l)" -eq 2
+          test "$(scripts/release-tags.sh v1.2.3 docker example/image abc aliases | wc -l)" -eq 3
+          test -z "$(scripts/release-tags.sh v1.2.3-rc.1 docker example/image abc aliases)"
+          if scripts/release-tags.sh v1.2 docker example/image abc >/dev/null 2>&1; then
+            echo "invalid release tag was accepted"
+            exit 1
+          fi
 
       - name: Verify container definition parity
         run: make container-parity
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Install Podman
         run: |
@@ -53,14 +67,18 @@ jobs:
           bash scripts/test-installer-config.sh
 
       - name: Build Docker image
-        run: |
-          docker build \
-            --file Dockerfile \
-            --tag slowmeet:ci \
-            --build-arg VERSION=ci \
-            --build-arg VCS_REF="$GITHUB_SHA" \
-            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: slowmeet:ci
+          cache-from: type=gha,scope=slowmeet
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=slowmeet' || '' }}
+          build-args: |
+            VERSION=ci
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
 
       - name: Build Podman image
         run: |

@@ -1,10 +1,12 @@
-FROM golang:1.23-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS build
 
 WORKDIR /src
+ARG TARGETARCH
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/slowmeet .
+RUN build_arch="${TARGETARCH:-$(go env GOARCH)}" \
+  && CGO_ENABLED=0 GOOS=linux GOARCH="$build_arch" go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/slowmeet .
 
 FROM alpine:3.20
 ARG VERSION=dev

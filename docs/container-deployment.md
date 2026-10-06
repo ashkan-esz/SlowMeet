@@ -114,7 +114,13 @@ host-sizing starting estimate for up to five participants, allow 1 vCPU and
 1 GiB RAM for SlowMeet alone, or 2 vCPU and 2 GiB RAM when co-hosting coturn
 and the HTTPS proxy. These host estimates are not benchmarked minimums; scale
 for actual media use and load. The Go binary embeds the frontend assets, so
-containers and the systemd service do not need a separate runtime `web/` directory. Stable GHCR
-releases publish version, major/minor, major, and `latest` tags; Podman images
-use the same tags with `-podman`. Prereleases publish only their exact version
-tag.
+containers and the systemd service do not need a separate runtime `web/`
+directory. GHCR release images support Linux `amd64` and `arm64`. Stable releases publish version,
+major/minor, major, and `latest` tags; Podman-compatible aliases use the same
+tags with `-podman`. Prereleases publish only their exact version and commit
+tags, with matching Podman aliases. The workflow publishes and smoke-tests
+immutable version tags, verifies anonymous pulls for both engines, then
+promotes stable aliases. GHCR packages start private: after the first
+publication, set the package visibility to public in its package settings and
+rerun the workflow if its public-pull check failed. Later releases use the
+workflow's scoped `GITHUB_TOKEN` permission to publish new versions.
