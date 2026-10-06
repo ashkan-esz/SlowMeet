@@ -6,6 +6,12 @@ IMAGE_TAG ?= dev
 VERSION ?= dev
 VCS_REF ?= local
 BUILD_DATE ?= unknown
+RELEASE_IMAGE ?= ghcr.io/ashkan-esz/slowmeet
+RELEASE_TAG ?=
+RELEASE_VERSION = $(patsubst v%,%,$(RELEASE_TAG))
+RELEASE_VCS_REF ?= $(shell git rev-parse HEAD)
+RELEASE_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
 GO ?= go
 NODE ?= node
 COMPOSE ?= docker compose
@@ -16,7 +22,8 @@ PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 	test-js test-admin test-protocol test-adaptation test-layout smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
-	container-config container-parity image-build image-build-podman image-check
+	container-config container-parity image-build image-build-podman image-check release-preflight \
+	image-publish image-publish-docker image-publish-podman
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -145,3 +152,47 @@ image-build-podman: ## Build a versioned Podman image directly
 		--build-arg BUILD_DATE=$(BUILD_DATE) .
 
 image-check: container-parity image-build image-build-podman ## Build both local container variants
+
+release-preflight: container-parity ## Validate a clean checkout at the requested release tag
+	@test -n "$(RELEASE_TAG)" || { echo "Set RELEASE_TAG to a release tag, for example v1.2.3."; exit 2; }
+	@scripts/release-tags.sh "$(RELEASE_TAG)" docker "$(RELEASE_IMAGE)" "$(RELEASE_VCS_REF)" >/dev/null
+	@set -eu; \
+	tag_commit="$$(git rev-parse --verify "refs/tags/$(RELEASE_TAG)^{commit}" 2>/dev/null)" || { \
+		echo "RELEASE_TAG=$(RELEASE_TAG) must exist in the local Git checkout."; \
+		exit 2; \
+	}; \
+	if [ "$$tag_commit" != "$$(git rev-parse HEAD)" ]; then \
+		echo "HEAD must be checked out at RELEASE_TAG=$(RELEASE_TAG)."; \
+		exit 2; \
+	fi
+	@test -z "$$(git status --porcelain)" || { \
+		echo "The working tree must be clean before publishing release images."; \
+		exit 2; \
+	}
+
+image-publish-docker: release-preflight ## Build and publish Docker release tags to GHCR
+	@set -eu; \
+	tags="$$(scripts/release-tags.sh "$(RELEASE_TAG)" docker "$(RELEASE_IMAGE)" "$(RELEASE_VCS_REF)")"; \
+	set --; \
+	for tag in $$tags; do set -- "$$@" --tag "$$tag"; done; \
+	docker buildx build --platform "$(RELEASE_PLATFORMS)" --file Dockerfile \
+		--build-arg VERSION="$(RELEASE_VERSION)" \
+		--build-arg VCS_REF="$(RELEASE_VCS_REF)" \
+		--build-arg BUILD_DATE="$(RELEASE_BUILD_DATE)" \
+		"$$@" --push .
+
+image-publish-podman: release-preflight ## Build and publish Podman release tags to GHCR
+	@command -v podman >/dev/null 2>&1 || { echo "Podman is required but was not found in PATH."; exit 1; }
+	@set -eu; \
+	manifest="localhost/slowmeet:release-$(RELEASE_VERSION)"; \
+	trap 'podman manifest rm "$$manifest" >/dev/null 2>&1 || true' EXIT HUP INT TERM; \
+	tags="$$(scripts/release-tags.sh "$(RELEASE_TAG)" podman "$(RELEASE_IMAGE)" "$(RELEASE_VCS_REF)")"; \
+	podman manifest rm "$$manifest" >/dev/null 2>&1 || true; \
+	podman build --format docker --platform "$(RELEASE_PLATFORMS)" \
+		--manifest "$$manifest" --file Containerfile \
+		--build-arg VERSION="$(RELEASE_VERSION)" \
+		--build-arg VCS_REF="$(RELEASE_VCS_REF)" \
+		--build-arg BUILD_DATE="$(RELEASE_BUILD_DATE)" .; \
+	for tag in $$tags; do podman manifest push --all "$$manifest" "docker://$$tag"; done
+
+image-publish: image-publish-docker image-publish-podman ## Build and publish Docker and Podman release tags to GHCR
