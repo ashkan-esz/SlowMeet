@@ -154,7 +154,7 @@ if (!indexSource.includes('id="participant-menu-stage-focus"') ||
     !appSource.includes('stageFocusParticipantID === owner.participantID') ||
     !appSource.includes('stageFocusExit?.addEventListener("click", () => clearStageFocus(true));') ||
     !appSource.includes('if (stageFocusParticipantID) {\n      clearStageFocus(true);\n      return;\n    }') ||
-    !appSource.includes('if (stageFocusParticipantID === participantID) clearStageFocus(true);') ||
+    !appSource.includes('if (stageFocusParticipantID === owner.participantID) {\n      clearStageFocus(true);\n    }') ||
     !styleSource.includes('.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-focused') ||
     !styleSource.includes('.meeting-layout-host[data-stage-focus="true"] .participant-tile.is-stage-suppressed') ||
     !styleSource.includes('.stage-focus-exit')) {
@@ -258,13 +258,13 @@ if (!appSource.includes('item.classList.toggle("is-poor-connection", normalized 
     !appSource.includes('for (let attempt = 0; attempt < 3; attempt += 1)')) {
   throw new Error("media and poor-connection state handling is missing");
 }
-if (!indexSource.includes('data-network-summary') || !indexSource.includes('id="chat-rail"')) {
+if (!indexSource.includes('data-network-label') || !indexSource.includes('id="chat-rail"')) {
   throw new Error("meeting status and chat rail markup is missing");
 }
 if ((indexSource.match(/id="leave"/g) || []).length !== 1 ||
     !indexSource.includes('<button id="leave"') ||
-    !indexSource.includes('</div>\n        <button id="leave"')) {
-  throw new Error("leave control must remain a single toolbar action aligned outside the session group");
+    !indexSource.includes('<div class="toolbar-leave">\n          <button id="leave"')) {
+  throw new Error("leave control must remain a single action inside its toolbar wrapper");
 }
 for (const rule of [
   ".stage-panel {\n  border: 0;",
@@ -292,7 +292,7 @@ for (const rule of [
     throw new Error(`connection chip state color rule is missing: ${rule}`);
   }
 }
-if (!styleSource.includes(".network-chip.connection .network-chip__copy small {\n  color: currentColor;\n  font-size: 10px;\n  font-weight: 600;") ||
+if (!styleSource.includes(".network-chip.connection .network-chip__copy small {\n  color: currentColor;\n  font-size: 11px;\n  font-weight: 600;") ||
     styleSource.includes(".network-chip.connection .network-chip__copy small {\n    display: none;")) {
   throw new Error("connection summary must remain readable in compact desktop layouts");
 }
