@@ -816,6 +816,10 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			return
 		}
+		// Router updates can request an offer as soon as the remote camera
+		// tracks arrive. Keep those offers pending until this answer is on the
+		// signaling socket so they cannot overtake it.
+		c.negotiationReady = false
 		c.negotiationMu.Unlock()
 		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
 			return

@@ -3672,6 +3672,7 @@ function addParticipant(participant) {
       updateParticipantAriaLabel(existing);
       updateParticipantCount();
     }
+    if (localParticipantID) updateParticipantPagination();
     return;
   }
   const item = document.createElement("li");
@@ -3778,6 +3779,7 @@ function addParticipant(participant) {
   updateParticipantCount();
   updateScreenShareUI();
   renderMeetingLayout();
+  if (localParticipantID) updateParticipantPagination();
 }
 
 function setParticipantHandState(participantID, raised, order = 0) {

@@ -136,6 +136,13 @@ if (state.speaking) throw new Error("speaker deactivation should occur after the
 
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+const addParticipantStart = appSource.indexOf("function addParticipant(participant) {");
+const addParticipantEnd = appSource.indexOf("\nfunction setParticipantHandState", addParticipantStart);
+const addParticipantSource = appSource.slice(addParticipantStart, addParticipantEnd);
+if (addParticipantStart < 0 || addParticipantEnd < 0 ||
+    (addParticipantSource.match(/updateParticipantPagination\(\)/g) || []).length !== 2) {
+  throw new Error("adding or reconnecting a participant must refresh visible camera subscriptions");
+}
 if (!indexSource.includes('data-action="hide-tile"') ||
     !appSource.includes("const hiddenParticipantIDs = new Set()") ||
     !appSource.includes('showTile.dataset.action = "show-tile"') ||

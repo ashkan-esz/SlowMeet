@@ -183,6 +183,168 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	}
 }
 
+func TestRouterRegistersLateReceiverForActiveCamera(t *testing.T) {
+	router := NewRouter()
+	sourceClient := newIntegrationPeer(t)
+	sourceIngress := newIntegrationWrapperPeer(t)
+	targetEgress := newIntegrationWrapperPeer(t)
+	targetClient := newIntegrationPeer(t)
+
+	t.Cleanup(func() {
+		router.Unregister("source")
+		router.Unregister("target")
+		_ = sourceClient.Close()
+		_ = targetClient.Close()
+		_ = sourceIngress.Close()
+		_ = targetEgress.Close()
+	})
+
+	if _, err := targetClient.AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add late receiver video transceiver: %v", err)
+	}
+	targetTracks := make(chan *pion.TrackRemote, 1)
+	targetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		targetTracks <- track
+	})
+
+	router.Register("source", sourceIngress, nil)
+	sourceIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("source", SourceRoleCamera, sourceIngress, track)
+	})
+	sourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90_000,
+	}, "active-camera")
+	if _, err := sourceClient.AddTrack(sourceTrack); err != nil {
+		t.Fatalf("add active source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPeerConnected(t, sourceClient, "active camera publisher")
+	waitIntegrationPeerConnected(t, sourceIngress.Connection(), "active camera ingress")
+	sendIntegrationPacket(t, sourceTrack, pion.RTPCodecTypeVideo, 90_000, 1)
+	waitIntegrationPublicationCount(t, router, 1)
+
+	// Match the join flow: the receiver is registered before the browser has
+	// processed the roster and sent its visible-camera subscription list.
+	targetOffer := make(chan struct{}, 1)
+	router.Register("target", targetEgress, func() error {
+		select {
+		case targetOffer <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	router.SetVideoSubscriptions("target", []string{"source"})
+	waitIntegrationSignal(t, targetOffer, "late receiver camera offer")
+	negotiateIntegrationPeers(t, targetClient, targetEgress.Connection())
+	waitIntegrationPeerConnected(t, targetClient, "late camera receiver")
+	waitIntegrationPeerConnected(t, targetEgress.Connection(), "late camera egress")
+
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	sendIntegrationRTP(t, sourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	targetTrack := waitIntegrationTrack(t, ctx, targetTracks, "late receiver camera track")
+	if !readIntegrationRTP(ctx, targetTrack) {
+		t.Fatal("late receiver did not get RTP from the already active camera")
+	}
+}
+
+func TestRouterForwardsSimultaneousCamerasBothWays(t *testing.T) {
+	router := NewRouter()
+	clientA := newIntegrationPeer(t)
+	peerA := newIntegrationWrapperPeer(t)
+	clientB := newIntegrationPeer(t)
+	peerB := newIntegrationWrapperPeer(t)
+
+	t.Cleanup(func() {
+		router.Unregister("participant-a")
+		router.Unregister("participant-b")
+		_ = clientA.Close()
+		_ = clientB.Close()
+		_ = peerA.Close()
+		_ = peerB.Close()
+	})
+
+	for _, client := range []*pion.PeerConnection{clientA, clientB} {
+		if _, err := client.AddTransceiverFromKind(
+			pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+		); err != nil {
+			t.Fatalf("add camera receive transceiver: %v", err)
+		}
+	}
+
+	tracksA := make(chan *pion.TrackRemote, 1)
+	clientA.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		tracksA <- track
+	})
+	tracksB := make(chan *pion.TrackRemote, 1)
+	clientB.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		tracksB <- track
+	})
+	offersA := make(chan struct{}, 2)
+	offersB := make(chan struct{}, 2)
+	router.SetVideoSubscriptions("participant-a", []string{"participant-b"})
+	router.SetVideoSubscriptions("participant-b", []string{"participant-a"})
+	router.Register("participant-a", peerA, func() error {
+		offersA <- struct{}{}
+		return nil
+	})
+	router.Register("participant-b", peerB, func() error {
+		offersB <- struct{}{}
+		return nil
+	})
+	peerA.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("participant-a", SourceRoleCamera, peerA, track)
+	})
+	peerB.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("participant-b", SourceRoleCamera, peerB, track)
+	})
+
+	cameraA := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90_000,
+	}, "camera-a")
+	cameraB := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90_000,
+	}, "camera-b")
+	if _, err := clientA.AddTrack(cameraA); err != nil {
+		t.Fatalf("add participant A camera: %v", err)
+	}
+	if _, err := clientB.AddTrack(cameraB); err != nil {
+		t.Fatalf("add participant B camera: %v", err)
+	}
+
+	// Both publishers establish their camera tracks before either receiver
+	// handles the SFU's resulting offer, exercising overlapping publications.
+	negotiateIntegrationPeers(t, clientA, peerA.Connection())
+	negotiateIntegrationPeers(t, clientB, peerB.Connection())
+	waitIntegrationPeerConnected(t, clientA, "participant A")
+	waitIntegrationPeerConnected(t, clientB, "participant B")
+	sendIntegrationPacket(t, cameraA, pion.RTPCodecTypeVideo, 90_000, 1)
+	sendIntegrationPacket(t, cameraB, pion.RTPCodecTypeVideo, 90_000, 1)
+	waitIntegrationPublicationCount(t, router, 2)
+	waitIntegrationSignal(t, offersA, "participant A camera offer")
+	waitIntegrationSignal(t, offersB, "participant B camera offer")
+	negotiateIntegrationPeers(t, peerA.Connection(), clientA)
+	negotiateIntegrationPeers(t, peerB.Connection(), clientB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	sendIntegrationRTP(t, cameraA, pion.RTPCodecTypeVideo, 90_000)
+	sendIntegrationRTP(t, cameraB, pion.RTPCodecTypeVideo, 90_000)
+	trackAtA := waitIntegrationTrack(t, ctx, tracksA, "participant B camera at A")
+	trackAtB := waitIntegrationTrack(t, ctx, tracksB, "participant A camera at B")
+	if trackAtA.ID() != "participant-b|camera" {
+		t.Fatalf("participant A received track %q, want participant B camera", trackAtA.ID())
+	}
+	if trackAtB.ID() != "participant-a|camera" {
+		t.Fatalf("participant B received track %q, want participant A camera", trackAtB.ID())
+	}
+	if !readIntegrationRTP(ctx, trackAtA) || !readIntegrationRTP(ctx, trackAtB) {
+		t.Fatal("both cameras must continue forwarding RTP after simultaneous publication")
+	}
+}
+
 func TestRouterRemovesEndedCameraBeforeRepublish(t *testing.T) {
 	router := NewRouter()
 	sourceClient := newIntegrationPeer(t)

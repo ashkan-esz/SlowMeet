@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/meeting"
+	internalwebrtc "SlowMeet/internal/webrtc"
 	"github.com/gorilla/websocket"
+	pion "github.com/pion/webrtc/v4"
 )
 
 func TestHubJoinLeaveLifecycle(t *testing.T) {
@@ -321,6 +324,138 @@ func TestSendOfferWaitsForInitialBrowserOffer(t *testing.T) {
 	client.negotiationMu.Unlock()
 	if ready || !pending {
 		t.Fatalf("unexpected negotiation state: ready=%t pending=%t", ready, pending)
+	}
+}
+
+func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
+	serverConnections := make(chan *websocket.Conn, 1)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial websocket test peer: %v", err)
+	}
+	defer browserConn.Close()
+	serverConn := <-serverConnections
+	defer serverConn.Close()
+
+	serverPeer, err := internalwebrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create signaling peer: %v", err)
+	}
+	defer serverPeer.Close()
+	browserPeer, err := pion.NewPeerConnection(pion.Configuration{})
+	if err != nil {
+		t.Fatalf("create browser peer: %v", err)
+	}
+	defer browserPeer.Close()
+	if _, err := browserPeer.AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo,
+		pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add browser receive transceiver: %v", err)
+	}
+	offer, err := browserPeer.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create browser offer: %v", err)
+	}
+	if err := browserPeer.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set browser local offer: %v", err)
+	}
+	<-pion.GatheringCompletePromise(browserPeer)
+	offer = *browserPeer.LocalDescription()
+
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
+	c := &client{conn: serverConn, peer: serverPeer, negotiationReady: true}
+	c.writeMu.Lock()
+	writeLocked := true
+	defer func() {
+		if writeLocked {
+			c.writeMu.Unlock()
+		}
+	}()
+
+	handledOffer := make(chan struct{})
+	go func() {
+		hub.handleWebRTCMessage(c, Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer.SDP})
+		close(handledOffer)
+	}()
+	waitForLocalAnswer(t, serverPeer.Connection())
+
+	offerResult := make(chan error, 1)
+	go func() { offerResult <- hub.sendOffer(c, false) }()
+	deadline := time.After(2 * time.Second)
+	for {
+		c.negotiationMu.Lock()
+		pending, inFlight := c.pendingOffer, c.offerInFlight
+		c.negotiationMu.Unlock()
+		if pending || inFlight {
+			if !pending || inFlight {
+				t.Fatalf("offer was not deferred while answer write was blocked: pending=%t in_flight=%t", pending, inFlight)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("router offer was not queued while browser answer write was blocked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	c.writeMu.Unlock()
+	writeLocked = false
+	select {
+	case <-handledOffer:
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser offer handling did not finish")
+	}
+	select {
+	case err := <-offerResult:
+		if err != nil {
+			t.Fatalf("send deferred router offer: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deferred router offer did not finish")
+	}
+
+	_ = browserConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var answer Message
+	if err := browserConn.ReadJSON(&answer); err != nil {
+		t.Fatalf("read browser answer: %v", err)
+	}
+	if answer.Type != TypeAnswer {
+		t.Fatalf("first signaling message = %q, want answer", answer.Type)
+	}
+	var routerOffer Message
+	if err := browserConn.ReadJSON(&routerOffer); err != nil {
+		t.Fatalf("read deferred router offer: %v", err)
+	}
+	if routerOffer.Type != TypeOffer {
+		t.Fatalf("second signaling message = %q, want offer", routerOffer.Type)
+	}
+}
+
+func waitForLocalAnswer(t *testing.T, peer *pion.PeerConnection) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		local := peer.LocalDescription()
+		if local != nil && local.Type == pion.SDPTypeAnswer {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("peer local description = %v, want an answer", local)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
