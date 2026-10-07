@@ -183,6 +183,101 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	}
 }
 
+func TestRouterRemovesEndedCameraBeforeRepublish(t *testing.T) {
+	router := NewRouter()
+	sourceClient := newIntegrationPeer(t)
+	sourceIngress := newIntegrationWrapperPeer(t)
+	targetEgress := newIntegrationWrapperPeer(t)
+	targetClient := newIntegrationPeer(t)
+
+	t.Cleanup(func() {
+		router.Unregister("source")
+		router.Unregister("target")
+		for _, peer := range []*pion.PeerConnection{sourceClient, targetClient} {
+			_ = peer.Close()
+		}
+		for _, peer := range []*internalwebrtc.Peer{sourceIngress, targetEgress} {
+			_ = peer.Close()
+		}
+	})
+
+	if _, err := targetClient.AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add camera receive transceiver: %v", err)
+	}
+
+	targetTracks := make(chan *pion.TrackRemote, 2)
+	targetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		targetTracks <- track
+	})
+	targetOffer := make(chan struct{}, 4)
+	router.SetVideoSubscriptions("target", []string{"source"})
+	router.Register("source", sourceIngress, nil)
+	router.Register("target", targetEgress, func() error {
+		select {
+		case targetOffer <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	sourceIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("source", SourceRoleCamera, sourceIngress, track)
+	})
+
+	firstSourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+	}, "browser-camera-first")
+	firstSourceSender, err := sourceClient.AddTrack(firstSourceTrack)
+	if err != nil {
+		t.Fatalf("add first source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPeerConnected(t, sourceClient, "camera source client")
+
+	sendIntegrationPacket(t, firstSourceTrack, pion.RTPCodecTypeVideo, 90_000, 1)
+	waitIntegrationPublicationCount(t, router, 1)
+	waitIntegrationSignal(t, targetOffer, "first camera offer")
+	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+
+	sendIntegrationRTP(t, firstSourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	firstTargetTrack := waitIntegrationTrack(t, ctx, targetTracks, "first camera track")
+	if !readIntegrationRTP(ctx, firstTargetTrack) {
+		t.Fatal("receiver did not get the first camera packet")
+	}
+
+	if err := sourceClient.RemoveTrack(firstSourceSender); err != nil {
+		t.Fatalf("remove first source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPublicationCountExact(t, router, 0)
+	waitIntegrationSignal(t, targetOffer, "camera removal offer")
+	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
+
+	secondSourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+	}, "browser-camera-second")
+	if _, err := sourceClient.AddTrack(secondSourceTrack); err != nil {
+		t.Fatalf("add replacement source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	sendIntegrationPacket(t, secondSourceTrack, pion.RTPCodecTypeVideo, 90_000, 3)
+	waitIntegrationPublicationCount(t, router, 1)
+	waitIntegrationSignal(t, targetOffer, "replacement camera offer")
+	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
+
+	sendIntegrationRTP(t, secondSourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	secondTargetTrack := waitIntegrationTrack(t, ctx, targetTracks, "replacement camera track")
+	if firstTargetTrack == secondTargetTrack {
+		t.Fatal("receiver reused the ended camera track")
+	}
+	if !readIntegrationRTP(ctx, secondTargetTrack) {
+		t.Fatal("receiver did not get a packet from the replacement camera")
+	}
+}
+
 func newIntegrationPeer(t *testing.T) *pion.PeerConnection {
 	t.Helper()
 	peer, err := pion.NewPeerConnection(pion.Configuration{})
@@ -338,5 +433,38 @@ func waitIntegrationPublicationCount(t *testing.T, router *Router, want int) {
 			t.Fatalf("router publications = %d, want at least %d", got, want)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func waitIntegrationPublicationCountExact(t *testing.T, router *Router, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	for {
+		router.mu.RLock()
+		got := len(router.pubs)
+		router.mu.RUnlock()
+		if got == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("router publications = %d, want exactly %d", got, want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func waitIntegrationTrack(t *testing.T, ctx context.Context, tracks <-chan *pion.TrackRemote, name string) *pion.TrackRemote {
+	t.Helper()
+	select {
+	case track := <-tracks:
+		if track == nil {
+			t.Fatalf("%s is nil", name)
+		}
+		return track
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s", name)
+		return nil
 	}
 }

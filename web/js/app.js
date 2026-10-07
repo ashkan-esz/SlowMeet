@@ -2171,6 +2171,17 @@ function remoteMediaStream(streams, track) {
   return stream;
 }
 
+function bindRemoteCameraTrack(video, track, onEnded = () => {}) {
+  const stream = new MediaStream([track]);
+  video.srcObject = stream;
+  track.addEventListener("ended", () => {
+    if (video.srcObject !== stream) return;
+    video.srcObject = null;
+    onEnded();
+  }, { once: true });
+  return stream;
+}
+
 function applySpeakerState(participantID, speaking) {
   const element = participantElements.get(participantID);
   if (!element) return;
@@ -2942,6 +2953,8 @@ async function startWebRTC() {
             updateParticipantVideoVisibility(element);
           });
           remoteScreenTracks.set(participantID, { track, stream });
+        } else if (role === "camera") {
+          bindRemoteCameraTrack(video, track, () => updateParticipantVideoVisibility(element));
         } else {
           video.srcObject = stream;
         }

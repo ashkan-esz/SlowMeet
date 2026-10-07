@@ -341,15 +341,8 @@ func (r *Router) Unpublish(sourceID string, role SourceRole) {
 		if pub.sourceID != sourceID || pub.role != role {
 			continue
 		}
+		offers = append(offers, r.removePublicationLocked(pub)...)
 		delete(r.pubs, key)
-		for targetID, sender := range pub.senders {
-			if peer := r.peers[targetID]; peer != nil {
-				_ = peer.RemoveTrack(sender)
-				if offerer := r.offerers[targetID]; offerer != nil {
-					offers = append(offers, offerer)
-				}
-			}
-		}
 	}
 	r.mu.Unlock()
 	for _, offer := range offers {
@@ -580,9 +573,31 @@ func (l *bitrateLimiter) refillLocked() {
 }
 
 func (r *Router) removePublication(pub *publication) {
+	var offers []Offerer
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if current, exists := r.pubs[pub.key]; exists && current == pub {
+		offers = r.removePublicationLocked(pub)
 		delete(r.pubs, pub.key)
 	}
+	r.mu.Unlock()
+	for _, offer := range offers {
+		_ = offer()
+	}
+}
+
+// removePublicationLocked detaches a publication's outgoing tracks. The
+// caller must hold r.mu; returned offers must run after the lock is released.
+func (r *Router) removePublicationLocked(pub *publication) []Offerer {
+	var offers []Offerer
+	for targetID, sender := range pub.senders {
+		if peer := r.peers[targetID]; peer != nil {
+			_ = peer.RemoveTrack(sender)
+			if offerer := r.offerers[targetID]; offerer != nil {
+				offers = append(offers, offerer)
+			}
+		}
+		delete(pub.tracks, targetID)
+		delete(pub.senders, targetID)
+	}
+	return offers
 }
