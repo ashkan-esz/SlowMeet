@@ -6,6 +6,7 @@ import (
 
 	"SlowMeet/internal/webrtc"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
 
@@ -88,6 +89,101 @@ func TestBitrateLimiterCapsVideoFramesWithoutQueueing(t *testing.T) {
 	}
 	if !limiter.allowFrame(9_000) {
 		t.Fatal("packets from an allowed frame should remain allowed")
+	}
+}
+
+func TestScreenShareFPSRemainsLimited(t *testing.T) {
+	now := time.Unix(0, 0)
+	limiter := newBitrateLimiterAt(10_000, func() time.Time { return now })
+	limiter.setFPS(10)
+
+	if !limiter.allowFrame(0) {
+		t.Fatal("first screen-share frame should fit the initial FPS budget")
+	}
+	if limiter.allowFrame(4_500) {
+		t.Fatal("screen-share FPS should be limited")
+	}
+	if !limiter.allowFrame(9_000) {
+		t.Fatal("screen-share FPS should resume at the configured interval")
+	}
+}
+
+func TestBitrateLimiterPacesInsteadOfDroppingWhenBudgetRefills(t *testing.T) {
+	limiter := newBitrateLimiter(10_000)
+	if !limiter.allow(1_200) {
+		t.Fatal("initial burst should be available")
+	}
+	start := time.Now()
+	if !limiter.waitForBytes(1_200, make(chan struct{})) {
+		t.Fatal("pacer unexpectedly stopped")
+	}
+	if elapsed := time.Since(start); elapsed < 90*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("paced packet wait = %s, want about 120ms", elapsed)
+	}
+}
+
+func TestRateForKindConvertsConfiguredBitsToBytes(t *testing.T) {
+	limits := Limits{MaxVideoBitrate: 800_000, MaxAudioBitrate: 96_000}
+	if got := rateForKind(pion.RTPCodecTypeVideo, limits); got != 100_000 {
+		t.Fatalf("video byte rate = %d, want 100000", got)
+	}
+	if got := rateForKind(pion.RTPCodecTypeAudio, limits); got != 12_000 {
+		t.Fatalf("audio byte rate = %d, want 12000", got)
+	}
+	if got := rateForKind(pion.RTPCodecTypeVideo, Limits{}); got != 0 {
+		t.Fatalf("zero video limit byte rate = %d, want 0", got)
+	}
+}
+
+func TestVideoFrameQueueDropsOnlyWholeFrames(t *testing.T) {
+	queue := make(chan videoFrame, 1)
+	first := videoFrame{packets: []*rtp.Packet{{Header: rtp.Header{Timestamp: 1}}, {Header: rtp.Header{Timestamp: 1, Marker: true}}}}
+	second := videoFrame{packets: []*rtp.Packet{{Header: rtp.Header{Timestamp: 2}}, {Header: rtp.Header{Timestamp: 2, Marker: true}}}}
+	if !enqueueVideoFrame(queue, first) {
+		t.Fatal("first complete frame should fit the queue")
+	}
+	if enqueueVideoFrame(queue, second) {
+		t.Fatal("queue overflow should reject the whole next frame")
+	}
+	queued := <-queue
+	if len(queued.packets) != 2 || queued.packets[0].Timestamp != queued.packets[1].Timestamp {
+		t.Fatal("queue must not expose a partial frame")
+	}
+}
+
+func TestVideoFrameBufferWaitsForCompleteFrame(t *testing.T) {
+	var frame videoFrameBuffer
+	first := &rtp.Packet{Header: rtp.Header{Timestamp: 10}, Payload: make([]byte, 900)}
+	last := &rtp.Packet{Header: rtp.Header{Timestamp: 10, Marker: true}, Payload: make([]byte, 900)}
+
+	if packets, _, complete := frame.add(first); complete || len(packets) != 0 {
+		t.Fatal("frame was exposed before its marker packet")
+	}
+	packets, frameBytes, complete := frame.add(last)
+	if !complete || len(packets) != 2 || frameBytes != first.MarshalSize()+last.MarshalSize() {
+		t.Fatalf("completed frame = (%d packets, %d bytes, %t), want (2 packets, full size, true)", len(packets), frameBytes, complete)
+	}
+
+	incomplete := &rtp.Packet{Header: rtp.Header{Timestamp: 20}, Payload: []byte{1}}
+	replacement := &rtp.Packet{Header: rtp.Header{Timestamp: 30, Marker: true}, Payload: []byte{2}}
+	frame.add(incomplete)
+	packets, _, complete = frame.add(replacement)
+	if !complete || len(packets) != 1 || packets[0] != replacement {
+		t.Fatal("timestamp change should discard an incomplete frame")
+	}
+}
+
+func TestBitrateLimiterPacesOversizedPacketAndChargesDebt(t *testing.T) {
+	limiter := newBitrateLimiter(10_000)
+	if !limiter.waitForBytes(2_000, make(chan struct{})) {
+		t.Fatal("oversized RTP packet should be paced and admitted")
+	}
+	start := time.Now()
+	if !limiter.waitForBytes(100, make(chan struct{})) {
+		t.Fatal("pacer unexpectedly stopped")
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("oversized packet debt was not paced, next packet wait = %s", elapsed)
 	}
 }
 

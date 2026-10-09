@@ -1474,6 +1474,7 @@ let localScreenTrack;
 let cameraOperation;
 let cameraSender;
 let screenSender;
+let screenShareAdaptation;
 let cameraTrack;
 let localParticipantID;
 let pendingHandState;
@@ -1978,16 +1979,9 @@ async function enableCameraOnce() {
 async function disableCamera() {
   cameraRequested = false;
   meetingViewState.cameraEnabled = false;
-  let negotiationError;
-  if (cameraSender && peer) {
-    peer.removeTrack(cameraSender);
-    cameraSender = undefined;
-    try {
-      await renegotiateLocalMedia();
-    } catch (error) {
-      negotiationError = error;
-    }
-  }
+  const stoppedPeer = peer;
+  const stoppedSender = cameraSender;
+  cameraSender = undefined;
   localCameraTrack?.stop();
   localStream?.removeTrack(localCameraTrack);
   localCameraStream?.getTracks().forEach((track) => track.stop());
@@ -1998,7 +1992,17 @@ async function disableCamera() {
   if (local) local.cameraVideo.srcObject = null;
   setLocalMediaControls();
   sendMediaState();
-  if (negotiationError) status.textContent = "Camera stopped, but media renegotiation failed.";
+  if (stoppedSender && stoppedPeer && peer === stoppedPeer) {
+    try {
+      stoppedPeer.removeTrack(stoppedSender);
+    } catch (_) {
+      status.textContent = "Camera stopped, but media renegotiation failed.";
+      return;
+    }
+    renegotiateLocalMedia().catch(() => {
+      if (peer === stoppedPeer) status.textContent = "Camera stopped, but media renegotiation failed.";
+    });
+  }
 }
 
 let sidebarFocusTrigger;
@@ -2813,6 +2817,8 @@ function resetMediaConnection() {
   statsTimer = undefined;
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
+  screenShareAdaptation?.stop();
+  screenShareAdaptation = undefined;
   localStream = undefined;
   localAudioStream = undefined;
   localCameraStream = undefined;
@@ -2925,9 +2931,23 @@ async function startWebRTC() {
     direction: receiveVideoEnabled ? "recvonly" : "inactive"
   });
   currentPeer.ontrack = ({ streams, track, receiver }) => {
-    const participantID = remoteParticipantID(streams, track);
-    const role = remoteMediaRole(streams, track);
-    const element = participantElements.get(participantID);
+    let participantID = remoteParticipantID(streams, track);
+    let role = remoteMediaRole(streams, track);
+    let element = participantElements.get(participantID);
+    if (track.kind === "video" && screenShareOwner && screenShareOwner !== localParticipantID) {
+      const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
+      const trackID = track?.id || "";
+      const explicitCameraTrack = /-camera$/.test(streamID) ||
+        /\|camera(?:\|(low|medium|high))?$/.test(trackID);
+      const explicitScreenTrack = /-screen$/.test(streamID) || /\|screen$/.test(trackID);
+      // Some browsers deliver screen tracks without stream metadata; the active
+      // owner is the signaling source of truth when the track IDs are ambiguous.
+      if (!explicitCameraTrack && (explicitScreenTrack || !element || participantID === screenShareOwner)) {
+        participantID = screenShareOwner;
+        role = "screen";
+        element = participantElements.get(participantID);
+      }
+    }
     if (!element) return;
     rememberRemoteTrack(participantID, track, receiver);
     const stream = remoteMediaStream(streams, track);
@@ -3597,8 +3617,14 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
   for (const sender of targetPeer.getSenders()) {
     if (sender.track?.kind !== "video") continue;
     const parameters = sender.getParameters();
-    parameters.degradationPreference = "maintain-framerate";
+    parameters.degradationPreference = sender === screenSender
+      ? "maintain-resolution"
+      : "maintain-framerate";
     parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    if (sender === screenSender && screenShareAdaptation) {
+      await screenShareAdaptation.update(bitrate, fps);
+      continue;
+    }
     if (sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3) {
       const shares = [0.15, 0.3, 0.55];
       parameters.encodings.forEach((encoding, index) => {
@@ -3978,7 +4004,7 @@ function updateScreenShareUI() {
   }
 }
 
-function requestScreenShare(active, mediaStreamID = "") {
+function requestScreenShare(active, mediaStreamID = "", mediaTrackID = "") {
   if (screenShareRequest) {
     return Promise.reject(new Error("screen share request already in progress"));
   }
@@ -3992,7 +4018,7 @@ function requestScreenShare(active, mediaStreamID = "") {
       if (active && socket?.readyState === WebSocket.OPEN && localParticipantID) {
       socket.send(JSON.stringify({
         version: 1, type: "screen_share", participant_id: localParticipantID,
-        screen_share_active: false, media_stream_id: ""
+        screen_share_active: false, media_stream_id: "", media_track_id: ""
         }));
       }
       reject(new Error("screen share request timed out"));
@@ -4000,7 +4026,7 @@ function requestScreenShare(active, mediaStreamID = "") {
     screenShareRequest = { active, resolve, reject, timer };
     socket?.send(JSON.stringify({
       version: 1, type: "screen_share", participant_id: localParticipantID,
-      screen_share_active: active, media_stream_id: mediaStreamID
+      screen_share_active: active, media_stream_id: mediaStreamID, media_track_id: mediaTrackID
     }));
   });
 }
@@ -4026,14 +4052,17 @@ async function startScreenShare() {
     localScreenStream = screenStream;
     localScreenTrack = screenStream.getVideoTracks()[0];
     if (!localScreenTrack) throw new Error("screen capture is unavailable");
+    localScreenTrack.contentHint = "detail";
     localScreenTrack.addEventListener("ended", () => {
       const stopAfterStart = () => stopScreenShare();
       if (screenShareStartPromise) screenShareStartPromise.then(stopAfterStart).catch(() => {});
       else stopAfterStart();
     }, { once: true });
-    await requestScreenShare(true, screenStream.id);
+    await requestScreenShare(true, screenStream.id, localScreenTrack.id);
     if (generation !== socketGeneration || peer !== sharePeer) throw new Error("media connection changed");
     screenSender = sharePeer.addTrack(localScreenTrack, screenStream);
+    screenShareAdaptation = createScreenShareAdaptation(screenSender);
+    await applyProfile(profile.value, sharePeer, screenStream);
     await setVideoSenderActive(true);
     await renegotiateLocalMedia();
     if (localScreenTrack.readyState === "ended") throw new Error("screen capture ended before sharing started");
@@ -4049,6 +4078,8 @@ async function startScreenShare() {
     const failedTrack = localScreenTrack;
     const failedStream = screenStream;
     screenSender = undefined;
+    screenShareAdaptation?.stop();
+    screenShareAdaptation = undefined;
     screenStream = undefined;
     localScreenStream = undefined;
     localScreenTrack = undefined;
@@ -4066,7 +4097,7 @@ async function startScreenShare() {
     if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
       socket?.send(JSON.stringify({
         version: 1, type: "screen_share", participant_id: localParticipantID,
-        screen_share_active: false, media_stream_id: ""
+        screen_share_active: false, media_stream_id: "", media_track_id: ""
       }));
     }
     const local = participantElements.get(localParticipantID);
@@ -4089,6 +4120,8 @@ async function stopScreenShare() {
   localScreenStream = undefined;
   localScreenTrack = undefined;
   screenSender = undefined;
+  screenShareAdaptation?.stop();
+  screenShareAdaptation = undefined;
   screenShareStopPromise = (async () => {
     let negotiation;
     if (sender && senderPeer) {
@@ -4103,7 +4136,7 @@ async function stopScreenShare() {
     if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
       socket.send(JSON.stringify({
         version: 1, type: "screen_share", participant_id: localParticipantID,
-        screen_share_active: false
+        screen_share_active: false, media_stream_id: "", media_track_id: ""
       }));
     }
     const local = participantElements.get(localParticipantID);
@@ -4252,6 +4285,8 @@ leave.addEventListener("click", () => {
   reconnectToken = undefined;
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
+  screenShareAdaptation?.stop();
+  screenShareAdaptation = undefined;
   if (screenShareRequest) {
     clearTimeout(screenShareRequest.timer);
     screenShareRequest.reject(new Error("meeting left"));

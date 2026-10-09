@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"SlowMeet/internal/config"
+	"SlowMeet/internal/media"
 	"SlowMeet/internal/meeting"
 	internalwebrtc "SlowMeet/internal/webrtc"
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
 
@@ -440,6 +443,186 @@ func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
 	}
 	if routerOffer.Type != TypeOffer {
 		t.Fatalf("second signaling message = %q, want offer", routerOffer.Type)
+	}
+}
+
+func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
+	serverConnections := make(chan *websocket.Conn, 1)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial websocket test peer: %v", err)
+	}
+	defer browserConn.Close()
+	serverConn := <-serverConnections
+	defer serverConn.Close()
+
+	publisherBrowser, err := pion.NewPeerConnection(pion.Configuration{})
+	if err != nil {
+		t.Fatalf("create publisher browser peer: %v", err)
+	}
+	defer publisherBrowser.Close()
+	publisherIngress, err := internalwebrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create publisher ingress peer: %v", err)
+	}
+	defer publisherIngress.Close()
+	receiverPeer, err := internalwebrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create receiver server peer: %v", err)
+	}
+	defer receiverPeer.Close()
+	receiverBrowser, err := pion.NewPeerConnection(pion.Configuration{})
+	if err != nil {
+		t.Fatalf("create receiver browser peer: %v", err)
+	}
+	defer receiverBrowser.Close()
+	if _, err := publisherIngress.Connection().AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo,
+		pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add publisher ingress transceiver: %v", err)
+	}
+	if _, err := receiverBrowser.AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo,
+		pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add receiver browser transceiver: %v", err)
+	}
+
+	hub := NewHub(meeting.New(2), config.NewStore(config.Config{}), slog.Default())
+	hub.router.Register("receiver", receiverPeer, nil)
+	t.Cleanup(func() {
+		hub.router.Unregister("receiver")
+		hub.router.Unregister("publisher")
+	})
+	publicationReady := make(chan struct{})
+	publisherIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		hub.router.Publish("publisher", media.SourceRoleScreen, publisherIngress, track)
+		close(publicationReady)
+	})
+	publisherTrack, err := pion.NewTrackLocalStaticRTP(
+		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90_000},
+		"publisher-screen", "publisher-stream",
+	)
+	if err != nil {
+		t.Fatalf("create publisher screen track: %v", err)
+	}
+	publisherSender, err := publisherBrowser.AddTrack(publisherTrack)
+	if err != nil {
+		t.Fatalf("add publisher screen track: %v", err)
+	}
+	negotiateHubTestPeers(t, publisherBrowser, publisherIngress.Connection())
+	waitForPeerConnected(t, publisherBrowser)
+	waitForPeerConnected(t, publisherIngress.Connection())
+	if err := publisherTrack.WriteRTP(&rtp.Packet{
+		Header:  rtp.Header{Version: 2, Marker: true, PayloadType: 96, SequenceNumber: 1, Timestamp: 9_000},
+		Payload: []byte{0x10, 0x00},
+	}); err != nil {
+		t.Fatalf("write initial screen packet: %v", err)
+	}
+	select {
+	case <-publicationReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("screen publication was not created")
+	}
+
+	pliReceived := make(chan struct{}, 1)
+	go func() {
+		for {
+			packets, _, readErr := publisherSender.ReadRTCP()
+			if readErr != nil {
+				return
+			}
+			for _, packet := range packets {
+				if _, ok := packet.(*rtcp.PictureLossIndication); ok {
+					select {
+					case pliReceived <- struct{}{}:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	offer, err := receiverBrowser.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create receiver browser offer: %v", err)
+	}
+	if err := receiverBrowser.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set receiver browser offer: %v", err)
+	}
+	<-pion.GatheringCompletePromise(receiverBrowser)
+	c := &client{
+		conn:             serverConn,
+		peer:             receiverPeer,
+		participant:      meeting.Participant{ID: "receiver"},
+		negotiationReady: true,
+	}
+	hub.handleWebRTCMessage(c, Message{
+		Version: ProtocolVersion,
+		Type:    TypeOffer,
+		SDP:     receiverBrowser.LocalDescription().SDP,
+	})
+	browserConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var answer Message
+	if err := browserConn.ReadJSON(&answer); err != nil {
+		t.Fatalf("read receiver answer: %v", err)
+	}
+	if answer.Type != TypeAnswer {
+		t.Fatalf("receiver offer response type = %q, want answer", answer.Type)
+	}
+	select {
+	case <-pliReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("screen publisher did not receive a PLI after receiver-initiated renegotiation")
+	}
+}
+
+func negotiateHubTestPeers(t *testing.T, offerer, answerer *pion.PeerConnection) {
+	t.Helper()
+	offer, err := offerer.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create peer offer: %v", err)
+	}
+	if err := offerer.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set peer local offer: %v", err)
+	}
+	<-pion.GatheringCompletePromise(offerer)
+	if err := answerer.SetRemoteDescription(*offerer.LocalDescription()); err != nil {
+		t.Fatalf("set peer remote offer: %v", err)
+	}
+	answer, err := answerer.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create peer answer: %v", err)
+	}
+	if err := answerer.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set peer local answer: %v", err)
+	}
+	<-pion.GatheringCompletePromise(answerer)
+	if err := offerer.SetRemoteDescription(*answerer.LocalDescription()); err != nil {
+		t.Fatalf("set peer remote answer: %v", err)
+	}
+}
+
+func waitForPeerConnected(t *testing.T, peer *pion.PeerConnection) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for peer.ConnectionState() != pion.PeerConnectionStateConnected {
+		if time.Now().After(deadline) {
+			t.Fatalf("peer connection state = %s, want connected", peer.ConnectionState())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

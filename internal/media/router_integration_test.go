@@ -6,6 +6,7 @@ import (
 	"time"
 
 	internalwebrtc "SlowMeet/internal/webrtc"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
@@ -106,7 +107,8 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	if _, err := sourceClient.AddTrack(videoTrack); err != nil {
 		t.Fatalf("add video track: %v", err)
 	}
-	if _, err := sourceClient.AddTrack(screenTrack); err != nil {
+	screenSender, err := sourceClient.AddTrack(screenTrack)
+	if err != nil {
 		t.Fatalf("add screen track: %v", err)
 	}
 
@@ -132,6 +134,43 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	waitIntegrationPublicationCount(t, router, 3)
 	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
 	negotiateIntegrationPeers(t, secondTargetEgress.Connection(), secondTargetClient)
+
+	screenFeedback := make(chan *rtcp.PictureLossIndication, screenKeyFrameRequestCount+1)
+	go func() {
+		for {
+			packets, _, err := screenSender.ReadRTCP()
+			if err != nil {
+				return
+			}
+			for _, packet := range packets {
+				pli, ok := packet.(*rtcp.PictureLossIndication)
+				if !ok {
+					continue
+				}
+				select {
+				case screenFeedback <- pli:
+				default:
+				}
+			}
+		}
+	}()
+	router.RequestScreenKeyFrame("target", nil)
+	for attempt := 0; attempt < screenKeyFrameRequestCount; attempt++ {
+		select {
+		case pli := <-screenFeedback:
+			if pli.MediaSSRC == 0 {
+				t.Fatalf("screen keyframe feedback = %#v, want PLI with source SSRC", pli)
+			}
+		case <-time.After(routerIntegrationTimeout):
+			t.Fatalf("screen publisher received only %d of %d keyframe requests", attempt, screenKeyFrameRequestCount)
+		}
+	}
+	select {
+	case pli := <-screenFeedback:
+		t.Fatalf("screen publisher received an extra keyframe request after the bounded retries: %#v", pli)
+	case <-time.After(2*screenKeyFrameRetryDelay + 50*time.Millisecond):
+	}
+
 	sendIntegrationRTP(t, audioTrack, pion.RTPCodecTypeAudio, 48_000)
 	sendIntegrationRTP(t, videoTrack, pion.RTPCodecTypeVideo, 90_000)
 	sendIntegrationRTP(t, screenTrack, pion.RTPCodecTypeVideo, 90_000)
@@ -180,6 +219,19 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 		if !secondReceivedTracks[id] {
 			t.Errorf("receiver missed always-on %s", id)
 		}
+	}
+
+	router.RequestScreenKeyFrame("target", nil)
+	select {
+	case <-screenFeedback:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("screen publisher did not receive the initial keyframe request before unpublish")
+	}
+	router.Unpublish("source", SourceRoleScreen)
+	select {
+	case pli := <-screenFeedback:
+		t.Fatalf("screen publisher received a retry after unpublish: %#v", pli)
+	case <-time.After(2*screenKeyFrameRetryDelay + 50*time.Millisecond):
 	}
 }
 
@@ -518,6 +570,7 @@ func sendIntegrationPacket(t *testing.T, track *pion.TrackLocalStaticRTP, kind p
 	packet := &rtp.Packet{
 		Header: rtp.Header{
 			Version:        2,
+			Marker:         kind == pion.RTPCodecTypeVideo,
 			PayloadType:    integrationPayloadType(kind),
 			SequenceNumber: sequence,
 			Timestamp:      uint32(sequence) * clockRate / 10,

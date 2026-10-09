@@ -7,19 +7,77 @@ function createTrack() {
   const listeners = new Map();
   return {
     addEventListener(type, callback, options) {
-      listeners.set(type, { callback, once: options?.once });
+      const entries = listeners.get(type) || [];
+      entries.push({ callback, once: options?.once });
+      listeners.set(type, entries);
+    },
+    removeEventListener(type, callback) {
+      const entries = listeners.get(type) || [];
+      listeners.set(type, entries.filter((entry) => entry.callback !== callback));
+    },
+    emit(type) {
+      const entries = listeners.get(type) || [];
+      for (const entry of [...entries]) {
+        if (entry.once) this.removeEventListener(type, entry.callback);
+        entry.callback();
+      }
     },
     end() {
-      const listener = listeners.get("ended");
-      if (!listener) return;
-      if (listener.once) listeners.delete("ended");
-      listener.callback();
+      this.emit("ended");
     }
   };
 }
 
 function createVideo() {
-  return { srcObject: null };
+  const listeners = new Map();
+  let attachedSettings;
+  const video = {
+    autoplay: false,
+    muted: false,
+    playsInline: false,
+    playCalls: 0,
+    pauseCalls: 0,
+    addEventListener(type, callback, options) {
+      const entries = listeners.get(type) || [];
+      entries.push({ callback, once: options?.once });
+      listeners.set(type, entries);
+    },
+    removeEventListener(type, callback) {
+      const entries = listeners.get(type) || [];
+      listeners.set(type, entries.filter((entry) => entry.callback !== callback));
+    },
+    emit(type) {
+      const entries = listeners.get(type) || [];
+      for (const entry of [...entries]) {
+        if (entry.once) this.removeEventListener(type, entry.callback);
+        entry.callback();
+      }
+    },
+    play() {
+      this.playCalls += 1;
+      return Promise.resolve();
+    },
+    pause() {
+      this.pauseCalls += 1;
+    },
+    get attachedSettings() {
+      return attachedSettings;
+    }
+  };
+  Object.defineProperty(video, "srcObject", {
+    get() { return this._srcObject || null; },
+    set(stream) {
+      this._srcObject = stream;
+      if (stream) {
+        attachedSettings = {
+          autoplay: this.autoplay,
+          muted: this.muted,
+          playsInline: this.playsInline
+        };
+      }
+    }
+  });
+  return video;
 }
 
 function createStream(track) {
@@ -55,6 +113,45 @@ function testCurrentTrackEndClearsVideo() {
   assert.equal(endedUpdates, 1, "ended cleanup should run once");
 }
 
+function testScreenVideoStartsMutedInlinePlaybackBeforeBinding() {
+  const video = createVideo();
+  const track = createTrack();
+
+  bindRemoteScreenTrack(video, track, () => {}, createStream);
+
+  assert.deepEqual(video.attachedSettings, {
+    autoplay: true,
+    muted: true,
+    playsInline: true
+  }, "autoplay properties must be configured before attaching the stream");
+  assert.equal(video.playCalls, 1, "binding should attempt playback immediately");
+}
+
+function testScreenVideoRetriesPlaybackWhenTrackAndMetadataBecomeReady() {
+  const video = createVideo();
+  const track = createTrack();
+
+  bindRemoteScreenTrack(video, track, () => {}, createStream);
+  track.emit("unmute");
+  video.emit("loadedmetadata");
+
+  assert.equal(video.playCalls, 3, "playback should retry on track unmute and loaded metadata");
+}
+
+function testStaleTrackEventsCannotRestartCurrentPlayback() {
+  const video = createVideo();
+  const oldTrack = createTrack();
+  const newTrack = createTrack();
+
+  bindRemoteScreenTrack(video, oldTrack, () => {}, createStream);
+  const currentStream = bindRemoteScreenTrack(video, newTrack, () => {}, createStream);
+  const playCallsAfterRestart = video.playCalls;
+  oldTrack.emit("unmute");
+
+  assert.equal(video.srcObject, currentStream);
+  assert.equal(video.playCalls, playCallsAfterRestart, "a stale track must not restart the new share's video");
+}
+
 function testShareStateCleanupCannotClearNewBinding() {
   const video = createVideo();
   const oldTrack = createTrack();
@@ -73,9 +170,13 @@ function testShareStateCleanupCannotClearNewBinding() {
 testOldTrackEndDoesNotClearRestartedShare();
 testCurrentTrackEndClearsVideo();
 testShareStateCleanupCannotClearNewBinding();
+testScreenVideoStartsMutedInlinePlaybackBeforeBinding();
+testScreenVideoRetriesPlaybackWhenTrackAndMetadataBecomeReady();
+testStaleTrackEventsCannotRestartCurrentPlayback();
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const pageSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 assert.match(appSource, /bindRemoteScreenTrack\(video, track, \(\) => \{/);
 assert.match(appSource, /bindRemoteScreenTrack\.clear\([\s\S]*previousBinding\.stream/);
-assert.match(pageSource, /<script src="\/js\/remote-screen-video\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
+assert.doesNotMatch(appSource, /recoverRemoteScreenVideo|screenRecoveryChain|remoteScreenRecoveryGuard/);
+assert.match(pageSource, /<script src="\/js\/remote-screen-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
 console.log("remote screen video tests passed");

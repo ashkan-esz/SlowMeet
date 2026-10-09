@@ -7,6 +7,7 @@ import (
 
 	"SlowMeet/internal/webrtc"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
 
@@ -43,6 +44,25 @@ type publication struct {
 	limiter  *bitrateLimiter
 }
 
+type screenKeyFrameRequestKey struct {
+	receiverID     string
+	publicationKey string
+}
+
+type screenKeyFrameRetry struct {
+	publication *publication
+	remaining   int
+	timer       *time.Timer
+	onError     func(error)
+}
+
+const (
+	screenKeyFrameRetryDelay   = 250 * time.Millisecond
+	screenKeyFrameRequestCount = 3
+	maxVideoFrameBufferBytes   = 16 << 20
+	maxQueuedVideoFrames       = 4
+)
+
 type Router struct {
 	mu                    sync.RWMutex
 	peers                 map[string]*webrtc.Peer
@@ -51,6 +71,7 @@ type Router struct {
 	videoSubscriptions    map[string]map[string]struct{}
 	videoSubscriptionsSet map[string]bool
 	cameraLayers          map[string]string
+	screenKeyFrameRetries map[screenKeyFrameRequestKey]*screenKeyFrameRetry
 	limits                Limits
 }
 
@@ -66,6 +87,7 @@ func NewRouter(config ...Limits) *Router {
 		videoSubscriptions:    make(map[string]map[string]struct{}),
 		videoSubscriptionsSet: make(map[string]bool),
 		cameraLayers:          make(map[string]string),
+		screenKeyFrameRetries: make(map[screenKeyFrameRequestKey]*screenKeyFrameRetry),
 		limits:                limits,
 	}
 }
@@ -115,6 +137,7 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 func (r *Router) Unregister(id string) {
 	offers := make(map[string]Offerer)
 	r.mu.Lock()
+	r.cancelScreenKeyFrameRetriesForReceiverLocked(id)
 	delete(r.peers, id)
 	delete(r.offerers, id)
 	delete(r.videoSubscriptions, id)
@@ -125,6 +148,7 @@ func (r *Router) Unregister(id string) {
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
+			r.cancelScreenKeyFrameRetriesForPublicationLocked(pub)
 			for targetID, sender := range pub.senders {
 				if peer := r.peers[targetID]; peer != nil && sender != nil {
 					_ = peer.RemoveTrack(sender)
@@ -350,6 +374,109 @@ func (r *Router) Unpublish(sourceID string, role SourceRole) {
 	}
 }
 
+// RequestScreenKeyFrame asks active screen publishers to send a fresh frame
+// after a receiver has accepted the offer that added the screen track. It
+// retries a bounded number of times and cancels retries when either peer or
+// the publication is removed. onError is optional and reports RTCP write
+// failures from the initial request or a retry.
+func (r *Router) RequestScreenKeyFrame(receiverID string, onError ...func(error)) {
+	var reportError func(error)
+	if len(onError) > 0 {
+		reportError = onError[0]
+	}
+	r.requestScreenKeyFrame(receiverID, reportError)
+}
+
+func (r *Router) requestScreenKeyFrame(receiverID string, onError func(error)) {
+	var requests []*screenKeyFrameRetry
+	r.mu.Lock()
+	for _, pub := range r.pubs {
+		if pub.role != SourceRoleScreen || pub.source == nil || pub.remote == nil {
+			continue
+		}
+		if pub.senders[receiverID] == nil {
+			continue
+		}
+		key := screenKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
+		if existing := r.screenKeyFrameRetries[key]; existing != nil {
+			if existing.publication == pub {
+				continue
+			}
+			existing.timer.Stop()
+			delete(r.screenKeyFrameRetries, key)
+		}
+		request := &screenKeyFrameRetry{
+			publication: pub,
+			remaining:   screenKeyFrameRequestCount - 1,
+			onError:     onError,
+		}
+		request.timer = time.AfterFunc(screenKeyFrameRetryDelay, func() {
+			r.retryScreenKeyFrame(key, request)
+		})
+		r.screenKeyFrameRetries[key] = request
+		requests = append(requests, request)
+	}
+	r.mu.Unlock()
+
+	for _, request := range requests {
+		r.writeScreenKeyFrame(request.publication, request.onError)
+	}
+}
+
+func (r *Router) retryScreenKeyFrame(key screenKeyFrameRequestKey, request *screenKeyFrameRetry) {
+	r.mu.Lock()
+	if r.screenKeyFrameRetries[key] != request {
+		r.mu.Unlock()
+		return
+	}
+	if r.pubs[request.publication.key] != request.publication ||
+		request.publication.senders[key.receiverID] == nil {
+		delete(r.screenKeyFrameRetries, key)
+		r.mu.Unlock()
+		return
+	}
+	request.remaining--
+	if request.remaining == 0 {
+		delete(r.screenKeyFrameRetries, key)
+	} else {
+		request.timer = time.AfterFunc(screenKeyFrameRetryDelay, func() {
+			r.retryScreenKeyFrame(key, request)
+		})
+	}
+	r.mu.Unlock()
+
+	r.writeScreenKeyFrame(request.publication, request.onError)
+}
+
+func (r *Router) writeScreenKeyFrame(pub *publication, onError func(error)) {
+	err := pub.source.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: uint32(pub.remote.SSRC())},
+	})
+	if err != nil && onError != nil {
+		onError(err)
+	}
+}
+
+func (r *Router) cancelScreenKeyFrameRetriesForReceiverLocked(receiverID string) {
+	for key, request := range r.screenKeyFrameRetries {
+		if key.receiverID != receiverID {
+			continue
+		}
+		request.timer.Stop()
+		delete(r.screenKeyFrameRetries, key)
+	}
+}
+
+func (r *Router) cancelScreenKeyFrameRetriesForPublicationLocked(pub *publication) {
+	for key, request := range r.screenKeyFrameRetries {
+		if request.publication != pub {
+			continue
+		}
+		request.timer.Stop()
+		delete(r.screenKeyFrameRetries, key)
+	}
+}
+
 func (r *Router) currentLimits() Limits {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -357,10 +484,18 @@ func (r *Router) currentLimits() Limits {
 }
 
 func rateForKind(kind pion.RTPCodecType, limits Limits) int {
+	bitrate := limits.MaxVideoBitrate
 	if kind == pion.RTPCodecTypeAudio {
-		return limits.MaxAudioBitrate
+		bitrate = limits.MaxAudioBitrate
 	}
-	return limits.MaxVideoBitrate
+	if bitrate <= 0 {
+		return 0
+	}
+	bytesPerSecond := bitrate / 8
+	if bytesPerSecond == 0 {
+		return 1
+	}
+	return bytesPerSecond
 }
 
 func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
@@ -423,39 +558,126 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 }
 
 func (r *Router) forward(pub *publication) {
+	var frame videoFrameBuffer
+	frames := make(chan videoFrame, maxQueuedVideoFrames)
+	stopPacer := make(chan struct{})
+	go r.forwardVideoFrames(pub, frames, stopPacer)
+	defer close(stopPacer)
 	for {
 		packet, _, err := pub.remote.ReadRTP()
 		if err != nil {
 			r.removePublication(pub)
 			return
 		}
-		if pub.remote.Kind() == pion.RTPCodecTypeVideo && !pub.limiter.allowFrame(packet.Timestamp) {
+		if pub.remote.Kind() == pion.RTPCodecTypeVideo {
+			packets, _, complete := frame.add(packet)
+			if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
+				continue
+			}
+			if !enqueueVideoFrame(frames, videoFrame{packets: packets}) {
+				// Keep the publisher read loop moving when a receiver cannot
+				// drain its bounded pacing queue; never forward a partial frame.
+			}
 			continue
 		}
 		if !pub.limiter.allow(packet.MarshalSize()) {
 			continue
 		}
-		r.mu.RLock()
-		targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
-		for targetID, track := range pub.tracks {
-			selectedLayer := r.cameraLayers[targetID]
-			if selectedLayer == "" {
-				selectedLayer = "medium"
+		r.forwardPacket(pub, packet)
+	}
+}
+
+func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case frame := <-frames:
+			for _, packet := range frame.packets {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if !pub.limiter.waitForBytes(packet.MarshalSize(), stop) {
+					return
+				}
+				r.forwardPacket(pub, packet)
 			}
-			if pub.layer == "" || selectedLayer == pub.layer {
-				targetTracks[targetID] = track
-			}
-		}
-		r.mu.RUnlock()
-		for _, track := range targetTracks {
-			_ = track.WriteRTP(packet)
 		}
 	}
 }
 
-// bitrateLimiter is a non-queuing token bucket. Dropping when the bucket is
-// empty preserves latency and lets WebRTC's normal loss recovery handle the
-// resulting loss; packets are never delayed in the SFU.
+func enqueueVideoFrame(queue chan<- videoFrame, frame videoFrame) bool {
+	select {
+	case queue <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Router) forwardPacket(pub *publication, packet *rtp.Packet) {
+	r.mu.RLock()
+	targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
+	for targetID, track := range pub.tracks {
+		selectedLayer := r.cameraLayers[targetID]
+		if selectedLayer == "" {
+			selectedLayer = "medium"
+		}
+		if pub.layer == "" || selectedLayer == pub.layer {
+			targetTracks[targetID] = track
+		}
+	}
+	r.mu.RUnlock()
+	for _, track := range targetTracks {
+		_ = track.WriteRTP(packet)
+	}
+}
+
+type videoFrameBuffer struct {
+	timestamp uint32
+	packets   []*rtp.Packet
+	bytes     int
+	active    bool
+	dropping  bool
+}
+
+type videoFrame struct {
+	packets []*rtp.Packet
+}
+
+// add returns a complete video frame only after its marker packet arrives.
+// A timestamp change before the marker discards the previous incomplete frame.
+func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
+	if !f.active || f.timestamp != packet.Timestamp {
+		*f = videoFrameBuffer{timestamp: packet.Timestamp, active: true}
+	}
+
+	if !f.dropping {
+		packetBytes := packet.MarshalSize()
+		if packetBytes > maxVideoFrameBufferBytes-f.bytes {
+			f.packets = nil
+			f.bytes = 0
+			f.dropping = true
+		} else {
+			f.packets = append(f.packets, packet)
+			f.bytes += packetBytes
+		}
+	}
+	if !packet.Marker {
+		return nil, 0, false
+	}
+
+	packets, frameBytes, complete := f.packets, f.bytes, !f.dropping
+	*f = videoFrameBuffer{}
+	if !complete {
+		return nil, 0, false
+	}
+	return packets, frameBytes, true
+}
+
+// bitrateLimiter meters bytes per second with a short burst allowance.
 type bitrateLimiter struct {
 	mu                  sync.Mutex
 	rate                float64
@@ -517,6 +739,59 @@ func (l *bitrateLimiter) allow(bytes int) bool {
 	}
 	l.tokens -= float64(bytes)
 	return true
+}
+
+// waitForBytes paces a packet until the configured byte budget can admit it.
+func (l *bitrateLimiter) waitForBytes(bytes int, stop <-chan struct{}) bool {
+	if bytes <= 0 {
+		return true
+	}
+	for {
+		l.mu.Lock()
+		l.refillLocked()
+		if l.rate <= 0 || l.tokens >= float64(bytes) {
+			if l.rate > 0 {
+				l.tokens -= float64(bytes)
+			}
+			l.mu.Unlock()
+			return true
+		}
+		deficit := float64(bytes) - l.tokens
+		rate := l.rate
+		burst := rate / 10
+		if burst < 1200 {
+			burst = 1200
+		}
+		oversizedPacket := float64(bytes) > burst
+		if oversizedPacket {
+			deficit = burst - l.tokens
+		}
+		wait := time.Duration(deficit / rate * float64(time.Second))
+		if wait < time.Millisecond {
+			wait = time.Millisecond
+		}
+		l.mu.Unlock()
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-stop:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return false
+		case <-timer.C:
+		}
+		if oversizedPacket {
+			l.mu.Lock()
+			l.refillLocked()
+			l.tokens -= float64(bytes)
+			l.mu.Unlock()
+			return true
+		}
+	}
 }
 
 func (l *bitrateLimiter) setFPS(fps int) {
@@ -588,6 +863,7 @@ func (r *Router) removePublication(pub *publication) {
 // removePublicationLocked detaches a publication's outgoing tracks. The
 // caller must hold r.mu; returned offers must run after the lock is released.
 func (r *Router) removePublicationLocked(pub *publication) []Offerer {
+	r.cancelScreenKeyFrameRetriesForPublicationLocked(pub)
 	var offers []Offerer
 	for targetID, sender := range pub.senders {
 		if peer := r.peers[targetID]; peer != nil {

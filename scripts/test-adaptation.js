@@ -218,6 +218,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const styleSource = fs.readFileSync(path.join(__dirname, "..", "web/css/style.css"), "utf8");
+const cameraStopStart = appSource.indexOf("async function disableCamera() {");
+const cameraStopEnd = appSource.indexOf("\nlet sidebarFocusTrigger", cameraStopStart);
+const cameraStopSource = appSource.slice(cameraStopStart, cameraStopEnd);
+if (cameraStopStart < 0 || cameraStopEnd < 0 ||
+    cameraStopSource.indexOf("localCameraTrack?.stop();") < 0 ||
+    cameraStopSource.indexOf("localCameraTrack?.stop();") > cameraStopSource.indexOf("renegotiateLocalMedia().catch(") ||
+    cameraStopSource.includes("await renegotiateLocalMedia()")) {
+  throw new Error("camera capture must stop before renegotiation is awaited or reported");
+}
 if (!appSource.includes("const selectedPair = selectedCandidatePair(report);") ||
     !appSource.includes("values.rttMs = selectedCandidatePairRTT(report);") ||
     appSource.includes("!selectedCandidatePair")) {
@@ -277,7 +286,7 @@ if (!/\.device-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSo
 if (!appSource.includes('const streamPrefix = "slowmeet-";') ||
     !appSource.includes('return track.id?.split("|")[0] || "";') ||
     !appSource.includes("const stream = new MediaStream();") ||
-    !appSource.includes("const participantID = remoteParticipantID(streams, track);") ||
+    !appSource.includes("let participantID = remoteParticipantID(streams, track);") ||
     !appSource.includes("element.video.play().catch(() => {});")) {
   throw new Error("remote video tracks must resolve and start playback");
 }

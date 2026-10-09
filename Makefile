@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-adaptation test-layout smoke \
+	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-layout smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -54,7 +54,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-admin test-protocol test-adaptation test-layout
+	$(MAKE) test-admin test-protocol test-adaptation test-screen-share-adaptation test-layout
 
 test-admin: ## Test the admin dashboard
 	$(NODE) scripts/test-admin.js
@@ -64,6 +64,9 @@ test-protocol: ## Test the signaling protocol
 
 test-adaptation: ## Test media adaptation behavior
 	$(NODE) scripts/test-adaptation.js
+
+test-screen-share-adaptation: ## Test screen-share sender rate adaptation
+	$(NODE) scripts/test-screen-share-adaptation.js
 
 test-layout: ## Test responsive meeting layout behavior
 	$(NODE) scripts/test-meeting-layout.js

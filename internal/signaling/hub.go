@@ -64,6 +64,7 @@ type client struct {
 	pendingOffer              bool
 	pendingICERestart         bool
 	activeScreenMediaStreamID string
+	activeScreenMediaTrackID  string
 	reactionWindowStart       time.Time
 	reactionCount             int
 }
@@ -144,6 +145,7 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 	if !cfg.EnableScreenShare && h.screenSharer != nil {
 		releasedScreenSharer = h.screenSharer
 		releasedScreenSharer.activeScreenMediaStreamID = ""
+		releasedScreenSharer.activeScreenMediaTrackID = ""
 		h.screenSharer = nil
 		releasedScreenShare = true
 	}
@@ -345,10 +347,14 @@ func (h *Hub) screenShareMessage(active bool, owner string) Message {
 	}
 }
 
-func (h *Hub) requestScreenShare(c *client, active bool, mediaStreamIDs ...string) error {
+func (h *Hub) requestScreenShare(c *client, active bool, mediaIDs ...string) error {
 	mediaStreamID := ""
-	if len(mediaStreamIDs) > 0 {
-		mediaStreamID = mediaStreamIDs[0]
+	mediaTrackID := ""
+	if len(mediaIDs) > 0 {
+		mediaStreamID = mediaIDs[0]
+	}
+	if len(mediaIDs) > 1 {
+		mediaTrackID = mediaIDs[1]
 	}
 	cfg := h.Config.Snapshot()
 	if active && !cfg.EnableScreenShare {
@@ -362,9 +368,11 @@ func (h *Hub) requestScreenShare(c *client, active bool, mediaStreamIDs ...strin
 		}
 		h.screenSharer = c
 		c.activeScreenMediaStreamID = mediaStreamID
+		c.activeScreenMediaTrackID = mediaTrackID
 	} else if h.screenSharer == c {
 		h.screenSharer = nil
 		c.activeScreenMediaStreamID = ""
+		c.activeScreenMediaTrackID = ""
 	}
 	owner := ""
 	if h.screenSharer != nil {
@@ -387,6 +395,15 @@ func (h *Hub) screenShareStreamID(c *client) string {
 	return c.activeScreenMediaStreamID
 }
 
+func (h *Hub) screenShareTrackID(c *client) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.screenSharer != c {
+		return ""
+	}
+	return c.activeScreenMediaTrackID
+}
+
 func (h *Hub) releaseScreenShare(c *client) {
 	h.mu.Lock()
 	if h.screenSharer != c {
@@ -395,6 +412,7 @@ func (h *Hub) releaseScreenShare(c *client) {
 	}
 	h.screenSharer = nil
 	c.activeScreenMediaStreamID = ""
+	c.activeScreenMediaTrackID = ""
 	h.mu.Unlock()
 	h.router.Unpublish(c.participant.ID, media.SourceRoleScreen)
 	active := false
@@ -600,7 +618,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.Type == TypeScreenShare {
 				msg.ParticipantID = c.participant.ID
-				if err := h.requestScreenShare(c, *msg.ScreenShareActive, msg.MediaStreamID); err != nil {
+				if err := h.requestScreenShare(c, *msg.ScreenShareActive, msg.MediaStreamID, msg.MediaTrackID); err != nil {
 					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				}
 				continue
@@ -698,6 +716,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if track.Kind() == pion.RTPCodecTypeVideo {
 				role = media.SourceRoleCamera
 				if streamID := h.screenShareStreamID(c); streamID != "" && track.StreamID() == streamID {
+					role = media.SourceRoleScreen
+				} else if trackID := h.screenShareTrackID(c); trackID != "" && track.ID() == trackID {
 					role = media.SourceRoleScreen
 				}
 			}
@@ -824,6 +844,9 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
 			return
 		}
+		h.router.RequestScreenKeyFrame(c.participant.ID, func(err error) {
+			h.Logger.Error("screen_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
+		})
 		c.negotiationMu.Lock()
 		c.negotiationReady = true
 		shouldOffer := c.pendingOffer
@@ -852,6 +875,10 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		c.negotiationMu.Unlock()
 		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
+		} else {
+			h.router.RequestScreenKeyFrame(c.participant.ID, func(err error) {
+				h.Logger.Error("screen_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
+			})
 		}
 		if shouldOffer {
 			_ = h.sendOffer(c, iceRestart)

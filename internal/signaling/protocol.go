@@ -55,6 +55,7 @@ type Message struct {
 	CameraParticipantIDs []string             `json:"camera_participant_ids,omitempty"`
 	CameraLayer          string               `json:"camera_layer,omitempty"`
 	MediaStreamID        string               `json:"media_stream_id,omitempty"`
+	MediaTrackID         string               `json:"media_track_id,omitempty"`
 	Error                string               `json:"error,omitempty"`
 	Participant          *meeting.Participant `json:"participant,omitempty"`
 	TargetID             string               `json:"target_id,omitempty"`
@@ -91,6 +92,9 @@ func (m Message) Validate() error {
 	}
 	if len(m.MediaStreamID) > 128 {
 		return fmt.Errorf("media_stream_id is too long")
+	}
+	if len(m.MediaTrackID) > 128 {
+		return fmt.Errorf("media_track_id is too long")
 	}
 	switch m.Type {
 	case TypeJoin:

@@ -48,12 +48,16 @@ through host and provider firewalls.
 
 ## Media limits and diagnostics
 
-`MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, `MAX_VIDEO_FPS`, and
-`MAX_AUDIO_BITRATE` set hard ceilings. The quality limit caps browser profile
-resolution; the SFU drops RTP that exceeds bitrate or frame-rate limits rather
-than buffering or transcoding it. The built-in `very-good` profile is 720p at
-60 FPS and `ultra` is 1080p at 30 FPS. The starter settings allow both with a
-3 Mbps video ceiling, a 60 FPS ceiling, and a 96 kbps audio ceiling.
+`MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video
+ceilings. The quality limit caps browser profile resolution. The SFU paces
+video RTP to the bitrate ceiling and forwards complete frames only; it drops
+whole frames when the FPS ceiling or a full pacing queue requires it.
+Screen-share senders adapt to the configured bitrate and FPS limits, reducing
+frame rate before resolution to preserve text sharpness. `MAX_AUDIO_BITRATE`
+sets the separate audio ceiling.
+The built-in `very-good` profile is 720p at 60 FPS and `ultra` is 1080p at
+30 FPS. The starter settings allow both with a 3 Mbps video ceiling, a 60 FPS
+ceiling, and a 96 kbps audio ceiling.
 
 `/health` and `/ready` expose service health. `/metrics` exposes
 Prometheus-compatible counters and the latest network samples, including active
