@@ -439,7 +439,7 @@ function updateParticipantTileState(element) {
   else if (cameraState === "paused") label = "Video paused to protect audio";
   else if (cameraState === "on" && !element.item.classList.contains("is-local") && !receiveVideoEnabled) {
     label = "Incoming video off for you";
-  } else if (cameraState === "off") {
+  } else if (cameraState === "off" && element.item.dataset.participantId !== screenShareOwner) {
     label = "Camera off";
   } else if (cameraState === "unknown") {
     label = "Connecting…";
@@ -2601,6 +2601,7 @@ function connectSocket(name, password) {
     if (message.type === "screen_share_state") {
       const previousScreenShareOwner = screenShareOwner;
       screenShareOwner = message.screen_share_active === true ? message.screen_share_owner : undefined;
+      participantElements.forEach(updateParticipantTileState);
       if (previousScreenShareOwner && previousScreenShareOwner !== screenShareOwner) {
         const previousElement = participantElements.get(previousScreenShareOwner);
         const previousBinding = remoteScreenTracks.get(previousScreenShareOwner);
