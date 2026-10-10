@@ -2101,7 +2101,7 @@ function showSelectedRemoteCamera(element) {
   const participantID = element.item.dataset.participantId;
   const tracks = remoteCameraLayerTracks.get(participantID);
   if (!tracks) return false;
-  const track = tracks.get(cameraLayer);
+  const track = bindRemoteCameraTrack.selectLayer(tracks, cameraLayer);
   if (track) {
     bindRemoteCameraTrack(element.cameraVideo, track, () => updateParticipantVideoVisibility(element));
   } else {
@@ -2951,6 +2951,12 @@ async function startWebRTC() {
         const tracks = remoteCameraLayerTracks.get(participantID) || new Map();
         tracks.set(layer, track);
         remoteCameraLayerTracks.set(participantID, tracks);
+        const updateSelectedLayer = () => {
+          if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
+          if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
+        };
+        track.addEventListener("mute", updateSelectedLayer);
+        track.addEventListener("unmute", updateSelectedLayer);
         track.addEventListener("ended", () => {
           if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
           tracks.delete(layer);

@@ -3,6 +3,7 @@ package media
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"SlowMeet/internal/webrtc"
@@ -30,18 +31,19 @@ type Limits struct {
 }
 
 type publication struct {
-	key      string
-	sourceID string
-	role     SourceRole
-	layer    string
-	trackID  string
-	streamID string
-	codec    pion.RTPCodecCapability
-	remote   *pion.TrackRemote
-	source   *webrtc.Peer
-	tracks   map[string]*pion.TrackLocalStaticRTP
-	senders  map[string]*pion.RTPSender
-	limiter  *bitrateLimiter
+	key          string
+	sourceID     string
+	role         SourceRole
+	layer        string
+	trackID      string
+	streamID     string
+	codec        pion.RTPCodecCapability
+	remote       *pion.TrackRemote
+	source       *webrtc.Peer
+	tracks       map[string]*pion.TrackLocalStaticRTP
+	senders      map[string]*pion.RTPSender
+	limiter      *bitrateLimiter
+	lastPacketAt atomic.Int64
 }
 
 type videoKeyFrameRequestKey struct {
@@ -61,6 +63,7 @@ const (
 	videoKeyFrameRequestCount = 3
 	maxVideoFrameBufferBytes  = 16 << 20
 	maxQueuedVideoFrames      = 4
+	cameraLayerActivityWindow = 3 * time.Second
 )
 
 type Router struct {
@@ -569,6 +572,7 @@ func (r *Router) forward(pub *publication) {
 			r.removePublication(pub)
 			return
 		}
+		pub.lastPacketAt.Store(time.Now().UnixNano())
 		if pub.remote.Kind() == pion.RTPCodecTypeVideo {
 			packets, _, complete := frame.add(packet)
 			if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
@@ -621,11 +625,7 @@ func (r *Router) forwardPacket(pub *publication, packet *rtp.Packet) {
 	r.mu.RLock()
 	targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
 	for targetID, track := range pub.tracks {
-		selectedLayer := r.cameraLayers[targetID]
-		if selectedLayer == "" {
-			selectedLayer = "medium"
-		}
-		if pub.layer == "" || selectedLayer == pub.layer {
+		if pub.layer == "" || r.selectedCameraLayerLocked(pub.sourceID, targetID, time.Now()) == pub.layer {
 			targetTracks[targetID] = track
 		}
 	}
@@ -633,6 +633,50 @@ func (r *Router) forwardPacket(pub *publication, packet *rtp.Packet) {
 	for _, track := range targetTracks {
 		_ = track.WriteRTP(packet)
 	}
+}
+
+func (r *Router) selectedCameraLayerLocked(sourceID, receiverID string, now time.Time) string {
+	preferred := r.cameraLayers[receiverID]
+	if !validCameraLayer(preferred) {
+		preferred = "medium"
+	}
+	preferredRank := cameraLayerRank(preferred)
+	selected := ""
+	selectedDistance := len(cameraLayersByQuality)
+	selectedRank := len(cameraLayersByQuality)
+	for _, layer := range cameraLayersByQuality {
+		pub := r.pubs[publicationKey(sourceID, SourceRoleCamera, layer)]
+		if pub == nil || pub.tracks[receiverID] == nil || !pub.hasRecentPacket(now) {
+			continue
+		}
+		rank := cameraLayerRank(layer)
+		distance := rank - preferredRank
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < selectedDistance || (distance == selectedDistance && rank < selectedRank) {
+			selected = layer
+			selectedDistance = distance
+			selectedRank = rank
+		}
+	}
+	return selected
+}
+
+var cameraLayersByQuality = [...]string{"low", "medium", "high"}
+
+func cameraLayerRank(layer string) int {
+	for rank, candidate := range cameraLayersByQuality {
+		if candidate == layer {
+			return rank
+		}
+	}
+	return len(cameraLayersByQuality)
+}
+
+func (pub *publication) hasRecentPacket(now time.Time) bool {
+	lastPacketAt := pub.lastPacketAt.Load()
+	return lastPacketAt != 0 && now.Sub(time.Unix(0, lastPacketAt)) <= cameraLayerActivityWindow
 }
 
 type videoFrameBuffer struct {

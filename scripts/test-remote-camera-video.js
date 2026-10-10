@@ -28,6 +28,8 @@ function createEventTarget() {
 function createTrack() {
   return {
     ...createEventTarget(),
+    readyState: "live",
+    muted: false,
     end() { this.emit("ended"); }
   };
 }
@@ -121,14 +123,29 @@ function testClearingCameraDetachesOldTrack() {
   assert.equal(endedUpdates, 0, "a cleared layer must not run stale ended cleanup");
 }
 
+function testSelectLayerFallsBackToActiveQuality() {
+  const medium = createTrack();
+  const high = createTrack();
+  high.muted = true;
+  const tracks = new Map([["medium", medium], ["high", high]]);
+
+  assert.equal(bindRemoteCameraTrack.selectLayer(tracks, "high"), medium,
+    "use the active medium layer while the preferred high layer has no packets");
+  high.muted = false;
+  assert.equal(bindRemoteCameraTrack.selectLayer(tracks, "high"), high,
+    "switch to the preferred layer when it starts receiving packets");
+}
+
 testPlaybackStartsAndRetriesWhenCameraBecomesReady();
 testStaleCameraTrackCannotClearReplacement();
 testClearingCameraDetachesOldTrack();
+testSelectLayerFallsBackToActiveQuality();
 
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const pageSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 assert.match(appSource, /bindRemoteCameraTrack\(video, track, \(\) => updateParticipantVideoVisibility\(element\)\)/);
 assert.match(appSource, /bindRemoteCameraTrack\(element\.cameraVideo, track, \(\) => updateParticipantVideoVisibility\(element\)\)/);
 assert.match(appSource, /remoteCameraLayerTracks\.get\(participantID\) !== tracks \|\| tracks\.get\(layer\) !== track/);
+assert.match(appSource, /bindRemoteCameraTrack\.selectLayer\(tracks, cameraLayer\)/);
 assert.match(pageSource, /<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
 console.log("remote camera video tests passed");

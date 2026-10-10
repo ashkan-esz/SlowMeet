@@ -55,6 +55,21 @@
     return stream;
   }
 
+  bindRemoteCameraTrack.selectLayer = function selectLayer(tracks, preferredLayer) {
+    const quality = ["low", "medium", "high"];
+    const preferredIndex = quality.indexOf(preferredLayer);
+    const candidates = [...tracks.entries()]
+      .filter(([, track]) => track.readyState === "live")
+      .sort(([layerA], [layerB]) => {
+        const indexA = quality.indexOf(layerA);
+        const indexB = quality.indexOf(layerB);
+        const distanceA = Math.abs(indexA - preferredIndex);
+        const distanceB = Math.abs(indexB - preferredIndex);
+        return distanceA - distanceB || indexA - indexB;
+      });
+    return candidates.find(([, track]) => !track.muted)?.[1] || candidates[0]?.[1];
+  };
+
   bindRemoteCameraTrack.clear = function clearRemoteCameraTrack(video) {
     const binding = activeBindings.get(video);
     if (!binding) return false;
