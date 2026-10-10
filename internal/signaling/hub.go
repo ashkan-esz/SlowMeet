@@ -844,8 +844,8 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
 			return
 		}
-		h.router.RequestScreenKeyFrame(c.participant.ID, func(err error) {
-			h.Logger.Error("screen_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
+		h.router.RequestVideoKeyFrame(c.participant.ID, func(err error) {
+			h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
 		})
 		c.negotiationMu.Lock()
 		c.negotiationReady = true
@@ -876,8 +876,8 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		} else {
-			h.router.RequestScreenKeyFrame(c.participant.ID, func(err error) {
-				h.Logger.Error("screen_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
+			h.router.RequestVideoKeyFrame(c.participant.ID, func(err error) {
+				h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
 			})
 		}
 		if shouldOffer {

@@ -2102,9 +2102,12 @@ function showSelectedRemoteCamera(element) {
   const tracks = remoteCameraLayerTracks.get(participantID);
   if (!tracks) return false;
   const track = tracks.get(cameraLayer);
-  element.cameraVideo.srcObject = track ? new MediaStream([track]) : null;
+  if (track) {
+    bindRemoteCameraTrack(element.cameraVideo, track, () => updateParticipantVideoVisibility(element));
+  } else {
+    bindRemoteCameraTrack.clear(element.cameraVideo);
+  }
   updateParticipantVideoVisibility(element);
-  if (track) element.cameraVideo.play().catch(() => {});
   return true;
 }
 
@@ -2172,17 +2175,6 @@ function remoteMediaStream(streams, track) {
   if (streams?.[0]) return streams[0];
   const stream = new MediaStream();
   stream.addTrack(track);
-  return stream;
-}
-
-function bindRemoteCameraTrack(video, track, onEnded = () => {}) {
-  const stream = new MediaStream([track]);
-  video.srcObject = stream;
-  track.addEventListener("ended", () => {
-    if (video.srcObject !== stream) return;
-    video.srcObject = null;
-    onEnded();
-  }, { once: true });
   return stream;
 }
 
@@ -2960,9 +2952,10 @@ async function startWebRTC() {
         tracks.set(layer, track);
         remoteCameraLayerTracks.set(participantID, tracks);
         track.addEventListener("ended", () => {
-          if (tracks.get(layer) === track) tracks.delete(layer);
+          if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
+          tracks.delete(layer);
           if (tracks.size === 0) remoteCameraLayerTracks.delete(participantID);
-          showSelectedRemoteCamera(element);
+          if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
         }, { once: true });
         showSelectedRemoteCamera(element);
       } else {

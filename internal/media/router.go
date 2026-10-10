@@ -44,12 +44,12 @@ type publication struct {
 	limiter  *bitrateLimiter
 }
 
-type screenKeyFrameRequestKey struct {
+type videoKeyFrameRequestKey struct {
 	receiverID     string
 	publicationKey string
 }
 
-type screenKeyFrameRetry struct {
+type videoKeyFrameRetry struct {
 	publication *publication
 	remaining   int
 	timer       *time.Timer
@@ -57,10 +57,10 @@ type screenKeyFrameRetry struct {
 }
 
 const (
-	screenKeyFrameRetryDelay   = 250 * time.Millisecond
-	screenKeyFrameRequestCount = 3
-	maxVideoFrameBufferBytes   = 16 << 20
-	maxQueuedVideoFrames       = 4
+	videoKeyFrameRetryDelay   = 250 * time.Millisecond
+	videoKeyFrameRequestCount = 3
+	maxVideoFrameBufferBytes  = 16 << 20
+	maxQueuedVideoFrames      = 4
 )
 
 type Router struct {
@@ -71,7 +71,7 @@ type Router struct {
 	videoSubscriptions    map[string]map[string]struct{}
 	videoSubscriptionsSet map[string]bool
 	cameraLayers          map[string]string
-	screenKeyFrameRetries map[screenKeyFrameRequestKey]*screenKeyFrameRetry
+	videoKeyFrameRetries  map[videoKeyFrameRequestKey]*videoKeyFrameRetry
 	limits                Limits
 }
 
@@ -87,7 +87,7 @@ func NewRouter(config ...Limits) *Router {
 		videoSubscriptions:    make(map[string]map[string]struct{}),
 		videoSubscriptionsSet: make(map[string]bool),
 		cameraLayers:          make(map[string]string),
-		screenKeyFrameRetries: make(map[screenKeyFrameRequestKey]*screenKeyFrameRetry),
+		videoKeyFrameRetries:  make(map[videoKeyFrameRequestKey]*videoKeyFrameRetry),
 		limits:                limits,
 	}
 }
@@ -137,7 +137,7 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 func (r *Router) Unregister(id string) {
 	offers := make(map[string]Offerer)
 	r.mu.Lock()
-	r.cancelScreenKeyFrameRetriesForReceiverLocked(id)
+	r.cancelVideoKeyFrameRetriesForReceiverLocked(id)
 	delete(r.peers, id)
 	delete(r.offerers, id)
 	delete(r.videoSubscriptions, id)
@@ -148,7 +148,7 @@ func (r *Router) Unregister(id string) {
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
-			r.cancelScreenKeyFrameRetriesForPublicationLocked(pub)
+			r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
 			for targetID, sender := range pub.senders {
 				if peer := r.peers[targetID]; peer != nil && sender != nil {
 					_ = peer.RemoveTrack(sender)
@@ -374,81 +374,81 @@ func (r *Router) Unpublish(sourceID string, role SourceRole) {
 	}
 }
 
-// RequestScreenKeyFrame asks active screen publishers to send a fresh frame
-// after a receiver has accepted the offer that added the screen track. It
+// RequestVideoKeyFrame asks active camera and screen publishers with a
+// track sent to receiverID to send a fresh frame after negotiation signaling.
 // retries a bounded number of times and cancels retries when either peer or
 // the publication is removed. onError is optional and reports RTCP write
 // failures from the initial request or a retry.
-func (r *Router) RequestScreenKeyFrame(receiverID string, onError ...func(error)) {
+func (r *Router) RequestVideoKeyFrame(receiverID string, onError ...func(error)) {
 	var reportError func(error)
 	if len(onError) > 0 {
 		reportError = onError[0]
 	}
-	r.requestScreenKeyFrame(receiverID, reportError)
+	r.requestVideoKeyFrame(receiverID, reportError)
 }
 
-func (r *Router) requestScreenKeyFrame(receiverID string, onError func(error)) {
-	var requests []*screenKeyFrameRetry
+func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
+	var requests []*videoKeyFrameRetry
 	r.mu.Lock()
 	for _, pub := range r.pubs {
-		if pub.role != SourceRoleScreen || pub.source == nil || pub.remote == nil {
+		if (pub.role != SourceRoleCamera && pub.role != SourceRoleScreen) || pub.source == nil || pub.remote == nil {
 			continue
 		}
 		if pub.senders[receiverID] == nil {
 			continue
 		}
-		key := screenKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
-		if existing := r.screenKeyFrameRetries[key]; existing != nil {
+		key := videoKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
+		if existing := r.videoKeyFrameRetries[key]; existing != nil {
 			if existing.publication == pub {
 				continue
 			}
 			existing.timer.Stop()
-			delete(r.screenKeyFrameRetries, key)
+			delete(r.videoKeyFrameRetries, key)
 		}
-		request := &screenKeyFrameRetry{
+		request := &videoKeyFrameRetry{
 			publication: pub,
-			remaining:   screenKeyFrameRequestCount - 1,
+			remaining:   videoKeyFrameRequestCount - 1,
 			onError:     onError,
 		}
-		request.timer = time.AfterFunc(screenKeyFrameRetryDelay, func() {
-			r.retryScreenKeyFrame(key, request)
+		request.timer = time.AfterFunc(videoKeyFrameRetryDelay, func() {
+			r.retryVideoKeyFrame(key, request)
 		})
-		r.screenKeyFrameRetries[key] = request
+		r.videoKeyFrameRetries[key] = request
 		requests = append(requests, request)
 	}
 	r.mu.Unlock()
 
 	for _, request := range requests {
-		r.writeScreenKeyFrame(request.publication, request.onError)
+		r.writeVideoKeyFrame(request.publication, request.onError)
 	}
 }
 
-func (r *Router) retryScreenKeyFrame(key screenKeyFrameRequestKey, request *screenKeyFrameRetry) {
+func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoKeyFrameRetry) {
 	r.mu.Lock()
-	if r.screenKeyFrameRetries[key] != request {
+	if r.videoKeyFrameRetries[key] != request {
 		r.mu.Unlock()
 		return
 	}
 	if r.pubs[request.publication.key] != request.publication ||
 		request.publication.senders[key.receiverID] == nil {
-		delete(r.screenKeyFrameRetries, key)
+		delete(r.videoKeyFrameRetries, key)
 		r.mu.Unlock()
 		return
 	}
 	request.remaining--
 	if request.remaining == 0 {
-		delete(r.screenKeyFrameRetries, key)
+		delete(r.videoKeyFrameRetries, key)
 	} else {
-		request.timer = time.AfterFunc(screenKeyFrameRetryDelay, func() {
-			r.retryScreenKeyFrame(key, request)
+		request.timer = time.AfterFunc(videoKeyFrameRetryDelay, func() {
+			r.retryVideoKeyFrame(key, request)
 		})
 	}
 	r.mu.Unlock()
 
-	r.writeScreenKeyFrame(request.publication, request.onError)
+	r.writeVideoKeyFrame(request.publication, request.onError)
 }
 
-func (r *Router) writeScreenKeyFrame(pub *publication, onError func(error)) {
+func (r *Router) writeVideoKeyFrame(pub *publication, onError func(error)) {
 	err := pub.source.WriteRTCP([]rtcp.Packet{
 		&rtcp.PictureLossIndication{MediaSSRC: uint32(pub.remote.SSRC())},
 	})
@@ -457,23 +457,23 @@ func (r *Router) writeScreenKeyFrame(pub *publication, onError func(error)) {
 	}
 }
 
-func (r *Router) cancelScreenKeyFrameRetriesForReceiverLocked(receiverID string) {
-	for key, request := range r.screenKeyFrameRetries {
+func (r *Router) cancelVideoKeyFrameRetriesForReceiverLocked(receiverID string) {
+	for key, request := range r.videoKeyFrameRetries {
 		if key.receiverID != receiverID {
 			continue
 		}
 		request.timer.Stop()
-		delete(r.screenKeyFrameRetries, key)
+		delete(r.videoKeyFrameRetries, key)
 	}
 }
 
-func (r *Router) cancelScreenKeyFrameRetriesForPublicationLocked(pub *publication) {
-	for key, request := range r.screenKeyFrameRetries {
+func (r *Router) cancelVideoKeyFrameRetriesForPublicationLocked(pub *publication) {
+	for key, request := range r.videoKeyFrameRetries {
 		if request.publication != pub {
 			continue
 		}
 		request.timer.Stop()
-		delete(r.screenKeyFrameRetries, key)
+		delete(r.videoKeyFrameRetries, key)
 	}
 }
 
@@ -863,7 +863,7 @@ func (r *Router) removePublication(pub *publication) {
 // removePublicationLocked detaches a publication's outgoing tracks. The
 // caller must hold r.mu; returned offers must run after the lock is released.
 func (r *Router) removePublicationLocked(pub *publication) []Offerer {
-	r.cancelScreenKeyFrameRetriesForPublicationLocked(pub)
+	r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
 	var offers []Offerer
 	for targetID, sender := range pub.senders {
 		if peer := r.peers[targetID]; peer != nil {

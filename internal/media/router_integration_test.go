@@ -104,8 +104,9 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	if _, err := sourceClient.AddTrack(audioTrack); err != nil {
 		t.Fatalf("add audio track: %v", err)
 	}
-	if _, err := sourceClient.AddTrack(videoTrack); err != nil {
-		t.Fatalf("add video track: %v", err)
+	videoSender, err := sourceClient.AddTrack(videoTrack)
+	if err != nil {
+		t.Fatalf("add camera track: %v", err)
 	}
 	screenSender, err := sourceClient.AddTrack(screenTrack)
 	if err != nil {
@@ -135,40 +136,67 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
 	negotiateIntegrationPeers(t, secondTargetEgress.Connection(), secondTargetClient)
 
-	screenFeedback := make(chan *rtcp.PictureLossIndication, screenKeyFrameRequestCount+1)
-	go func() {
-		for {
-			packets, _, err := screenSender.ReadRTCP()
-			if err != nil {
-				return
+	readPLIs := func(sender *pion.RTPSender) <-chan *rtcp.PictureLossIndication {
+		feedback := make(chan *rtcp.PictureLossIndication, videoKeyFrameRequestCount+1)
+		go func() {
+			for {
+				packets, _, err := sender.ReadRTCP()
+				if err != nil {
+					return
+				}
+				for _, packet := range packets {
+					pli, ok := packet.(*rtcp.PictureLossIndication)
+					if !ok {
+						continue
+					}
+					select {
+					case feedback <- pli:
+					default:
+					}
+				}
 			}
-			for _, packet := range packets {
-				pli, ok := packet.(*rtcp.PictureLossIndication)
-				if !ok {
-					continue
+		}()
+		return feedback
+	}
+	cameraFeedback := readPLIs(videoSender)
+	screenFeedback := readPLIs(screenSender)
+	router.RequestVideoKeyFrame("target", nil)
+	for _, feedback := range []struct {
+		role string
+		pli  <-chan *rtcp.PictureLossIndication
+	}{
+		{role: "camera", pli: cameraFeedback},
+		{role: "screen", pli: screenFeedback},
+	} {
+		for attempt := 0; attempt < videoKeyFrameRequestCount; attempt++ {
+			select {
+			case pli := <-feedback.pli:
+				if pli.MediaSSRC == 0 {
+					t.Fatalf("%s keyframe feedback = %#v, want PLI with source SSRC", feedback.role, pli)
 				}
-				select {
-				case screenFeedback <- pli:
-				default:
-				}
+			case <-time.After(routerIntegrationTimeout):
+				t.Fatalf("%s publisher received only %d of %d keyframe requests", feedback.role, attempt, videoKeyFrameRequestCount)
 			}
 		}
-	}()
-	router.RequestScreenKeyFrame("target", nil)
-	for attempt := 0; attempt < screenKeyFrameRequestCount; attempt++ {
 		select {
-		case pli := <-screenFeedback:
-			if pli.MediaSSRC == 0 {
-				t.Fatalf("screen keyframe feedback = %#v, want PLI with source SSRC", pli)
-			}
+		case pli := <-feedback.pli:
+			t.Fatalf("%s publisher received an extra keyframe request after bounded retries: %#v", feedback.role, pli)
+		case <-time.After(2*videoKeyFrameRetryDelay + 50*time.Millisecond):
+		}
+	}
+
+	router.RequestVideoKeyFrame("second-target", nil)
+	for attempt := 0; attempt < videoKeyFrameRequestCount; attempt++ {
+		select {
+		case <-screenFeedback:
 		case <-time.After(routerIntegrationTimeout):
-			t.Fatalf("screen publisher received only %d of %d keyframe requests", attempt, screenKeyFrameRequestCount)
+			t.Fatalf("screen publisher received only %d of %d requests for second receiver", attempt, videoKeyFrameRequestCount)
 		}
 	}
 	select {
-	case pli := <-screenFeedback:
-		t.Fatalf("screen publisher received an extra keyframe request after the bounded retries: %#v", pli)
-	case <-time.After(2*screenKeyFrameRetryDelay + 50*time.Millisecond):
+	case pli := <-cameraFeedback:
+		t.Fatalf("unsubscribed second receiver triggered a camera keyframe request: %#v", pli)
+	case <-time.After(2*videoKeyFrameRetryDelay + 50*time.Millisecond):
 	}
 
 	sendIntegrationRTP(t, audioTrack, pion.RTPCodecTypeAudio, 48_000)
@@ -221,7 +249,7 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 		}
 	}
 
-	router.RequestScreenKeyFrame("target", nil)
+	router.RequestVideoKeyFrame("target", nil)
 	select {
 	case <-screenFeedback:
 	case <-time.After(routerIntegrationTimeout):
@@ -231,7 +259,7 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	select {
 	case pli := <-screenFeedback:
 		t.Fatalf("screen publisher received a retry after unpublish: %#v", pli)
-	case <-time.After(2*screenKeyFrameRetryDelay + 50*time.Millisecond):
+	case <-time.After(2*videoKeyFrameRetryDelay + 50*time.Millisecond):
 	}
 }
 

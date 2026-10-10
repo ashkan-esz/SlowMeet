@@ -446,7 +446,7 @@ func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
 	}
 }
 
-func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
+func TestCompletedNegotiationsRequestCameraKeyFrames(t *testing.T) {
 	serverConnections := make(chan *websocket.Conn, 1)
 	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
@@ -507,19 +507,19 @@ func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
 	})
 	publicationReady := make(chan struct{})
 	publisherIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
-		hub.router.Publish("publisher", media.SourceRoleScreen, publisherIngress, track)
+		hub.router.Publish("publisher", media.SourceRoleCamera, publisherIngress, track)
 		close(publicationReady)
 	})
 	publisherTrack, err := pion.NewTrackLocalStaticRTP(
 		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90_000},
-		"publisher-screen", "publisher-stream",
+		"publisher-camera", "publisher-stream",
 	)
 	if err != nil {
-		t.Fatalf("create publisher screen track: %v", err)
+		t.Fatalf("create publisher camera track: %v", err)
 	}
 	publisherSender, err := publisherBrowser.AddTrack(publisherTrack)
 	if err != nil {
-		t.Fatalf("add publisher screen track: %v", err)
+		t.Fatalf("add publisher camera track: %v", err)
 	}
 	negotiateHubTestPeers(t, publisherBrowser, publisherIngress.Connection())
 	waitForPeerConnected(t, publisherBrowser)
@@ -528,15 +528,15 @@ func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
 		Header:  rtp.Header{Version: 2, Marker: true, PayloadType: 96, SequenceNumber: 1, Timestamp: 9_000},
 		Payload: []byte{0x10, 0x00},
 	}); err != nil {
-		t.Fatalf("write initial screen packet: %v", err)
+		t.Fatalf("write initial camera packet: %v", err)
 	}
 	select {
 	case <-publicationReady:
 	case <-time.After(5 * time.Second):
-		t.Fatal("screen publication was not created")
+		t.Fatal("camera publication was not created")
 	}
 
-	pliReceived := make(chan struct{}, 1)
+	pliReceived := make(chan struct{}, 8)
 	go func() {
 		for {
 			packets, _, readErr := publisherSender.ReadRTCP()
@@ -549,11 +549,20 @@ func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
 					case pliReceived <- struct{}{}:
 					default:
 					}
-					return
 				}
 			}
 		}
 	}()
+	awaitPLIRequests := func(negotiation string) {
+		t.Helper()
+		for attempt := range 3 {
+			select {
+			case <-pliReceived:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("camera publisher received only %d of 3 keyframe requests after %s", attempt, negotiation)
+			}
+		}
+	}
 
 	offer, err := receiverBrowser.CreateOffer(nil)
 	if err != nil {
@@ -582,11 +591,45 @@ func TestBrowserInitiatedOfferRequestsScreenKeyFrame(t *testing.T) {
 	if answer.Type != TypeAnswer {
 		t.Fatalf("receiver offer response type = %q, want answer", answer.Type)
 	}
-	select {
-	case <-pliReceived:
-	case <-time.After(2 * time.Second):
-		t.Fatal("screen publisher did not receive a PLI after receiver-initiated renegotiation")
+	if err := receiverBrowser.SetRemoteDescription(pion.SessionDescription{
+		Type: pion.SDPTypeAnswer,
+		SDP:  answer.SDP,
+	}); err != nil {
+		t.Fatalf("set receiver browser remote answer: %v", err)
 	}
+	awaitPLIRequests("receiver-initiated negotiation")
+
+	if err := hub.sendOffer(c, false); err != nil {
+		t.Fatalf("send server offer: %v", err)
+	}
+	browserConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var serverOffer Message
+	if err := browserConn.ReadJSON(&serverOffer); err != nil {
+		t.Fatalf("read server offer: %v", err)
+	}
+	if serverOffer.Type != TypeOffer {
+		t.Fatalf("server negotiation message type = %q, want offer", serverOffer.Type)
+	}
+	if err := receiverBrowser.SetRemoteDescription(pion.SessionDescription{
+		Type: pion.SDPTypeOffer,
+		SDP:  serverOffer.SDP,
+	}); err != nil {
+		t.Fatalf("set receiver browser remote offer: %v", err)
+	}
+	answerToServerOffer, err := receiverBrowser.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer to server offer: %v", err)
+	}
+	if err := receiverBrowser.SetLocalDescription(answerToServerOffer); err != nil {
+		t.Fatalf("set receiver browser local answer: %v", err)
+	}
+	<-pion.GatheringCompletePromise(receiverBrowser)
+	hub.handleWebRTCMessage(c, Message{
+		Version: ProtocolVersion,
+		Type:    TypeAnswer,
+		SDP:     receiverBrowser.LocalDescription().SDP,
+	})
+	awaitPLIRequests("server-offer answer")
 }
 
 func negotiateHubTestPeers(t *testing.T, offerer, answerer *pion.PeerConnection) {
