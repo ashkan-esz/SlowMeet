@@ -1473,6 +1473,8 @@ let localCameraTrack;
 let localScreenTrack;
 let cameraOperation;
 let cameraSender;
+let cameraSenderPeer;
+let cameraSenderNegotiated = false;
 let screenSender;
 let screenShareAdaptation;
 let cameraTrack;
@@ -1929,6 +1931,7 @@ async function enableCamera() {
 
 async function enableCameraOnce() {
   if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
+  const currentPeer = peer;
   const stream = await getUserMediaWithDeviceFallback(
     "video",
     selectedDeviceIDs.video,
@@ -1942,37 +1945,58 @@ async function enableCameraOnce() {
   );
   const track = stream.getVideoTracks()[0];
   if (!track) throw new Error("camera is unavailable");
+  if (peer !== currentPeer) {
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    throw new Error("media connection changed");
+  }
+  const existingSender = cameraSender && cameraSenderPeer === currentPeer ? cameraSender : undefined;
+  if (!existingSender) {
+    cameraSender = undefined;
+    cameraSenderPeer = undefined;
+    cameraSenderNegotiated = false;
+  }
   localCameraStream = stream;
   localCameraTrack = track;
   cameraTrack = track;
   track.enabled = !videoSuspended && !audioOnly?.checked;
   localStream?.addTrack(track);
-  if (simulcastEnabled && typeof peer.addTransceiver === "function") {
-    try {
-      const transceiver = peer.addTransceiver(track, {
-        direction: "sendonly",
-        streams: [stream],
-        sendEncodings: [
-          { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
-          { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
-          { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
-        ]
-      });
-      cameraSender = transceiver.sender;
-    } catch (_) {
-      cameraSender = peer.addTrack(track, stream);
-    }
+  if (existingSender) {
+    await existingSender.replaceTrack(track);
   } else {
-    cameraSender = peer.addTrack(track, stream);
+    if (simulcastEnabled && typeof currentPeer.addTransceiver === "function") {
+      try {
+        const transceiver = currentPeer.addTransceiver(track, {
+          direction: "sendonly",
+          streams: [stream],
+          sendEncodings: [
+            { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
+            { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
+            { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
+          ]
+        });
+        cameraSender = transceiver.sender;
+      } catch (_) {
+        cameraSender = currentPeer.addTrack(track, stream);
+      }
+    } else {
+      cameraSender = currentPeer.addTrack(track, stream);
+    }
+    cameraSenderPeer = currentPeer;
+    cameraSenderNegotiated = false;
   }
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = stream;
   cameraRequested = true;
   meetingViewState.cameraEnabled = true;
+  updateVideoTransceiverDirection();
   setLocalVideoMirror(true);
   setLocalMediaControls();
-  await applyProfile(profile.value, peer, stream);
-  await renegotiateLocalMedia();
+  await applyProfile(profile.value, currentPeer, stream);
+  if (peer !== currentPeer) throw new Error("media connection changed");
+  if (!cameraSenderNegotiated) {
+    await renegotiateLocalMedia();
+    cameraSenderNegotiated = true;
+  }
   sendMediaState();
 }
 
@@ -1980,8 +2004,10 @@ async function disableCamera() {
   cameraRequested = false;
   meetingViewState.cameraEnabled = false;
   const stoppedPeer = peer;
-  const stoppedSender = cameraSender;
-  cameraSender = undefined;
+  const stoppedSender = cameraSender && cameraSenderPeer === stoppedPeer ? cameraSender : undefined;
+  const detachPromise = stoppedSender
+    ? stoppedSender.replaceTrack(null).catch((error) => error)
+    : Promise.resolve(undefined);
   localCameraTrack?.stop();
   localStream?.removeTrack(localCameraTrack);
   localCameraStream?.getTracks().forEach((track) => track.stop());
@@ -1992,16 +2018,9 @@ async function disableCamera() {
   if (local) local.cameraVideo.srcObject = null;
   setLocalMediaControls();
   sendMediaState();
-  if (stoppedSender && stoppedPeer && peer === stoppedPeer) {
-    try {
-      stoppedPeer.removeTrack(stoppedSender);
-    } catch (_) {
-      status.textContent = "Camera stopped, but media renegotiation failed.";
-      return;
-    }
-    renegotiateLocalMedia().catch(() => {
-      if (peer === stoppedPeer) status.textContent = "Camera stopped, but media renegotiation failed.";
-    });
+  const detachError = await detachPromise;
+  if (detachError && peer === stoppedPeer) {
+    status.textContent = "Camera stopped, but media could not be detached. Try enabling it again.";
   }
 }
 
@@ -2820,6 +2839,8 @@ function resetMediaConnection() {
   localCameraTrack = undefined;
   localScreenTrack = undefined;
   cameraSender = undefined;
+  cameraSenderPeer = undefined;
+  cameraSenderNegotiated = false;
   screenSender = undefined;
   cameraTrack = undefined;
   screenShareOwner = undefined;
@@ -3044,6 +3065,8 @@ async function startWebRTC() {
     localScreenTrack = undefined;
     cameraTrack = undefined;
     cameraSender = undefined;
+    cameraSenderPeer = undefined;
+    cameraSenderNegotiated = false;
     screenSender = undefined;
     setLocalMediaControls();
     if (localStream.getAudioTracks().length) attachSpeakerAnalyzer(localParticipantID, localStream);
@@ -3942,6 +3965,17 @@ function setReceiveVideoControlLabel(button, enabled) {
   button.dataset.receiveVideo = enabled ? "on" : "off";
 }
 
+function updateVideoTransceiverDirection(targetTransceiver = videoTransceiver) {
+  if (!targetTransceiver) return;
+  const cameraSharesTransceiver = cameraSender && cameraSenderPeer === peer &&
+    cameraSender === targetTransceiver.sender;
+  if (cameraSharesTransceiver) {
+    targetTransceiver.direction = receiveVideoEnabled ? "sendrecv" : "sendonly";
+    return;
+  }
+  targetTransceiver.direction = receiveVideoEnabled ? "recvonly" : "inactive";
+}
+
 function setMoreIncomingVideoState(enabled) {
   if (moreStateBadge) moreStateBadge.hidden = enabled;
   if (!more) return;
@@ -3973,7 +4007,7 @@ function setReceiveVideo(enabled) {
   const targetTransceiver = videoTransceiver;
   const generation = socketGeneration;
   if (!targetPeer || !targetTransceiver || !isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
-  targetTransceiver.direction = enabled ? "recvonly" : "inactive";
+  updateVideoTransceiverDirection(targetTransceiver);
   renegotiateLocalMedia().catch(() => {
     if (generation === socketGeneration) status.textContent = "Unable to change remote video.";
   });
@@ -4187,7 +4221,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
       }));
       if (renegotiationQueue?.hasPending() && videoTransceiver) {
-        videoTransceiver.direction = receiveVideoEnabled ? "recvonly" : "inactive";
+        updateVideoTransceiverDirection(videoTransceiver);
       }
       renegotiationQueue?.resume();
     }).catch(() => {
@@ -4311,6 +4345,8 @@ leave.addEventListener("click", () => {
   localCameraTrack = undefined;
   localScreenTrack = undefined;
   cameraSender = undefined;
+  cameraSenderPeer = undefined;
+  cameraSenderNegotiated = false;
   screenSender = undefined;
   cameraTrack = undefined;
   peer = undefined;

@@ -223,9 +223,33 @@ const cameraStopEnd = appSource.indexOf("\nlet sidebarFocusTrigger", cameraStopS
 const cameraStopSource = appSource.slice(cameraStopStart, cameraStopEnd);
 if (cameraStopStart < 0 || cameraStopEnd < 0 ||
     cameraStopSource.indexOf("localCameraTrack?.stop();") < 0 ||
-    cameraStopSource.indexOf("localCameraTrack?.stop();") > cameraStopSource.indexOf("renegotiateLocalMedia().catch(") ||
-    cameraStopSource.includes("await renegotiateLocalMedia()")) {
-  throw new Error("camera capture must stop before renegotiation is awaited or reported");
+    cameraStopSource.indexOf("localCameraTrack?.stop();") > cameraStopSource.indexOf("await detachPromise") ||
+    !cameraStopSource.includes("stoppedSender.replaceTrack(null)") ||
+    cameraStopSource.includes("cameraSender = undefined") ||
+    cameraStopSource.includes("stoppedPeer.removeTrack(") ||
+    cameraStopSource.includes("renegotiateLocalMedia()")) {
+  throw new Error("camera capture must stop immediately while reusing its sender without renegotiation");
+}
+const cameraStartStart = appSource.indexOf("async function enableCameraOnce() {");
+const cameraStartEnd = appSource.indexOf("\nasync function disableCamera()", cameraStartStart);
+const cameraStartSource = appSource.slice(cameraStartStart, cameraStartEnd);
+if (cameraStartStart < 0 || cameraStartEnd < 0 ||
+    !cameraStartSource.includes("cameraSender && cameraSenderPeer === currentPeer") ||
+    !cameraStartSource.includes("await existingSender.replaceTrack(track)") ||
+    !cameraStartSource.includes("if (!cameraSenderNegotiated)") ||
+    !cameraStartSource.includes("cameraSenderNegotiated = true;") ||
+    !cameraStartSource.includes("cameraSenderPeer = currentPeer;")) {
+  throw new Error("camera re-enable must replace the track on the existing sender and negotiate only until that sender is established");
+}
+const videoDirectionStart = appSource.indexOf("function updateVideoTransceiverDirection(");
+const videoDirectionEnd = appSource.indexOf("\nfunction setReceiveVideo(enabled)", videoDirectionStart);
+const videoDirectionSource = appSource.slice(videoDirectionStart, videoDirectionEnd);
+if (videoDirectionStart < 0 || videoDirectionEnd < 0 ||
+    !videoDirectionSource.includes("cameraSender === targetTransceiver.sender") ||
+    !videoDirectionSource.includes('"sendrecv" : "sendonly"') ||
+    !appSource.includes("updateVideoTransceiverDirection(targetTransceiver);") ||
+    !appSource.includes("updateVideoTransceiverDirection(videoTransceiver);")) {
+  throw new Error("incoming-video and offer-collision direction updates must preserve a shared camera sender");
 }
 if (!appSource.includes("const selectedPair = selectedCandidatePair(report);") ||
     !appSource.includes("values.rttMs = selectedCandidatePairRTT(report);") ||
