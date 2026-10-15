@@ -632,6 +632,174 @@ func TestCompletedNegotiationsRequestCameraKeyFrames(t *testing.T) {
 	awaitPLIRequests("server-offer answer")
 }
 
+func TestICERestartBuffersCandidatesUntilAnswer(t *testing.T) {
+	serverConnections := make(chan *websocket.Conn, 1)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial websocket test peer: %v", err)
+	}
+	defer browserConn.Close()
+	serverConn := <-serverConnections
+	defer serverConn.Close()
+
+	c := &client{
+		conn:              serverConn,
+		negotiationReady:  true,
+		remoteDescription: true,
+	}
+	peer := &restartSignalingPeer{}
+
+	if err := sendOfferWithPeer(c, peer, true); err != nil {
+		t.Fatalf("send ICE restart offer: %v", err)
+	}
+	var offer Message
+	readTestMessage(t, browserConn, &offer)
+	if offer.Type != TypeOffer || offer.SDP != "restart offer" {
+		t.Fatalf("ICE restart offer = %+v", offer)
+	}
+	if c.remoteDescription {
+		t.Fatal("remote description remained active while the restart offer was in flight")
+	}
+
+	candidate := Message{
+		Version:       ProtocolVersion,
+		Type:          TypeCandidate,
+		Candidate:     "candidate:restart-generation",
+		SDPMid:        stringPointer("0"),
+		SDPMLineIndex: uint16Pointer(0),
+	}
+	c.negotiationMu.Lock()
+	if err := addOrQueueCandidate(c, peer, candidate); err != nil {
+		c.negotiationMu.Unlock()
+		t.Fatalf("queue restart candidate: %v", err)
+	}
+	queued := len(c.pendingCandidates)
+	c.negotiationMu.Unlock()
+	if queued != 1 {
+		t.Fatalf("pending candidates = %d, want 1 before restart answer", queued)
+	}
+	if len(peer.candidates) != 0 {
+		t.Fatal("restart candidate was applied before its answer installed the matching remote description")
+	}
+
+	c.negotiationMu.Lock()
+	err = applyRemoteAnswer(c, peer, "restart answer")
+	c.negotiationMu.Unlock()
+	if err != nil {
+		t.Fatalf("apply restart answer and buffered candidate: %v", err)
+	}
+	if !c.remoteDescription {
+		t.Fatal("remote description was not marked active after applying the restart answer")
+	}
+	if got := len(c.pendingCandidates); got != 0 {
+		t.Fatalf("pending candidates after answer = %d, want 0", got)
+	}
+	if len(peer.candidates) != 1 || peer.candidates[0] != candidate.Candidate {
+		t.Fatalf("applied candidates = %v, want [%q]", peer.candidates, candidate.Candidate)
+	}
+}
+
+func TestServerOfferIsWrittenBeforeGatheredCandidates(t *testing.T) {
+	serverConnections := make(chan *websocket.Conn, 1)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial websocket test peer: %v", err)
+	}
+	defer browserConn.Close()
+	serverConn := <-serverConnections
+	defer serverConn.Close()
+
+	c := &client{conn: serverConn, negotiationReady: true, remoteDescription: true}
+	candidate := Message{
+		Version:       ProtocolVersion,
+		Type:          TypeCandidate,
+		Candidate:     "candidate:restart-generation",
+		SDPMid:        stringPointer("0"),
+		SDPMLineIndex: uint16Pointer(0),
+	}
+	candidateStarted := make(chan struct{})
+	candidateWritten := make(chan error, 1)
+	peer := &restartSignalingPeer{
+		onCreateOffer: func() {
+			go func() {
+				close(candidateStarted)
+				candidateWritten <- c.sendOrQueueLocalCandidate(candidate)
+			}()
+			<-candidateStarted
+		},
+	}
+
+	if err := sendOfferWithPeer(c, peer, true); err != nil {
+		t.Fatalf("send ICE restart offer: %v", err)
+	}
+	var offer Message
+	readTestMessage(t, browserConn, &offer)
+	if offer.Type != TypeOffer {
+		t.Fatalf("first signaling message = %q, want offer", offer.Type)
+	}
+	var gatheredCandidate Message
+	readTestMessage(t, browserConn, &gatheredCandidate)
+	if gatheredCandidate.Type != TypeCandidate || gatheredCandidate.Candidate != candidate.Candidate {
+		t.Fatalf("second signaling message = %+v, want restart candidate after offer", gatheredCandidate)
+	}
+	if err := <-candidateWritten; err != nil {
+		t.Fatalf("write gathered restart candidate: %v", err)
+	}
+}
+
+type restartSignalingPeer struct {
+	remoteAnswer  string
+	candidates    []string
+	onCreateOffer func()
+}
+
+func (p *restartSignalingPeer) CreateOffer(iceRestart bool) (string, error) {
+	if !iceRestart {
+		return "", errors.New("expected an ICE restart offer")
+	}
+	if p.onCreateOffer != nil {
+		p.onCreateOffer()
+	}
+	return "restart offer", nil
+}
+
+func (p *restartSignalingPeer) SetRemoteAnswer(sdp string) error {
+	p.remoteAnswer = sdp
+	return nil
+}
+
+func (p *restartSignalingPeer) AddICECandidate(candidate string, _ *string, _ *uint16) error {
+	if p.remoteAnswer == "" {
+		return errors.New("candidate arrived before remote answer")
+	}
+	p.candidates = append(p.candidates, candidate)
+	return nil
+}
+
+func stringPointer(value string) *string { return &value }
+
+func uint16Pointer(value uint16) *uint16 { return &value }
+
 func negotiateHubTestPeers(t *testing.T, offerer, answerer *pion.PeerConnection) {
 	t.Helper()
 	offer, err := offerer.CreateOffer(nil)

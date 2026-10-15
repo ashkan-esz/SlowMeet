@@ -291,6 +291,20 @@ async function run() {
   await testStalePeerRejectsInflightAndQueuedRequests();
 
   const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+  const receiveVideoHandler = appSource.match(/function setReceiveVideo\(enabled\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(receiveVideoHandler, "incoming-video control handler should exist");
+  assert.ok(
+    receiveVideoHandler.indexOf("updateVideoTransceiverDirection(targetTransceiver)") <
+      receiveVideoHandler.indexOf("updateParticipantPagination()"),
+    "set receive direction before the subscription update can trigger a server offer"
+  );
+  assert.doesNotMatch(receiveVideoHandler, /renegotiateLocalMedia\(\)/,
+    "subscription changes should not also request a browser offer");
+  assert.match(appSource, /function isPeerConnectionConnected\(targetPeer\)[\s\S]*?targetPeer\?\.connectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "completed"/);
+  assert.match(appSource, /if \(label === "Connected" && !isPeerConnectionConnected\(peer\)\) return;/,
+    "stats must not replace a disconnected transport label with Connected");
+  assert.match(appSource, /iceDisconnectRestartTimer = setTimeout\([\s\S]*?type: "ice_restart"[\s\S]*?\}, 5000\);/,
+    "a sustained disconnected peer should request one delayed ICE restart");
   assert.match(appSource, /renegotiationQueue = createRenegotiationQueue\(/);
   assert.match(appSource, /renegotiationQueue\?\.answer\(\)/);
   assert.match(appSource, /renegotiationQueue\?\.rollback\(\)/);

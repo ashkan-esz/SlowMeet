@@ -1244,6 +1244,8 @@ connectionPopoverControls?.addEventListener("click", () => {
 connectionPopoverRetry?.addEventListener("click", () => {
   setConnectionPopoverOpen(false, null, false);
   if (socket?.readyState === WebSocket.OPEN && peer) {
+    clearTimeout(iceDisconnectRestartTimer);
+    iceDisconnectRestartTimer = undefined;
     restartRequested = false;
     status.textContent = "Restarting media...";
     socket.send(JSON.stringify({version: 1, type: "ice_restart"}));
@@ -1491,6 +1493,7 @@ let remoteDescriptionSet = false;
 let reconnectTimer;
 let intentionalClose = false;
 let restartRequested = false;
+let iceDisconnectRestartTimer;
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
 let statsTimer;
@@ -2853,6 +2856,8 @@ function resetMediaConnection() {
   updateScreenShareUI();
   remoteDescriptionSet = false;
   pendingCandidates.splice(0);
+  clearTimeout(iceDisconnectRestartTimer);
+  iceDisconnectRestartTimer = undefined;
   restartRequested = false;
   previousStats = undefined;
   cameraLayerPoorSamples = 0;
@@ -2872,6 +2877,8 @@ async function startWebRTC() {
   }
   await iceConfigReady;
   if (generation !== socketGeneration || socket !== currentSocket) return;
+  clearTimeout(iceDisconnectRestartTimer);
+  iceDisconnectRestartTimer = undefined;
   renegotiationQueue?.close(new Error("WebRTC connection replaced"));
   const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });
   restartRequested = false;
@@ -2911,34 +2918,10 @@ async function startWebRTC() {
     })
   });
   currentPeer.oniceconnectionstatechange = () => {
-    if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-    if (currentPeer.iceConnectionState === "connected" || currentPeer.iceConnectionState === "completed") {
-      setConnection("good", "Connected");
-      setParticipantConnectionState("connected");
-    } else if (currentPeer.iceConnectionState === "checking") {
-      setConnection("", "Connecting");
-    } else if (currentPeer.iceConnectionState === "disconnected") {
-      setConnection("fair", "Reconnecting");
-      setParticipantConnectionState("disconnected");
-    } else if (currentPeer.iceConnectionState === "failed") {
-      setConnection("poor", "Offline");
-      setParticipantConnectionState("disconnected");
-    }
+    updatePeerConnectionUI(currentPeer, currentSocket, generation);
   };
   currentPeer.onconnectionstatechange = () => {
-    if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-    if (currentPeer.connectionState === "connected") {
-      restartRequested = false;
-      status.textContent = "Connected";
-    }
-    if (currentPeer.connectionState === "disconnected") {
-      status.textContent = "Reconnecting media...";
-    }
-    if (currentPeer.connectionState === "failed" && !restartRequested) {
-      restartRequested = true;
-      status.textContent = "Restarting media...";
-      currentSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
-    }
+    updatePeerConnectionUI(currentPeer, currentSocket, generation);
   };
   currentPeer.addTransceiver("audio", { direction: "recvonly" });
   videoTransceiver = currentPeer.addTransceiver("video", {
@@ -3183,8 +3166,7 @@ function updateConnectionSummary(level, label) {
   if (connectionSummaryTitle) connectionSummaryTitle.textContent = label;
   if (connectionSummaryCopy) {
     const audioAvailable = Boolean(localStream?.getAudioTracks().length);
-    const mediaConnected = peer?.connectionState === "connected" ||
-      peer?.iceConnectionState === "connected" || peer?.iceConnectionState === "completed";
+    const mediaConnected = isPeerConnectionConnected(peer);
     const audioText = !audioAvailable
       ? "Audio is not available yet."
       : mediaConnected ? "Audio is connected." : "Audio is ready on this device.";
@@ -3228,7 +3210,65 @@ function setConnection(level, label) {
   pendingConnectionSamples = 0;
 }
 
+function isPeerConnectionConnected(targetPeer) {
+  return targetPeer?.connectionState === "connected" &&
+    (targetPeer.iceConnectionState === "connected" || targetPeer.iceConnectionState === "completed");
+}
+
+function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
+  if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || targetPeer.connectionState === "closed") return;
+  if (isPeerConnectionConnected(targetPeer)) {
+    clearTimeout(iceDisconnectRestartTimer);
+    iceDisconnectRestartTimer = undefined;
+    restartRequested = false;
+    setConnection("good", "Connected");
+    setParticipantConnectionState("connected");
+    status.textContent = "Connected";
+    return;
+  }
+
+  if (targetPeer.connectionState === "failed" || targetPeer.iceConnectionState === "failed") {
+    clearTimeout(iceDisconnectRestartTimer);
+    iceDisconnectRestartTimer = undefined;
+    setConnection("poor", "Offline");
+    setParticipantConnectionState("disconnected");
+    status.textContent = "Restarting media...";
+    if (!restartRequested) {
+      restartRequested = true;
+      if (targetSocket.readyState === WebSocket.OPEN) {
+        targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
+      }
+    }
+    return;
+  }
+
+  if (targetPeer.connectionState === "disconnected" || targetPeer.iceConnectionState === "disconnected") {
+    setConnection("fair", "Reconnecting");
+    setParticipantConnectionState("disconnected");
+    status.textContent = restartRequested ? "Restarting media..." : "Reconnecting media...";
+    if (!restartRequested && iceDisconnectRestartTimer === undefined) {
+      iceDisconnectRestartTimer = setTimeout(() => {
+        iceDisconnectRestartTimer = undefined;
+        if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || restartRequested) return;
+        if (targetPeer.connectionState !== "disconnected" && targetPeer.iceConnectionState !== "disconnected") return;
+        restartRequested = true;
+        status.textContent = "Restarting media...";
+        if (targetSocket.readyState === WebSocket.OPEN) {
+          targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
+        }
+      }, 5000);
+    }
+    return;
+  }
+
+  clearTimeout(iceDisconnectRestartTimer);
+  iceDisconnectRestartTimer = undefined;
+  setConnection("", "Connecting");
+  status.textContent = restartRequested ? "Restarting media..." : "Connecting media...";
+}
+
 function setMeasuredConnection(level, label) {
+  if (label === "Connected" && !isPeerConnectionConnected(peer)) return;
   if (level === lastConnectionLevel) {
     pendingConnectionLevel = "";
     pendingConnectionSamples = 0;
@@ -3992,6 +4032,14 @@ function setMoreIncomingVideoState(enabled) {
 
 function setReceiveVideo(enabled) {
   receiveVideoEnabled = enabled;
+  const targetPeer = peer;
+  const targetSocket = socket;
+  const targetTransceiver = videoTransceiver;
+  const generation = socketGeneration;
+  if (targetPeer && targetTransceiver && isCurrentWebRTC(generation, targetPeer, targetSocket)) {
+    updateVideoTransceiverDirection(targetTransceiver);
+  }
+  // The router offers subscription changes; a simultaneous browser offer can collide with it.
   updateParticipantPagination();
   setReceiveVideoControlLabel(receiveVideo, enabled);
   receiveVideo.setAttribute("aria-pressed", String(enabled));
@@ -4002,15 +4050,6 @@ function setReceiveVideo(enabled) {
   renderPeopleList();
   updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
   showToast(enabled ? "Incoming video is on for this device." : "Incoming video is off for this device.");
-  const targetPeer = peer;
-  const targetSocket = socket;
-  const targetTransceiver = videoTransceiver;
-  const generation = socketGeneration;
-  if (!targetPeer || !targetTransceiver || !isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
-  updateVideoTransceiverDirection(targetTransceiver);
-  renegotiateLocalMedia().catch(() => {
-    if (generation === socketGeneration) status.textContent = "Unable to change remote video.";
-  });
 }
 
 function updateScreenShareUI() {
@@ -4308,6 +4347,8 @@ leave.addEventListener("click", () => {
   hiddenParticipantIDs.clear();
   intentionalClose = true;
   socketGeneration++;
+  clearTimeout(iceDisconnectRestartTimer);
+  iceDisconnectRestartTimer = undefined;
   clearTimeout(reconnectTimer);
   clearInterval(statsTimer);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {

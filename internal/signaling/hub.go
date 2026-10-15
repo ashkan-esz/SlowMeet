@@ -60,6 +60,7 @@ type client struct {
 	negotiationReady          bool
 	remoteDescription         bool
 	pendingCandidates         []Message
+	pendingLocalCandidates    []Message
 	offerInFlight             bool
 	pendingOffer              bool
 	pendingICERestart         bool
@@ -67,6 +68,19 @@ type client struct {
 	activeScreenMediaTrackID  string
 	reactionWindowStart       time.Time
 	reactionCount             int
+}
+
+type offerPeer interface {
+	CreateOffer(iceRestart bool) (string, error)
+}
+
+type answerCandidatePeer interface {
+	SetRemoteAnswer(sdp string) error
+	AddICECandidate(candidate string, mid *string, mlineIndex *uint16) error
+}
+
+type candidatePeer interface {
+	AddICECandidate(candidate string, mid *string, mlineIndex *uint16) error
 }
 
 type pendingReconnect struct {
@@ -692,7 +706,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.peer.OnICECandidate(func(candidate pion.ICECandidateInit) {
-			_ = c.write(Message{
+			_ = c.sendOrQueueLocalCandidate(Message{
 				Version: ProtocolVersion, Type: TypeCandidate,
 				Candidate: candidate.Candidate, SDPMid: candidate.SDPMid,
 				SDPMLineIndex: candidate.SDPMLineIndex,
@@ -824,22 +838,21 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			return
 		}
-		if err := applyPendingCandidates(c); err != nil {
+		if err := applyPendingCandidates(c, c.peer); err != nil {
 			c.negotiationMu.Unlock()
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			return
 		}
 		c.remoteDescription = true
+		wasNegotiationReady := c.negotiationReady
+		c.negotiationReady = false
 		answer, err := c.peer.CreateAnswer()
 		if err != nil {
+			c.negotiationReady = wasNegotiationReady
 			c.negotiationMu.Unlock()
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			return
 		}
-		// Router updates can request an offer as soon as the remote camera
-		// tracks arrive. Keep those offers pending until this answer is on the
-		// signaling socket so they cannot overtake it.
-		c.negotiationReady = false
 		c.negotiationMu.Unlock()
 		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
 			return
@@ -848,6 +861,9 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
 		})
 		c.negotiationMu.Lock()
+		if err := c.flushPendingLocalCandidates(); err != nil {
+			h.Logger.Error("ice_candidate_write_failed", "participant_id", c.participant.ID, "error", err)
+		}
 		c.negotiationReady = true
 		shouldOffer := c.pendingOffer
 		iceRestart := c.pendingICERestart
@@ -863,10 +879,7 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			c.negotiationMu.Unlock()
 			return
 		}
-		err := c.peer.SetRemoteAnswer(msg.SDP)
-		if err == nil {
-			err = applyPendingCandidates(c)
-		}
+		err := applyRemoteAnswer(c, c.peer, msg.SDP)
 		shouldOffer := c.offerInFlight && c.pendingOffer
 		iceRestart := c.pendingICERestart
 		c.offerInFlight = false
@@ -885,13 +898,9 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		}
 	case TypeCandidate:
 		c.negotiationMu.Lock()
-		if !c.remoteDescription {
-			c.pendingCandidates = append(c.pendingCandidates, msg)
-			c.negotiationMu.Unlock()
-			return
-		}
+		err := addOrQueueCandidate(c, c.peer, msg)
 		c.negotiationMu.Unlock()
-		if err := c.peer.AddICECandidate(msg.Candidate, msg.SDPMid, msg.SDPMLineIndex); err != nil {
+		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		}
 	case TypeICERestart:
@@ -901,11 +910,27 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 	}
 }
 
-func applyPendingCandidates(c *client) error {
+func applyRemoteAnswer(c *client, peer answerCandidatePeer, sdp string) error {
+	if err := peer.SetRemoteAnswer(sdp); err != nil {
+		return err
+	}
+	c.remoteDescription = true
+	return applyPendingCandidates(c, peer)
+}
+
+func addOrQueueCandidate(c *client, peer candidatePeer, candidate Message) error {
+	if !c.remoteDescription {
+		c.pendingCandidates = append(c.pendingCandidates, candidate)
+		return nil
+	}
+	return peer.AddICECandidate(candidate.Candidate, candidate.SDPMid, candidate.SDPMLineIndex)
+}
+
+func applyPendingCandidates(c *client, peer candidatePeer) error {
 	pending := c.pendingCandidates
 	c.pendingCandidates = nil
 	for _, candidate := range pending {
-		if err := c.peer.AddICECandidate(candidate.Candidate, candidate.SDPMid, candidate.SDPMLineIndex); err != nil {
+		if err := peer.AddICECandidate(candidate.Candidate, candidate.SDPMid, candidate.SDPMLineIndex); err != nil {
 			return err
 		}
 	}
@@ -913,6 +938,10 @@ func applyPendingCandidates(c *client) error {
 }
 
 func (h *Hub) sendOffer(c *client, iceRestart bool) error {
+	return sendOfferWithPeer(c, c.peer, iceRestart)
+}
+
+func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 	c.negotiationMu.Lock()
 	if !c.negotiationReady {
 		c.pendingOffer = true
@@ -927,15 +956,23 @@ func (h *Hub) sendOffer(c *client, iceRestart bool) error {
 		return nil
 	}
 	c.offerInFlight = true
-	offer, err := c.peer.CreateOffer(iceRestart)
+	previousRemoteDescription := c.remoteDescription
+	if iceRestart {
+		// Browser candidates gathered for the restarted ICE credentials must
+		// wait until their answer becomes the active remote description.
+		c.remoteDescription = false
+	}
+	offer, err := peer.CreateOffer(iceRestart)
 	if err != nil {
 		c.offerInFlight = false
+		c.remoteDescription = previousRemoteDescription
 		c.negotiationMu.Unlock()
 		return err
 	}
 	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
 	if err != nil {
 		c.offerInFlight = false
+		c.remoteDescription = previousRemoteDescription
 	}
 	c.negotiationMu.Unlock()
 	return err
@@ -949,6 +986,29 @@ func (c *client) write(msg Message) error {
 	}
 	defer c.conn.SetWriteDeadline(time.Time{})
 	return c.conn.WriteJSON(msg)
+}
+
+func (c *client) sendOrQueueLocalCandidate(candidate Message) error {
+	c.negotiationMu.Lock()
+	defer c.negotiationMu.Unlock()
+	if !c.negotiationReady {
+		c.pendingLocalCandidates = append(c.pendingLocalCandidates, candidate)
+		return nil
+	}
+	return c.write(candidate)
+}
+
+// flushPendingLocalCandidates must be called with negotiationMu held.
+func (c *client) flushPendingLocalCandidates() error {
+	pending := c.pendingLocalCandidates
+	c.pendingLocalCandidates = nil
+	for index, candidate := range pending {
+		if err := c.write(candidate); err != nil {
+			c.pendingLocalCandidates = append(pending[index:], c.pendingLocalCandidates...)
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *Hub) broadcast(msg Message) {
