@@ -113,6 +113,21 @@ function testCurrentTrackEndClearsVideo() {
   assert.equal(endedUpdates, 1, "ended cleanup should run once");
 }
 
+function testSameTrackCanResumeAfterInactiveShareState() {
+  const video = createVideo();
+  const track = createTrack();
+  const firstStream = bindRemoteScreenTrack(video, track, () => {}, createStream);
+
+  assert.equal(bindRemoteScreenTrack.clear(video, firstStream), true);
+  assert.equal(video.srcObject, null, "inactive share state should clear the current binding");
+
+  const resumedStream = bindRemoteScreenTrack(video, track, () => {}, createStream);
+  assert.notEqual(resumedStream, firstStream);
+  assert.equal(video.srcObject, resumedStream, "an active state can rebind a retained screen track");
+  track.emit("unmute");
+  assert.equal(video.srcObject, resumedStream, "the resumed track should keep its current binding");
+}
+
 function testScreenVideoStartsMutedInlinePlaybackBeforeBinding() {
   const video = createVideo();
   const track = createTrack();
@@ -169,14 +184,18 @@ function testShareStateCleanupCannotClearNewBinding() {
 
 testOldTrackEndDoesNotClearRestartedShare();
 testCurrentTrackEndClearsVideo();
+testSameTrackCanResumeAfterInactiveShareState();
 testShareStateCleanupCannotClearNewBinding();
 testScreenVideoStartsMutedInlinePlaybackBeforeBinding();
 testScreenVideoRetriesPlaybackWhenTrackAndMetadataBecomeReady();
 testStaleTrackEventsCannotRestartCurrentPlayback();
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
 const pageSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
-assert.match(appSource, /bindRemoteScreenTrack\(video, track, \(\) => \{/);
+assert.match(appSource, /bindRemoteScreenTrack\(element\.screenVideo, track, \(\) => \{/);
 assert.match(appSource, /bindRemoteScreenTrack\.clear\([\s\S]*previousBinding\.stream/);
+assert.match(appSource, /bindRemoteScreenTrackForParticipant\(\s*screenShareOwner,\s*activeElement,\s*activeBinding\.track/);
+assert.match(appSource, /screenSender\.setStreams\(screenStream\);\s*await screenSender\.replaceTrack\(localScreenTrack\)/);
+assert.match(appSource, /sender\.replaceTrack\(null\)/);
 assert.doesNotMatch(appSource, /recoverRemoteScreenVideo|screenRecoveryChain|remoteScreenRecoveryGuard/);
-assert.match(pageSource, /<script src="\/js\/remote-screen-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
+assert.match(pageSource, /<script src="\/js\/remote-screen-video\.js"><\/script>\s*<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
 console.log("remote screen video tests passed");

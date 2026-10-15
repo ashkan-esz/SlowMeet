@@ -1,3 +1,16 @@
+function normalizePacketCounter(value) {
+  const count = Number(value);
+  return Number.isFinite(count) ? Math.max(0, count) : 0;
+}
+
+function normalizePacketLoss10(packetLoss) {
+  if (packetLoss === null || packetLoss === undefined ||
+      !Number.isFinite(packetLoss) || packetLoss < 0) {
+    return -1;
+  }
+  return Math.min(1000, Math.round(packetLoss * 10));
+}
+
 function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
   if (poorSamples >= 2 && level > 0) {
     return { level: level - 1, reset: "poor" };
@@ -173,6 +186,8 @@ function chooseParticipantLayout({
 
 if (typeof module !== "undefined") {
   module.exports = {
+    normalizePacketCounter,
+    normalizePacketLoss10,
     chooseAdaptationLevel,
     shouldRecoverVideo,
     chooseCameraLayer,

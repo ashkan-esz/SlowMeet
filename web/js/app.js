@@ -1478,6 +1478,7 @@ let cameraSender;
 let cameraSenderPeer;
 let cameraSenderNegotiated = false;
 let screenSender;
+let screenSenderPeer;
 let screenShareAdaptation;
 let cameraTrack;
 let localParticipantID;
@@ -1966,20 +1967,30 @@ async function enableCameraOnce() {
   if (existingSender) {
     await existingSender.replaceTrack(track);
   } else {
-    if (simulcastEnabled && typeof currentPeer.addTransceiver === "function") {
+    if (typeof currentPeer.addTransceiver === "function") {
+      const transceiverOptions = { direction: "sendonly", streams: [stream] };
+      if (simulcastEnabled) {
+        transceiverOptions.sendEncodings = [
+          { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
+          { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
+          { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
+        ];
+      }
       try {
-        const transceiver = currentPeer.addTransceiver(track, {
-          direction: "sendonly",
-          streams: [stream],
-          sendEncodings: [
-            { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
-            { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
-            { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
-          ]
-        });
-        cameraSender = transceiver.sender;
+        cameraSender = currentPeer.addTransceiver(track, transceiverOptions).sender;
       } catch (_) {
-        cameraSender = currentPeer.addTrack(track, stream);
+        if (simulcastEnabled) {
+          try {
+            cameraSender = currentPeer.addTransceiver(track, {
+              direction: "sendonly",
+              streams: [stream]
+            }).sender;
+          } catch (_) {
+            cameraSender = currentPeer.addTrack(track, stream);
+          }
+        } else {
+          cameraSender = currentPeer.addTrack(track, stream);
+        }
       }
     } else {
       cameraSender = currentPeer.addTrack(track, stream);
@@ -2112,6 +2123,18 @@ function remoteMediaRole(streams, track) {
   if (/-screen$/.test(streamID) || /\|screen$/.test(track?.id || "")) return "screen";
   if (/-camera$/.test(streamID) || /\|camera(?:\|(low|medium|high))?$/.test(track?.id || "")) return "camera";
   return track?.kind === "audio" ? "audio" : "camera";
+}
+
+function bindRemoteScreenTrackForParticipant(participantID, element, track) {
+  let stream;
+  stream = bindRemoteScreenTrack(element.screenVideo, track, () => {
+    if (remoteScreenTracks.get(participantID)?.stream === stream) {
+      remoteScreenTracks.delete(participantID);
+    }
+    updateParticipantVideoVisibility(element);
+  });
+  remoteScreenTracks.set(participantID, { track, stream });
+  return stream;
 }
 
 function remoteCameraLayer(track) {
@@ -2619,12 +2642,26 @@ function connectSocket(name, password) {
       if (previousScreenShareOwner && previousScreenShareOwner !== screenShareOwner) {
         const previousElement = participantElements.get(previousScreenShareOwner);
         const previousBinding = remoteScreenTracks.get(previousScreenShareOwner);
-        if (previousElement && previousBinding && bindRemoteScreenTrack.clear(
+        const cleared = previousElement && previousBinding && bindRemoteScreenTrack.clear(
           previousElement.screenVideo,
           previousBinding.stream,
           () => updateParticipantVideoVisibility(previousElement)
-        )) {
+        );
+        if (cleared && previousBinding.track.readyState === "ended") {
           remoteScreenTracks.delete(previousScreenShareOwner);
+        }
+      }
+      if (screenShareOwner && screenShareOwner !== localParticipantID) {
+        const activeElement = participantElements.get(screenShareOwner);
+        const activeBinding = remoteScreenTracks.get(screenShareOwner);
+        if (activeBinding?.track.readyState === "ended") {
+          remoteScreenTracks.delete(screenShareOwner);
+        } else if (activeElement && activeBinding) {
+          bindRemoteScreenTrackForParticipant(
+            screenShareOwner,
+            activeElement,
+            activeBinding.track
+          );
         }
       }
       meetingViewState.activeScreenShareId = screenShareOwner || (screenStream ? localParticipantID : null);
@@ -2845,6 +2882,7 @@ function resetMediaConnection() {
   cameraSenderPeer = undefined;
   cameraSenderNegotiated = false;
   screenSender = undefined;
+  screenSenderPeer = undefined;
   cameraTrack = undefined;
   screenShareOwner = undefined;
   setLocalMediaControls();
@@ -2970,13 +3008,7 @@ async function startWebRTC() {
         showSelectedRemoteCamera(element);
       } else {
         if (role === "screen") {
-          const stream = bindRemoteScreenTrack(video, track, () => {
-            if (remoteScreenTracks.get(participantID)?.stream === stream) {
-              remoteScreenTracks.delete(participantID);
-            }
-            updateParticipantVideoVisibility(element);
-          });
-          remoteScreenTracks.set(participantID, { track, stream });
+          bindRemoteScreenTrackForParticipant(participantID, element, track);
         } else if (role === "camera") {
           bindRemoteCameraTrack(video, track, () => updateParticipantVideoVisibility(element));
         } else {
@@ -3431,6 +3463,8 @@ async function updateDiagnostics() {
       sentAudioBytes += stat.bytesSent || 0;
     }
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
+      const lostPackets = normalizePacketCounter(stat.packetsLost);
+      const receivedPackets = normalizePacketCounter(stat.packetsReceived);
       hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
@@ -3447,8 +3481,8 @@ async function updateDiagnostics() {
       } else if (role === "camera") {
         values.cameraResolution = `${stat.frameWidth || "?"}x${stat.frameHeight || "?"}`;
         values.cameraFps = stat.framesPerSecond ?? null;
-        cameraLost += Math.max(0, Number(stat.packetsLost) || 0);
-        cameraReceived += Math.max(0, Number(stat.packetsReceived) || 0);
+        cameraLost += lostPackets;
+        cameraReceived += receivedPackets;
         hasCameraLossStats = true;
         if (Number.isFinite(stat.framesDropped) && Number.isFinite(stat.framesDecoded)) {
           cameraFramesDropped += Math.max(0, stat.framesDropped);
@@ -3456,33 +3490,35 @@ async function updateDiagnostics() {
           hasCameraFrameStats = true;
         }
       }
-      totalLost += stat.packetsLost || 0;
-      totalReceived += stat.packetsReceived || 0;
+      totalLost += lostPackets;
+      totalReceived += receivedPackets;
       const participantID = participantForInboundStat(stat, trackStatsOwners);
       if (participantID) {
         const stats = participantStats.get(participantID) || {
           hasData: false, lostPackets: 0, receivedPackets: 0, totalPackets: 0
         };
         stats.hasData = true;
-        stats.lostPackets += Math.max(0, Number(stat.packetsLost) || 0);
-        stats.receivedPackets += Math.max(0, Number(stat.packetsReceived) || 0);
+        stats.lostPackets += lostPackets;
+        stats.receivedPackets += receivedPackets;
         stats.totalPackets = stats.lostPackets + stats.receivedPackets;
         participantStats.set(participantID, stats);
       }
     }
     if (stat.type === "inbound-rtp" && stat.kind === "audio") {
+      const lostPackets = normalizePacketCounter(stat.packetsLost);
+      const receivedPackets = normalizePacketCounter(stat.packetsReceived);
       receivedAudioBytes += stat.bytesReceived || 0;
       if (stat.jitter != null && values.jitterMs == null) values.jitterMs = Math.round(stat.jitter * 1000);
-      totalLost += stat.packetsLost || 0;
-      totalReceived += stat.packetsReceived || 0;
+      totalLost += lostPackets;
+      totalReceived += receivedPackets;
       const participantID = participantForInboundStat(stat, trackStatsOwners);
       if (participantID) {
         const stats = participantStats.get(participantID) || {
           hasData: false, lostPackets: 0, receivedPackets: 0, totalPackets: 0
         };
         stats.hasData = true;
-        stats.lostPackets += Math.max(0, Number(stat.packetsLost) || 0);
-        stats.receivedPackets += Math.max(0, Number(stat.packetsReceived) || 0);
+        stats.lostPackets += lostPackets;
+        stats.receivedPackets += receivedPackets;
         stats.totalPackets = stats.lostPackets + stats.receivedPackets;
         participantStats.set(participantID, stats);
       }
@@ -3642,7 +3678,7 @@ async function updateDiagnostics() {
       type: "network_state",
       participant_id: localParticipantID,
       rtt_ms: values.rttMs ?? -1,
-      packet_loss10: values.packetLoss == null ? -1 : Math.round(packetLoss * 10),
+      packet_loss10: normalizePacketLoss10(values.packetLoss),
       jitter_ms: values.jitterMs ?? -1,
       video_kbps: values.outboundKbps == null ? -1 : Math.max(0, values.outboundKbps),
       audio_kbps: values.outboundAudioKbps == null ? -1 : Math.max(0, values.outboundAudioKbps)
@@ -3964,15 +4000,8 @@ async function setVideoSending(enabled, automatic = false) {
   const sendingEnabled = enabled && !audioOnly?.checked;
   videoSuspended = !sendingEnabled;
   videoSuspendedAutomatically = !sendingEnabled && automatic && !audioOnly?.checked;
-  for (const sender of [cameraSender, screenSender]) {
-    if (!sender) continue;
-    const parameters = sender.getParameters();
-    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-    parameters.encodings[0].active = sender === screenSender
-      ? sendingEnabled
-      : sendingEnabled && cameraRequested;
-    await sender.setParameters(parameters).catch(() => {});
-  }
+  await setSenderEncodingActive(cameraSender, sendingEnabled && cameraRequested);
+  await setSenderEncodingActive(screenSender, sendingEnabled);
   if (localCameraTrack) localCameraTrack.enabled = sendingEnabled && cameraRequested;
   if (localScreenTrack) localScreenTrack.enabled = sendingEnabled;
   setLocalMediaControls();
@@ -3980,14 +4009,22 @@ async function setVideoSending(enabled, automatic = false) {
   sendMediaState();
 }
 
-async function setVideoSenderActive(enabled) {
-  for (const sender of [cameraSender, screenSender]) {
-    if (!sender) continue;
-    const parameters = sender.getParameters();
-    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-    parameters.encodings[0].active = enabled;
-    await sender.setParameters(parameters).catch(() => {});
+async function setSenderEncodingActive(sender, enabled) {
+  if (!sender) return true;
+  const parameters = sender.getParameters();
+  parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+  parameters.encodings[0].active = enabled;
+  try {
+    await sender.setParameters(parameters);
+    return true;
+  } catch (_) {
+    return false;
   }
+}
+
+async function setVideoSenderActive(enabled) {
+  await setSenderEncodingActive(cameraSender, enabled && cameraRequested);
+  await setSenderEncodingActive(screenSender, enabled);
 }
 
 function setReceiveVideoControlLabel(button, enabled) {
@@ -4133,11 +4170,28 @@ async function startScreenShare() {
     }, { once: true });
     await requestScreenShare(true, screenStream.id, localScreenTrack.id);
     if (generation !== socketGeneration || peer !== sharePeer) throw new Error("media connection changed");
-    screenSender = sharePeer.addTrack(localScreenTrack, screenStream);
+    if (screenSender && screenSenderPeer === sharePeer &&
+        typeof screenSender.setStreams === "function") {
+      if (!(await setSenderEncodingActive(screenSender, false))) {
+        throw new Error("screen sender could not be paused before restarting");
+      }
+      screenSender.setStreams(screenStream);
+      await screenSender.replaceTrack(localScreenTrack);
+    } else if (typeof sharePeer.addTransceiver === "function") {
+      screenSender = sharePeer.addTransceiver(localScreenTrack, {
+        direction: "sendonly",
+        streams: [screenStream]
+      }).sender;
+      screenSenderPeer = sharePeer;
+      await setSenderEncodingActive(screenSender, false);
+    } else {
+      screenSender = sharePeer.addTrack(localScreenTrack, screenStream);
+      screenSenderPeer = sharePeer;
+    }
     screenShareAdaptation = createScreenShareAdaptation(screenSender);
     await applyProfile(profile.value, sharePeer, screenStream);
-    await setVideoSenderActive(true);
     await renegotiateLocalMedia();
+    await setVideoSenderActive(!videoSuspended);
     if (localScreenTrack.readyState === "ended") throw new Error("screen capture ended before sharing started");
     const local = participantElements.get(localParticipantID);
     if (local) local.screenVideo.srcObject = screenStream;
@@ -4148,18 +4202,25 @@ async function startScreenShare() {
     renderMeetingLayout();
   } catch (error) {
     const failedSender = screenSender;
+    const failedSenderPeer = screenSenderPeer;
+    const canReuseFailedSender = Boolean(failedSender && failedSenderPeer === sharePeer &&
+      typeof failedSender.setStreams === "function");
     const failedTrack = localScreenTrack;
     const failedStream = screenStream;
-    screenSender = undefined;
     screenShareAdaptation?.stop();
     screenShareAdaptation = undefined;
     screenStream = undefined;
     localScreenStream = undefined;
     localScreenTrack = undefined;
-    if (failedSender && sharePeer) {
-      sharePeer.removeTrack(failedSender);
-      if (peer === sharePeer) {
-        renegotiateLocalMedia().catch(() => {});
+    if (failedSender && failedSenderPeer) {
+      if (canReuseFailedSender) {
+        await setSenderEncodingActive(failedSender, false);
+        await failedSender.replaceTrack(null).catch(() => {});
+      } else {
+        failedSenderPeer.removeTrack(failedSender);
+        screenSender = undefined;
+        screenSenderPeer = undefined;
+        if (peer === failedSenderPeer) renegotiateLocalMedia().catch(() => {});
       }
     }
     failedTrack?.stop();
@@ -4187,20 +4248,31 @@ async function stopScreenShare() {
   if (!stream) return;
   const sender = screenSender;
   const track = localScreenTrack;
-  const senderPeer = peer;
+  const senderPeer = screenSenderPeer || peer;
+  const keepSender = Boolean(sender && senderPeer === screenSenderPeer &&
+    typeof sender.setStreams === "function");
   const wasAutomaticallySuspended = videoSuspended && videoSuspendedAutomatically;
   screenStream = undefined;
   localScreenStream = undefined;
   localScreenTrack = undefined;
-  screenSender = undefined;
   screenShareAdaptation?.stop();
   screenShareAdaptation = undefined;
   screenShareStopPromise = (async () => {
     let negotiation;
     if (sender && senderPeer) {
-      senderPeer.removeTrack(sender);
-      if (peer === senderPeer) {
-        negotiation = renegotiateLocalMedia();
+      if (keepSender) {
+        await setSenderEncodingActive(sender, false);
+        await sender.replaceTrack(null).catch(() => {
+          senderPeer.removeTrack(sender);
+          screenSender = undefined;
+          screenSenderPeer = undefined;
+          if (peer === senderPeer) negotiation = renegotiateLocalMedia();
+        });
+      } else {
+        senderPeer.removeTrack(sender);
+        screenSender = undefined;
+        screenSenderPeer = undefined;
+        if (peer === senderPeer) negotiation = renegotiateLocalMedia();
       }
     }
     track?.stop();

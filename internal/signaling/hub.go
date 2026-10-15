@@ -170,7 +170,7 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		MaxVideoFPS:     cfg.MaxVideoFPS,
 	})
 	if releasedScreenSharer != nil {
-		h.router.Unpublish(releasedScreenSharer.participant.ID, media.SourceRoleScreen)
+		h.router.SetPublicationActive(releasedScreenSharer.participant.ID, media.SourceRoleScreen, false)
 	}
 	h.broadcast(Message{
 		Version: ProtocolVersion, Type: TypeConfigUpdate,
@@ -393,9 +393,10 @@ func (h *Hub) requestScreenShare(c *client, active bool, mediaIDs ...string) err
 		owner = h.screenSharer.participant.ID
 	}
 	h.mu.Unlock()
-	if !active {
-		h.router.Unpublish(c.participant.ID, media.SourceRoleScreen)
-	}
+	// Keep the screen publication registered while paused. The browser reuses
+	// its sender/transceiver across stop and re-share, so Pion does not emit a
+	// second OnTrack event for the same remote track.
+	h.router.SetPublicationActive(c.participant.ID, media.SourceRoleScreen, active)
 	h.broadcast(h.screenShareMessage(owner != "", owner))
 	return nil
 }

@@ -44,6 +44,7 @@ type publication struct {
 	senders      map[string]*pion.RTPSender
 	limiter      *bitrateLimiter
 	lastPacketAt atomic.Int64
+	paused       atomic.Bool
 }
 
 type videoKeyFrameRequestKey struct {
@@ -377,6 +378,20 @@ func (r *Router) Unpublish(sourceID string, role SourceRole) {
 	}
 }
 
+// SetPublicationActive pauses or resumes forwarding for an existing source
+// without removing its negotiated receiver tracks. Screen-share senders may
+// replace their local track with nil while stopped, then reuse the same sender
+// and remote track when sharing resumes.
+func (r *Router) SetPublicationActive(sourceID string, role SourceRole, active bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pub := range r.pubs {
+		if pub.sourceID == sourceID && pub.role == role {
+			pub.paused.Store(!active)
+		}
+	}
+}
+
 // RequestVideoKeyFrame asks active camera and screen publishers with a
 // track sent to receiverID to send a fresh frame after negotiation signaling.
 // retries a bounded number of times and cancels retries when either peer or
@@ -394,7 +409,7 @@ func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
 	var requests []*videoKeyFrameRetry
 	r.mu.Lock()
 	for _, pub := range r.pubs {
-		if (pub.role != SourceRoleCamera && pub.role != SourceRoleScreen) || pub.source == nil || pub.remote == nil {
+		if (pub.role != SourceRoleCamera && pub.role != SourceRoleScreen) || pub.source == nil || pub.remote == nil || pub.paused.Load() {
 			continue
 		}
 		if pub.senders[receiverID] == nil {
@@ -573,6 +588,9 @@ func (r *Router) forward(pub *publication) {
 			return
 		}
 		pub.lastPacketAt.Store(time.Now().UnixNano())
+		if pub.paused.Load() {
+			continue
+		}
 		if pub.remote.Kind() == pion.RTPCodecTypeVideo {
 			packets, _, complete := frame.add(packet)
 			if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
@@ -598,6 +616,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 			return
 		case frame := <-frames:
 			for _, packet := range frame.packets {
+				if pub.paused.Load() {
+					break
+				}
 				select {
 				case <-stop:
 					return
@@ -623,6 +644,10 @@ func enqueueVideoFrame(queue chan<- videoFrame, frame videoFrame) bool {
 
 func (r *Router) forwardPacket(pub *publication, packet *rtp.Packet) {
 	r.mu.RLock()
+	if pub.paused.Load() {
+		r.mu.RUnlock()
+		return
+	}
 	targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
 	for targetID, track := range pub.tracks {
 		if pub.layer == "" || r.selectedCameraLayerLocked(pub.sourceID, targetID, time.Now()) == pub.layer {

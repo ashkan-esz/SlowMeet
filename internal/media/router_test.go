@@ -196,6 +196,27 @@ func TestRouterSetLimitsUpdatesExistingPublication(t *testing.T) {
 	}
 }
 
+func TestSetPublicationActivePausesAndResumesMatchingRole(t *testing.T) {
+	router := NewRouter()
+	screen := &publication{key: "owner/screen", sourceID: "owner", role: SourceRoleScreen}
+	camera := &publication{key: "owner/camera", sourceID: "owner", role: SourceRoleCamera}
+	router.pubs[screen.key] = screen
+	router.pubs[camera.key] = camera
+
+	router.SetPublicationActive("owner", SourceRoleScreen, false)
+	if !screen.paused.Load() {
+		t.Fatal("screen publication was not paused")
+	}
+	if camera.paused.Load() {
+		t.Fatal("pausing screen publication also paused the camera")
+	}
+
+	router.SetPublicationActive("owner", SourceRoleScreen, true)
+	if screen.paused.Load() {
+		t.Fatal("screen publication was not resumed")
+	}
+}
+
 func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 	router := NewRouter()
 	sourcePeer := &webrtc.Peer{}

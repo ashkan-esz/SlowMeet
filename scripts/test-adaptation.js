@@ -1,4 +1,6 @@
 const {
+  normalizePacketCounter,
+  normalizePacketLoss10,
   chooseAdaptationLevel,
   shouldRecoverVideo,
   chooseCameraLayer,
@@ -16,6 +18,17 @@ const {
 
 const transition = (level, poor, good) =>
   chooseAdaptationLevel(level, poor, good, 4);
+
+if (normalizePacketCounter(-4) !== 0 || normalizePacketCounter(17) !== 17 ||
+    normalizePacketCounter(Number.NaN) !== 0 || normalizePacketCounter(Number.POSITIVE_INFINITY) !== 0) {
+  throw new Error("signed or invalid RTP counters must not reduce the network packet totals");
+}
+if (normalizePacketLoss10(null) !== -1 || normalizePacketLoss10(undefined) !== -1 ||
+    normalizePacketLoss10(-0.1) !== -1 || normalizePacketLoss10(Number.NaN) !== -1 ||
+    normalizePacketLoss10(0) !== 0 || normalizePacketLoss10(2.4) !== 24 ||
+    normalizePacketLoss10(100) !== 1000 || normalizePacketLoss10(100.1) !== 1000) {
+  throw new Error("network packet loss must be unavailable or a valid nonnegative protocol value");
+}
 
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
 layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 5, null);
@@ -471,7 +484,9 @@ for (const behavior of [
   "participantForInboundStat",
   "setParticipantQuality(element, classifyParticipantQuality",
   "trackIdentifier",
-  "packetsLost"
+  "packetsLost",
+  "normalizePacketCounter(stat.packetsLost)",
+  "packet_loss10: normalizePacketLoss10(values.packetLoss)"
 ]) {
   if (!appSource.includes(behavior)) {
     throw new Error(`bandwidth status behavior is missing: ${behavior}`);
