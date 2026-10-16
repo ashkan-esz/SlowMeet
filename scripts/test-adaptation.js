@@ -280,13 +280,14 @@ if (cameraStopStart < 0 || cameraStopEnd < 0 ||
     cameraStopSource.includes("renegotiateLocalMedia()")) {
   throw new Error("camera capture must stop immediately while reusing its sender without renegotiation");
 }
-const cameraStartStart = appSource.indexOf("async function enableCameraOnce() {");
+const cameraStartStart = appSource.indexOf("async function enableCameraOnce");
 const cameraStartEnd = appSource.indexOf("\nasync function disableCamera()", cameraStartStart);
 const cameraStartSource = appSource.slice(cameraStartStart, cameraStartEnd);
+const cameraRenegotiationGuard = /if\s*\(\s*!cameraSenderNegotiated\s*&&\s*negotiate\s*\)\s*\{\s*await renegotiateLocalMedia\(\);\s*cameraSenderNegotiated\s*=\s*true;\s*\}/;
 if (cameraStartStart < 0 || cameraStartEnd < 0 ||
     !cameraStartSource.includes("cameraSender && cameraSenderPeer === currentPeer") ||
     !cameraStartSource.includes("await existingSender.replaceTrack(track)") ||
-    !cameraStartSource.includes("if (!cameraSenderNegotiated)") ||
+    !cameraRenegotiationGuard.test(cameraStartSource) ||
     !cameraStartSource.includes("cameraSenderNegotiated = true;") ||
     !cameraStartSource.includes("cameraSenderPeer = currentPeer;")) {
   throw new Error("camera re-enable must replace the track on the existing sender and negotiate only until that sender is established");
