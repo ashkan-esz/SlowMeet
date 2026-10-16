@@ -114,13 +114,13 @@ sort_debian_versions() {
         while (( position > 0 )); do
             previous_position=$((position - 1))
             if dpkg --compare-versions "$candidate" gt "${ordered[$previous_position]}"; then
-                ordered[$position]=${ordered[$previous_position]}
+                ordered[position]=${ordered[previous_position]}
                 position=$previous_position
             else
                 break
             fi
         done
-        ordered[$position]=$candidate
+        ordered[position]=$candidate
     done
 
     printf '%s\n' "${ordered[@]}"

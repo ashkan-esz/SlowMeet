@@ -198,11 +198,12 @@ APTMARK
 
 chmod +x "$TEST_DIR/bin/"*
 
-CONTAINERD_PACKAGE=containerd.io
-DOCKER_RUNTIME_PROBE_IMAGE=hello-world:latest
-DOCKER_RUNTIME_PROBE_TIMEOUT=30s
+export CONTAINERD_PACKAGE=containerd.io
+export DOCKER_RUNTIME_PROBE_IMAGE=hello-world:latest
+export DOCKER_RUNTIME_PROBE_TIMEOUT=30s
 # shellcheck disable=SC1090
 source <(sed -n '/^docker_lxc_error_in_output() {/,/^enable_container_engine() {/p' "$INSTALLER" | sed '$d')
+declare -a runtime_packages=()
 log() { printf '[test] %s\n' "$*" >&2; }
 
 reset_case() {
