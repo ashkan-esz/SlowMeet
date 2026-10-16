@@ -21,6 +21,7 @@ readonly CADDY_BINARY_DIR=/usr/bin
 readonly CADDY_UNIT_FILE=/etc/systemd/system/caddy.service
 readonly CONTAINERD_PACKAGE=containerd.io
 readonly DOCKER_RUNTIME_PROBE_IMAGE=hello-world:latest
+readonly DOCKER_RUNTIME_PROBE_TIMEOUT=30s
 
 log() { printf '[slowmeet] %s\n' "$*"; }
 fail() { printf '[slowmeet] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -68,10 +69,17 @@ docker_lxc_error_in_output() {
 
 run_docker_runtime_probe() {
     local output_file=$1 status
-    if docker run --rm "$DOCKER_RUNTIME_PROBE_IMAGE" >"$output_file" 2>&1; then
+    if timeout --kill-after=2s "$DOCKER_RUNTIME_PROBE_TIMEOUT" \
+        docker run --rm "$DOCKER_RUNTIME_PROBE_IMAGE" >"$output_file" 2>&1; then
         return 0
     else
         status=$?
+    fi
+
+    if (( status == 124 || status == 137 )); then
+        printf '[slowmeet] ERROR: Docker runtime probe timed out after %s.\n' \
+            "$DOCKER_RUNTIME_PROBE_TIMEOUT" >>"$output_file"
+        return 124
     fi
 
     if docker_lxc_error_in_output "$output_file"; then
@@ -112,17 +120,53 @@ sort_debian_versions() {
 
 containerd_available_versions() {
     local versions
-    versions=$(apt-cache madison "$CONTAINERD_PACKAGE" | awk -F '|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}') || return 1
+    versions=$(containerd_preflight_run apt-cache madison "$CONTAINERD_PACKAGE") || return $?
+    versions=$(printf '%s\n' "$versions" | awk -F '|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}') || return 1
     printf '%s\n' "$versions" | sort_debian_versions
+}
+
+containerd_preflight_remaining_seconds() {
+    local remaining=$((preflight_deadline - SECONDS))
+    (( remaining > 0 )) || return 124
+    printf '%s\n' "$remaining"
+}
+
+containerd_preflight_run() {
+    local remaining status
+    remaining=$(containerd_preflight_remaining_seconds) || return 124
+    if timeout --kill-after=2s "${remaining}s" "$@"; then
+        return 0
+    else
+        status=$?
+    fi
+    if (( status == 124 || status == 137 )); then
+        return 124
+    fi
+    return "$status"
 }
 
 download_containerd_package() {
     local version=$1 destination=$2
+    local remaining download_timeout status
     local -a package_files
 
     mkdir -p "$destination"
-    if ! (cd "$destination" && apt-get download "$CONTAINERD_PACKAGE=$version" >/dev/null 2>&1); then
-        return 1
+    remaining=$(containerd_preflight_remaining_seconds) || return 124
+    download_timeout=30
+    (( remaining < download_timeout )) && download_timeout=$remaining
+    printf '[slowmeet] Downloading %s %s for LXC runtime compatibility preflight (timeout %ss).\n' \
+        "$CONTAINERD_PACKAGE" "$version" "$download_timeout" >&2
+    if (cd "$destination" && timeout --kill-after=2s "${download_timeout}s" \
+        apt-get download "$CONTAINERD_PACKAGE=$version" >&2); then
+        :
+    else
+        status=$?
+        if (( status == 124 || status == 137 )); then
+            printf '[slowmeet] ERROR: Timed out downloading %s %s; no package change was made.\n' \
+                "$CONTAINERD_PACKAGE" "$version" >&2
+            return 124
+        fi
+        return "$status"
     fi
 
     package_files=("$destination"/*.deb)
@@ -131,21 +175,33 @@ download_containerd_package() {
 }
 
 containerd_package_runc_version() {
-    local version=$1 destination=$2 package_file extract_dir
-    package_file=$(download_containerd_package "$version" "$destination") || return 1
+    local version=$1 destination=$2 package_file extract_dir status
+    if package_file=$(download_containerd_package "$version" "$destination"); then
+        :
+    else
+        status=$?
+        return "$status"
+    fi
     extract_dir="$destination/root"
-    if ! dpkg-deb -x "$package_file" "$extract_dir" >/dev/null 2>&1; then
-        return 1
+    if containerd_preflight_run dpkg-deb -x "$package_file" "$extract_dir" >/dev/null 2>&1; then
+        :
+    else
+        status=$?
+        return "$status"
     fi
     [[ -x "$extract_dir/usr/bin/runc" ]] || return 1
-    "$extract_dir/usr/bin/runc" --version 2>/dev/null \
+    containerd_preflight_run "$extract_dir/usr/bin/runc" --version 2>/dev/null \
         | awk '$1 == "runc" && $2 == "version" {sub(/^v/, "", $3); print $3; exit}'
 }
 
 containerd_candidate_is_compatible() {
-    local version=$1 simulation_file=$2
-    if ! apt-get -s install --allow-downgrades "$CONTAINERD_PACKAGE=$version" >"$simulation_file" 2>&1; then
-        return 1
+    local version=$1 simulation_file=$2 status
+    if containerd_preflight_run apt-get -s install --allow-downgrades \
+        --allow-change-held-packages "$CONTAINERD_PACKAGE=$version" >"$simulation_file" 2>&1; then
+        :
+    else
+        status=$?
+        return "$status"
     fi
 
     awk '
@@ -164,7 +220,11 @@ repair_docker_lxc_runtime() (
 
     local temporary_directory original_version original_package original_hold=no
     local available_versions candidate preferred_runc candidate_runc selected_version selected_runc
+    local preferred_package_version candidate_status other_candidate_count=0 runtime_index
     local package_change_attempted=no finalized=no restored_version
+    local preflight_deadline=$((SECONDS + 120))
+    local -a available_version_list=() candidate_versions=()
+    local -a compatible_versions=() compatible_runc_versions=()
 
     temporary_directory=$(mktemp -d)
     original_package=
@@ -221,35 +281,96 @@ repair_docker_lxc_runtime() (
         original_hold=yes
     fi
 
-    original_package=$(download_containerd_package "$original_version" "$temporary_directory/original") \
-        || fail "Cannot safely change $CONTAINERD_PACKAGE because its installed version $original_version cannot be downloaded for rollback."
-
-    if [[ "$original_hold" == yes ]] && ! apt-mark unhold "$CONTAINERD_PACKAGE" >/dev/null 2>&1; then
-        fail "Could not temporarily unhold $CONTAINERD_PACKAGE to test compatible package versions."
+    command -v timeout >/dev/null || fail 'The timeout command is required for a bounded containerd.io runtime preflight.'
+    if original_package=$(download_containerd_package "$original_version" "$temporary_directory/original"); then
+        :
+    else
+        candidate_status=$?
+        if (( candidate_status == 124 )); then
+            fail "The bounded LXC runtime preflight timed out downloading the rollback copy of $CONTAINERD_PACKAGE. No package or hold was changed."
+        fi
+        fail "Cannot safely change $CONTAINERD_PACKAGE because its installed version $original_version cannot be downloaded for rollback."
     fi
 
-    available_versions=$(containerd_available_versions) || fail "Could not inspect available $CONTAINERD_PACKAGE APT versions."
+    if available_versions=$(containerd_available_versions); then
+        :
+    else
+        candidate_status=$?
+        if (( candidate_status == 124 )); then
+            fail "The bounded LXC runtime preflight timed out reading available $CONTAINERD_PACKAGE versions. No package or hold was changed."
+        fi
+        fail "Could not inspect available $CONTAINERD_PACKAGE APT versions."
+    fi
+
+    mapfile -t available_version_list <<< "$available_versions"
+    for preferred_package_version in 1.7.28-2 1.7.28-1; do
+        for candidate in "${available_version_list[@]}"; do
+            case "$candidate" in
+                "$preferred_package_version"|"$preferred_package_version"+*|"$preferred_package_version"~*|"$preferred_package_version".*|"$preferred_package_version"-*) ;;
+                *) continue ;;
+            esac
+            dpkg --compare-versions "$candidate" lt "$original_version" || continue
+            candidate_versions+=("$candidate")
+            break
+        done
+    done
+    for candidate in "${available_version_list[@]}"; do
+        [[ -n "$candidate" ]] || continue
+        dpkg --compare-versions "$candidate" lt "$original_version" || continue
+        case "$candidate" in
+            1.7.28-2|1.7.28-2+*|1.7.28-2~*|1.7.28-2.*|1.7.28-2-*|\
+            1.7.28-1|1.7.28-1+*|1.7.28-1~*|1.7.28-1.*|1.7.28-1-*) continue ;;
+        esac
+        (( other_candidate_count += 1 ))
+        candidate_versions+=("$candidate")
+        (( other_candidate_count < 2 )) || break
+    done
+
     selected_version=
     selected_runc=
-    for preferred_runc in 1.3.2 1.2.7; do
-        while IFS= read -r candidate; do
-            [[ -n "$candidate" ]] || continue
-            dpkg --compare-versions "$candidate" lt "$original_version" || continue
+    for candidate in "${candidate_versions[@]}"; do
+        if candidate_runc=$(containerd_package_runc_version \
+            "$candidate" "$temporary_directory/candidate-$candidate"); then
+            :
+        else
+            candidate_status=$?
+            if (( candidate_status == 124 )); then
+                fail "The bounded LXC runtime preflight timed out inspecting $CONTAINERD_PACKAGE $candidate. No package or hold was changed."
+            fi
+            continue
+        fi
+        case "$candidate_runc" in
+            1.3.2|1.2.7|1.3.0)
+                compatible_versions+=("$candidate")
+                compatible_runc_versions+=("$candidate_runc")
+                ;;
+        esac
+    done
 
-            candidate_runc=$(containerd_package_runc_version \
-                "$candidate" "$temporary_directory/candidate-$candidate" 2>/dev/null) || continue
-            [[ "$candidate_runc" == "$preferred_runc" ]] || continue
+    for preferred_runc in 1.3.2 1.2.7 1.3.0; do
+        for runtime_index in "${!compatible_versions[@]}"; do
+            [[ "${compatible_runc_versions[$runtime_index]}" == "$preferred_runc" ]] || continue
+            candidate=${compatible_versions[$runtime_index]}
             if containerd_candidate_is_compatible \
                 "$candidate" "$temporary_directory/simulation-$candidate.log"; then
                 selected_version=$candidate
-                selected_runc=$candidate_runc
+                selected_runc=$preferred_runc
                 break 2
+            else
+                candidate_status=$?
+                if (( candidate_status == 124 )); then
+                    fail "The bounded LXC runtime preflight timed out simulating $CONTAINERD_PACKAGE $candidate. No package or hold was changed."
+                fi
             fi
-        done <<< "$available_versions"
+        done
     done
 
     [[ -n "$selected_version" ]] || fail \
-        "No compatible $CONTAINERD_PACKAGE package bundling runc 1.3.2 or 1.2.7 is available. No package was changed; ask the VPS provider to fix the outer LXC/AppArmor profile."
+        "No compatible $CONTAINERD_PACKAGE package bundling runc 1.3.2, 1.2.7, or 1.3.0 is available. No package was changed; ask the VPS provider to fix the outer LXC/AppArmor profile."
+
+    if [[ "$original_hold" == yes ]] && ! apt-mark unhold "$CONTAINERD_PACKAGE" >/dev/null 2>&1; then
+        fail "Could not temporarily unhold $CONTAINERD_PACKAGE to install the compatible package."
+    fi
 
     log "Temporarily downgrading $CONTAINERD_PACKAGE to $selected_version (bundled runc $selected_runc) for the confirmed LXC/AppArmor startup error."
     package_change_attempted=yes

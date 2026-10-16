@@ -6,7 +6,7 @@ TEST_DIR=$(mktemp -d)
 readonly TEST_DIR
 REAL_DPKG=$(command -v dpkg)
 readonly REAL_DPKG
-ORIGINAL_VERSION=1.7.28-3~test
+ORIGINAL_VERSION=2.2.1-1~test
 readonly ORIGINAL_VERSION
 export REAL_DPKG
 trap 'rm -rf -- "$TEST_DIR"' EXIT
@@ -22,6 +22,7 @@ export CURRENT_VERSION_FILE="$TEST_DIR/installed-version"
 export PACKAGE_HOLDS_FILE="$TEST_DIR/package-holds"
 export COMMAND_LOG="$TEST_DIR/commands.log"
 export DOCKER_COUNT_FILE="$TEST_DIR/docker-count"
+export DOWNLOAD_LOG="$TEST_DIR/downloads.log"
 
 cat > "$TEST_DIR/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
@@ -54,22 +55,43 @@ case "$CANDIDATE_SET" in
     no-target)
         printf '%s\n' \
             'containerd.io | 1.7.27-1~test | test repo' \
-            'containerd.io | 1.7.28-3~test | test repo'
+            'containerd.io | 2.2.1-1~test | test repo'
         ;;
     only-1.2.7)
         printf '%s\n' \
             'containerd.io | 1.7.28-1~test | test repo' \
-            'containerd.io | 1.7.28-3~test | test repo'
+            'containerd.io | 2.2.1-1~test | test repo'
         ;;
     *)
         printf '%s\n' \
             'containerd.io | 1.7.28-1~test | test repo' \
-            'containerd.io | 1.7.28-3~test | test repo' \
             'containerd.io | 1.7.28-2~test | test repo' \
-            'containerd.io | 1.7.27-1~test | test repo'
+            'containerd.io | 1.7.27-1~test | test repo' \
+            'containerd.io | 2.2.1-1~test | test repo' \
+            'containerd.io | 2.2.0-2~test | test repo' \
+            'containerd.io | 2.1.5-1~test | test repo' \
+            'containerd.io | 1.7.29-1~test | test repo' \
+            'containerd.io | 1.7.28-0~test | test repo'
         ;;
 esac
 APTCACHE
+
+cat > "$TEST_DIR/bin/timeout" <<'TIMEOUT'
+#!/usr/bin/env bash
+printf 'timeout:%s\n' "$*" >> "$COMMAND_LOG"
+while [[ "$1" == --* ]]; do shift; done
+[[ $# -ge 2 ]] || exit 90
+duration=$1
+shift
+if [[ "$TIMEOUT_SCENARIO" == preflight-timeout && "$1" == apt-cache ]]; then
+    exit 124
+fi
+if [[ "$TIMEOUT_SCENARIO" == candidate-download && "$1" == apt-get && "$2" == download \
+    && "$3" == containerd.io=1.7.28-2~test ]]; then
+    exit 124
+fi
+exec "$@"
+TIMEOUT
 
 cat > "$TEST_DIR/bin/apt-get" <<'APTGET'
 #!/usr/bin/env bash
@@ -77,6 +99,7 @@ printf 'apt-get:%s\n' "$*" >> "$COMMAND_LOG"
 case "$1" in
     download)
         version=${2#containerd.io=}
+        printf '%s\n' "$version" >> "$DOWNLOAD_LOG"
         if [[ "$APT_SCENARIO" == package-unavailable && "$version" != "$ORIGINAL_VERSION" ]]; then
             exit 1
         fi
@@ -85,7 +108,7 @@ case "$1" in
     -s)
         version=${*: -1}
         version=${version#containerd.io=}
-        printf 'Inst containerd.io [1.7.28-3~test] (%s test [amd64])\n' "$version"
+        printf 'Inst containerd.io [%s] (%s test [amd64])\n' "$ORIGINAL_VERSION" "$version"
         if [[ "$APT_SCENARIO" == simulation-incompatible ]]; then
             printf '%s\n' 'Inst docker-ce [5:28.5.2-1~ubuntu] (5:28.5.3-1~ubuntu test [amd64])'
         fi
@@ -131,12 +154,21 @@ package_file=$2
 extract_dir=$3
 version=${package_file##*/containerd.io_}
 version=${version%_amd64.deb}
-case "$version" in
-    1.7.28-3~test) runc_version=1.3.3 ;;
-    1.7.28-2~test) runc_version=1.3.2 ;;
-    1.7.28-1~test) runc_version=1.2.7 ;;
-    *) runc_version=1.2.6 ;;
-esac
+if [[ "$APT_SCENARIO" == plucky-runtime ]]; then
+    case "$version" in
+        2.2.1-1~test|1.7.28-2~test) runc_version=1.3.3 ;;
+        1.7.28-1~test) runc_version=1.3.0 ;;
+        *) runc_version=1.2.5 ;;
+    esac
+else
+    case "$version" in
+        2.2.1-1~test) runc_version=1.3.3 ;;
+        1.7.28-2~test) runc_version=1.3.2 ;;
+        1.7.28-1~test) runc_version=1.2.7 ;;
+        *) runc_version=1.2.6 ;;
+    esac
+fi
+[[ "$APT_SCENARIO" != no-compatible-runc ]] || runc_version=1.2.6
 mkdir -p "$extract_dir/usr/bin"
 cat > "$extract_dir/usr/bin/runc" <<EOF
 #!/usr/bin/env bash
@@ -177,10 +209,12 @@ reset_case() {
     printf '%s\n' unattended-upgrades > "$PACKAGE_HOLDS_FILE"
     : > "$COMMAND_LOG"
     : > "$DOCKER_COUNT_FILE"
+    : > "$DOWNLOAD_LOG"
     CANDIDATE_SET=all
     APT_SCENARIO=normal
     DOCKER_SCENARIO=success
-    export CANDIDATE_SET APT_SCENARIO DOCKER_SCENARIO
+    TIMEOUT_SCENARIO=none
+    export CANDIDATE_SET APT_SCENARIO DOCKER_SCENARIO TIMEOUT_SCENARIO
 }
 
 assert_current_version() {
@@ -221,11 +255,28 @@ if ! ensure_docker_runtime_compatible > "$TEST_DIR/success.log" 2>&1; then
 fi
 assert_current_version 1.7.28-2~test
 [[ $(<"$DOCKER_COUNT_FILE") == 2 ]] || fail 'The runtime probe was not retried after the downgrade'
+mapfile -t download_versions < "$DOWNLOAD_LOG"
+[[ "${download_versions[0]}" == "$ORIGINAL_VERSION" ]] || fail 'The installed rollback package was not downloaded first'
+[[ "${download_versions[1]}" == 1.7.28-2~test ]] || fail 'A newer non-preferred candidate was inspected before 1.7.28-2'
 grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'An unrelated APT hold was removed'
 grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE" || fail 'containerd.io was not held after the successful retry'
 grep -Fq 'apt-get:install -y --allow-downgrades containerd.io=1.7.28-2~test' "$COMMAND_LOG" \
     || fail 'The newest compatible runc 1.3.2 package was not selected'
 grep -Fq 'apt-mark unhold containerd.io' "$COMMAND_LOG" && fail 'An unheld containerd.io package was unnecessarily unheld'
+
+reset_case
+APT_SCENARIO=plucky-runtime
+DOCKER_SCENARIO=exact-then-success
+export APT_SCENARIO DOCKER_SCENARIO
+if ! ensure_docker_runtime_compatible > "$TEST_DIR/plucky-runtime.log" 2>&1; then
+    cat "$TEST_DIR/plucky-runtime.log" >&2
+    fail 'The runtime bundled by Ubuntu Plucky candidate 1.7.28-1 was not accepted'
+fi
+assert_current_version 1.7.28-1~test
+grep -Fq 'apt-get:install -y --allow-downgrades containerd.io=1.7.28-1~test' "$COMMAND_LOG" \
+    || fail 'The Plucky runc 1.3.0 fallback package was not selected'
+grep -Fq 'bundled runc 1.3.0' "$TEST_DIR/plucky-runtime.log" \
+    || fail 'The Plucky runtime fallback did not report its bundled runc version'
 
 reset_case
 printf '%s\n' containerd.io unattended-upgrades > "$PACKAGE_HOLDS_FILE"
@@ -266,6 +317,61 @@ for scenario in package-unavailable simulation-incompatible; do
 done
 
 reset_case
+APT_SCENARIO=no-compatible-runc
+DOCKER_SCENARIO=exact
+export APT_SCENARIO DOCKER_SCENARIO
+if (ensure_docker_runtime_compatible) >"$TEST_DIR/candidate-cap.log" 2>&1; then
+    fail 'A candidate set without a compatible runc was accepted'
+fi
+assert_current_version "$ORIGINAL_VERSION"
+grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'The candidate cap failure changed unrelated APT holds'
+if grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE"; then
+    fail 'The candidate cap failure changed the containerd.io hold'
+fi
+mapfile -t download_versions < "$DOWNLOAD_LOG"
+[[ ${#download_versions[@]} == 5 ]] || fail "Expected rollback plus four candidate downloads, got ${#download_versions[@]} total downloads"
+[[ "${download_versions[1]}" == 1.7.28-2~test && "${download_versions[2]}" == 1.7.28-1~test \
+    && "${download_versions[3]}" == 2.2.0-2~test && "${download_versions[4]}" == 2.1.5-1~test ]] \
+    || fail 'The bounded candidate scan did not prioritize 1.7.28-2/-1 before two other older versions'
+if rg -q '^apt-get:install -y ' "$COMMAND_LOG"; then
+    fail 'The no-compatible-candidate path changed the installed package set'
+fi
+
+reset_case
+printf '%s\n' containerd.io unattended-upgrades > "$PACKAGE_HOLDS_FILE"
+TIMEOUT_SCENARIO=candidate-download
+DOCKER_SCENARIO=exact
+export TIMEOUT_SCENARIO DOCKER_SCENARIO
+if (ensure_docker_runtime_compatible) >"$TEST_DIR/download-timeout.log" 2>&1; then
+    fail 'A candidate download timeout was accepted'
+fi
+assert_current_version "$ORIGINAL_VERSION"
+grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE" || fail 'A candidate download timeout removed the original containerd.io hold'
+grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'A candidate download timeout changed unrelated APT holds'
+grep -Fq 'timeout:--kill-after=2s 30s apt-get download containerd.io=1.7.28-2~test' "$COMMAND_LOG" \
+    || fail 'Candidate downloads were not bounded by the 30-second timeout'
+if rg -q '^apt-get:install -y |^apt-mark unhold containerd.io' "$COMMAND_LOG"; then
+    fail 'A candidate download timeout changed packages or holds'
+fi
+
+reset_case
+printf '%s\n' containerd.io unattended-upgrades > "$PACKAGE_HOLDS_FILE"
+TIMEOUT_SCENARIO=preflight-timeout
+DOCKER_SCENARIO=exact
+export TIMEOUT_SCENARIO DOCKER_SCENARIO
+if (ensure_docker_runtime_compatible) >"$TEST_DIR/preflight-timeout.log" 2>&1; then
+    fail 'A total preflight timeout was accepted'
+fi
+assert_current_version "$ORIGINAL_VERSION"
+grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE" || fail 'A total preflight timeout removed the original containerd.io hold'
+grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'A total preflight timeout changed unrelated APT holds'
+grep -Eq '^timeout:--kill-after=2s 1[0-9]{2}s apt-cache madison containerd.io$' "$COMMAND_LOG" \
+    || fail 'APT metadata inspection was not bounded by the remaining total preflight deadline'
+if rg -q '^apt-get:install -y |^apt-mark unhold containerd.io' "$COMMAND_LOG"; then
+    fail 'A total preflight timeout changed packages or holds'
+fi
+
+reset_case
 DOCKER_SCENARIO=exact-always
 export DOCKER_SCENARIO
 if (ensure_docker_runtime_compatible) >"$TEST_DIR/probe-rollback.log" 2>&1; then
@@ -277,7 +383,7 @@ grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'Rollback removed an
 if grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE"; then
     fail 'Rollback left containerd.io held after the probe failed'
 fi
-grep -Fq 'Restored containerd.io 1.7.28-3~test' "$TEST_DIR/probe-rollback.log" \
+grep -Fq "Restored containerd.io $ORIGINAL_VERSION" "$TEST_DIR/probe-rollback.log" \
     || fail 'A failed runtime probe did not report successful rollback'
 
 reset_case
