@@ -1531,6 +1531,7 @@ let cameraLayer = "medium";
 let cameraLayerPoorSamples = 0;
 let cameraLayerGoodSamples = 0;
 let criticalSamples = 0;
+let lastPauseCriticalSamples = 0;
 let recoverySamples = 0;
 let videoSuspended = false;
 let videoSuspendedAutomatically = false;
@@ -1936,7 +1937,7 @@ async function enableCamera() {
   throw lastError || new Error("camera is unavailable");
 }
 
-async function enableCameraOnce() {
+async function enableCameraOnce({ negotiate = true, markRequested = true } = {}) {
   if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
   const currentPeer = peer;
   const stream = await getUserMediaWithDeviceFallback(
@@ -2013,14 +2014,16 @@ async function enableCameraOnce() {
   }
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = stream;
-  cameraRequested = true;
-  meetingViewState.cameraEnabled = true;
+  if (markRequested) {
+    cameraRequested = true;
+    meetingViewState.cameraEnabled = true;
+  }
   updateVideoTransceiverDirection();
   setLocalVideoMirror(true);
   setLocalMediaControls();
   await applyProfile(profile.value, currentPeer, stream);
   if (peer !== currentPeer) throw new Error("media connection changed");
-  if (!cameraSenderNegotiated) {
+  if (!cameraSenderNegotiated && negotiate) {
     await renegotiateLocalMedia();
     cameraSenderNegotiated = true;
   }
@@ -3128,10 +3131,27 @@ async function startWebRTC() {
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     await applyProfile(profile.value, currentPeer, localStream);
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+    const restoreCamera = cameraRequested ||
+      (audioOnly?.checked && cameraBeforeAudioOnly && selectedCameraQuality !== "off");
+    if (restoreCamera) {
+      try {
+        await enableCameraOnce({ negotiate: false, markRequested: !audioOnly?.checked });
+      } catch (error) {
+        if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+        if (audioOnly?.checked) cameraBeforeAudioOnly = false;
+        else cameraRequested = false;
+        meetingViewState.cameraEnabled = false;
+        setLocalMediaControls();
+        sendMediaState();
+        status.textContent = mediaAccessMessage("video", error);
+      }
+    }
+    if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
     clearInterval(statsTimer);
     previousStats = undefined;
     statsTimer = setInterval(updateDiagnostics, 1000);
     await renegotiateLocalMedia();
+    if (cameraSender && cameraSenderPeer === currentPeer) cameraSenderNegotiated = true;
   } catch (error) {
     status.textContent = `Media unavailable: ${error.message}`;
   }
@@ -3476,6 +3496,17 @@ async function updateDiagnostics() {
   const candidatesById = new Map();
   const trackStatsOwners = new Map();
   const participantStats = new Map();
+  const packetCounters = new Map();
+  let lostPacketsSincePreviousSample = 0;
+  let receivedPacketsSincePreviousSample = 0;
+  const recordPacketCounters = (stat, lostPackets, receivedPackets) => {
+    const previous = previousStats?.packetCounters?.get(stat.id);
+    if (previous && lostPackets >= previous.lost && receivedPackets >= previous.received) {
+      lostPacketsSincePreviousSample += lostPackets - previous.lost;
+      receivedPacketsSincePreviousSample += receivedPackets - previous.received;
+    }
+    packetCounters.set(stat.id, { lost: lostPackets, received: receivedPackets });
+  };
   const selectedPair = selectedCandidatePair(report);
   values.rttMs = selectedCandidatePairRTT(report);
   values.availableOutgoingKbps = Number.isFinite(selectedPair?.availableOutgoingBitrate)
@@ -3512,6 +3543,7 @@ async function updateDiagnostics() {
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
+      recordPacketCounters(stat, lostPackets, receivedPackets);
       hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
@@ -3554,6 +3586,7 @@ async function updateDiagnostics() {
     if (stat.type === "inbound-rtp" && stat.kind === "audio") {
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
+      recordPacketCounters(stat, lostPackets, receivedPackets);
       receivedAudioBytes += stat.bytesReceived || 0;
       if (stat.jitter != null && values.jitterMs == null) values.jitterMs = Math.round(stat.jitter * 1000);
       totalLost += lostPackets;
@@ -3600,9 +3633,10 @@ async function updateDiagnostics() {
     values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
     values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
-  if (totalLost + totalReceived > 0) {
-    values.packetLoss = Number((totalLost / (totalLost + totalReceived) * 100).toFixed(1));
-  }
+  values.packetLoss = packetLossPercentFromDeltas(
+    lostPacketsSincePreviousSample,
+    receivedPacketsSincePreviousSample
+  );
   if (previousStats && timestamp > previousStats.timestamp && hasCameraLossStats) {
     const lostDelta = Math.max(0, cameraLost - previousStats.cameraLost);
     const receivedDelta = Math.max(0, cameraReceived - previousStats.cameraReceived);
@@ -3620,7 +3654,8 @@ async function updateDiagnostics() {
   values.framesDropped = hasFrameDropStats ? framesDropped : null;
   previousStats = {
     timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes,
-    cameraLost, cameraReceived, cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats
+    cameraLost, cameraReceived, cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats,
+    packetCounters
   };
   const lossKnown = values.packetLoss != null;
   const connectionHasMetrics = values.rttMs != null || lossKnown;
@@ -3707,6 +3742,7 @@ async function updateDiagnostics() {
     setCameraLayer(layerDecision.layer);
   }
   if (shouldPauseVideo(profile.value === "auto", adaptationLevel, criticalSamples)) {
+    lastPauseCriticalSamples = criticalSamples;
     criticalSamples = 0;
     recoverySamples = 0;
     if (!videoSuspended) {
@@ -3717,6 +3753,30 @@ async function updateDiagnostics() {
   } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, good)) {
     recoverySamples = 0;
     await setVideoSending(true);
+  }
+  if (window.__slowMeetTest) {
+    window.__slowMeetTest.networkQuality = {
+      rttMs: values.rttMs,
+      packetLossPct: values.packetLoss,
+      jitterMs: values.jitterMs,
+      estimatedOutgoingKbps: values.availableOutgoingKbps,
+      outgoingVideoKbps: values.outboundKbps,
+      poor,
+      critical,
+      good
+    };
+    window.__slowMeetTest.adaptationState = {
+      selectedProfile: profile.value,
+      effectiveProfile: profile.value === "auto" ? profiles[adaptationLevel]?.name : profile.value,
+      profileLevel: adaptationLevel,
+      poorSamples,
+      goodSamples,
+      criticalSamples,
+      lastPauseCriticalSamples,
+      recoverySamples,
+      videoSuspended,
+      videoSuspendedAutomatically
+    };
   }
   diagnostics.textContent = JSON.stringify(values, null, 2);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
@@ -4545,6 +4605,7 @@ leave.addEventListener("click", () => {
   remoteScreenTracks.clear();
   previousStats = undefined;
   criticalSamples = 0;
+  lastPauseCriticalSamples = 0;
   recoverySamples = 0;
   adaptationLevel = 2;
   poorSamples = 0;

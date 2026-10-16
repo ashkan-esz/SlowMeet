@@ -1,6 +1,7 @@
 const {
   normalizePacketCounter,
   normalizePacketLoss10,
+  packetLossPercentFromDeltas,
   chooseAdaptationLevel,
   shouldRecoverVideo,
   chooseCameraLayer,
@@ -28,6 +29,12 @@ if (normalizePacketLoss10(null) !== -1 || normalizePacketLoss10(undefined) !== -
     normalizePacketLoss10(0) !== 0 || normalizePacketLoss10(2.4) !== 24 ||
     normalizePacketLoss10(100) !== 1000 || normalizePacketLoss10(100.1) !== 1000) {
   throw new Error("network packet loss must be unavailable or a valid nonnegative protocol value");
+}
+if (packetLossPercentFromDeltas(0, 0) !== null ||
+    packetLossPercentFromDeltas(2, 10) !== 16.7 ||
+    packetLossPercentFromDeltas(0, 10) !== 0 ||
+    packetLossPercentFromDeltas(-1, 10) !== null) {
+  throw new Error("packet loss must reflect the current counter interval and ignore empty or invalid samples");
 }
 
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
@@ -138,6 +145,14 @@ const constrainedCapacity = classifyNetworkSample({
 if (!constrainedCapacity.poor || !constrainedCapacity.critical || constrainedCapacity.good) {
   throw new Error("available outgoing bitrate should identify a critical uplink constraint");
 }
+const startupCapacityEstimate = classifyNetworkSample({ availableOutgoingKbps: 0 });
+const healthyStartupCapacityEstimate = classifyNetworkSample({
+  rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 0
+});
+if (startupCapacityEstimate.poor || startupCapacityEstimate.critical || startupCapacityEstimate.good ||
+    healthyStartupCapacityEstimate.poor || healthyStartupCapacityEstimate.critical || !healthyStartupCapacityEstimate.good) {
+  throw new Error("a zero startup bandwidth estimate must remain unavailable while other healthy metrics still support recovery");
+}
 const recoveringCapacity = classifyNetworkSample({
   rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 500
 });
@@ -167,6 +182,28 @@ if (quietVideoOnHealthyNetwork.poor || quietVideoOnHealthyNetwork.critical || !q
 if (shouldPauseVideo(true, 1, 5) || !shouldPauseVideo(true, 0, 3) ||
     shouldPauseVideo(false, 2, 2) || !shouldPauseVideo(false, 2, 3)) {
   throw new Error("automatic quality must reach very-slow before sustained critical conditions pause video");
+}
+let criticalStreak = 0;
+const sustainedCriticalSample = classifyNetworkSample({ rttMs: 180, packetLoss: 12, jitterMs: 40 });
+for (let sample = 0; sample < 2; sample += 1) {
+  criticalStreak = sustainedCriticalSample.critical ? criticalStreak + 1 : 0;
+  if (shouldPauseVideo(true, 0, criticalStreak)) {
+    throw new Error("video should keep sending until critical conditions are sustained");
+  }
+}
+criticalStreak = sustainedCriticalSample.critical ? criticalStreak + 1 : 0;
+if (!shouldPauseVideo(true, 0, criticalStreak)) {
+  throw new Error("three consecutive critical samples must still pause automatic video");
+}
+let recoveryStreak = 0;
+for (let sample = 0; sample < 5; sample += 1) {
+  const healthySample = classifyNetworkSample({
+    rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 0
+  });
+  recoveryStreak = healthySample.good ? recoveryStreak + 1 : 0;
+}
+if (!shouldRecoverVideo(recoveryStreak, true)) {
+  throw new Error("five consecutive healthy samples must restore paused video even while capacity estimation is unavailable");
 }
 const sixPersonLayout = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 if (sixPersonLayout.columns !== 3 || sixPersonLayout.rows !== 2 ||

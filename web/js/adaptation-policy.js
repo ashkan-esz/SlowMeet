@@ -11,6 +11,16 @@ function normalizePacketLoss10(packetLoss) {
   return Math.min(1000, Math.round(packetLoss * 10));
 }
 
+function packetLossPercentFromDeltas(lostPackets, receivedPackets) {
+  if (!Number.isFinite(lostPackets) || lostPackets < 0 ||
+      !Number.isFinite(receivedPackets) || receivedPackets < 0) {
+    return null;
+  }
+  const totalPackets = lostPackets + receivedPackets;
+  if (totalPackets <= 0) return null;
+  return Number((lostPackets / totalPackets * 100).toFixed(1));
+}
+
 function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
   if (poorSamples >= 2 && level > 0) {
     return { level: level - 1, reset: "poor" };
@@ -110,12 +120,13 @@ function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingK
   const rttKnown = Number.isFinite(rttMs) && rttMs >= 0;
   const lossKnown = Number.isFinite(packetLoss) && packetLoss >= 0;
   const jitterKnown = Number.isFinite(jitterMs) && jitterMs >= 0;
-  const capacityKnown = Number.isFinite(availableOutgoingKbps) && availableOutgoingKbps >= 0;
+  // Browsers report zero while the bandwidth estimate is still warming up.
+  const capacityKnown = Number.isFinite(availableOutgoingKbps) && availableOutgoingKbps > 0;
   const hasSignal = rttKnown || lossKnown || jitterKnown || capacityKnown;
   const poor = (rttKnown && rttMs > 250) || (lossKnown && packetLoss > 5) ||
-    (jitterKnown && jitterMs > 50) || isBelowBitrate(availableOutgoingKbps, 220);
+    (jitterKnown && jitterMs > 50) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 220));
   const critical = (rttKnown && rttMs > 500) || (lossKnown && packetLoss > 10) ||
-    (jitterKnown && jitterMs > 120) || isBelowBitrate(availableOutgoingKbps, 120);
+    (jitterKnown && jitterMs > 120) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 120));
   const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
     (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
   return { poor, critical, good };
@@ -188,6 +199,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     normalizePacketCounter,
     normalizePacketLoss10,
+    packetLossPercentFromDeltas,
     chooseAdaptationLevel,
     shouldRecoverVideo,
     chooseCameraLayer,
