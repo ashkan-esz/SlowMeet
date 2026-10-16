@@ -20,14 +20,21 @@ const iceRestartOnly = process.env.MEDIA_E2E_ICE_RESTART_ONLY === "1";
 const diagnosticWaitMs = Number(process.env.MEDIA_E2E_DIAGNOSTIC_WAIT_MS || 7000);
 const pollIntervalMs = 1000;
 const noProgressLimitMs = 5000;
+const cameraToggleCycles = Number(process.env.MEDIA_E2E_CAMERA_CYCLES || 10);
+const cameraStopObservationMs = 1200;
+const cameraStopTimeoutMs = 8000;
+const mediaProgressTimeoutMs = 15000;
+const mediaProgressPollMs = 250;
 
 if (!Number.isFinite(stabilityMs) || stabilityMs < 1000) {
   throw new Error("MEDIA_E2E_STABILITY_MS must be at least 1000 milliseconds");
 }
+if (!Number.isInteger(cameraToggleCycles) || cameraToggleCycles < 1) {
+  throw new Error("MEDIA_E2E_CAMERA_CYCLES must be a positive integer");
+}
 if (testScreenShare && !headed) {
   throw new Error("MEDIA_E2E_SCREEN_SHARE=1 requires MEDIA_E2E_HEADED=1 so the native picker can be used");
 }
-
 function findChrome() {
   const candidates = [
     process.env.CHROMIUM_PATH,
@@ -47,6 +54,7 @@ function summarizePeerState(state) {
     iceConnectionState: state.iceConnectionState,
     signalingState: state.signalingState,
     peerConnectionCount: state.peerConnectionCount,
+    socketCount: state.socketCount,
     framesDecoded: state.framesDecoded,
     videoBytesSent: state.videoBytesSent,
     videoBytesReceived: state.videoBytesReceived,
@@ -54,11 +62,13 @@ function summarizePeerState(state) {
     audioBytesReceived: state.audioBytesReceived,
     candidatePair: state.candidatePair,
     videoRtpStats: state.videoRtpStats,
+    videoSenderStats: state.videoSenderStats,
     candidatePairs: state.candidatePairs.slice(0, 8),
     acceptedRemoteCandidates: state.acceptedRemoteCandidates.slice(-8),
     iceCandidateErrors: state.iceCandidateErrors.slice(-4),
     transports: state.transports,
     remoteVideos: state.remoteVideos,
+    remoteParticipants: state.remoteParticipants,
     transceivers: state.transceivers,
     localUfrag: state.localUfrag,
     remoteUfrag: state.remoteUfrag,
@@ -159,6 +169,11 @@ async function waitForPeerConnection(page, expected = "connected", timeout = 300
   }, expected, { timeout });
 }
 
+async function waitForPeerSignalingStable(page, timeout = 30000) {
+  await page.waitForFunction(() => window.__slowMeetTest?.peerConnections.at(-1)?.signalingState === "stable",
+    null, { timeout });
+}
+
 async function waitForPeerStability(peers, stableMs = 3000, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   let stableSince;
@@ -187,14 +202,54 @@ async function diagnostics(page) {
     const sum = (type, kind, field) => stats
       .filter((item) => item.type === type && (item.kind || item.mediaType) === kind)
       .reduce((total, item) => total + (Number(item[field]) || 0), 0);
-    const remoteVideos = [...document.querySelectorAll("#participants video[data-media-role]")]
-      .map((video) => ({
-        role: video.dataset.mediaRole,
-        width: video.videoWidth,
-        height: video.videoHeight,
-        currentTime: video.currentTime,
-        paused: video.paused,
-        participant: video.closest("li")?.textContent?.trim() || ""
+    const receivers = peer.getReceivers();
+    const remoteVideos = await Promise.all([...document.querySelectorAll("#participants video[data-media-role]")]
+      .map(async (video) => {
+        const item = video.closest("li");
+        const videoTracks = video.srcObject?.getVideoTracks?.() || [];
+        const inboundVideoStats = [];
+        for (const track of videoTracks) {
+          const receiver = receivers.find((candidate) => candidate.track?.id === track.id);
+          if (!receiver?.getStats) continue;
+          try {
+            const receiverReport = await receiver.getStats();
+            for (const stat of receiverReport.values()) {
+              if (stat.type !== "inbound-rtp" || (stat.kind || stat.mediaType) !== "video") continue;
+              inboundVideoStats.push({
+                trackIdentifier: stat.trackIdentifier || track.id,
+                bytesReceived: stat.bytesReceived,
+                packetsReceived: stat.packetsReceived,
+                framesReceived: stat.framesReceived,
+                framesDecoded: stat.framesDecoded,
+                timestamp: stat.timestamp
+              });
+            }
+          } catch (_) {}
+        }
+        return {
+          role: video.dataset.mediaRole,
+          width: video.videoWidth,
+          height: video.videoHeight,
+          currentTime: video.currentTime,
+          paused: video.paused,
+          participant: item?.textContent?.trim() || "",
+          cameraState: item?.dataset.camera || "unknown",
+          microphoneState: item?.dataset.mic || "unknown",
+          receiveVideo: item?.dataset.receiveVideo,
+          sharing: item?.dataset.sharing,
+          trackIDs: videoTracks.map((track) => track.id),
+          inboundVideoStats
+        };
+      }));
+    const remoteParticipants = [...document.querySelectorAll("#participants li[data-participant-id]")]
+      .map((item) => ({
+        participantID: item.dataset.participantId,
+        name: item.textContent?.trim() || "",
+        local: item.classList.contains("is-local"),
+        cameraState: item.dataset.camera || "unknown",
+        microphoneState: item.dataset.mic || "unknown",
+        receiveVideo: item.dataset.receiveVideo,
+        sharing: item.dataset.sharing
       }));
     const selectedTransport = stats.find((item) => item.type === "transport");
     const selectedPair = stats.find((item) => item.type === "candidate-pair" &&
@@ -221,6 +276,9 @@ async function diagnostics(page) {
       bytesSent: item.bytesSent,
       framesReceived: item.framesReceived,
       framesDecoded: item.framesDecoded,
+      trackIdentifier: item.trackIdentifier || report.get(item.trackId)?.trackIdentifier,
+      trackId: item.trackId,
+      mid: item.mid,
       framesDropped: item.framesDropped,
       framesEncoded: item.framesEncoded,
       keyFramesDecoded: item.keyFramesDecoded,
@@ -232,11 +290,29 @@ async function diagnostics(page) {
       jitterBufferDelay: item.jitterBufferDelay,
       jitterBufferEmittedCount: item.jitterBufferEmittedCount
     }));
+    const videoSenderStats = await Promise.all((window.__slowMeetTest?.videoSenders || []).map(async ({ senderID, sender }) => {
+      try {
+        const senderReport = await sender.getStats();
+        const outbound = [...senderReport.values()].filter((item) => item.type === "outbound-rtp" &&
+          (item.kind || item.mediaType) === "video");
+        return {
+          senderID,
+          trackID: sender.track?.id || null,
+          bytesSent: outbound.reduce((total, item) => total + (Number(item.bytesSent) || 0), 0),
+          packetsSent: outbound.reduce((total, item) => total + (Number(item.packetsSent) || 0), 0),
+          framesEncoded: outbound.reduce((total, item) => total + (Number(item.framesEncoded) || 0), 0),
+          keyFramesEncoded: outbound.reduce((total, item) => total + (Number(item.keyFramesEncoded) || 0), 0)
+        };
+      } catch (_) {
+        return { senderID, trackID: sender.track?.id || null, bytesSent: 0, packetsSent: 0, framesEncoded: 0 };
+      }
+    }));
     return {
       connectionState: peer.connectionState,
       iceConnectionState: peer.iceConnectionState,
       signalingState: peer.signalingState,
       peerConnectionCount: window.__slowMeetTest?.peerConnections.length || 0,
+      socketCount: window.__slowMeetTest?.sockets.length || 0,
       localUfrag: peer.localDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1] || "",
       remoteUfrag: peer.remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1] || "",
       iceCandidateErrors: window.__slowMeetTest?.iceCandidateErrors || [],
@@ -247,7 +323,9 @@ async function diagnostics(page) {
       audioBytesSent: sum("outbound-rtp", "audio", "bytesSent"),
       videoBytesSent: sum("outbound-rtp", "video", "bytesSent"),
       videoRtpStats,
+      videoSenderStats,
       remoteVideos,
+      remoteParticipants,
       candidatePair: selectedPair ? {
         state: selectedPair.state,
         nominated: selectedPair.nominated,
@@ -288,7 +366,7 @@ async function diagnostics(page) {
         senderTrack: transceiver.sender?.track?.kind || null
       })),
       replaceTrackEvents: window.__slowMeetTest?.replaceTrackEvents || [],
-      connectionEvents: window.__slowMeetTest?.connectionEvents.slice(-20) || [],
+      connectionEvents: window.__slowMeetTest?.connectionEvents.slice(-80) || [],
       signalingMessages: window.__slowMeetTest?.signalingMessages.slice(-20) || [],
       cameraButton: document.querySelector("#camera")?.getAttribute("aria-pressed"),
       micButton: document.querySelector("#mic")?.getAttribute("aria-pressed"),
@@ -313,6 +391,7 @@ async function joinMeeting(context, name, baseURL) {
       peerConnections: [],
       sockets: [],
       replaceTrackEvents: [],
+      videoSenders: [],
       connectionEvents: [],
       iceCandidateErrors: [],
       acceptedRemoteCandidates: [],
@@ -417,9 +496,13 @@ async function joinMeeting(context, name, baseURL) {
         senderID = nextSenderID++;
         senderIDs.set(this, senderID);
       }
+      const kind = this.track?.kind || track?.kind || "unknown";
+      if (kind === "video" && !window.__slowMeetTest.videoSenders.some((record) => record.sender === this)) {
+        window.__slowMeetTest.videoSenders.push({ senderID, sender: this });
+      }
       window.__slowMeetTest.replaceTrackEvents.push({
         senderID,
-        kind: this.track?.kind || track?.kind || "unknown",
+        kind,
         nextTrackId: track?.id || null
       });
       return originalReplaceTrack.call(this, track);
@@ -438,6 +521,228 @@ async function waitForRemoteCamera(page, senderName) {
       .some((video) => video.closest("li")?.textContent?.includes(name) &&
         video.videoWidth > 0 && video.videoHeight > 0);
   }, senderName, { timeout: 30000 });
+}
+
+async function waitForRemoteParticipantState(page, senderName, datasetKey, expectedValue) {
+  await page.waitForFunction(({ name, key, value }) => [...document.querySelectorAll("#participants li[data-participant-id]")]
+    .some((item) => !item.classList.contains("is-local") && item.textContent.includes(name) && item.dataset[key] === value),
+  { name: senderName, key: datasetKey, value: expectedValue }, { timeout: 15000 });
+}
+
+async function setButtonPressed(page, selector, pressed) {
+  const button = page.locator(selector);
+  const expected = String(pressed);
+  if (await button.getAttribute("aria-pressed") !== expected) await button.click();
+  await page.waitForFunction(({ buttonSelector, value }) =>
+    document.querySelector(buttonSelector)?.getAttribute("aria-pressed") === value,
+  { buttonSelector: selector, value: expected }, { timeout: 15000 });
+}
+
+function cameraObservation(state, senderName) {
+  const video = state.remoteVideos.find((entry) => entry.role === "camera" &&
+    entry.participant.includes(senderName));
+  const inbound = video?.inboundVideoStats || [];
+  return {
+    cameraState: video?.cameraState,
+    currentTime: video?.currentTime,
+    width: video?.width,
+    height: video?.height,
+    inboundStatsCount: inbound.length,
+    bytesReceived: inbound.reduce((total, item) => total + (Number(item.bytesReceived) || 0), 0),
+    framesReceived: inbound.reduce((total, item) => total + (Number(item.framesReceived) || 0), 0),
+    framesDecoded: inbound.reduce((total, item) => total + (Number(item.framesDecoded) || 0), 0)
+  };
+}
+
+function videoSenderStats(state, senderID) {
+  return state.videoSenderStats.find((entry) => entry.senderID === senderID);
+}
+
+async function assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, since) {
+  const states = await Promise.all(peers.map(diagnostics));
+  states.forEach((state, index) => {
+    assert.equal(state.connectionState, "connected",
+      `${label}: peer ${index + 1} connection state changed: ${JSON.stringify(summarizePeerState(state))}`);
+    assert.ok(["connected", "completed"].includes(state.iceConnectionState),
+      `${label}: peer ${index + 1} ICE state changed: ${JSON.stringify(summarizePeerState(state))}`);
+    assert.equal(state.peerConnectionCount, expectedPeerConnectionCounts[index],
+      `${label}: peer ${index + 1} created or replaced a peer connection`);
+    assert.equal(state.socketCount, expectedSocketCounts[index],
+      `${label}: peer ${index + 1} rejoined through a replacement signaling socket`);
+    const interrupted = state.connectionEvents.find((event) => event.timestamp >= since &&
+      (event.connectionState === "disconnected" || event.connectionState === "failed" ||
+        event.iceConnectionState === "disconnected" || event.iceConnectionState === "failed"));
+    assert.ok(!interrupted,
+      `${label}: peer ${index + 1} disconnected during media lifecycle: ${JSON.stringify(interrupted)}`);
+  });
+  return states;
+}
+
+async function waitForCameraStopped(label, senderName, receivingPage, peers,
+  expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt) {
+  await waitForRemoteParticipantState(receivingPage, senderName, "camera", "off");
+  const deadline = Date.now() + cameraStopTimeoutMs;
+  let previous;
+  let quietSince;
+  let lastState;
+  while (Date.now() < deadline) {
+    const states = await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, mediaStartedAt);
+    const receiver = states[peers.indexOf(receivingPage)];
+    const current = cameraObservation(receiver, senderName);
+    lastState = receiver;
+    assert.equal(current.cameraState, "off", `${label}: remote camera state did not update to off`);
+    assert.ok(current.inboundStatsCount > 0,
+      `${label}: no receiver RTP stats are associated with the remote camera: ${JSON.stringify(summarizePeerState(receiver))}`);
+    const progressed = previous && (current.bytesReceived > previous.bytesReceived ||
+      current.framesReceived > previous.framesReceived || current.framesDecoded > previous.framesDecoded ||
+      current.currentTime > previous.currentTime + 0.01);
+    if (progressed) {
+      quietSince = undefined;
+    } else {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= cameraStopObservationMs) {
+        console.log(`[pass] ${label}: remote camera state is off and camera RTP/frame time stopped`);
+        return;
+      }
+    }
+    previous = current;
+    await delay(mediaProgressPollMs);
+  }
+  assert.fail(`${label}: remote camera kept progressing after pause: ${JSON.stringify({
+    camera: cameraObservation(lastState, senderName),
+    state: summarizePeerState(lastState)
+  })}`);
+}
+
+async function waitForCameraProgress(label, senderName, receivingPage, peers,
+  expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt) {
+  await waitForRemoteParticipantState(receivingPage, senderName, "camera", "on");
+  await waitForRemoteCamera(receivingPage, senderName);
+  const statsDeadline = Date.now() + mediaProgressTimeoutMs;
+  let initialState;
+  let initial;
+  while (Date.now() < statsDeadline) {
+    const states = await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, mediaStartedAt);
+    initialState = states[peers.indexOf(receivingPage)];
+    initial = cameraObservation(initialState, senderName);
+    if (initial.inboundStatsCount > 0 && initial.width > 0 && initial.height > 0) break;
+    await delay(mediaProgressPollMs);
+  }
+  assert.ok(initial?.inboundStatsCount > 0,
+    `${label}: no receiver RTP stats are associated with the remote camera after renegotiation: ${JSON.stringify(summarizePeerState(initialState))}`);
+  const deadline = Date.now() + mediaProgressTimeoutMs;
+  let lastState = initialState;
+  while (Date.now() < deadline) {
+    const states = await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, mediaStartedAt);
+    const receiver = states[peers.indexOf(receivingPage)];
+    lastState = receiver;
+    const current = cameraObservation(receiver, senderName);
+    assert.equal(current.cameraState, "on", `${label}: remote camera state is not on`);
+    if (current.width > 0 && current.height > 0 && current.bytesReceived > initial.bytesReceived &&
+        current.framesDecoded > initial.framesDecoded && current.currentTime > initial.currentTime + 0.05) {
+      await waitForPeerStability(peers, 750, 5000);
+      await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, mediaStartedAt);
+      console.log(`[pass] ${label}: camera RTP, decoded frames, and video time advanced`);
+      return;
+    }
+    await delay(mediaProgressPollMs);
+  }
+  assert.fail(`${label}: remote camera did not resume decoded frames and video time: ${JSON.stringify({
+    initial,
+    current: cameraObservation(lastState, senderName),
+    state: summarizePeerState(lastState)
+  })}`);
+}
+
+async function getCameraSenderID(page) {
+  return page.evaluate(() => {
+    const event = window.__slowMeetTest.replaceTrackEvents
+      .filter((entry) => entry.kind === "video" && entry.nextTrackId === null).at(-1);
+    if (!event) throw new Error("camera sender has no replaceTrack(null) event to identify");
+    window.__slowMeetTest.cameraSenderID = event.senderID;
+    return event.senderID;
+  });
+}
+
+async function assertVideoSenderProgress(page, senderID, label, durationMs = 1200) {
+  const before = videoSenderStats(await diagnostics(page), senderID);
+  assert.ok(before, `${label}: camera sender ${senderID} has no outbound video RTP stats`);
+  await delay(durationMs);
+  const after = videoSenderStats(await diagnostics(page), senderID);
+  assert.ok(after && after.bytesSent > before.bytesSent && after.packetsSent > before.packetsSent,
+    `${label}: camera sender RTP did not advance: ${JSON.stringify({ before, after })}`);
+}
+
+async function assertCameraRTPContinues(sharerPage, receiverPage, senderName, senderID, label,
+  peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt) {
+  const [beforeSenderState, beforeReceiverState] = await Promise.all([
+    diagnostics(sharerPage), diagnostics(receiverPage)
+  ]);
+  const beforeSender = videoSenderStats(beforeSenderState, senderID);
+  const beforeReceiver = cameraObservation(beforeReceiverState, senderName);
+  assert.ok(beforeSender && beforeReceiver.inboundStatsCount > 0,
+    `${label}: missing camera sender or receiver RTP stats: ${JSON.stringify({ beforeSender, beforeReceiver })}`);
+  await delay(1500);
+  const [afterSenderState, afterReceiverState] = await Promise.all([
+    diagnostics(sharerPage), diagnostics(receiverPage)
+  ]);
+  const afterSender = videoSenderStats(afterSenderState, senderID);
+  const afterReceiver = cameraObservation(afterReceiverState, senderName);
+  await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, label, mediaStartedAt);
+  assert.ok(afterSender && afterSender.bytesSent > beforeSender.bytesSent &&
+    afterSender.packetsSent > beforeSender.packetsSent,
+  `${label}: camera sender RTP stopped while screen video was main: ${JSON.stringify({ beforeSender, afterSender })}`);
+  assert.ok(afterReceiver.bytesReceived > beforeReceiver.bytesReceived,
+    `${label}: receiver camera RTP stopped while screen video was main: ${JSON.stringify({ beforeReceiver, afterReceiver })}`);
+  console.log(`[pass] ${label}: camera sender and receiver RTP advanced while screen video was main`);
+}
+
+async function toggleCameraAndAssert(label, senderName, senderPage, receiverPage, peers,
+  expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt) {
+  const eventCount = await senderPage.evaluate(() => window.__slowMeetTest.replaceTrackEvents.length);
+  await setButtonPressed(senderPage, "#camera", false);
+  await senderPage.waitForFunction((previousCount) => {
+    const events = window.__slowMeetTest.replaceTrackEvents;
+    return events.length > previousCount && events.at(-1)?.kind === "video" && events.at(-1)?.nextTrackId === null;
+  }, eventCount, { timeout: 15000 });
+  const stoppedSenderID = await getCameraSenderID(senderPage);
+  await waitForCameraStopped(`${label} paused`, senderName, receiverPage, peers,
+    expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+
+  const resumeEventCount = await senderPage.evaluate(() => window.__slowMeetTest.replaceTrackEvents.length);
+  await setButtonPressed(senderPage, "#camera", true);
+  await senderPage.waitForFunction(({ previousCount, senderID }) =>
+    window.__slowMeetTest.replaceTrackEvents.slice(previousCount).some((event) =>
+      event.senderID === senderID && event.kind === "video" && event.nextTrackId !== null),
+  { previousCount: resumeEventCount, senderID: stoppedSenderID }, { timeout: 15000 });
+  const resumedSenderID = await senderPage.evaluate(({ previousCount }) =>
+    window.__slowMeetTest.replaceTrackEvents.slice(previousCount)
+      .filter((event) => event.kind === "video" && event.nextTrackId !== null).at(-1)?.senderID,
+  { previousCount: resumeEventCount });
+  assert.equal(resumedSenderID, stoppedSenderID, `${label}: camera resume must reuse the established video sender`);
+  await senderPage.evaluate((senderID) => { window.__slowMeetTest.cameraSenderID = senderID; }, stoppedSenderID);
+  await waitForCameraProgress(`${label} resumed`, senderName, receiverPage, peers,
+    expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+  return stoppedSenderID;
+}
+
+async function toggleIncomingVideoAndAssert(label, senderName, senderPage, receiverPage, peers,
+  senderID, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt) {
+  await setButtonPressed(receiverPage, "#receive-video", false);
+  await waitForRemoteParticipantState(receiverPage, senderName, "receiveVideo", "false");
+  await waitForPeerStability(peers, 750, 10000);
+  await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts, `${label} incoming video off`, mediaStartedAt);
+  const remote = (await diagnostics(receiverPage)).remoteParticipants.find((entry) =>
+    !entry.local && entry.name.includes(senderName));
+  assert.equal(remote?.cameraState, "on", `${label}: disabling incoming video changed the sender camera state`);
+  await assertVideoSenderProgress(senderPage, senderID, `${label} sender continues while incoming video is off`);
+
+  await setButtonPressed(receiverPage, "#receive-video", true);
+  await waitForRemoteParticipantState(receiverPage, senderName, "receiveVideo", "true");
+  await Promise.all(peers.map((page) => waitForPeerSignalingStable(page)));
+  await waitForPeerStability(peers, 750, 10000);
+  await waitForCameraProgress(`${label} incoming video resumed`, senderName, receiverPage, peers,
+    expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
 }
 
 async function monitorCamera(label, senderName, receivingPage, peers, expectedPeerConnectionCounts, durationMs = stabilityMs) {
@@ -523,27 +828,39 @@ async function assertRemoteVideoMoves(page, role, label) {
   console.log(`[pass] ${label}: remote ${role} video time advanced`);
 }
 
-async function waitForAudioProgress(sender, receiver) {
-  const before = await diagnostics(receiver);
+async function waitForAudioProgress(sender, receiver, beforeSender, beforeReceiver, label) {
   const start = Date.now();
   while (Date.now() - start < 10000) {
     const [senderState, receiverState] = await Promise.all([diagnostics(sender), diagnostics(receiver)]);
-    if (senderState.audioBytesSent > 0 && receiverState.audioBytesReceived > before.audioBytesReceived) return;
+    if (senderState.audioBytesSent > beforeSender.audioBytesSent &&
+        receiverState.audioBytesReceived > beforeReceiver.audioBytesReceived) {
+      console.log(`[pass] ${label}: outbound and remote audio RTP advanced after unmute`);
+      return;
+    }
     await delay(250);
   }
-  assert.fail(`unmuted audio did not reach the other peer: ${JSON.stringify({ sender: await diagnostics(sender), receiver: await diagnostics(receiver) })}`);
+  assert.fail(`${label}: unmuted audio did not reach the other peer: ${JSON.stringify({
+    sender: await diagnostics(sender),
+    receiver: await diagnostics(receiver),
+    beforeSender,
+    beforeReceiver
+  })}`);
 }
 
-async function testMicrophoneControls(pageA, pageB, browser, baseURL) {
-  await pageA.locator("#mic").click();
-  await pageA.waitForFunction(() => document.querySelector("#mic")?.getAttribute("aria-pressed") === "true");
-  await waitForAudioProgress(pageA, pageB);
-  await pageA.locator("#mic").click();
-  await pageA.waitForFunction(() => document.querySelector("#mic")?.getAttribute("aria-pressed") === "false");
-  await pageB.locator("#mic").click();
-  await pageB.waitForFunction(() => document.querySelector("#mic")?.getAttribute("aria-pressed") === "true");
-  await waitForAudioProgress(pageB, pageA);
-  console.log("[pass] microphone permission, mute/unmute, and remote audio packets in both directions");
+async function testMicrophoneControls(pageA, pageB) {
+  await setButtonPressed(pageA, "#mic", false);
+  await waitForRemoteParticipantState(pageB, "Media A", "mic", "off");
+  const [beforeSenderA, beforeReceiverB] = await Promise.all([diagnostics(pageA), diagnostics(pageB)]);
+  await setButtonPressed(pageA, "#mic", true);
+  await waitForRemoteParticipantState(pageB, "Media A", "mic", "on");
+  await waitForAudioProgress(pageA, pageB, beforeSenderA, beforeReceiverB, "A microphone mute/unmute -> B");
+
+  await setButtonPressed(pageB, "#mic", false);
+  await waitForRemoteParticipantState(pageA, "Media B", "mic", "off");
+  const [beforeSenderB, beforeReceiverA] = await Promise.all([diagnostics(pageB), diagnostics(pageA)]);
+  await setButtonPressed(pageB, "#mic", true);
+  await waitForRemoteParticipantState(pageA, "Media B", "mic", "on");
+  await waitForAudioProgress(pageB, pageA, beforeSenderB, beforeReceiverA, "B microphone mute/unmute -> A");
 }
 
 async function requestIceRestart(page) {
@@ -586,38 +903,59 @@ async function testUnavailableMicrophone(browser, baseURL) {
   await context.close();
 }
 
-async function testHeadedScreenShare(pageA, pageB, peers) {
-  console.log("[screen] Select a screen or window in Chromium's native picker when it opens.");
-  await pageA.locator("#screen").click();
-  await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true", null, { timeout: 60000 });
-  await assertRemoteVideoMoves(pageB, "screen", "first screen share");
-  await pageA.locator("#screen").click();
-  await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false");
-  await pageA.locator("#screen").click();
-  await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true", null, { timeout: 60000 });
-  await assertRemoteVideoMoves(pageB, "screen", "screen share after toolbar stop");
-  console.log("[pass] headed screen share: share, toolbar stop, and share again");
+async function testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnectionCounts,
+  expectedSocketCounts, mediaStartedAt) {
+  for (const { sharerPage, receiverPage, senderName, direction } of [
+    { sharerPage: pageA, receiverPage: pageB, senderName: "Media A", direction: "A -> B" },
+    { sharerPage: pageB, receiverPage: pageA, senderName: "Media B", direction: "B -> A" }
+  ]) {
+    const cameraSenderID = await sharerPage.evaluate(() => window.__slowMeetTest.cameraSenderID);
+    assert.ok(cameraSenderID, `${direction}: camera sender identity was not recorded before screen sharing`);
 
-  await pageA.evaluate(() => {
-    const track = typeof screenStream === "undefined" ? undefined : screenStream?.getVideoTracks()[0];
-    if (!track) throw new Error("active screen source track is missing");
-    window.__slowMeetTest.browserStoppedScreenShare = false;
-    track.addEventListener("ended", () => {
-      window.__slowMeetTest.browserStoppedScreenShare = true;
-    }, { once: true });
-  });
-  console.log("[screen] Stop sharing from Chromium's browser sharing indicator now.");
-  await pageA.waitForFunction(() => window.__slowMeetTest?.browserStoppedScreenShare === true, null, { timeout: 120000 });
-  await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false", null, { timeout: 15000 });
-  await pageA.locator("#screen").click();
-  await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true", null, { timeout: 60000 });
-  await assertRemoteVideoMoves(pageB, "screen", "screen share after browser-level stop");
-  console.log("[pass] headed screen share: restarted after the native browser stop event");
-  await pageA.locator("#screen").click();
-  await Promise.all(peers.map(waitForPeerConnection));
+    const startShare = async (label) => {
+      console.log(`[screen] ${direction}: select a screen or window in Chromium's native picker for ${label}.`);
+      await sharerPage.locator("#screen").click();
+      await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true", null, { timeout: 60000 });
+      await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "true");
+      await assertRemoteVideoMoves(receiverPage, "screen", `${direction} ${label}`);
+      await assertCameraRTPContinues(sharerPage, receiverPage, senderName, cameraSenderID,
+        `${direction} camera RTP during ${label}`, peers, expectedPeerConnectionCounts,
+        expectedSocketCounts, mediaStartedAt);
+    };
+
+    const stopFromToolbar = async () => {
+      await sharerPage.locator("#screen").click();
+      await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false");
+      await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "false");
+      await waitForPeerStability(peers, 750, 10000);
+      await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts,
+        `${direction} toolbar screen stop`, mediaStartedAt);
+    };
+
+    await startShare("first screen share");
+    await stopFromToolbar();
+    await startShare("restart after toolbar stop");
+
+    await sharerPage.evaluate(() => {
+      const track = typeof screenStream === "undefined" ? undefined : screenStream?.getVideoTracks()[0];
+      if (!track) throw new Error("active screen source track is missing");
+      window.__slowMeetTest.browserStoppedScreenShare = false;
+      track.addEventListener("ended", () => {
+        window.__slowMeetTest.browserStoppedScreenShare = true;
+      }, { once: true });
+    });
+    console.log(`[screen] ${direction}: stop sharing from Chromium's browser sharing indicator now.`);
+    await sharerPage.waitForFunction(() => window.__slowMeetTest?.browserStoppedScreenShare === true, null, { timeout: 120000 });
+    await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false", null, { timeout: 15000 });
+    await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "false");
+    await startShare("restart after browser-indicator stop");
+    await stopFromToolbar();
+    console.log(`[pass] headed screen share ${direction}: native picker, toolbar stop, restart, indicator stop, and restart`);
+  }
 }
 
 async function main() {
+  console.log(`[media] ${realDevices ? "real capture devices" : "Chromium-generated camera/microphone"}; ${headed ? "headed" : "headless"} Chromium`);
   const server = process.env.MEDIA_E2E_BASE_URL
     ? undefined
     : await startLocalServer();
@@ -666,6 +1004,9 @@ async function main() {
     const expectedPeerConnectionCounts = await Promise.all(peers.map((page) =>
       page.evaluate(() => window.__slowMeetTest.peerConnections.length)));
     assert.deepEqual(expectedPeerConnectionCounts, [1, 1], "expected one peer connection per participant before media starts");
+    const expectedSocketCounts = await Promise.all(peers.map(async (page) => (await diagnostics(page)).socketCount));
+    assert.deepEqual(expectedSocketCounts, [1, 1], "expected one signaling socket per participant before media starts");
+    const mediaStartedAt = Date.now();
 
     if (idleOnly) {
       await waitForPeerStability(peers, stabilityMs, stabilityMs + 30000);
@@ -674,7 +1015,7 @@ async function main() {
     }
 
     if (microphoneOnly) {
-      await testMicrophoneControls(pageA, pageB, browser, baseURL);
+      await testMicrophoneControls(pageA, pageB);
       await testUnavailableMicrophone(browser, baseURL);
       console.log("Stopped after microphone diagnostics as requested.");
       return;
@@ -703,64 +1044,36 @@ async function main() {
       return;
     }
 
-    await pageA.locator("#camera").click();
-    await pageA.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
+    await setButtonPressed(pageA, "#camera", true);
+    await waitForRemoteParticipantState(pageB, "Media A", "camera", "on");
     await monitorCamera("A first camera enable -> B", "Media A", pageB, peers, expectedPeerConnectionCounts);
     if (firstCameraOnly) {
       console.log("Stopped after first-camera diagnostic as requested.");
       return;
     }
 
-    await pageA.locator("#camera").click();
-    await pageA.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "false");
-    await pageA.waitForFunction(() => window.__slowMeetTest.replaceTrackEvents.some((event) =>
-      event.kind === "video" && event.nextTrackId === null));
-    const stoppedSenderID = await pageA.evaluate(() => window.__slowMeetTest.replaceTrackEvents
-      .filter((event) => event.kind === "video" && event.nextTrackId === null).at(-1)?.senderID);
-    await pageA.locator("#camera").click();
-    await pageA.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
-    await pageA.waitForFunction((senderID) => window.__slowMeetTest.replaceTrackEvents.some((event) =>
-      event.senderID === senderID && event.kind === "video" && event.nextTrackId !== null), stoppedSenderID);
-    const resumedSenderID = await pageA.evaluate(() => window.__slowMeetTest.replaceTrackEvents
-      .filter((event) => event.kind === "video" && event.nextTrackId !== null).at(-1)?.senderID);
-    assert.equal(resumedSenderID, stoppedSenderID, "camera resume should reuse the established video sender");
-    await monitorCamera("A camera off/on -> B", "Media A", pageB, peers, expectedPeerConnectionCounts);
+    await setButtonPressed(pageB, "#camera", true);
+    await waitForRemoteParticipantState(pageA, "Media B", "camera", "on");
+    await monitorCamera("B first camera enable -> A", "Media B", pageA, peers, expectedPeerConnectionCounts);
 
-    await pageB.locator("#receive-video").click();
-    await pageB.waitForFunction(() => document.querySelector("#receive-video")?.getAttribute("aria-pressed") === "false");
-    await pageB.locator("#receive-video").click();
-    await pageB.waitForFunction(() => document.querySelector("#receive-video")?.getAttribute("aria-pressed") === "true");
-    await monitorCamera("B incoming video off/on, A keeps sending", "Media A", pageB, peers, expectedPeerConnectionCounts);
+    let cameraSenderIDA;
+    let cameraSenderIDB;
+    for (let cycle = 1; cycle <= cameraToggleCycles; cycle += 1) {
+      console.log(`[camera] cycle ${cycle}/${cameraToggleCycles}: A off/on -> B off/on -> A off/on`);
+      cameraSenderIDA = await toggleCameraAndAssert(`cycle ${cycle}: A off/on -> B`,
+        "Media A", pageA, pageB, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+      cameraSenderIDB = await toggleCameraAndAssert(`cycle ${cycle}: B off/on -> A`,
+        "Media B", pageB, pageA, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+      cameraSenderIDA = await toggleCameraAndAssert(`cycle ${cycle}: A off/on -> B`,
+        "Media A", pageA, pageB, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+    }
 
-    await pageB.locator("#camera").click();
-    await pageB.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
-    await Promise.all([
-      monitorCamera("A receives B while both cameras are on", "Media B", pageA, peers, expectedPeerConnectionCounts),
-      monitorCamera("B receives A while both cameras are on", "Media A", pageB, peers, expectedPeerConnectionCounts)
-    ]);
+    await toggleIncomingVideoAndAssert("B receives A", "Media A", pageA, pageB, peers,
+      cameraSenderIDA, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
+    await toggleIncomingVideoAndAssert("A receives B", "Media B", pageB, pageA, peers,
+      cameraSenderIDB, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
 
-    await pageA.locator("#receive-video").click();
-    await pageA.waitForFunction(() => document.querySelector("#receive-video")?.getAttribute("aria-pressed") === "false");
-    await pageA.locator("#receive-video").click();
-    await pageA.waitForFunction(() => document.querySelector("#receive-video")?.getAttribute("aria-pressed") === "true");
-    await monitorCamera("A incoming video off/on, B keeps sending", "Media B", pageA, peers, expectedPeerConnectionCounts);
-
-    await pageB.locator("#camera").click();
-    await pageB.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "false");
-    await pageB.waitForFunction(() => window.__slowMeetTest.replaceTrackEvents.some((event) =>
-      event.kind === "video" && event.nextTrackId === null));
-    const stoppedSenderBID = await pageB.evaluate(() => window.__slowMeetTest.replaceTrackEvents
-      .filter((event) => event.kind === "video" && event.nextTrackId === null).at(-1)?.senderID);
-    await pageB.locator("#camera").click();
-    await pageB.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
-    await pageB.waitForFunction((senderID) => window.__slowMeetTest.replaceTrackEvents.some((event) =>
-      event.senderID === senderID && event.kind === "video" && event.nextTrackId !== null), stoppedSenderBID);
-    const resumedSenderBID = await pageB.evaluate(() => window.__slowMeetTest.replaceTrackEvents
-      .filter((event) => event.kind === "video" && event.nextTrackId !== null).at(-1)?.senderID);
-    assert.equal(resumedSenderBID, stoppedSenderBID, "camera resume should reuse the established video sender");
-    await monitorCamera("B camera off/on -> A", "Media B", pageA, peers, expectedPeerConnectionCounts);
-
-    await testMicrophoneControls(pageA, pageB, browser, baseURL);
+    await testMicrophoneControls(pageA, pageB);
 
     const beforeA = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1] || "");
     await requestIceRestart(pageA);
@@ -777,7 +1090,10 @@ async function main() {
       monitorCamera("ICE restart from B -> B receives A", "Media A", pageB, peers, expectedPeerConnectionCounts)
     ]);
 
-    if (testScreenShare) await testHeadedScreenShare(pageA, pageB, peers);
+    if (testScreenShare) {
+      await testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnectionCounts,
+        expectedSocketCounts, mediaStartedAt);
+    }
     await testUnavailableMicrophone(browser, baseURL);
     console.log("All media E2E checks passed.");
   } catch (error) {
