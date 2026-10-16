@@ -18,9 +18,14 @@ func TestRouteRTCPFeedbackTargetsSourceTrack(t *testing.T) {
 		MediaSSRC:  21,
 		FIR:        []rtcp.FIREntry{{SSRC: 22, SequenceNumber: 3}},
 	}
-	routed := routeRTCPFeedback([]rtcp.Packet{pli, fir}, sourceSSRC)
-	if len(routed) != 2 {
-		t.Fatalf("routed packet count = %d, want 2", len(routed))
+	nack := &rtcp.TransportLayerNack{
+		SenderSSRC: 12,
+		MediaSSRC:  23,
+		Nacks:      []rtcp.NackPair{{PacketID: 44, LostPackets: 3}},
+	}
+	routed := routeRTCPFeedback([]rtcp.Packet{pli, fir, nack}, sourceSSRC)
+	if len(routed) != 3 {
+		t.Fatalf("routed packet count = %d, want 3", len(routed))
 	}
 	routedPLI, ok := routed[0].(*rtcp.PictureLossIndication)
 	if !ok || routedPLI.MediaSSRC != sourceSSRC || routedPLI.SenderSSRC != pli.SenderSSRC {
@@ -30,7 +35,12 @@ func TestRouteRTCPFeedbackTargetsSourceTrack(t *testing.T) {
 	if !ok || routedFIR.MediaSSRC != sourceSSRC || len(routedFIR.FIR) != 1 || routedFIR.FIR[0].SSRC != sourceSSRC {
 		t.Fatalf("routed FIR = %+v, want source SSRC %d", routed[1], sourceSSRC)
 	}
-	if pli.MediaSSRC != 20 || fir.MediaSSRC != 21 || fir.FIR[0].SSRC != 22 {
+	routedNACK, ok := routed[2].(*rtcp.TransportLayerNack)
+	if !ok || routedNACK.MediaSSRC != sourceSSRC || routedNACK.SenderSSRC != nack.SenderSSRC ||
+		len(routedNACK.Nacks) != 1 || routedNACK.Nacks[0] != nack.Nacks[0] {
+		t.Fatalf("routed NACK = %+v, want source SSRC %d with its original packet IDs", routed[2], sourceSSRC)
+	}
+	if pli.MediaSSRC != 20 || fir.MediaSSRC != 21 || fir.FIR[0].SSRC != 22 || nack.MediaSSRC != 23 {
 		t.Fatal("routing feedback mutated the receiver's RTCP packets")
 	}
 }
@@ -153,23 +163,70 @@ func TestVideoFrameQueueDropsOnlyWholeFrames(t *testing.T) {
 
 func TestVideoFrameBufferWaitsForCompleteFrame(t *testing.T) {
 	var frame videoFrameBuffer
-	first := &rtp.Packet{Header: rtp.Header{Timestamp: 10}, Payload: make([]byte, 900)}
-	last := &rtp.Packet{Header: rtp.Header{Timestamp: 10, Marker: true}, Payload: make([]byte, 900)}
+	first := &rtp.Packet{Header: rtp.Header{Timestamp: 10, SequenceNumber: 101}, Payload: make([]byte, 900)}
+	reordered := &rtp.Packet{Header: rtp.Header{Timestamp: 10, SequenceNumber: 100}, Payload: make([]byte, 900)}
+	last := &rtp.Packet{Header: rtp.Header{Timestamp: 10, SequenceNumber: 102, Marker: true}, Payload: make([]byte, 900)}
 
 	if packets, _, complete := frame.add(first); complete || len(packets) != 0 {
 		t.Fatal("frame was exposed before its marker packet")
 	}
+	if packets, _, complete := frame.add(reordered); complete || len(packets) != 0 {
+		t.Fatal("out-of-order frame packets should wait for the marker")
+	}
+	duplicate := &rtp.Packet{Header: first.Header, Payload: first.Payload}
+	if packets, _, complete := frame.add(duplicate); complete || len(packets) != 0 {
+		t.Fatal("duplicate RTP sequence should not complete or extend the frame")
+	}
 	packets, frameBytes, complete := frame.add(last)
-	if !complete || len(packets) != 2 || frameBytes != first.MarshalSize()+last.MarshalSize() {
-		t.Fatalf("completed frame = (%d packets, %d bytes, %t), want (2 packets, full size, true)", len(packets), frameBytes, complete)
+	if !complete || len(packets) != 3 || frameBytes != first.MarshalSize()+reordered.MarshalSize()+last.MarshalSize() {
+		t.Fatalf("completed frame = (%d packets, %d bytes, %t), want (3 packets, full size, true)", len(packets), frameBytes, complete)
+	}
+	if packets[0].SequenceNumber != 100 || packets[1].SequenceNumber != 101 || packets[2].SequenceNumber != 102 {
+		t.Fatalf("frame sequence order = [%d %d %d], want [100 101 102]", packets[0].SequenceNumber, packets[1].SequenceNumber, packets[2].SequenceNumber)
 	}
 
-	incomplete := &rtp.Packet{Header: rtp.Header{Timestamp: 20}, Payload: []byte{1}}
-	replacement := &rtp.Packet{Header: rtp.Header{Timestamp: 30, Marker: true}, Payload: []byte{2}}
+	incomplete := &rtp.Packet{Header: rtp.Header{Timestamp: 20, SequenceNumber: 103}, Payload: []byte{1}}
+	replacement := &rtp.Packet{Header: rtp.Header{Timestamp: 30, SequenceNumber: 104, Marker: true}, Payload: []byte{2}}
 	frame.add(incomplete)
 	packets, _, complete = frame.add(replacement)
 	if !complete || len(packets) != 1 || packets[0] != replacement {
 		t.Fatal("timestamp change should discard an incomplete frame")
+	}
+	stale := &rtp.Packet{Header: rtp.Header{Timestamp: 20, SequenceNumber: 105, Marker: true}, Payload: []byte{3}}
+	if packets, _, complete = frame.add(stale); complete || len(packets) != 0 {
+		t.Fatal("late packet from an older completed frame should be ignored")
+	}
+
+	current := &rtp.Packet{Header: rtp.Header{Timestamp: 40, SequenceNumber: 106}, Payload: []byte{4}}
+	late := &rtp.Packet{Header: rtp.Header{Timestamp: 35, SequenceNumber: 107, Marker: true}, Payload: []byte{5}}
+	currentMarker := &rtp.Packet{Header: rtp.Header{Timestamp: 40, SequenceNumber: 108, Marker: true}, Payload: []byte{6}}
+	frame.add(current)
+	if packets, _, complete = frame.add(late); complete || len(packets) != 0 {
+		t.Fatal("late packet should not reset the active frame")
+	}
+	packets, _, complete = frame.add(currentMarker)
+	if !complete || len(packets) != 2 || packets[0] != current || packets[1] != currentMarker {
+		t.Fatal("late older frame should not discard the active newer frame")
+	}
+}
+
+func TestVideoFrameBufferAcceptsRTPTimeStampWrap(t *testing.T) {
+	var frame videoFrameBuffer
+	first := &rtp.Packet{Header: rtp.Header{Timestamp: 0xfffffff0, SequenceNumber: 0}}
+	sequenceBeforeWrap := &rtp.Packet{Header: rtp.Header{Timestamp: 0xfffffff0, SequenceNumber: 65535}}
+	last := &rtp.Packet{Header: rtp.Header{Timestamp: 0xfffffff0, SequenceNumber: 1, Marker: true}}
+	frame.add(first)
+	frame.add(sequenceBeforeWrap)
+	packets, _, complete := frame.add(last)
+	if !complete || len(packets) != 3 {
+		t.Fatal("frame should complete across RTP sequence wrap")
+	}
+	if packets[0] != sequenceBeforeWrap || packets[1] != first || packets[2] != last {
+		t.Fatal("RTP sequence wrap should sort as 65535, 0, 1")
+	}
+	afterWrap := &rtp.Packet{Header: rtp.Header{Timestamp: 0x10, SequenceNumber: 0, Marker: true}}
+	if packets, _, complete := frame.add(afterWrap); !complete || len(packets) != 1 || packets[0] != afterWrap {
+		t.Fatal("newer timestamp after uint32 wrap should be accepted")
 	}
 }
 

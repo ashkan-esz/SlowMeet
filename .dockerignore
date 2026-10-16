@@ -19,3 +19,4 @@ debug*.png
 docs
 scripts
 internal/*/*_test.go
+node_modules

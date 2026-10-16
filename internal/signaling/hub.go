@@ -62,6 +62,7 @@ type client struct {
 	pendingCandidates         []Message
 	pendingLocalCandidates    []Message
 	offerInFlight             bool
+	offerICERestart           bool
 	pendingOffer              bool
 	pendingICERestart         bool
 	activeScreenMediaStreamID string
@@ -881,8 +882,10 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		err := applyRemoteAnswer(c, c.peer, msg.SDP)
+		completedICERestart := c.offerICERestart
+		c.offerICERestart = false
 		shouldOffer := c.offerInFlight && c.pendingOffer
-		iceRestart := c.pendingICERestart
+		pendingICERestart := c.pendingICERestart
 		c.offerInFlight = false
 		c.pendingOffer = false
 		c.pendingICERestart = false
@@ -893,9 +896,14 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			h.router.RequestVideoKeyFrame(c.participant.ID, func(err error) {
 				h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
 			})
+			if completedICERestart {
+				h.router.RequestVideoKeyFrameForPublisher(c.participant.ID, func(err error) {
+					h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "direction", "publisher", "error", err)
+				})
+			}
 		}
 		if shouldOffer {
-			_ = h.sendOffer(c, iceRestart)
+			_ = h.sendOffer(c, pendingICERestart)
 		}
 	case TypeCandidate:
 		c.negotiationMu.Lock()
@@ -957,6 +965,7 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 		return nil
 	}
 	c.offerInFlight = true
+	c.offerICERestart = iceRestart
 	previousRemoteDescription := c.remoteDescription
 	if iceRestart {
 		// Browser candidates gathered for the restarted ICE credentials must
@@ -966,6 +975,7 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 	offer, err := peer.CreateOffer(iceRestart)
 	if err != nil {
 		c.offerInFlight = false
+		c.offerICERestart = false
 		c.remoteDescription = previousRemoteDescription
 		c.negotiationMu.Unlock()
 		return err
@@ -973,6 +983,7 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
 	if err != nil {
 		c.offerInFlight = false
+		c.offerICERestart = false
 		c.remoteDescription = previousRemoteDescription
 	}
 	c.negotiationMu.Unlock()

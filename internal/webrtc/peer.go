@@ -90,11 +90,18 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 		settingEngine.SetNetworkTypes([]pion.NetworkType{pion.NetworkTypeUDP4})
 	}
 	if publicIP != "" {
-		if net.ParseIP(publicIP) == nil {
+		publicAddress := net.ParseIP(publicIP)
+		if publicAddress == nil {
 			return nil, fmt.Errorf("ICE public IP must be a valid IP address")
 		}
 		settingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		settingEngine.SetNAT1To1IPs([]string{publicIP}, pion.ICECandidateTypeHost)
+		if publicAddress.IsLoopback() {
+			settingEngine.SetIncludeLoopbackCandidate(true)
+			settingEngine.SetIPFilter(func(candidateIP net.IP) bool {
+				return candidateIP.IsLoopback()
+			})
+		}
 	}
 	api := pion.NewAPI(pion.WithSettingEngine(settingEngine))
 	connection, err := api.NewPeerConnection(configuration)

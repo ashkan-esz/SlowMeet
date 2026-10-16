@@ -199,6 +199,26 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	case <-time.After(2*videoKeyFrameRetryDelay + 50*time.Millisecond):
 	}
 
+	router.RequestVideoKeyFrameForPublisher("source")
+	for _, feedback := range []struct {
+		role string
+		pli  <-chan *rtcp.PictureLossIndication
+	}{
+		{role: "camera", pli: cameraFeedback},
+		{role: "screen", pli: screenFeedback},
+	} {
+		for attempt := 0; attempt < videoKeyFrameRequestCount; attempt++ {
+			select {
+			case pli := <-feedback.pli:
+				if pli.MediaSSRC == 0 {
+					t.Fatalf("%s publisher-targeted keyframe feedback = %#v, want PLI with source SSRC", feedback.role, pli)
+				}
+			case <-time.After(routerIntegrationTimeout):
+				t.Fatalf("publisher-targeted %s received only %d of %d keyframe requests", feedback.role, attempt, videoKeyFrameRequestCount)
+			}
+		}
+	}
+
 	sendIntegrationRTP(t, audioTrack, pion.RTPCodecTypeAudio, 48_000)
 	sendIntegrationRTP(t, videoTrack, pion.RTPCodecTypeVideo, 90_000)
 	sendIntegrationRTP(t, screenTrack, pion.RTPCodecTypeVideo, 90_000)

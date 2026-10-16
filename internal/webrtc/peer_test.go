@@ -1,7 +1,9 @@
 package webrtc
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	pion "github.com/pion/webrtc/v4"
 )
@@ -67,6 +69,40 @@ func TestNewPeerWithPublicIPCreatesConnection(t *testing.T) {
 	defer peer.Close()
 	if peer.Connection() == nil {
 		t.Fatal("Connection() returned nil")
+	}
+}
+
+func TestNewPeerWithLoopbackPublicIPGathersLoopbackCandidate(t *testing.T) {
+	peer, err := NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
+		nil, nil, "", "", 50000, 50100, true, "all", "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatalf("create loopback peer: %v", err)
+	}
+	defer peer.Close()
+
+	if _, err := peer.Connection().AddTransceiverFromKind(pion.RTPCodecTypeAudio); err != nil {
+		t.Fatalf("add audio transceiver: %v", err)
+	}
+	gatheringComplete := pion.GatheringCompletePromise(peer.Connection())
+	offer, err := peer.Connection().CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create offer: %v", err)
+	}
+	if err := peer.Connection().SetLocalDescription(offer); err != nil {
+		t.Fatalf("set local offer: %v", err)
+	}
+	select {
+	case <-gatheringComplete:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ICE candidate gathering did not complete")
+	}
+	sdp := peer.Connection().LocalDescription().SDP
+	if !strings.Contains(sdp, "127.0.0.1") {
+		t.Fatalf("loopback candidate missing from local SDP:\n%s", sdp)
+	}
+	if strings.Contains(sdp, "192.168.") {
+		t.Fatalf("non-loopback address leaked into loopback-only SDP:\n%s", sdp)
 	}
 }
 

@@ -2,6 +2,8 @@ package media
 
 import (
 	"fmt"
+	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -239,7 +241,17 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 
 	var offers []Offerer
 	r.mu.Lock()
-	if _, exists := r.pubs[key]; exists {
+	if existing, exists := r.pubs[key]; exists {
+		if existing.remote != remote {
+			slog.Default().Warn("media_publication_duplicate_track",
+				"source_id", sourceID,
+				"role", role,
+				"layer", layer,
+				"track_id", trackID,
+				"existing_ssrc", existing.remote.SSRC(),
+				"new_ssrc", remote.SSRC(),
+			)
+		}
 		r.mu.Unlock()
 		return
 	}
@@ -405,6 +417,38 @@ func (r *Router) RequestVideoKeyFrame(receiverID string, onError ...func(error))
 	r.requestVideoKeyFrame(receiverID, reportError)
 }
 
+// RequestVideoKeyFrameForPublisher asks each active camera or screen
+// publication from sourceID to produce a fresh keyframe for its subscribers.
+func (r *Router) RequestVideoKeyFrameForPublisher(sourceID string, onError ...func(error)) {
+	var reportError func(error)
+	if len(onError) > 0 {
+		reportError = onError[0]
+	}
+	if sourceID == "" {
+		return
+	}
+
+	var requests []*videoKeyFrameRetry
+	r.mu.Lock()
+	for _, pub := range r.pubs {
+		if pub.sourceID != sourceID || (pub.role != SourceRoleCamera && pub.role != SourceRoleScreen) ||
+			pub.source == nil || pub.remote == nil || pub.paused.Load() {
+			continue
+		}
+		for receiverID := range pub.senders {
+			if request := r.scheduleVideoKeyFrameRetryLocked(pub, receiverID, reportError); request != nil {
+				requests = append(requests, request)
+			}
+			break
+		}
+	}
+	r.mu.Unlock()
+
+	for _, request := range requests {
+		r.writeVideoKeyFrame(request.publication, request.onError)
+	}
+}
+
 func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
 	var requests []*videoKeyFrameRetry
 	r.mu.Lock()
@@ -415,30 +459,36 @@ func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
 		if pub.senders[receiverID] == nil {
 			continue
 		}
-		key := videoKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
-		if existing := r.videoKeyFrameRetries[key]; existing != nil {
-			if existing.publication == pub {
-				continue
-			}
-			existing.timer.Stop()
-			delete(r.videoKeyFrameRetries, key)
+		if request := r.scheduleVideoKeyFrameRetryLocked(pub, receiverID, onError); request != nil {
+			requests = append(requests, request)
 		}
-		request := &videoKeyFrameRetry{
-			publication: pub,
-			remaining:   videoKeyFrameRequestCount - 1,
-			onError:     onError,
-		}
-		request.timer = time.AfterFunc(videoKeyFrameRetryDelay, func() {
-			r.retryVideoKeyFrame(key, request)
-		})
-		r.videoKeyFrameRetries[key] = request
-		requests = append(requests, request)
 	}
 	r.mu.Unlock()
 
 	for _, request := range requests {
 		r.writeVideoKeyFrame(request.publication, request.onError)
 	}
+}
+
+func (r *Router) scheduleVideoKeyFrameRetryLocked(pub *publication, receiverID string, onError func(error)) *videoKeyFrameRetry {
+	key := videoKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
+	if existing := r.videoKeyFrameRetries[key]; existing != nil {
+		if existing.publication == pub {
+			return nil
+		}
+		existing.timer.Stop()
+		delete(r.videoKeyFrameRetries, key)
+	}
+	request := &videoKeyFrameRetry{
+		publication: pub,
+		remaining:   videoKeyFrameRequestCount - 1,
+		onError:     onError,
+	}
+	request.timer = time.AfterFunc(videoKeyFrameRetryDelay, func() {
+		r.retryVideoKeyFrame(key, request)
+	})
+	r.videoKeyFrameRetries[key] = request
+	return request
 }
 
 func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoKeyFrameRetry) {
@@ -568,6 +618,11 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 				copy.FIR[index].SSRC = sourceSSRC
 			}
 			routed = append(routed, &copy)
+		case *rtcp.TransportLayerNack:
+			copy := *feedback
+			copy.MediaSSRC = sourceSSRC
+			copy.Nacks = append([]rtcp.NackPair(nil), feedback.Nacks...)
+			routed = append(routed, &copy)
 		default:
 			routed = append(routed, packet)
 		}
@@ -584,6 +639,19 @@ func (r *Router) forward(pub *publication) {
 	for {
 		packet, _, err := pub.remote.ReadRTP()
 		if err != nil {
+			r.mu.RLock()
+			stillRegistered := r.pubs[pub.key] == pub
+			r.mu.RUnlock()
+			if stillRegistered {
+				slog.Default().Warn("media_publication_read_stopped",
+					"source_id", pub.sourceID,
+					"role", pub.role,
+					"layer", pub.layer,
+					"track_id", pub.trackID,
+					"ssrc", pub.remote.SSRC(),
+					"error", err,
+				)
+			}
 			r.removePublication(pub)
 			return
 		}
@@ -705,11 +773,14 @@ func (pub *publication) hasRecentPacket(now time.Time) bool {
 }
 
 type videoFrameBuffer struct {
-	timestamp uint32
-	packets   []*rtp.Packet
-	bytes     int
-	active    bool
-	dropping  bool
+	timestamp        uint32
+	lastTimestamp    uint32
+	packets          []*rtp.Packet
+	seenSequences    map[uint16]struct{}
+	bytes            int
+	active           bool
+	dropping         bool
+	hasLastTimestamp bool
 }
 
 type videoFrame struct {
@@ -719,17 +790,29 @@ type videoFrame struct {
 // add returns a complete video frame only after its marker packet arrives.
 // A timestamp change before the marker discards the previous incomplete frame.
 func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
-	if !f.active || f.timestamp != packet.Timestamp {
-		*f = videoFrameBuffer{timestamp: packet.Timestamp, active: true}
+	if !f.active {
+		if f.hasLastTimestamp && !rtpTimestampAfter(packet.Timestamp, f.lastTimestamp) {
+			return nil, 0, false
+		}
+		f.start(packet.Timestamp)
+	} else if f.timestamp != packet.Timestamp {
+		if !rtpTimestampAfter(packet.Timestamp, f.timestamp) {
+			return nil, 0, false
+		}
+		f.start(packet.Timestamp)
 	}
 
 	if !f.dropping {
+		if _, duplicate := f.seenSequences[packet.SequenceNumber]; duplicate {
+			return nil, 0, false
+		}
 		packetBytes := packet.MarshalSize()
 		if packetBytes > maxVideoFrameBufferBytes-f.bytes {
 			f.packets = nil
 			f.bytes = 0
 			f.dropping = true
 		} else {
+			f.seenSequences[packet.SequenceNumber] = struct{}{}
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
 		}
@@ -739,11 +822,33 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	}
 
 	packets, frameBytes, complete := f.packets, f.bytes, !f.dropping
-	*f = videoFrameBuffer{}
+	frameTimestamp := f.timestamp
+	lastTimestamp, hasLastTimestamp := frameTimestamp, true
+	*f = videoFrameBuffer{lastTimestamp: lastTimestamp, hasLastTimestamp: hasLastTimestamp}
 	if !complete {
 		return nil, 0, false
 	}
+	if len(packets) > 1 {
+		sort.Slice(packets, func(i, j int) bool {
+			return int16(packets[i].SequenceNumber-packets[j].SequenceNumber) < 0
+		})
+	}
 	return packets, frameBytes, true
+}
+
+func (f *videoFrameBuffer) start(timestamp uint32) {
+	lastTimestamp, hasLastTimestamp := f.lastTimestamp, f.hasLastTimestamp
+	*f = videoFrameBuffer{
+		timestamp:        timestamp,
+		lastTimestamp:    lastTimestamp,
+		seenSequences:    make(map[uint16]struct{}),
+		active:           true,
+		hasLastTimestamp: hasLastTimestamp,
+	}
+}
+
+func rtpTimestampAfter(timestamp, previous uint32) bool {
+	return int32(timestamp-previous) > 0
 }
 
 // bitrateLimiter meters bytes per second with a short burst allowance.

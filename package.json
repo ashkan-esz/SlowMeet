@@ -1,0 +1,10 @@
+{
+  "name": "slowmeet-browser-checks",
+  "private": true,
+  "scripts": {
+    "test:media-e2e": "node scripts/test-media-e2e.js"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
