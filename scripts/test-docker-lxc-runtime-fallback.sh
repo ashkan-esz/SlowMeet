@@ -200,6 +200,7 @@ chmod +x "$TEST_DIR/bin/"*
 
 CONTAINERD_PACKAGE=containerd.io
 DOCKER_RUNTIME_PROBE_IMAGE=hello-world:latest
+DOCKER_RUNTIME_PROBE_TIMEOUT=30s
 # shellcheck disable=SC1090
 source <(sed -n '/^docker_lxc_error_in_output() {/,/^enable_container_engine() {/p' "$INSTALLER" | sed '$d')
 log() { printf '[test] %s\n' "$*" >&2; }
@@ -222,6 +223,22 @@ assert_current_version() {
     actual=$(<"$CURRENT_VERSION_FILE")
     [[ "$actual" == "$expected" ]] || fail "expected containerd.io $expected, found $actual"
 }
+
+reset_case
+select_docker_runtime_packages
+[[ "${runtime_packages[*]}" == 'docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin' ]] \
+    || fail 'The unheld Docker package list changed unexpectedly'
+if grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE"; then
+    fail 'The unheld package-list check unexpectedly changed the containerd.io hold'
+fi
+
+reset_case
+printf '%s\n' containerd.io >> "$PACKAGE_HOLDS_FILE"
+select_docker_runtime_packages
+[[ "${runtime_packages[*]}" == 'docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin' ]] \
+    || fail 'The held containerd.io package was still explicitly requested for installation'
+grep -Fxq containerd.io "$PACKAGE_HOLDS_FILE" || fail 'Package selection removed the containerd.io hold'
+grep -Fxq unattended-upgrades "$PACKAGE_HOLDS_FILE" || fail 'Package selection changed an unrelated APT hold'
 
 error_log="$TEST_DIR/error.log"
 printf '%s\n' 'open sysctl net.ipv4.ip_unprivileged_port_start file: reopen fd 8: permission denied' > "$error_log"

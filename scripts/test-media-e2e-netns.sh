@@ -26,5 +26,6 @@ exec unshare --user --map-root-user --net --fork --kill-child=TERM /bin/sh -c '
   export MEDIA_E2E_NETNS=1
   export MEDIA_E2E_NETWORK_IMPAIRMENT=1
   export MEDIA_E2E_DEVICE_FIXTURES=1
+  export MEDIA_E2E_PROFILE=network
   exec node scripts/test-media-e2e.js
 '

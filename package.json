@@ -2,9 +2,14 @@
   "name": "slowmeet-browser-checks",
   "private": true,
   "scripts": {
-    "test:media-e2e": "node scripts/test-media-e2e.js"
+    "test:media-e2e": "node scripts/test-media-e2e.js",
+    "test:media-e2e:network": "./scripts/test-media-e2e-netns.sh",
+    "test:media-e2e:screen-share": "MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE=1 node scripts/test-media-e2e.js",
+    "test:media-e2e:picker": "MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE_NATIVE=1 node scripts/test-media-e2e.js",
+    "test:media-e2e:real-media": "MEDIA_E2E_PROFILE=real-media MEDIA_E2E_REAL_MEDIA=1 MEDIA_E2E_HEADED=1 node scripts/test-media-e2e.js"
   },
   "devDependencies": {
+    "axe-core": "^4.14.0",
     "playwright-core": "1.63.0"
   }
 }

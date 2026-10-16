@@ -8,6 +8,15 @@ const os = require("node:os");
 const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 const { chromium } = require("playwright-core");
+const axeCore = (() => {
+  try {
+    return require("axe-core");
+  } catch (_) {
+    return undefined;
+  }
+})();
+const participantFlowScenarios = require("./media-e2e/participant-flows").scenarios;
+const mediaLifecycleScenarios = require("./media-e2e/media-lifecycle").scenarios;
 
 const root = path.join(__dirname, "..");
 const stabilityMs = Number(process.env.MEDIA_E2E_STABILITY_MS || 30000);
@@ -18,28 +27,24 @@ const testNativeScreenShare = process.env.MEDIA_E2E_SCREEN_SHARE_NATIVE === "1";
 const screenShareOnly = process.env.MEDIA_E2E_SCREEN_SHARE_ONLY === "1";
 const testNetworkImpairment = process.env.MEDIA_E2E_NETWORK_IMPAIRMENT === "1";
 const testNetworkNamespace = process.env.MEDIA_E2E_NETNS === "1";
+const suiteProfile = process.env.MEDIA_E2E_PROFILE || (screenShareOnly ? "screen-share" : "full");
+const requestedScenario = process.env.MEDIA_E2E_SCENARIO;
+const externalBaseURL = process.env.MEDIA_E2E_BASE_URL;
+const testMeetingPassword = process.env.MEDIA_E2E_MEETING_PASSWORD ??
+  (externalBaseURL ? "" : "slowmeet-e2e-password");
 const deviceFixtures = !realDevices && process.env.MEDIA_E2E_DEVICE_FIXTURES !== "0";
 const screenSourceTitle = process.env.MEDIA_E2E_SCREEN_SOURCE_TITLE || "SlowMeet E2E Changing Content";
-const firstCameraOnly = process.env.MEDIA_E2E_FIRST_CAMERA_ONLY === "1";
-const microphoneOnly = process.env.MEDIA_E2E_MIC_ONLY === "1";
-const idleOnly = process.env.MEDIA_E2E_IDLE_ONLY === "1";
-const iceRestartOnly = process.env.MEDIA_E2E_ICE_RESTART_ONLY === "1";
 const diagnosticWaitMs = Number(process.env.MEDIA_E2E_DIAGNOSTIC_WAIT_MS || 7000);
 const pollIntervalMs = 1000;
 const noProgressLimitMs = 5000;
-const cameraToggleCycles = Number(process.env.MEDIA_E2E_CAMERA_CYCLES || 10);
 const cameraStopObservationMs = 1200;
 const cameraStopTimeoutMs = 8000;
 const mediaProgressTimeoutMs = 15000;
 const mediaProgressPollMs = 250;
-const transientDisconnectGraceMs = 500;
-const blockedScenarios = [];
+const transientDisconnectGraceMs = 0;
 
 if (!Number.isFinite(stabilityMs) || stabilityMs < 1000) {
   throw new Error("MEDIA_E2E_STABILITY_MS must be at least 1000 milliseconds");
-}
-if (!Number.isInteger(cameraToggleCycles) || cameraToggleCycles < 1) {
-  throw new Error("MEDIA_E2E_CAMERA_CYCLES must be a positive integer");
 }
 if ((testScreenShare || testNativeScreenShare) && !headed) {
   throw new Error("screen-share E2E requires MEDIA_E2E_HEADED=1");
@@ -49,6 +54,21 @@ if (screenShareOnly && !testScreenShare) {
 }
 if (testNetworkImpairment && !testNetworkNamespace) {
   throw new Error("MEDIA_E2E_NETWORK_IMPAIRMENT=1 must run through scripts/test-media-e2e-netns.sh");
+}
+if (!["full", "network", "screen-share", "real-media"].includes(suiteProfile)) {
+  throw new Error("MEDIA_E2E_PROFILE must be full, network, screen-share, or real-media");
+}
+if (suiteProfile === "network" && (!testNetworkNamespace || !testNetworkImpairment)) {
+  throw new Error("the network profile must run through scripts/test-media-e2e-netns.sh");
+}
+if (suiteProfile === "screen-share" && !testScreenShare && !testNativeScreenShare) {
+  throw new Error("the screen-share profile requires MEDIA_E2E_SCREEN_SHARE=1 or MEDIA_E2E_SCREEN_SHARE_NATIVE=1");
+}
+if (suiteProfile === "real-media" && (!realDevices || !headed)) {
+  throw new Error("the real-media profile requires MEDIA_E2E_REAL_MEDIA=1 and MEDIA_E2E_HEADED=1");
+}
+if (suiteProfile === "full" && realDevices) {
+  throw new Error("real capture devices use MEDIA_E2E_PROFILE=real-media; the full profile uses generated media");
 }
 function findChrome() {
   const candidates = [
@@ -134,7 +154,7 @@ async function waitForServer(url, processHandle, output) {
   throw new Error(`SlowMeet did not become ready: ${lastError?.message || "timeout"}\n${output.join("")}`);
 }
 
-async function startLocalServer() {
+async function startLocalServer(maxParticipants = 2) {
   const host = process.env.MEDIA_E2E_HOST || "127.0.0.1";
   const port = await reserveLocalPort(host);
   const address = `${host}:${port}`;
@@ -145,6 +165,9 @@ async function startLocalServer() {
       ...process.env,
       HTTP_ADDR: address,
       ICE_PUBLIC_IP: process.env.MEDIA_E2E_ICE_PUBLIC_IP ?? host,
+      MEETING_PASSWORD: testMeetingPassword,
+      MAX_PARTICIPANTS: String(maxParticipants),
+      RECONNECT_TIMEOUT_SECONDS: "1",
       GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-media-e2e-gocache"
     },
     detached: true,
@@ -399,6 +422,12 @@ async function diagnostics(page) {
         currentDirection: transceiver.currentDirection,
         senderTrack: transceiver.sender?.track?.kind || null
       })),
+      capturedTracks: (window.__slowMeetTest?.capturedTracks || []).map(({ kind, id, track }) => ({
+        kind,
+        id,
+        readyState: track.readyState,
+        enabled: track.enabled
+      })),
       replaceTrackEvents: window.__slowMeetTest?.replaceTrackEvents || [],
       connectionEvents: window.__slowMeetTest?.connectionEvents.slice(-80) || [],
       signalingMessages: window.__slowMeetTest?.signalingMessages.slice(-20) || [],
@@ -410,39 +439,6 @@ async function diagnostics(page) {
 }
 
 async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true) {
-  if (installDeviceFixtures) {
-    await context.addInitScript(() => {
-      const mediaDevices = navigator.mediaDevices;
-      const nativeEnumerateDevices = mediaDevices.enumerateDevices.bind(mediaDevices);
-      const nativeGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
-      const virtualDevices = [
-        { kind: "audioinput", deviceId: "slowmeet-e2e-microphone", groupId: "slowmeet-e2e-audio", label: "E2E secondary microphone" },
-        { kind: "videoinput", deviceId: "slowmeet-e2e-camera", groupId: "slowmeet-e2e-video", label: "E2E secondary camera" }
-      ];
-      Object.defineProperty(mediaDevices, "enumerateDevices", {
-        configurable: true,
-        value: async () => [...await nativeEnumerateDevices(), ...virtualDevices]
-      });
-      Object.defineProperty(mediaDevices, "getUserMedia", {
-        configurable: true,
-        value: (constraints = {}) => {
-          const normalized = structuredClone(constraints);
-          for (const kind of ["audio", "video"]) {
-            const constraint = normalized?.[kind];
-            const requestedDevice = typeof constraint === "object"
-              ? constraint.deviceId?.exact
-              : undefined;
-            if (typeof requestedDevice !== "string" || !requestedDevice.startsWith("slowmeet-e2e-")) continue;
-            if (window.__slowMeetTest) {
-              window.__slowMeetTest.deviceSelectionRequests.push({ kind, deviceId: requestedDevice, timestamp: Date.now() });
-            }
-            delete constraint.deviceId;
-          }
-          return nativeGetUserMedia(normalized);
-        }
-      });
-    });
-  }
   const page = await context.newPage();
   const pageEvents = [];
   page.__mediaE2EEvents = pageEvents;
@@ -465,7 +461,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
   page.on("requestfailed", (request) => pageEvents.push({
     type: "requestfailed", method: request.method(), url: request.url(), error: request.failure()?.errorText, timestamp: Date.now()
   }));
-  await page.addInitScript(() => {
+  await page.addInitScript((installDeviceFixtures) => {
     const NativePeerConnection = window.RTCPeerConnection;
     const NativeWebSocket = window.WebSocket;
     const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
@@ -480,8 +476,58 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       iceCandidateErrors: [],
       acceptedRemoteCandidates: [],
       signalingMessages: [],
-      deviceSelectionRequests: []
+      deviceSelectionRequests: [],
+      capturedTracks: []
     };
+    const mediaDevices = navigator.mediaDevices;
+    const nativeEnumerateDevices = mediaDevices.enumerateDevices.bind(mediaDevices);
+    const nativeGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    const nativeGetDisplayMedia = mediaDevices.getDisplayMedia?.bind(mediaDevices);
+    const virtualDevices = [
+      { kind: "audioinput", deviceId: "slowmeet-e2e-microphone", groupId: "slowmeet-e2e-audio", label: "E2E secondary microphone" },
+      { kind: "videoinput", deviceId: "slowmeet-e2e-camera", groupId: "slowmeet-e2e-video", label: "E2E secondary camera" }
+    ];
+    if (installDeviceFixtures) {
+      Object.defineProperty(mediaDevices, "enumerateDevices", {
+        configurable: true,
+        value: async () => [...await nativeEnumerateDevices(), ...virtualDevices]
+      });
+    }
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+      configurable: true,
+      value: async (constraints = {}) => {
+        let normalized = constraints;
+        if (installDeviceFixtures) {
+          normalized = structuredClone(constraints);
+          for (const kind of ["audio", "video"]) {
+            const constraint = normalized?.[kind];
+            const requestedDevice = typeof constraint === "object"
+              ? constraint.deviceId?.exact
+              : undefined;
+            if (typeof requestedDevice !== "string" || !requestedDevice.startsWith("slowmeet-e2e-")) continue;
+            window.__slowMeetTest.deviceSelectionRequests.push({ kind, deviceId: requestedDevice, timestamp: Date.now() });
+            delete constraint.deviceId;
+          }
+        }
+        const stream = await nativeGetUserMedia(normalized);
+        for (const track of stream.getTracks()) {
+          window.__slowMeetTest.capturedTracks.push({ source: "user-media", kind: track.kind, id: track.id, track });
+        }
+        return stream;
+      }
+    });
+    if (nativeGetDisplayMedia) {
+      Object.defineProperty(mediaDevices, "getDisplayMedia", {
+        configurable: true,
+        value: async (constraints = {}) => {
+          const stream = await nativeGetDisplayMedia(constraints);
+          for (const track of stream.getTracks()) {
+            window.__slowMeetTest.capturedTracks.push({ source: "display-media", kind: track.kind, id: track.id, track });
+          }
+          return stream;
+        }
+      });
+    }
     const originalAddIceCandidate = NativePeerConnection.prototype.addIceCandidate;
     NativePeerConnection.prototype.addIceCandidate = async function addIceCandidate(candidate) {
       const candidateString = candidate?.candidate || "";
@@ -596,13 +642,297 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       });
       return originalReplaceTrack.call(this, track);
     };
-  });
+  }, installDeviceFixtures);
   await page.goto(`${baseURL}/`);
   if (!autoJoin) return page;
   await page.locator("#name").fill(name);
+  if (testMeetingPassword) await page.locator("#password").fill(testMeetingPassword);
   await page.locator("#join").click();
   await page.locator("#meeting").waitFor({ state: "visible", timeout: 20000 });
   return page;
+}
+
+function pageForRole(fixture, role) {
+  if (role !== "A" && role !== "B") throw new Error(`unknown participant role: ${role}`);
+  return role === "A" ? fixture.pageA : fixture.pageB;
+}
+
+function contextForRole(fixture, role) {
+  if (role !== "A" && role !== "B") throw new Error(`unknown participant role: ${role}`);
+  return role === "A" ? fixture.contextA : fixture.contextB;
+}
+
+async function createScenarioFixture({ browserA, browserB, baseURL, contexts, traceContexts }) {
+  const contextA = await browserA.newContext({ viewport: { width: 1440, height: 960 } });
+  contexts.push(contextA);
+  const contextB = await browserB.newContext({ viewport: { width: 1440, height: 960 } });
+  contexts.push(contextB);
+  await Promise.all([contextA, contextB].map(async (context) => {
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+    traceContexts.add(context);
+    await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
+  }));
+
+  const [pageA, pageB] = await Promise.all([
+    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false),
+    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false)
+  ]);
+  const joined = new Set();
+  const expectedPeerCounts = new Map();
+  const expectedSocketCounts = new Map();
+  const baselineAt = new Map();
+  const fixture = {
+    baseURL,
+    password: testMeetingPassword,
+    browserA,
+    browserB,
+    contextA,
+    contextB,
+    pageA,
+    pageB,
+    names: { A: "Media A", B: "Media B" },
+    joined,
+    page: (role) => pageForRole(fixture, role),
+    context: (role) => contextForRole(fixture, role),
+    async join(role, name = fixture.names[role], password = fixture.password) {
+      const page = pageForRole(fixture, role);
+      fixture.names[role] = name;
+      if (await page.locator("#meeting").isVisible()) return page;
+      await page.locator("#name").fill(name);
+      if (password) await page.locator("#password").fill(password);
+      await page.locator("#join").click();
+      await page.locator("#meeting").waitFor({ state: "visible", timeout: 20000 });
+      await waitForPeerConnection(page, "connected", 20000);
+      joined.add(role);
+      const state = await diagnostics(page);
+      expectedPeerCounts.set(role, state.peerConnectionCount);
+      expectedSocketCounts.set(role, state.socketCount);
+      baselineAt.set(role, Date.now());
+      return page;
+    },
+    async newPage(role) {
+      return joinMeeting(contextForRole(fixture, role), fixture.names[role], baseURL, deviceFixtures, false);
+    },
+    async diagnostics(role) {
+      return diagnostics(pageForRole(fixture, role));
+    },
+      async capturedTrackStates(role) {
+        return pageForRole(fixture, role).evaluate(() =>
+          (window.__slowMeetTest?.capturedTracks || []).map(({ source, kind, id, track }) => ({
+            source,
+            kind,
+            id,
+          readyState: track.readyState,
+          enabled: track.enabled
+        })));
+    },
+      async assertNoLiveCapturedTracks(role, label = `participant ${role} media cleanup`) {
+        const tracks = await fixture.capturedTrackStates(role);
+        assert.ok(tracks.length > 0, `${label}: no captured media tracks were recorded`);
+        const liveTracks = tracks.filter((track) => track.readyState !== "ended");
+        assert.deepEqual(liveTracks, [], `${label}: captured tracks remain live: ${JSON.stringify(liveTracks)}`);
+      },
+      async assertDisplayCaptureEnded(role, label = `participant ${role} screen-share cleanup`) {
+        const tracks = (await fixture.capturedTrackStates(role))
+          .filter((track) => track.source === "display-media" && track.kind === "video");
+        assert.ok(tracks.length > 0, `${label}: no display-capture video tracks were recorded`);
+        const liveTracks = tracks.filter((track) => track.readyState !== "ended");
+        assert.deepEqual(liveTracks, [], `${label}: display-capture tracks remain live: ${JSON.stringify(liveTracks)}`);
+      },
+    async waitForConnected(role) {
+      const roles = role ? [role] : [...joined];
+      await Promise.all(roles.map((participantRole) =>
+        waitForPeerConnection(pageForRole(fixture, participantRole), "connected", 30000)));
+    },
+    async waitForStability(stableMs = 1000, timeoutMs = 20000) {
+      const peers = [...joined].map((role) => pageForRole(fixture, role));
+      assert.ok(peers.length > 0, "at least one participant must join before checking peer stability");
+      await waitForPeerStability(peers, stableMs, timeoutMs);
+    },
+    async waitForRemoteState(receiverRole, participantName, datasetKey, expectedValue) {
+      await waitForRemoteParticipantState(pageForRole(fixture, receiverRole), participantName, datasetKey, expectedValue);
+    },
+    async setPressed(role, selector, pressed) {
+      return setButtonPressed(pageForRole(fixture, role), selector, pressed);
+    },
+    async openSidebar(role, trigger = "#more") {
+      return openMeetingSidebar(pageForRole(fixture, role), trigger);
+    },
+    async closeSidebar(role) {
+      return closeMeetingSidebar(pageForRole(fixture, role));
+    },
+    async assertPeersConnected(label = "peer connectivity") {
+      const states = [];
+      for (const role of joined) {
+        const state = await diagnostics(pageForRole(fixture, role));
+        assert.equal(state.connectionState, "connected",
+          `${label}: participant ${role} connection state is ${state.connectionState}`);
+        assert.ok(["connected", "completed"].includes(state.iceConnectionState),
+          `${label}: participant ${role} ICE state is ${state.iceConnectionState}`);
+        const expectedPeerCount = expectedPeerCounts.get(role);
+        const expectedSocketCount = expectedSocketCounts.get(role);
+        if (expectedPeerCount !== undefined) {
+          assert.equal(state.peerConnectionCount, expectedPeerCount,
+            `${label}: participant ${role} unexpectedly replaced its peer connection`);
+        }
+        if (expectedSocketCount !== undefined) {
+          assert.equal(state.socketCount, expectedSocketCount,
+            `${label}: participant ${role} unexpectedly replaced its signaling socket`);
+        }
+        const interruption = persistentPeerInterruption(state.connectionEvents,
+          baselineAt.get(role) || 0, Date.now(), transientDisconnectGraceMs);
+        assert.ok(!interruption, `${label}: participant ${role} disconnected: ${JSON.stringify(interruption)}`);
+        states.push(state);
+      }
+      return states;
+    },
+    async refreshPeerBaseline(role) {
+      const roles = role ? [role] : [...joined];
+      for (const participantRole of roles) {
+        const state = await diagnostics(pageForRole(fixture, participantRole));
+        expectedPeerCounts.set(participantRole, state.peerConnectionCount);
+        expectedSocketCounts.set(participantRole, state.socketCount);
+        baselineAt.set(participantRole, Date.now());
+      }
+    },
+    async assertNoDuplicateParticipants() {
+      for (const role of joined) {
+        const summary = await pageForRole(fixture, role).locator("#participants li[data-participant-id]")
+          .evaluateAll((items) => {
+            const ids = items.map((item) => item.dataset.participantId);
+            const videoKeys = [...document.querySelectorAll("#participants video[data-media-role]")]
+              .map((video) => `${video.closest("li")?.dataset.participantId || "unknown"}:${video.dataset.mediaRole}`);
+            return {
+              participantIDs: ids,
+              duplicateParticipantIDs: ids.filter((id, index) => ids.indexOf(id) !== index),
+              videoKeys,
+              duplicateVideoKeys: videoKeys.filter((key, index) => videoKeys.indexOf(key) !== index)
+            };
+          });
+        assert.deepEqual(summary.duplicateParticipantIDs, [], `participant ${role} rendered a duplicate roster row`);
+        assert.deepEqual(summary.duplicateVideoKeys, [], `participant ${role} rendered duplicate media elements`);
+      }
+    },
+    async assertRemoteVideoMoves(senderRole, receiverRole, label = `${senderRole} camera -> ${receiverRole}`, mediaRole = "camera") {
+      const before = await diagnostics(pageForRole(fixture, receiverRole));
+      await assertRemoteVideoMoves(pageForRole(fixture, receiverRole), mediaRole, label);
+      const after = await diagnostics(pageForRole(fixture, receiverRole));
+      const frames = (state) => state.remoteVideos.filter((video) => video.role === mediaRole)
+        .flatMap((video) => video.inboundVideoStats)
+        .reduce((total, stat) => total + (Number(stat.framesDecoded) || 0), 0);
+      assert.ok(frames(after) > frames(before), `${label}: decoded frame count did not advance`);
+      await fixture.assertPeersConnected(label);
+    },
+    async assertAudioProgress(senderRole, receiverRole, label = `${senderRole} microphone -> ${receiverRole}`) {
+      const [beforeSender, beforeReceiver] = await Promise.all([
+        diagnostics(pageForRole(fixture, senderRole)), diagnostics(pageForRole(fixture, receiverRole))
+      ]);
+      await waitForAudioProgress(pageForRole(fixture, senderRole), pageForRole(fixture, receiverRole),
+        beforeSender, beforeReceiver, label);
+      await fixture.assertPeersConnected(label);
+    },
+    async assertCameraRTPContinues(senderRole, receiverRole, label = `${senderRole} camera RTP -> ${receiverRole}`) {
+      const senderPage = pageForRole(fixture, senderRole);
+      const receiverPage = pageForRole(fixture, receiverRole);
+      const senderID = await activeVideoSenderID(senderPage);
+      assert.ok(senderID, `${label}: no active camera sender`);
+      const [beforeSenderState, beforeReceiverState] = await Promise.all([
+        diagnostics(senderPage), diagnostics(receiverPage)
+      ]);
+      const beforeSender = videoSenderStats(beforeSenderState, senderID);
+      const beforeReceiver = cameraObservation(beforeReceiverState, fixture.names[senderRole]);
+      await delay(1200);
+      const [afterSenderState, afterReceiverState] = await Promise.all([
+        diagnostics(senderPage), diagnostics(receiverPage)
+      ]);
+      const afterSender = videoSenderStats(afterSenderState, senderID);
+      const afterReceiver = cameraObservation(afterReceiverState, fixture.names[senderRole]);
+      assert.ok(afterSender?.bytesSent > beforeSender?.bytesSent && afterSender?.packetsSent > beforeSender?.packetsSent,
+        `${label}: sender RTP did not advance`);
+      assert.ok(afterReceiver.bytesReceived > beforeReceiver.bytesReceived &&
+        afterReceiver.framesDecoded > beforeReceiver.framesDecoded &&
+        afterReceiver.currentTime > beforeReceiver.currentTime,
+      `${label}: received RTP, decoded frames, and playback time must advance`);
+      await fixture.assertPeersConnected(label);
+    },
+    async createChangingContentPage(role) {
+      return createChangingContentPage(contextForRole(fixture, role));
+    },
+    async requestIceRestart(role) {
+      return requestIceRestart(pageForRole(fixture, role));
+    },
+    async setViewport(role, width, height) {
+      await pageForRole(fixture, role).setViewportSize({ width, height });
+    },
+    async checkAxe(role, surface) {
+      if (!axeCore?.source) throw new Error("axe-core is required for the accessibility scenarios; install npm dependencies first");
+      const page = pageForRole(fixture, role);
+      const targetSelector = surface === "prejoin" ? "#join-form" : surface === "meeting" ? "#meeting" : surface;
+      const axeScriptURL = new URL("/__media-e2e__/axe-core.js", baseURL).href;
+      const fulfillAxeScript = (route) => route.fulfill({
+        status: 200,
+        contentType: "application/javascript; charset=utf-8",
+        body: axeCore.source
+      });
+      await page.route(axeScriptURL, fulfillAxeScript);
+      try {
+        await page.addScriptTag({ url: axeScriptURL });
+      } finally {
+        await page.unroute(axeScriptURL, fulfillAxeScript);
+      }
+      const results = await page.evaluate(async (selector) => {
+        const target = document.querySelector(selector);
+        if (!target) throw new Error(`axe surface not found: ${selector}`);
+        return window.axe.run(target);
+      }, targetSelector);
+      const violations = results.violations.filter((violation) =>
+        violation.impact === "critical" || violation.impact === "serious");
+      assert.deepEqual(violations.map(({ id, impact, help, nodes }) => ({
+        id,
+        impact,
+        help,
+        nodes: nodes.map((node) => ({
+          target: node.target,
+          html: node.html.slice(0, 240),
+          failureSummary: node.failureSummary?.slice(0, 500),
+          checks: node.any.map((check) => ({ id: check.id, data: check.data }))
+        }))
+      })), [], `${surface} has axe critical/serious violations`);
+      return {
+        surface,
+        violations: results.violations.length,
+        criticalOrSerious: violations.length,
+        passes: results.passes.length,
+        incomplete: results.incomplete.length
+      };
+    }
+  };
+  return fixture;
+}
+
+async function closeScenarioFixture(fixture, contexts, traceContexts) {
+  for (const context of [fixture.contextA, fixture.contextB]) {
+    await Promise.all(context.pages().map(leaveMeetingBeforeClose));
+    if (traceContexts.has(context)) {
+      await context.tracing.stop().catch(() => {});
+      traceContexts.delete(context);
+    }
+    const index = contexts.indexOf(context);
+    if (index >= 0) contexts.splice(index, 1);
+    await context.close().catch(() => {});
+  }
+}
+
+async function leaveMeetingBeforeClose(page) {
+  if (page.isClosed()) return;
+  const meeting = page.locator("#meeting");
+  if (!await meeting.isVisible().catch(() => false)) return;
+  try {
+    await page.locator("#leave").click({ timeout: 1500 });
+    await meeting.waitFor({ state: "hidden", timeout: 3000 });
+  } catch (_) {
+    // The local E2E server uses a short reconnect timeout as a fallback.
+  }
 }
 
 async function waitForRemoteCamera(page, senderName) {
@@ -976,8 +1306,25 @@ async function monitorCamera(label, senderName, receivingPage, peers, expectedPe
 }
 
 async function assertRemoteVideoMoves(page, role, label) {
-  await page.waitForFunction((mediaRole) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
-    .some((video) => video.videoWidth > 0 && video.videoHeight > 0 && !video.paused), role, { timeout: 30000 });
+  try {
+    await page.waitForFunction((mediaRole) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
+      .some((video) => video.videoWidth > 0 && video.videoHeight > 0 && !video.paused), role, { timeout: 30000 });
+  } catch (error) {
+    let state = {};
+    try {
+      const current = await diagnostics(page);
+      state = {
+        connectionState: current.connectionState,
+        iceConnectionState: current.iceConnectionState,
+        signalingState: current.signalingState,
+        remoteVideos: current.remoteVideos.map(({ role: mediaRole, width, height, currentTime, paused, participant,
+          inboundVideoStats }) => ({ mediaRole, width, height, currentTime, paused, participant, inboundVideoStats }))
+      };
+    } catch (diagnosticError) {
+      state = { diagnosticError: diagnosticError.message };
+    }
+    throw new Error(`${label}: remote ${role} video did not become active; ${JSON.stringify(state)}`, { cause: error });
+  }
   const startTime = await page.evaluate((mediaRole) => Math.max(0, ...[...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
     .map((video) => video.currentTime)), role);
   const before = await diagnostics(page);
@@ -1418,6 +1765,7 @@ async function createFailureTrackedContext(browser, baseURL, contexts, traceCont
 }
 
 async function closeSuccessfulDiagnosticContext(context, contexts, traceContexts) {
+  await Promise.all(context.pages().map(leaveMeetingBeforeClose));
   if (traceContexts.has(context)) {
     await context.tracing.stop().catch(() => {});
     traceContexts.delete(context);
@@ -1494,6 +1842,7 @@ async function testDeniedCapturePermissions(browser, baseURL, contexts, traceCon
     assert.match(await page.locator("#device-test-status").textContent(), /Camera access was denied/);
     assert.match(await page.locator("#device-test-status").textContent(), /Microphone access was denied/);
     await page.locator("#name").fill("Denied media");
+    if (testMeetingPassword) await page.locator("#password").fill(testMeetingPassword);
     await page.locator("#join").click();
     await page.locator("#meeting").waitFor({ state: "visible", timeout: 20000 });
     await waitForPeerConnection(page, "connected", 20000);
@@ -1630,13 +1979,15 @@ async function testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnection
   }
 }
 
-async function saveFailureArtifacts(contexts, error, traceContexts, server) {
+async function saveFailureArtifacts(contexts, error, traceContexts, server, scenarioName = "failure") {
   const configuredDirectory = process.env.MEDIA_E2E_ARTIFACT_DIR;
+  const safeScenarioName = scenarioName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "failure";
   const artifactDirectory = configuredDirectory
-    ? path.resolve(configuredDirectory)
+    ? path.resolve(configuredDirectory, safeScenarioName)
     : fs.mkdtempSync(path.join(os.tmpdir(), "slowmeet-media-e2e-failure-"));
   fs.mkdirSync(artifactDirectory, { recursive: true });
   const failure = {
+    scenario: scenarioName,
     error: { name: error?.name, message: error?.message, stack: error?.stack },
     serverLogs: server?.output?.slice(-300) || [],
     contexts: []
@@ -1677,210 +2028,236 @@ async function saveFailureArtifacts(contexts, error, traceContexts, server) {
 }
 
 async function main() {
-  console.log(`[media] ${realDevices ? "real capture devices" : "Chromium-generated camera/microphone"}; ${headed ? "headed" : "headless"} Chromium`);
-  const server = process.env.MEDIA_E2E_BASE_URL
-    ? undefined
-    : await startLocalServer();
-  const baseURL = (process.env.MEDIA_E2E_BASE_URL || server.url).replace(/\/$/, "");
+  const server = externalBaseURL ? undefined : await startLocalServer();
+  const baseURL = (externalBaseURL || server.url).replace(/\/$/, "");
+  const targetHost = new URL(baseURL).hostname.replace(/^\[|\]$/g, "");
+  const localTarget = ["localhost", "127.0.0.1", "::1"].includes(targetHost);
+  if (!localTarget && process.env.MEDIA_E2E_ALLOW_EXTERNAL !== "1") {
+    throw new Error("remote media E2E requires MEDIA_E2E_ALLOW_EXTERNAL=1 and a staging target");
+  }
+  if (externalBaseURL && suiteProfile === "full" && !testMeetingPassword) {
+    console.warn("[media] external target has no MEDIA_E2E_MEETING_PASSWORD; password validation is environment-qualified");
+  }
+
+  console.log(`[media] profile=${suiteProfile}; ${realDevices ? "real capture devices" : "Chromium-generated camera/microphone"}; ${headed ? "headed" : "headless"} Chromium`);
   const chromePath = findChrome();
-  const launchOptions = {
-    headless: !headed,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--force-webrtc-ip-handling-policy=default_public_interface_only",
-      `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
-      "--autoplay-policy=no-user-gesture-required",
-      "--disable-features=WebRtcHideLocalIpsWithMdns"
-    ]
-  };
-  const browserHost = new URL(baseURL).hostname.replace(/^\[|\]$/g, "");
-  if (browserHost === "localhost" || browserHost === "127.0.0.1" || browserHost === "::1") {
-    launchOptions.args.push("--allow-loopback-in-peer-connection");
-  }
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--force-webrtc-ip-handling-policy=default_public_interface_only",
+    `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
+    "--autoplay-policy=no-user-gesture-required",
+    "--disable-features=WebRtcHideLocalIpsWithMdns"
+  ];
+  if (localTarget) launchArgs.push("--allow-loopback-in-peer-connection");
+  if (!realDevices) launchArgs.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
+  if (testScreenShare) launchArgs.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
+  const launchOptions = { headless: !headed, args: launchArgs };
   if (chromePath) launchOptions.executablePath = chromePath;
-  if (!realDevices) {
-    launchOptions.args.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
-  }
-  if (testScreenShare) {
-    launchOptions.args.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
-  }
 
-  let browser;
-  const contexts = [];
-  const traceContexts = new Set();
-  try {
-    browser = await chromium.launch(launchOptions);
-    const origin = new URL(baseURL).origin;
-    const contextA = await browser.newContext();
-    const contextB = await browser.newContext();
-    contexts.push(contextA, contextB);
-    await Promise.all([contextA, contextB].map(async (context) => {
-      await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
-      traceContexts.add(context);
-    }));
-    await Promise.all([contextA, contextB].map((context) =>
-      context.grantPermissions(["camera", "microphone"], { origin })));
-    const pageA = await joinMeeting(contextA, "Media A", baseURL, deviceFixtures);
-    const pageB = await joinMeeting(contextB, "Media B", baseURL, deviceFixtures);
-    const peers = [pageA, pageB];
-    await Promise.all(peers.map((page) => waitForPeerConnection(page, "connected", 15000)));
-    console.log("[pass] two isolated Chromium contexts joined and connected");
-    await waitForPeerStability(peers, 3000, 20000);
-    console.log("[pass] both peers remained connected through the startup ICE recovery window");
-    let expectedPeerConnectionCounts = await Promise.all(peers.map((page) =>
-      page.evaluate(() => window.__slowMeetTest.peerConnections.length)));
-    assert.deepEqual(expectedPeerConnectionCounts, [1, 1], "expected one peer connection per participant before media starts");
-    let expectedSocketCounts = await Promise.all(peers.map(async (page) => (await diagnostics(page)).socketCount));
-    assert.deepEqual(expectedSocketCounts, [1, 1], "expected one signaling socket per participant before media starts");
-    let mediaStartedAt = Date.now();
-
-    if (idleOnly) {
-      await waitForPeerStability(peers, stabilityMs, stabilityMs + 30000);
-      console.log(`[pass] both idle peer connections remained connected for ${stabilityMs}ms`);
-      return;
-    }
-
-    if (microphoneOnly) {
-      await testMicrophoneControls(pageA, pageB);
-      await testUnavailableMicrophone(browser, baseURL, contexts, traceContexts);
-      console.log("Stopped after microphone diagnostics as requested.");
-      return;
-    }
-
-    if (iceRestartOnly) {
-      await pageA.locator("#camera").click();
-      await pageA.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
-      await pageB.locator("#camera").click();
-      await pageB.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
-      await Promise.all([
-        monitorCamera("before ICE restart A -> B", "Media A", pageB, peers, expectedPeerConnectionCounts),
-        monitorCamera("before ICE restart B -> A", "Media B", pageA, peers, expectedPeerConnectionCounts)
-      ]);
-      await requestIceRestart(pageA);
-      await Promise.all([
-        monitorCamera("ICE restart from A -> B", "Media A", pageB, peers, expectedPeerConnectionCounts),
-        monitorCamera("ICE restart from A -> A receives B", "Media B", pageA, peers, expectedPeerConnectionCounts)
-      ]);
-      await requestIceRestart(pageB);
-      await Promise.all([
-        monitorCamera("ICE restart from B -> A", "Media B", pageA, peers, expectedPeerConnectionCounts),
-        monitorCamera("ICE restart from B -> B receives A", "Media A", pageB, peers, expectedPeerConnectionCounts)
-      ]);
-      console.log("Stopped after bidirectional ICE-restart diagnostics as requested.");
-      return;
-    }
-
-    await setButtonPressed(pageA, "#camera", true);
-    await waitForRemoteParticipantState(pageB, "Media A", "camera", "on");
-    await monitorCamera("A first camera enable -> B", "Media A", pageB, peers, expectedPeerConnectionCounts);
-    if (firstCameraOnly) {
-      console.log("Stopped after first-camera diagnostic as requested.");
-      return;
-    }
-
-    await setButtonPressed(pageB, "#camera", true);
-    await waitForRemoteParticipantState(pageA, "Media B", "camera", "on");
-    await monitorCamera("B first camera enable -> A", "Media B", pageA, peers, expectedPeerConnectionCounts);
-    if (screenShareOnly) {
-      const sourcePage = await createChangingContentPage(contextA);
-      await testAutoScreenShare(pageA, pageB, sourcePage, peers, expectedPeerConnectionCounts,
-        expectedSocketCounts, mediaStartedAt);
-      console.log("Stopped after bidirectional screen-share diagnostics as requested.");
-      return;
-    }
-
-    await testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnectionCounts,
-      expectedSocketCounts, mediaStartedAt);
-    await testParticipantFlows(pageA, pageB, peers, expectedPeerConnectionCounts,
-      expectedSocketCounts, mediaStartedAt);
-    await testDeviceSelection(pageA, pageB);
-
-    let cameraSenderIDA;
-    let cameraSenderIDB;
-    for (let cycle = 1; cycle <= cameraToggleCycles; cycle += 1) {
-      console.log(`[camera] cycle ${cycle}/${cameraToggleCycles}: A off/on -> B off/on -> A off/on`);
-      cameraSenderIDA = await toggleCameraAndAssert(`cycle ${cycle}: A off/on -> B`,
-        "Media A", pageA, pageB, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
-      cameraSenderIDB = await toggleCameraAndAssert(`cycle ${cycle}: B off/on -> A`,
-        "Media B", pageB, pageA, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
-      cameraSenderIDA = await toggleCameraAndAssert(`cycle ${cycle}: A off/on -> B`,
-        "Media A", pageA, pageB, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
-    }
-
-    await toggleIncomingVideoAndAssert("B receives A", "Media A", pageA, pageB, peers,
-      cameraSenderIDA, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
-    await toggleIncomingVideoAndAssert("A receives B", "Media B", pageB, pageA, peers,
-      cameraSenderIDB, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
-
-    await testMicrophoneControls(pageA, pageB);
-
-    const beforeA = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1] || "");
-    await requestIceRestart(pageA);
-    const afterA = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).remoteDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1] || "");
-    assert.notEqual(afterA, beforeA, "A's ICE restart should negotiate new ICE credentials");
-    await Promise.all([
-      monitorCamera("ICE restart from A -> B", "Media A", pageB, peers, expectedPeerConnectionCounts),
-      monitorCamera("ICE restart from A -> A receives B", "Media B", pageA, peers, expectedPeerConnectionCounts)
-    ]);
-
-    await requestIceRestart(pageB);
-    await Promise.all([
-      monitorCamera("ICE restart from B -> A", "Media B", pageA, peers, expectedPeerConnectionCounts),
-      monitorCamera("ICE restart from B -> B receives A", "Media A", pageB, peers, expectedPeerConnectionCounts)
-    ]);
-
-    const reconnectedCounts = await testSignalingReconnect(pageA, pageB, peers, mediaStartedAt);
-    expectedPeerConnectionCounts = reconnectedCounts.peerConnectionCounts;
-    expectedSocketCounts = reconnectedCounts.socketCounts;
-
-    const rejoinedCounts = await testParticipantLeaveAndRejoin(pageA, pageB, "Media A", peers,
-      expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt, baseURL);
-    expectedPeerConnectionCounts = rejoinedCounts.peerConnectionCounts;
-    expectedSocketCounts = rejoinedCounts.socketCounts;
-    mediaStartedAt = rejoinedCounts.mediaStartedAt;
-
-    if (testScreenShare) {
-      const sourcePage = await createChangingContentPage(contextA);
-      await testAutoScreenShare(pageA, pageB, sourcePage, peers, expectedPeerConnectionCounts,
-        expectedSocketCounts, mediaStartedAt);
-    }
-    if (testNativeScreenShare) {
-      await testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnectionCounts,
-        expectedSocketCounts, mediaStartedAt);
-    }
-    await testUnavailableMicrophone(browser, baseURL, contexts, traceContexts);
-    await testUnavailableCamera(browser, baseURL, contexts, traceContexts);
-    await testDeniedCapturePermissions(browser, baseURL, contexts, traceContexts);
-    if (blockedScenarios.length) {
-      console.log(`[partial] runnable media E2E checks passed; blocked scenarios: ${blockedScenarios.join("; ")}`);
-    } else {
-      console.log("All runnable media E2E checks passed.");
-    }
-  } catch (error) {
-    console.error(error.message || error);
-    if (contexts.length > 0) await delay(diagnosticWaitMs);
-    for (const context of contexts) {
-      for (const page of context.pages()) {
-        try {
-          const state = await diagnostics(page);
-          console.error(`[diagnostics] ${page.url()}: ${JSON.stringify({
-            ...summarizePeerState(state),
-            replaceTrackEvents: state.replaceTrackEvents
-          })}`);
-        } catch (_) {}
+  const scenarios = [
+    ...participantFlowScenarios,
+    ...mediaLifecycleScenarios,
+    {
+      name: "capture failures report device errors and keep participants usable",
+      async run(fixture) {
+        await testUnavailableMicrophone(fixture.browserA, baseURL, contexts, traceContexts);
+        await testUnavailableCamera(fixture.browserA, baseURL, contexts, traceContexts);
+        await testDeniedCapturePermissions(fixture.browserA, baseURL, contexts, traceContexts);
+      }
+    },
+    {
+      name: "native Chromium screen picker, browser stop, and share restart",
+      when: "nativePicker",
+      profile: "screen-share",
+      required: false,
+      async run(fixture) {
+        await fixture.join("A");
+        await fixture.join("B");
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#camera", true)));
+        await Promise.all([
+          fixture.waitForRemoteState("B", fixture.names.A, "camera", "on"),
+          fixture.waitForRemoteState("A", fixture.names.B, "camera", "on")
+        ]);
+        const peers = [fixture.pageA, fixture.pageB];
+        const states = await Promise.all([fixture.diagnostics("A"), fixture.diagnostics("B")]);
+        await testHeadedScreenShare(peers[0], peers[1], peers,
+          states.map((state) => state.peerConnectionCount), states.map((state) => state.socketCount), Date.now());
+        await fixture.assertPeersConnected("native screen-share picker recovery");
+      }
+    },
+    {
+      name: "real camera acceptance: moving video and connected peers",
+      when: "realMedia",
+      profile: "real-media",
+      required: false,
+      async run(fixture) {
+        await fixture.join("A");
+        await fixture.join("B");
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#mic", true)));
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#camera", true)));
+        await Promise.all([
+          fixture.waitForRemoteState("B", fixture.names.A, "camera", "on"),
+          fixture.waitForRemoteState("A", fixture.names.B, "camera", "on")
+        ]);
+        await Promise.all([
+          fixture.assertRemoteVideoMoves("A", "B", "real camera A -> B"),
+          fixture.assertRemoteVideoMoves("B", "A", "real camera B -> A"),
+          fixture.assertAudioProgress("A", "B", "real microphone A -> B"),
+          fixture.assertAudioProgress("B", "A", "real microphone B -> A")
+        ]);
+        await fixture.waitForStability(stabilityMs, stabilityMs + 30000);
+        await fixture.assertPeersConnected("real capture stability");
+        await fixture.assertNoDuplicateParticipants();
+      }
+    },
+    {
+      name: "isolated network impairment and recovery",
+      when: "networkImpairment",
+      profile: "network",
+      required: false,
+      async run(fixture) {
+        await fixture.join("A");
+        await fixture.join("B");
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#camera", true)));
+        await Promise.all([
+          fixture.waitForRemoteState("B", fixture.names.A, "camera", "on"),
+          fixture.waitForRemoteState("A", fixture.names.B, "camera", "on")
+        ]);
+        await Promise.all([
+          fixture.assertRemoteVideoMoves("A", "B"),
+          fixture.assertRemoteVideoMoves("B", "A")
+        ]);
+        const peers = [fixture.pageA, fixture.pageB];
+        const states = await Promise.all([fixture.diagnostics("A"), fixture.diagnostics("B")]);
+        await testNetworkImpairmentMode(peers[0], peers[1], peers,
+          states.map((state) => state.peerConnectionCount), states.map((state) => state.socketCount), Date.now());
+        await fixture.assertPeersConnected("network recovery");
       }
     }
-    if (server?.output.length) {
-      const stateLogs = server.output.filter((line) =>
-        /webrtc_(connected|failed|state_changed)|network_degraded|media_publication_(duplicate_track|read_stopped)/.test(line));
-      console.error(`[server ICE logs]\n${stateLogs.slice(-30).join("")}`);
+  ];
+
+  const names = scenarios.map((scenario) => scenario.name);
+  assert.equal(new Set(names).size, names.length, "scenario names must be unique");
+  assert.ok(scenarios.length > 0, "at least one scenario must be registered");
+  if (requestedScenario && !names.includes(requestedScenario)) {
+    throw new Error(`MEDIA_E2E_SCENARIO must match a registered scenario name: ${requestedScenario}`);
+  }
+
+  let browserA;
+  let browserB;
+  const contexts = [];
+  const traceContexts = new Set();
+  const results = [];
+  const runGate = (gate) => {
+    if (gate === "localCapacity") return !externalBaseURL;
+    if (gate === "passwordValidation") return Boolean(testMeetingPassword);
+    if (gate === "realMedia") return suiteProfile === "real-media";
+    if (gate === "screenShare") return testScreenShare;
+    if (gate === "nativePicker") return testNativeScreenShare;
+    if (gate === "networkImpairment") return suiteProfile === "network" && testNetworkImpairment && testNetworkNamespace;
+    return false;
+  };
+  const profileMatches = (scenario) => {
+    if (suiteProfile === "full") return !scenario.profile || scenario.profile === "full";
+    if (suiteProfile === "network") return scenario.profile === "network";
+    if (suiteProfile === "screen-share") return ["screenShare", "nativePicker"].includes(scenario.when);
+    if (suiteProfile === "real-media") return scenario.when === "realMedia";
+    return false;
+  };
+
+  try {
+    browserA = await chromium.launch({ ...launchOptions, args: [...launchArgs] });
+    browserB = await chromium.launch({ ...launchOptions, args: [...launchArgs] });
+
+    for (const scenario of scenarios) {
+      const scenarioSelected = !requestedScenario || scenario.name === requestedScenario;
+      const profileSelected = scenarioSelected && profileMatches(scenario);
+      const gateSelected = !scenario.when || runGate(scenario.when);
+      if (!profileSelected || !gateSelected) {
+        let reason = `not selected by ${suiteProfile} profile`;
+        if (!scenarioSelected) reason = `not selected by MEDIA_E2E_SCENARIO=${requestedScenario}`;
+        if (scenario.when && !runGate(scenario.when)) {
+          const gateNames = {
+            localCapacity: "the local E2E server configured with MAX_PARTICIPANTS=2",
+            passwordValidation: "a configured meeting password",
+            realMedia: "MEDIA_E2E_PROFILE=real-media with real capture devices",
+            screenShare: "the headed generated screen-share profile",
+            nativePicker: "the headed native-picker profile",
+            networkImpairment: "the isolated network profile"
+          };
+          reason = `requires ${gateNames[scenario.when] || `${scenario.when} environment gate`}`;
+        }
+        console.log(`NOT RUN | ${scenario.name} | ${reason}`);
+        results.push({ name: scenario.name, status: "NOT RUN", required: scenario.required !== false, reason });
+        continue;
+      }
+
+      console.log(`\n[scenario] ${scenario.name}`);
+      const scenarioContextStart = contexts.length;
+      let fixture;
+      let scenarioServer;
+      let scenarioBaseURL = baseURL;
+      const startedAt = Date.now();
+      try {
+        if (scenario.localCapacityLimit && !externalBaseURL) {
+          scenarioServer = await startLocalServer(scenario.localCapacityLimit);
+          scenarioBaseURL = scenarioServer.url;
+        }
+        fixture = await createScenarioFixture({
+          browserA,
+          browserB,
+          baseURL: scenarioBaseURL,
+          contexts,
+          traceContexts
+        });
+        await scenario.run(fixture);
+        results.push({ name: scenario.name, status: "PASS", required: true, durationMs: Date.now() - startedAt });
+        console.log(`PASS | ${scenario.name} | ${Date.now() - startedAt}ms`);
+      } catch (error) {
+        results.push({ name: scenario.name, status: "FAIL", required: true, durationMs: Date.now() - startedAt,
+          error: error?.message || String(error) });
+        console.error(`FAIL | ${scenario.name} | ${error?.stack || error}`);
+        if (contexts.length > scenarioContextStart) {
+          await delay(Math.min(diagnosticWaitMs, 1500));
+          await saveFailureArtifacts(contexts.slice(scenarioContextStart), error, traceContexts, scenarioServer || server, scenario.name)
+            .catch((artifactError) => console.error(`[artifacts] ${scenario.name}: ${artifactError.message}`));
+        }
+      } finally {
+        if (fixture) {
+          await closeScenarioFixture(fixture, contexts, traceContexts);
+        }
+        for (const context of contexts.splice(scenarioContextStart)) {
+          await Promise.all(context.pages().map(leaveMeetingBeforeClose));
+          if (traceContexts.has(context)) {
+            await context.tracing.stop().catch(() => {});
+            traceContexts.delete(context);
+          }
+          await context.close().catch(() => {});
+        }
+        if (scenarioServer) await scenarioServer.stop();
+        else if (server) await delay(1100);
+      }
     }
-    await saveFailureArtifacts(contexts, error, traceContexts, server).catch((artifactError) =>
-      console.error(`[artifacts] failure capture could not be saved: ${artifactError.message}`));
+
+    const passed = results.filter((result) => result.status === "PASS").length;
+    const failed = results.filter((result) => result.status === "FAIL").length;
+    const notRun = results.filter((result) => result.status === "NOT RUN").length;
+    const missingRequired = results.filter((result) => result.required && result.status !== "PASS");
+    console.log(`\nScenario report: ${passed} PASS, ${failed} FAIL, ${notRun} NOT RUN`);
+    for (const result of results) {
+      if (result.status !== "PASS") console.log(`${result.status} | ${result.name} | ${result.reason || result.error}`);
+    }
+    if (failed || missingRequired.length) process.exitCode = 1;
+  } catch (error) {
+    console.error(error.stack || error);
+    if (contexts.length) {
+      await saveFailureArtifacts(contexts, error, traceContexts, server, "suite-setup")
+        .catch((artifactError) => console.error(`[artifacts] setup: ${artifactError.message}`));
+    }
     process.exitCode = 1;
   } finally {
     for (const context of traceContexts) {
@@ -1888,7 +2265,8 @@ async function main() {
       traceContexts.delete(context);
     }
     for (const context of contexts) await context.close().catch(() => {});
-    await browser?.close().catch(() => {});
+    await browserA?.close().catch(() => {});
+    await browserB?.close().catch(() => {});
     await server?.stop();
   }
 }

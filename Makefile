@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout test-media-e2e test-media-e2e-netns smoke \
+	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -74,11 +74,20 @@ test-remote-camera-video: ## Test remote camera playback binding and recovery
 test-layout: ## Test responsive meeting layout behavior
 	$(NODE) scripts/test-meeting-layout.js
 
-test-media-e2e: ## Test two-user camera, microphone, and ICE recovery in Chromium
+test-media-e2e: ## Run the complete deterministic two-participant Chromium suite
 	$(NODE) scripts/test-media-e2e.js
 
 test-media-e2e-netns: ## Test media quality degradation and recovery in an isolated network namespace
 	./scripts/test-media-e2e-netns.sh
+
+test-media-e2e-screen-share: ## Run headed generated-content screen-share scenarios
+	MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE=1 $(NODE) scripts/test-media-e2e.js
+
+test-media-e2e-picker: ## Run headed native Chromium screen-picker scenarios (manual interaction required)
+	MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE_NATIVE=1 $(NODE) scripts/test-media-e2e.js
+
+test-media-e2e-real: ## Run headed real camera and microphone acceptance scenarios
+	MEDIA_E2E_PROFILE=real-media MEDIA_E2E_REAL_MEDIA=1 MEDIA_E2E_HEADED=1 $(NODE) scripts/test-media-e2e.js
 
 smoke: ## Run the local HTTP smoke test
 	./scripts/smoke.sh
