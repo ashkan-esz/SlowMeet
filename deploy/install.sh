@@ -92,6 +92,14 @@ containerd_is_held() {
     apt-mark showhold | awk -v package="$CONTAINERD_PACKAGE" '$0 == package { found = 1 } END { exit !found }'
 }
 
+select_docker_runtime_packages() {
+    runtime_packages=(docker-ce docker-ce-cli)
+    if ! containerd_is_held; then
+        runtime_packages+=(containerd.io)
+    fi
+    runtime_packages+=(docker-buildx-plugin docker-compose-plugin)
+}
+
 sort_debian_versions() {
     local candidate position previous_position
     local -a ordered=()
@@ -2403,13 +2411,20 @@ fi
 apt_update_with_caddy_fallback
 runtime_packages=()
 case "$container_engine" in
-    docker) runtime_packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin) ;;
+    docker) select_docker_runtime_packages ;;
     podman) runtime_packages=(podman podman-compose) ;;
 esac
 if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
     runtime_packages+=(caddy)
 fi
-apt-get install -y "${runtime_packages[@]}"
+if apt-get install -y "${runtime_packages[@]}"; then
+    :
+else
+    if [[ "$container_engine" == docker ]] && containerd_is_held; then
+        fail 'Docker runtime packages could not be installed while containerd.io is held. The hold was preserved; review APT dependency errors before intentionally changing the hold.'
+    fi
+    fail 'Could not install the selected container runtime packages.'
+fi
 enable_container_engine
 
 meeting_password=$(read_env_value MEETING_PASSWORD)
