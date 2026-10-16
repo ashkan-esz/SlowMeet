@@ -19,6 +19,8 @@ readonly CADDY_XRAY_BACKEND_PORT=9080
 readonly COSIGN_VERSION=v3.0.2
 readonly CADDY_BINARY_DIR=/usr/bin
 readonly CADDY_UNIT_FILE=/etc/systemd/system/caddy.service
+readonly CONTAINERD_PACKAGE=containerd.io
+readonly DOCKER_RUNTIME_PROBE_IMAGE=hello-world:latest
 
 log() { printf '[slowmeet] %s\n' "$*"; }
 fail() { printf '[slowmeet] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -59,9 +61,256 @@ compose() (
     esac
 )
 
+docker_lxc_error_in_output() {
+    local output_file=$1
+    grep -Eq 'open sysctl net\.ipv4\.ip_unprivileged_port_start file: reopen fd [0-9]+: permission denied' "$output_file"
+}
+
+run_docker_runtime_probe() {
+    local output_file=$1 status
+    if docker run --rm "$DOCKER_RUNTIME_PROBE_IMAGE" >"$output_file" 2>&1; then
+        return 0
+    else
+        status=$?
+    fi
+
+    if docker_lxc_error_in_output "$output_file"; then
+        return 2
+    fi
+    return "$status"
+}
+
+containerd_is_held() {
+    apt-mark showhold | awk -v package="$CONTAINERD_PACKAGE" '$0 == package { found = 1 } END { exit !found }'
+}
+
+sort_debian_versions() {
+    local candidate position previous_position
+    local -a ordered=()
+    local -A seen=()
+
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        [[ -z "${seen[$candidate]+present}" ]] || continue
+        seen[$candidate]=yes
+
+        position=${#ordered[@]}
+        while (( position > 0 )); do
+            previous_position=$((position - 1))
+            if dpkg --compare-versions "$candidate" gt "${ordered[$previous_position]}"; then
+                ordered[$position]=${ordered[$previous_position]}
+                position=$previous_position
+            else
+                break
+            fi
+        done
+        ordered[$position]=$candidate
+    done
+
+    printf '%s\n' "${ordered[@]}"
+}
+
+containerd_available_versions() {
+    local versions
+    versions=$(apt-cache madison "$CONTAINERD_PACKAGE" | awk -F '|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}') || return 1
+    printf '%s\n' "$versions" | sort_debian_versions
+}
+
+download_containerd_package() {
+    local version=$1 destination=$2
+    local -a package_files
+
+    mkdir -p "$destination"
+    if ! (cd "$destination" && apt-get download "$CONTAINERD_PACKAGE=$version" >/dev/null 2>&1); then
+        return 1
+    fi
+
+    package_files=("$destination"/*.deb)
+    [[ -f "${package_files[0]}" ]] || return 1
+    printf '%s\n' "${package_files[0]}"
+}
+
+containerd_package_runc_version() {
+    local version=$1 destination=$2 package_file extract_dir
+    package_file=$(download_containerd_package "$version" "$destination") || return 1
+    extract_dir="$destination/root"
+    if ! dpkg-deb -x "$package_file" "$extract_dir" >/dev/null 2>&1; then
+        return 1
+    fi
+    [[ -x "$extract_dir/usr/bin/runc" ]] || return 1
+    "$extract_dir/usr/bin/runc" --version 2>/dev/null \
+        | awk '$1 == "runc" && $2 == "version" {sub(/^v/, "", $3); print $3; exit}'
+}
+
+containerd_candidate_is_compatible() {
+    local version=$1 simulation_file=$2
+    if ! apt-get -s install --allow-downgrades "$CONTAINERD_PACKAGE=$version" >"$simulation_file" 2>&1; then
+        return 1
+    fi
+
+    awk '
+        /^(Inst|Remv|Conf) / {
+            package = $2
+            sub(/:.*/, "", package)
+            if (package != "containerd.io") unexpected_change = 1
+            if ($1 == "Inst" && package == "containerd.io") containerd_change = 1
+        }
+        END { exit !(containerd_change && !unexpected_change) }
+    ' "$simulation_file"
+}
+
+repair_docker_lxc_runtime() (
+    set -Eeuo pipefail
+
+    local temporary_directory original_version original_package original_hold=no
+    local available_versions candidate preferred_runc candidate_runc selected_version selected_runc
+    local package_change_attempted=no finalized=no restored_version
+
+    temporary_directory=$(mktemp -d)
+    original_package=
+
+    # shellcheck disable=SC2317
+    finish_runtime_repair() {
+        local status=$? rollback_failed=no
+        trap - EXIT
+
+        if [[ "$finalized" != yes ]]; then
+            if [[ "$package_change_attempted" == yes && -n "$original_package" ]]; then
+                if ! dpkg -i "$original_package" >/dev/null 2>&1; then
+                    printf '[slowmeet] ERROR: Could not restore the original %s package from %s.\n' \
+                        "$CONTAINERD_PACKAGE" "$original_package" >&2
+                    rollback_failed=yes
+                else
+                    restored_version=$(dpkg-query -W -f='${Version}' "$CONTAINERD_PACKAGE" 2>/dev/null || true)
+                    if [[ "$restored_version" != "$original_version" ]]; then
+                        printf '[slowmeet] ERROR: %s rollback left version %s installed; expected %s.\n' \
+                            "$CONTAINERD_PACKAGE" "${restored_version:-unknown}" "$original_version" >&2
+                        rollback_failed=yes
+                    else
+                        printf '[slowmeet] Restored %s %s after the runtime probe failed.\n' \
+                            "$CONTAINERD_PACKAGE" "$original_version" >&2
+                    fi
+                fi
+            fi
+
+            if [[ "$original_hold" == yes ]]; then
+                if ! containerd_is_held && ! apt-mark hold "$CONTAINERD_PACKAGE" >/dev/null 2>&1; then
+                    printf '[slowmeet] ERROR: Could not restore the original hold on %s.\n' \
+                        "$CONTAINERD_PACKAGE" >&2
+                    rollback_failed=yes
+                fi
+            elif containerd_is_held; then
+                if ! apt-mark unhold "$CONTAINERD_PACKAGE" >/dev/null 2>&1; then
+                    printf '[slowmeet] ERROR: Could not remove the temporary hold on %s.\n' \
+                        "$CONTAINERD_PACKAGE" >&2
+                    rollback_failed=yes
+                fi
+            fi
+        fi
+
+        rm -rf -- "$temporary_directory"
+        [[ "$rollback_failed" == no ]] || status=1
+        exit "$status"
+    }
+    trap finish_runtime_repair EXIT
+
+    command -v apt-mark >/dev/null || fail 'apt-mark is required to manage the temporary containerd.io hold.'
+    original_version=$(dpkg-query -W -f='${Version}' "$CONTAINERD_PACKAGE" 2>/dev/null) \
+        || fail "Could not determine the installed $CONTAINERD_PACKAGE version."
+    if containerd_is_held; then
+        original_hold=yes
+    fi
+
+    original_package=$(download_containerd_package "$original_version" "$temporary_directory/original") \
+        || fail "Cannot safely change $CONTAINERD_PACKAGE because its installed version $original_version cannot be downloaded for rollback."
+
+    if [[ "$original_hold" == yes ]] && ! apt-mark unhold "$CONTAINERD_PACKAGE" >/dev/null 2>&1; then
+        fail "Could not temporarily unhold $CONTAINERD_PACKAGE to test compatible package versions."
+    fi
+
+    available_versions=$(containerd_available_versions) || fail "Could not inspect available $CONTAINERD_PACKAGE APT versions."
+    selected_version=
+    selected_runc=
+    for preferred_runc in 1.3.2 1.2.7; do
+        while IFS= read -r candidate; do
+            [[ -n "$candidate" ]] || continue
+            dpkg --compare-versions "$candidate" lt "$original_version" || continue
+
+            candidate_runc=$(containerd_package_runc_version \
+                "$candidate" "$temporary_directory/candidate-$candidate" 2>/dev/null) || continue
+            [[ "$candidate_runc" == "$preferred_runc" ]] || continue
+            if containerd_candidate_is_compatible \
+                "$candidate" "$temporary_directory/simulation-$candidate.log"; then
+                selected_version=$candidate
+                selected_runc=$candidate_runc
+                break 2
+            fi
+        done <<< "$available_versions"
+    done
+
+    [[ -n "$selected_version" ]] || fail \
+        "No compatible $CONTAINERD_PACKAGE package bundling runc 1.3.2 or 1.2.7 is available. No package was changed; ask the VPS provider to fix the outer LXC/AppArmor profile."
+
+    log "Temporarily downgrading $CONTAINERD_PACKAGE to $selected_version (bundled runc $selected_runc) for the confirmed LXC/AppArmor startup error."
+    package_change_attempted=yes
+    if ! apt-get install -y --allow-downgrades "$CONTAINERD_PACKAGE=$selected_version"; then
+        fail "Could not install compatible $CONTAINERD_PACKAGE $selected_version; restoring the original package."
+    fi
+    restored_version=$(dpkg-query -W -f='${Version}' "$CONTAINERD_PACKAGE" 2>/dev/null || true)
+    [[ "$restored_version" == "$selected_version" ]] || fail \
+        "APT reported success but $CONTAINERD_PACKAGE is ${restored_version:-missing}; restoring the original package."
+
+    local probe_output probe_status
+    probe_output="$temporary_directory/retry-probe.log"
+    if run_docker_runtime_probe "$probe_output"; then
+        :
+    else
+        probe_status=$?
+        cat "$probe_output" >&2
+        if [[ "$probe_status" == 2 ]]; then
+            fail "Docker still reports the LXC/AppArmor sysctl permission error after the runtime downgrade; restoring the original package."
+        fi
+        fail "Docker's container probe failed after the runtime downgrade; restoring the original package."
+    fi
+
+    if ! apt-mark hold "$CONTAINERD_PACKAGE"; then
+        fail "The Docker probe passed, but the $CONTAINERD_PACKAGE hold could not be set; restoring the original package."
+    fi
+
+    finalized=yes
+    log "Docker's container probe passed. Held only $CONTAINERD_PACKAGE at $selected_version."
+    log "Security warning: runc $selected_runc lacks fixes for CVE-2025-31133, CVE-2025-52565, and CVE-2025-52881; keep this workaround temporary."
+    log 'After the VPS provider fixes the outer LXC/AppArmor profile, remove the hold with: apt-mark unhold containerd.io'
+)
+
+ensure_docker_runtime_compatible() (
+    local probe_status
+    probe_output=$(mktemp)
+    # The EXIT trap must retain this subshell's unique temp path after function scope ends.
+    # shellcheck disable=SC2064
+    trap "rm -f -- '$probe_output'" EXIT
+
+    if run_docker_runtime_probe "$probe_output"; then
+        return 0
+    else
+        probe_status=$?
+    fi
+
+    if [[ "$probe_status" != 2 ]]; then
+        cat "$probe_output" >&2
+        fail 'Docker could not start the runtime probe container. Fix this Docker error before building SlowMeet.'
+    fi
+
+    log 'Docker reproduced the LXC/AppArmor ip_unprivileged_port_start permission error; checking compatible containerd.io packages.'
+    repair_docker_lxc_runtime
+)
+
 enable_container_engine() {
     case "$container_engine" in
-        docker) systemctl enable --now docker ;;
+        docker)
+            systemctl enable --now docker
+            ensure_docker_runtime_compatible
+            ;;
         podman)
             command -v podman-compose >/dev/null || fail 'podman-compose is required for the selected Podman engine.'
             if [[ -f "$PODMAN_SERVICE_FILE" ]]; then
