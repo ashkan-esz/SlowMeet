@@ -202,6 +202,27 @@ const scenarios = [
     }
   },
   {
+    name: "marker-free frame quality accepts A-first camera stop/resume",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "marker-free A-first camera startup");
+      await enableCamera(fixture, "A", "A starts before B for marker-free capture");
+      await enableCamera(fixture, "B", "B starts after A for marker-free capture");
+      const senderIDs = await videoSenderIDs(fixture);
+
+      const capture = await fixture.beginCameraQualityCapture("marker-free A stop/resume while B stays live", {
+        requireMarkers: false,
+        includeFrameObservations: true
+      });
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      await transitionCamera(fixture, "A", false, "A camera paused for marker-free capture");
+      await transitionCamera(fixture, "A", true, "A camera resumed for marker-free capture");
+      await fixture.endCameraQualityCapture(capture, { toggledRoles: ["A"], liveRoles: ["B"] });
+      await assertVideoSenderIDs(fixture, senderIDs, "marker-free A stop/resume while B stays live");
+      await assertCameraScenarioHealthy(fixture, "marker-free A-first stop/resume while B stays live");
+    }
+  },
+  {
     name: "B starts first then A stops and resumes while B camera stays live",
     timecodedCamera: true,
     async run(fixture) {

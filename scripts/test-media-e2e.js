@@ -443,11 +443,14 @@ async function diagnostics(page) {
   });
 }
 
-async function beginCameraQualityCapture(pageA, pageB, label) {
+async function beginCameraQualityCapture(pageA, pageB, label, {
+  requireMarkers = true,
+  includeFrameObservations = false
+} = {}) {
   const pages = { A: pageA, B: pageB };
   await Promise.all(Object.entries(pages).map(([pageRole, page]) =>
-    page.evaluate(installCameraQualityRecorder, { label, pageRole })));
-  return { label, pages };
+    page.evaluate(installCameraQualityRecorder, { label, pageRole, requireMarkers, includeFrameObservations })));
+  return { label, pages, requireMarkers, includeFrameObservations };
 }
 
 async function waitForCameraQualityBaseline(capture, roles, timeoutMs = 5000) {
@@ -463,7 +466,8 @@ async function waitForCameraQualityBaseline(capture, roles, timeoutMs = 5000) {
       page.length === roles.length && page.every((role) => role.ready))) return;
     if (Date.now() < deadline) await delay(50);
   } while (Date.now() < deadline);
-  throw new Error(`${capture.label}: live camera marker baseline was not ready within ${timeoutMs}ms: ${JSON.stringify(readiness)}`);
+  const baseline = capture.requireMarkers ? "live camera marker" : "live camera frame";
+  throw new Error(`${capture.label}: ${baseline} baseline was not ready within ${timeoutMs}ms: ${JSON.stringify(readiness)}`);
 }
 
 async function endCameraQualityCapture(capture, options) {
@@ -481,6 +485,7 @@ async function endCameraQualityCapture(capture, options) {
       window.__slowMeetTest?.cameraQualityCapture?.finish())));
     return validateCameraQualityReports(reports, {
       label: capture.label,
+      requireMarkers: capture.requireMarkers,
       ...options
     });
   } catch (error) {
@@ -491,6 +496,50 @@ async function endCameraQualityCapture(capture, options) {
       window.__slowMeetTest?.cameraQualityCapture?.stop();
     }).catch(() => {})));
   }
+}
+
+async function logRealCameraDiagnostics(fixture, label, stage) {
+  const peers = await Promise.all(["A", "B"].map(async (role) => {
+    const state = await fixture.diagnostics(role);
+    return {
+      role,
+      connectionState: state.connectionState,
+      iceConnectionState: state.iceConnectionState,
+      signalingState: state.signalingState,
+      peerConnectionCount: state.peerConnectionCount,
+      socketCount: state.socketCount,
+      framesDecoded: state.framesDecoded,
+      videoBytesReceived: state.videoBytesReceived,
+      videoBytesSent: state.videoBytesSent,
+      videoRtpStats: state.videoRtpStats || [],
+      videoSenderStats: state.videoSenderStats || [],
+      cameraVideos: (state.remoteVideos || []).filter((video) => video.role === "camera").map((video) => ({
+        participant: video.participant,
+        width: video.width,
+        height: video.height,
+        currentTime: video.currentTime,
+        paused: video.paused,
+        cameraState: video.cameraState,
+        trackIDs: video.trackIDs,
+        inboundVideoStats: video.inboundVideoStats
+      })),
+      connectionEvents: state.connectionEvents,
+      signalingMessages: state.signalingMessages,
+      replaceTrackEvents: state.replaceTrackEvents
+    };
+  }));
+  const snapshot = { label, stage, peers };
+  console.log(`[real-camera diagnostics] ${JSON.stringify(snapshot)}`);
+  return snapshot;
+}
+
+async function realCameraVideoSenderIDs(fixture) {
+  const states = await Promise.all(["A", "B"].map((role) => fixture.diagnostics(role)));
+  return Object.fromEntries(states.map((state, index) => {
+    const sender = state.videoSenderStats.find((entry) => entry.trackID) || state.videoSenderStats[0];
+    assert.ok(sender?.senderID, `${["A", "B"][index]}: video sender identity was not recorded`);
+    return [["A", "B"][index], sender.senderID];
+  }));
 }
 
 async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true,
@@ -847,9 +896,14 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
     async diagnostics(role) {
       return diagnostics(pageForRole(fixture, role));
     },
-    async beginCameraQualityCapture(label) {
-      assert.ok(fixture.timeCodedCamera, `${label}: scenario must use time-coded synthetic cameras`);
-      return beginCameraQualityCapture(fixture.pageA, fixture.pageB, label);
+    async beginCameraQualityCapture(label, options = {}) {
+      const requireMarkers = options.requireMarkers ?? true;
+      assert.ok(!requireMarkers || fixture.timeCodedCamera,
+        `${label}: marker checks require time-coded synthetic cameras`);
+      return beginCameraQualityCapture(fixture.pageA, fixture.pageB, label, {
+        ...options,
+        requireMarkers
+      });
     },
     async waitForCameraQualityBaseline(capture, roles) {
       return waitForCameraQualityBaseline(capture, roles);
@@ -2202,6 +2256,50 @@ async function main() {
   const launchOptions = { headless: !headed, args: launchArgs };
   if (chromePath) launchOptions.executablePath = chromePath;
 
+  const runRealCameraToggleScenario = async (fixture, toggledRole) => {
+    const otherRole = toggledRole === "A" ? "B" : "A";
+    const label = `${toggledRole} real camera stop/resume while ${otherRole} remains live`;
+    await fixture.join("A");
+    await fixture.join("B");
+    await fixture.waitForConnected();
+
+    for (const role of ["A", "B"]) {
+      const receiverRole = role === "A" ? "B" : "A";
+      await fixture.setPressed(role, "#camera", true);
+      await fixture.waitForRemoteState(receiverRole, fixture.names[role], "camera", "on");
+      await fixture.assertRemoteVideoMoves(role, receiverRole, `real camera ${role} starts ${role === "A" ? "first" : "second"}`);
+    }
+
+    await fixture.assertPeersConnected(`${label} baseline`);
+    const senderIDs = await realCameraVideoSenderIDs(fixture);
+    const capture = await fixture.beginCameraQualityCapture(label, {
+      requireMarkers: false,
+      includeFrameObservations: true
+    });
+    await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+    await logRealCameraDiagnostics(fixture, label, "both cameras live before toggle");
+
+    await fixture.setPressed(toggledRole, "#camera", false);
+    await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "off");
+    await fixture.assertPeersConnected(`${label} camera off`);
+    await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera off`);
+
+    await fixture.setPressed(toggledRole, "#camera", true);
+    await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "on");
+    await fixture.assertPeersConnected(`${label} camera resumed`);
+    await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera resumed`);
+
+  await fixture.endCameraQualityCapture(capture, {
+      toggledRoles: [toggledRole],
+      liveRoles: [otherRole]
+    });
+    await logRealCameraDiagnostics(fixture, label, "after stable quality window");
+  assert.deepEqual(await realCameraVideoSenderIDs(fixture), senderIDs,
+    `${label}: camera toggle replaced an established video sender`);
+  await fixture.assertNoDuplicateParticipants();
+  console.log(`[real-camera sender continuity] ${JSON.stringify({ label, senderIDs })}`);
+  };
+
   const scenarios = [
     ...participantFlowScenarios,
     ...mediaLifecycleScenarios,
@@ -2256,6 +2354,24 @@ async function main() {
         await fixture.waitForStability(stabilityMs, stabilityMs + 30000);
         await fixture.assertPeersConnected("real capture stability");
         await fixture.assertNoDuplicateParticipants();
+      }
+    },
+    {
+      name: "A-first real camera stop/resume keeps B live",
+      when: "realMedia",
+      profile: "real-media",
+      required: false,
+      async run(fixture) {
+        await runRealCameraToggleScenario(fixture, "A");
+      }
+    },
+    {
+      name: "B real camera stop/resume keeps A live as the comparison",
+      when: "realMedia",
+      profile: "real-media",
+      required: false,
+      async run(fixture) {
+        await runRealCameraToggleScenario(fixture, "B");
       }
     },
     {
@@ -2336,7 +2452,12 @@ async function main() {
           reason = `requires ${gateNames[scenario.when] || `${scenario.when} environment gate`}`;
         }
         console.log(`NOT RUN | ${scenario.name} | ${reason}`);
-        results.push({ name: scenario.name, status: "NOT RUN", required: scenario.required !== false, reason });
+        results.push({
+          name: scenario.name,
+          status: "NOT RUN",
+          required: scenarioSelected && (Boolean(requestedScenario) || scenario.required !== false),
+          reason
+        });
         continue;
       }
 

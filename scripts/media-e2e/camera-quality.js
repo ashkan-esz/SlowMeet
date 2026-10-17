@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 
-function installCameraQualityRecorder({ label, pageRole }) {
+function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, includeFrameObservations = false }) {
   const markerModulo = 16777216;
   const rateWindowMs = 1000;
   const rateWindowStepMs = 250;
@@ -16,13 +16,16 @@ function installCameraQualityRecorder({ label, pageRole }) {
   const resumeEvents = [];
   const tiles = Object.create(null);
   const videoTiles = new WeakMap();
-  const markerCanvas = document.createElement("canvas");
-  markerCanvas.width = 640;
-  markerCanvas.height = 480;
-  const markerContext = markerCanvas.getContext("2d", { willReadFrequently: true });
+  const markerCanvas = requireMarkers ? document.createElement("canvas") : null;
+  if (markerCanvas) {
+    markerCanvas.width = 640;
+    markerCanvas.height = 480;
+  }
+  const markerContext = markerCanvas?.getContext("2d", { willReadFrequently: true }) || null;
   const capture = {
     label,
     pageRole,
+    requireMarkers,
     active: true,
     startedAt: performance.now(),
     stableStartedAt: null,
@@ -55,12 +58,18 @@ function installCameraQualityRecorder({ label, pageRole }) {
     roleStates[participantRole] = next;
     stateEvents.push({ role: participantRole, previous, current: next, at });
     if (previous === "off" && next === "on") {
-      const baselineMarkers = Object.fromEntries(Object.values(tiles)
-        .filter((tile) => tile.participantRole === participantRole)
-        .map((tile) => [tile.key, tile.lastOnMarkerValue]));
-      const expectedView = participantRole === pageRole ? "local" : "remote";
-      if (Number.isFinite(baselineMarkers[`${participantRole}/${expectedView}`])) {
-        resumeEvents.push({ role: participantRole, at, baselineMarkers, firstFrames: {} });
+      const roleTiles = Object.values(tiles).filter((tile) => tile.participantRole === participantRole);
+      if (requireMarkers) {
+        const baselineMarkers = Object.fromEntries(roleTiles.map((tile) => [tile.key, tile.lastOnMarkerValue]));
+        const expectedView = participantRole === pageRole ? "local" : "remote";
+        if (Number.isFinite(baselineMarkers[`${participantRole}/${expectedView}`])) {
+          resumeEvents.push({ role: participantRole, at, baselineMarkers, firstFrames: {} });
+        }
+      } else {
+        const baselineFrames = Object.fromEntries(roleTiles.map((tile) => [tile.key, tile.lastOnFrame]));
+        if (Object.values(baselineFrames).some(Boolean)) {
+          resumeEvents.push({ role: participantRole, at, baselineFrames, pendingFrames: {}, firstFrames: {} });
+        }
       }
     }
     if (next !== "on") {
@@ -71,7 +80,7 @@ function installCameraQualityRecorder({ label, pageRole }) {
   }
 
   function decodeMarker(video, participantRole) {
-    if (!markerContext || video.videoWidth < 320 || video.videoHeight < 200) {
+    if (!requireMarkers || !markerContext || video.videoWidth < 320 || video.videoHeight < 200) {
       return { valid: false, ageMs: null, marker: null, roleMatches: false };
     }
     try {
@@ -115,6 +124,7 @@ function installCameraQualityRecorder({ label, pageRole }) {
       maxOnFrameGapMs: 0,
       lastOnFrameAt: null,
       lastOnMarkerValue: null,
+      lastOnFrame: null,
       latest: null
     });
     if (!previousRegistration) tile.elementsSeen += 1;
@@ -133,6 +143,8 @@ function installCameraQualityRecorder({ label, pageRole }) {
       const currentRole = roleForRow(currentRow);
       const cameraState = currentRow.dataset.camera || "unknown";
       const marker = decodeMarker(video, currentRole);
+      const frameReady = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        video.videoWidth > 0 && video.videoHeight > 0;
       const sample = {
         at,
         mediaTime: Number.isFinite(metadata.mediaTime) ? metadata.mediaTime : null,
@@ -140,6 +152,8 @@ function installCameraQualityRecorder({ label, pageRole }) {
         currentTime: Number.isFinite(video.currentTime) ? video.currentTime : null,
         width: video.videoWidth,
         height: video.videoHeight,
+        readyState: video.readyState,
+        frameReady,
         paused: video.paused,
         visible: video.getClientRects().length > 0 && !currentRow.hidden &&
           getComputedStyle(video).visibility !== "hidden",
@@ -158,6 +172,13 @@ function installCameraQualityRecorder({ label, pageRole }) {
         }
         tile.lastOnFrameAt = at;
         if (marker.valid && Number.isFinite(marker.marker)) tile.lastOnMarkerValue = marker.marker;
+        if (frameReady && !video.paused) {
+          tile.lastOnFrame = {
+            at,
+            mediaTime: sample.mediaTime,
+            presentedFrames: sample.presentedFrames
+          };
+        }
       } else {
         tile.lastOnFrameAt = null;
       }
@@ -165,29 +186,66 @@ function installCameraQualityRecorder({ label, pageRole }) {
       let pendingResume;
       for (let index = resumeEvents.length - 1; index >= 0; index -= 1) {
         const candidate = resumeEvents[index];
-        if (candidate.role === currentRole && at >= candidate.at && !candidate.firstFrames[tile.key] &&
-            Number.isFinite(candidate.baselineMarkers[tile.key])) {
+        const hasBaseline = requireMarkers
+          ? Number.isFinite(candidate.baselineMarkers?.[tile.key])
+          : Boolean(candidate.baselineFrames?.[tile.key]);
+        if (candidate.role === currentRole && at >= candidate.at && !candidate.firstFrames[tile.key] && hasBaseline) {
           pendingResume = candidate;
           break;
         }
       }
       if (pendingResume) {
         const resume = pendingResume;
-        const baselineMarkerValue = resume.baselineMarkers[tile.key];
-        if (Number.isFinite(baselineMarkerValue) && marker.valid && Number.isFinite(marker.ageMs) &&
-            marker.ageMs >= -250 && marker.ageMs <= 1000 && marker.marker !== baselineMarkerValue) {
-          resume.firstFrames[tile.key] = {
-            key: tile.key,
-            at,
-            latencyMs: at - resume.at,
-            markerValid: marker.valid,
-            markerAgeMs: marker.ageMs,
-            markerRoleMatches: marker.roleMatches,
-            markerValue: marker.marker,
-            baselineMarkerValue,
-            markerAdvanced: marker.marker !== baselineMarkerValue,
-            mediaTime: sample.mediaTime
-          };
+        if (requireMarkers) {
+          const baselineMarkerValue = resume.baselineMarkers[tile.key];
+          if (Number.isFinite(baselineMarkerValue) && marker.valid && Number.isFinite(marker.ageMs) &&
+              marker.ageMs >= -250 && marker.ageMs <= 1000 && marker.marker !== baselineMarkerValue) {
+            resume.firstFrames[tile.key] = {
+              key: tile.key,
+              at,
+              latencyMs: at - resume.at,
+              markerValid: marker.valid,
+              markerAgeMs: marker.ageMs,
+              markerRoleMatches: marker.roleMatches,
+              markerValue: marker.marker,
+              baselineMarkerValue,
+              markerAdvanced: marker.marker !== baselineMarkerValue,
+              mediaTime: sample.mediaTime
+            };
+          }
+        } else if (sample.frameReady && sample.visible && !sample.paused) {
+          const baselineFrame = resume.baselineFrames?.[tile.key];
+          const pendingFrame = resume.pendingFrames?.[tile.key];
+          const advances = (next, previous) =>
+            (Number.isFinite(next?.presentedFrames) && Number.isFinite(previous?.presentedFrames) &&
+              next.presentedFrames > previous.presentedFrames) ||
+            (Number.isFinite(next?.mediaTime) && Number.isFinite(previous?.mediaTime) &&
+              next.mediaTime > previous.mediaTime + 0.001);
+          let firstFrame;
+          if (advances(sample, baselineFrame)) firstFrame = sample;
+          else if (pendingFrame && advances(sample, pendingFrame)) firstFrame = pendingFrame;
+
+          if (firstFrame) {
+            resume.firstFrames[tile.key] = {
+              key: tile.key,
+              at: firstFrame.at,
+              latencyMs: firstFrame.at - resume.at,
+              confirmationLatencyMs: at - resume.at,
+              frameAdvanced: true,
+              frameReady: firstFrame.frameReady,
+              visible: firstFrame.visible,
+              paused: firstFrame.paused,
+              width: firstFrame.width,
+              height: firstFrame.height,
+              readyState: firstFrame.readyState,
+              mediaTime: firstFrame.mediaTime,
+              presentedFrames: firstFrame.presentedFrames,
+              baselineMediaTime: baselineFrame?.mediaTime ?? null,
+              baselinePresentedFrames: baselineFrame?.presentedFrames ?? null
+            };
+          } else if (!pendingFrame) {
+            resume.pendingFrames[tile.key] = sample;
+          }
         }
       }
 
@@ -242,7 +300,14 @@ function installCameraQualityRecorder({ label, pageRole }) {
     const tileReports = Object.values(tiles).map((tile) => {
       const stableFrames = stableStart === null
         ? []
-        : tile.frames.filter((frame) => frame.at >= stableStart && frame.at <= endedAt && frame.cameraState === "on");
+        : tile.frames.filter((frame) => frame.at >= stableStart && frame.at <= endedAt && frame.cameraState === "on" &&
+          (requireMarkers || (frame.frameReady && frame.visible && !frame.paused)));
+      const stableLeadingFrameGapMs = stableStart === null || !stableFrames.length
+        ? Infinity
+        : Math.max(0, stableFrames[0].at - stableStart);
+      const stableTrailingFrameGapMs = stableFrames.length
+        ? Math.max(0, endedAt - stableFrames[stableFrames.length - 1].at)
+        : Infinity;
       const stableValidMarkers = stableFrames.filter((frame) => frame.markerValid && Number.isFinite(frame.markerAgeMs));
       const markerPoints = stableValidMarkers.map((frame) => ({ at: frame.at, markerValue: frame.markerValue }));
       let markerOffset = 0;
@@ -271,7 +336,9 @@ function installCameraQualityRecorder({ label, pageRole }) {
         maxOnFrameGapMs: tile.maxOnFrameGapMs,
         latest: tile.latest,
         stableFrameCount: stableFrames.length,
-        stableMaxFrameGapMs: gap(stableFrames),
+        stableMaxFrameGapMs: Math.max(gap(stableFrames), stableLeadingFrameGapMs, stableTrailingFrameGapMs),
+        stableLeadingFrameGapMs,
+        stableTrailingFrameGapMs,
         stableMarkerValidFraction: stableFrames.length ? stableValidMarkers.length / stableFrames.length : 0,
         stableMarkerCount: stableValidMarkers.length,
         stableUniqueMarkerCount: markerValues.size,
@@ -281,7 +348,18 @@ function installCameraQualityRecorder({ label, pageRole }) {
         sourceRate: markerRateMsPerSecond === null ? null : markerRateMsPerSecond / 1000,
         rateWindowMs,
         playbackRateWindows,
-        sourceRateWindows
+        sourceRateWindows,
+        frameObservations: includeFrameObservations ? stableFrames.map((frame) => ({
+          atMs: Math.round(frame.at - stableStart),
+          mediaTime: frame.mediaTime,
+          presentedFrames: frame.presentedFrames,
+          currentTime: frame.currentTime,
+          width: frame.width,
+          height: frame.height,
+          readyState: frame.readyState,
+          paused: frame.paused,
+          visible: frame.visible
+        })) : undefined
       };
     });
 
@@ -321,16 +399,24 @@ function installCameraQualityRecorder({ label, pageRole }) {
     const tile = tiles[`${role}/${view}`];
     const latest = tile?.latest;
     const markerAgeMs = latest?.markerAgeMs;
+    const frameReady = latest?.frameReady && latest.visible && !latest.paused &&
+      latest.width > 0 && latest.height > 0;
     return {
       role,
       view,
-      ready: roleStates[role] === "on" && Number.isFinite(tile?.lastOnMarkerValue) &&
-        latest?.cameraState === "on" && latest.markerValid && latest.markerRoleMatches &&
-        Number.isFinite(markerAgeMs) && markerAgeMs >= -250 && markerAgeMs <= 1000 &&
-        performance.now() - latest.at <= 500,
+      ready: requireMarkers
+        ? roleStates[role] === "on" && Number.isFinite(tile?.lastOnMarkerValue) &&
+          latest?.cameraState === "on" && latest.markerValid && latest.markerRoleMatches &&
+          Number.isFinite(markerAgeMs) && markerAgeMs >= -250 && markerAgeMs <= 1000 &&
+          performance.now() - latest.at <= 500
+        : roleStates[role] === "on" && latest?.cameraState === "on" && frameReady &&
+          Number.isFinite(latest.mediaTime) && performance.now() - latest.at <= 500,
       marker: tile?.lastOnMarkerValue ?? null,
       latestAt: latest?.at ?? null,
-      markerAgeMs: Number.isFinite(markerAgeMs) ? markerAgeMs : null
+      markerAgeMs: Number.isFinite(markerAgeMs) ? markerAgeMs : null,
+      frameReady: Boolean(frameReady),
+      mediaTime: Number.isFinite(latest?.mediaTime) ? latest.mediaTime : null,
+      presentedFrames: Number.isFinite(latest?.presentedFrames) ? latest.presentedFrames : null
     };
   });
   capture.markStableStart = () => { capture.stableStartedAt = performance.now(); };
@@ -360,7 +446,8 @@ function validateCameraQualityReports(reports, {
   maxResumeFrameMs = 1000,
   allowAdditionalResumeCycles = false,
   minPlaybackRate = 0.9,
-  maxPlaybackRate = 1.1
+  maxPlaybackRate = 1.1,
+  requireMarkers = true
 }) {
   assert.equal(reports.length, 2, `${label}: quality capture must include both Chromium pages`);
   const fail = (message, extra) => {
@@ -401,12 +488,21 @@ function validateCameraQualityReports(reports, {
       const resumesToValidate = allowAdditionalResumeCycles ? deliveredResumes : observedResumes;
       for (const resume of resumesToValidate) {
         const firstFrame = resume.firstFrames?.[`${role}/${expectedView}`];
-        if (!firstFrame || firstFrame.latencyMs > maxResumeFrameMs || !firstFrame.markerAdvanced || !firstFrame.markerValid ||
-            firstFrame.markerAgeMs === null || firstFrame.markerAgeMs < -250 ||
-            firstFrame.markerAgeMs > maxMarkerAgeMs || !firstFrame.markerRoleMatches) {
-          fail(`${report.pageRole} ${role}/${expectedView} did not show a fresh, advancing, correctly routed frame within ${maxResumeFrameMs}ms`, {
+        if (requireMarkers) {
+          if (!firstFrame || firstFrame.latencyMs > maxResumeFrameMs || !firstFrame.markerAdvanced || !firstFrame.markerValid ||
+              firstFrame.markerAgeMs === null || firstFrame.markerAgeMs < -250 ||
+              firstFrame.markerAgeMs > maxMarkerAgeMs || !firstFrame.markerRoleMatches) {
+            fail(`${report.pageRole} ${role}/${expectedView} did not show a fresh, advancing, correctly routed frame within ${maxResumeFrameMs}ms`, {
+              resume,
+              limits: { maxResumeFrameMs, maxMarkerAgeMs }
+            });
+          }
+        } else if (!firstFrame || firstFrame.latencyMs > maxResumeFrameMs ||
+            firstFrame.confirmationLatencyMs > maxResumeFrameMs || !firstFrame.frameAdvanced || !firstFrame.frameReady ||
+            !firstFrame.visible || firstFrame.paused || firstFrame.width <= 0 || firstFrame.height <= 0) {
+          fail(`${report.pageRole} ${role}/${expectedView} did not present a visible camera frame within ${maxResumeFrameMs}ms`, {
             resume,
-            limits: { maxResumeFrameMs, maxMarkerAgeMs }
+            limits: { maxResumeFrameMs }
           });
         }
       }
@@ -428,14 +524,19 @@ function validateCameraQualityReports(reports, {
         elementsSeen: tile.elementsSeen,
         stableFrameCount: tile.stableFrameCount,
         stableMaxFrameGapMs: tile.stableMaxFrameGapMs,
+        stableLeadingFrameGapMs: tile.stableLeadingFrameGapMs,
+        stableTrailingFrameGapMs: tile.stableTrailingFrameGapMs,
         maxOnFrameGapMs: tile.maxOnFrameGapMs,
+        ...(tile.frameObservations ? { frameObservations: tile.frameObservations } : {}),
         stableMarkerValidFraction: tile.stableMarkerValidFraction,
         stableMaxMarkerAgeMs: tile.stableMaxMarkerAgeMs,
         playbackRate: tile.playbackRate,
         sourceRate: tile.sourceRate,
         playbackRateWindowRange: rateRange(tile.playbackRateWindows),
         sourceRateWindowRange: rateRange(tile.sourceRateWindows),
-        rateWindowCount: Math.min(tile.playbackRateWindows.length, tile.sourceRateWindows.length),
+        rateWindowCount: requireMarkers
+          ? Math.min(tile.playbackRateWindows.length, tile.sourceRateWindows.length)
+          : tile.playbackRateWindows.length,
         width: latest?.width,
         height: latest?.height,
         paused: latest?.paused,
@@ -452,21 +553,23 @@ function validateCameraQualityReports(reports, {
       if (tile.stableMaxFrameGapMs > maxFrameGapMs || tile.maxOnFrameGapMs > maxFrameGapMs) {
         fail(`${role}/${view} frame gap exceeds ${maxFrameGapMs}ms while the camera is on`, evidence);
       }
-      if (tile.stableMarkerValidFraction < 0.95 || tile.stableUniqueMarkerCount < 10 ||
+      if (requireMarkers && (tile.stableMarkerValidFraction < 0.95 || tile.stableUniqueMarkerCount < 10 ||
           tile.stableMaxMarkerAgeMs === null || tile.stableMinMarkerAgeMs < -250 ||
-          tile.stableMaxMarkerAgeMs > maxMarkerAgeMs) {
+          tile.stableMaxMarkerAgeMs > maxMarkerAgeMs)) {
         fail(`${role}/${view} time-coded camera frames are stale or could not be decoded`, evidence);
       }
       if (!Number.isFinite(tile.playbackRate) || tile.playbackRate < minPlaybackRate || tile.playbackRate > maxPlaybackRate ||
-          !Number.isFinite(tile.sourceRate) || tile.sourceRate < minPlaybackRate || tile.sourceRate > maxPlaybackRate) {
-        fail(`${role}/${view} playback/source rate is outside ${minPlaybackRate}–${maxPlaybackRate}x`, evidence);
+          (requireMarkers && (!Number.isFinite(tile.sourceRate) || tile.sourceRate < minPlaybackRate ||
+            tile.sourceRate > maxPlaybackRate))) {
+        fail(`${role}/${view} ${requireMarkers ? "playback/source" : "playback"} rate is outside ${minPlaybackRate}–${maxPlaybackRate}x`, evidence);
       }
       const playbackRateWindows = tile.playbackRateWindows || [];
       const sourceRateWindows = tile.sourceRateWindows || [];
-      const outOfRangeRates = [...playbackRateWindows, ...sourceRateWindows].filter(({ rate }) =>
+      const rateWindows = requireMarkers ? [...playbackRateWindows, ...sourceRateWindows] : playbackRateWindows;
+      const outOfRangeRates = rateWindows.filter(({ rate }) =>
         !Number.isFinite(rate) || rate < minPlaybackRate || rate > maxPlaybackRate);
       if (evidence.rateWindowCount < 10 || outOfRangeRates.length) {
-        fail(`${role}/${view} has fewer than 10 valid rolling rate windows or a playback/source rate outside ` +
+        fail(`${role}/${view} has fewer than 10 valid rolling rate windows or a ${requireMarkers ? "playback/source" : "playback"} rate outside ` +
           `${minPlaybackRate}–${maxPlaybackRate}x in a ${tile.rateWindowMs || 1000}ms window`, {
           ...evidence,
           outOfRangeRates
@@ -485,6 +588,17 @@ function validateCameraQualityReports(reports, {
         role: resume.role,
         firstFrames: Object.fromEntries(Object.entries(resume.firstFrames).map(([key, frame]) => [key, {
           latencyMs: frame.latencyMs,
+          frameReady: frame.frameReady,
+          visible: frame.visible,
+          paused: frame.paused,
+          width: frame.width,
+          height: frame.height,
+          mediaTime: frame.mediaTime,
+          presentedFrames: frame.presentedFrames,
+          baselineMediaTime: frame.baselineMediaTime,
+          baselinePresentedFrames: frame.baselinePresentedFrames,
+          frameAdvanced: frame.frameAdvanced,
+          confirmationLatencyMs: frame.confirmationLatencyMs,
           markerAgeMs: frame.markerAgeMs,
           markerAdvanced: frame.markerAdvanced,
           markerRoleMatches: frame.markerRoleMatches
