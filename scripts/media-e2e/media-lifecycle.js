@@ -30,6 +30,24 @@ async function enableCamera(fixture, role, label) {
   await fixture.assertRemoteVideoMoves(role, receiverRole, label);
 }
 
+async function transitionCamera(fixture, role, enabled, label) {
+  await fixture.setPressed(role, "#camera", enabled);
+  await fixture.waitForRemoteState(otherRole(role), participants[role], "camera", enabled ? "on" : "off");
+  await fixture.assertPeersConnected(label);
+}
+
+async function transitionCamerasTogether(fixture, enabled, label) {
+  await Promise.all(roles.map((role) => fixture.setPressed(role, "#camera", enabled)));
+  await Promise.all(roles.map((role) =>
+    fixture.waitForRemoteState(otherRole(role), participants[role], "camera", enabled ? "on" : "off")));
+  await fixture.assertPeersConnected(label);
+}
+
+async function assertCameraScenarioHealthy(fixture, label) {
+  await fixture.assertPeersConnected(label);
+  await fixture.assertNoDuplicateParticipants();
+}
+
 async function enableMicrophone(fixture, role, label) {
   const receiverRole = otherRole(role);
   await fixture.setPressed(role, "#mic", true);
@@ -82,6 +100,18 @@ async function activeVideoSenderID(fixture, role) {
   const sender = state.videoSenderStats?.find((entry) => entry.trackID) || state.videoSenderStats?.[0];
   assert.ok(sender?.senderID, `${role}: active video sender identity was not recorded`);
   return sender.senderID;
+}
+
+async function videoSenderIDs(fixture) {
+  return Object.fromEntries(await Promise.all(roles.map(async (role) =>
+    [role, await activeVideoSenderID(fixture, role)])));
+}
+
+async function assertVideoSenderIDs(fixture, expected, label) {
+  for (const role of roles) {
+    assert.equal(await activeVideoSenderID(fixture, role), expected[role],
+      `${label}: ${role} camera replaced its established video sender`);
+  }
 }
 
 async function assertRemoteScreenPixelsChange(page, senderName, label) {
@@ -151,6 +181,158 @@ const scenarios = [
         await fixture.assertPeersConnected(`${role} camera toggle recovery`);
         await fixture.assertNoDuplicateParticipants();
       }
+    }
+  },
+  {
+    name: "A starts first then stops and resumes while B camera stays live",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "A-first camera regression startup");
+      await enableCamera(fixture, "A", "A starts before B");
+      await enableCamera(fixture, "B", "B starts after A");
+      const senderIDs = await videoSenderIDs(fixture);
+
+      const capture = await fixture.beginCameraQualityCapture("A stop/resume while B stays live");
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      await transitionCamera(fixture, "A", false, "A camera paused while B stays live");
+      await transitionCamera(fixture, "A", true, "A camera resumed while B stays live");
+      await fixture.endCameraQualityCapture(capture, { toggledRoles: ["A"], liveRoles: ["B"] });
+      await assertVideoSenderIDs(fixture, senderIDs, "A stop/resume while B stays live");
+      await assertCameraScenarioHealthy(fixture, "A-first stop/resume while B stays live");
+    }
+  },
+  {
+    name: "B starts first then A stops and resumes while B camera stays live",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "B-first camera regression startup");
+      await enableCamera(fixture, "B", "B starts before A");
+      await enableCamera(fixture, "A", "A starts after B");
+      const senderIDs = await videoSenderIDs(fixture);
+
+      const capture = await fixture.beginCameraQualityCapture("A stop/resume after B starts first");
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      await transitionCamera(fixture, "A", false, "A camera paused after B started first");
+      await transitionCamera(fixture, "A", true, "A camera resumed after B started first");
+      await fixture.endCameraQualityCapture(capture, { toggledRoles: ["A"], liveRoles: ["B"] });
+      await assertVideoSenderIDs(fixture, senderIDs, "B-first A stop/resume while B stays live");
+      await assertCameraScenarioHealthy(fixture, "B-first A stop/resume while B stays live");
+    }
+  },
+  {
+    name: "B starts first then B stops and resumes while A camera stays live",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "B-first B-camera regression startup");
+      await enableCamera(fixture, "B", "B starts before A for B toggle");
+      await enableCamera(fixture, "A", "A starts after B for B toggle");
+      const senderIDs = await videoSenderIDs(fixture);
+
+      const capture = await fixture.beginCameraQualityCapture("B stop/resume after B starts first");
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      await transitionCamera(fixture, "B", false, "B camera paused after B started first");
+      await transitionCamera(fixture, "B", true, "B camera resumed after B started first");
+      await fixture.endCameraQualityCapture(capture, { toggledRoles: ["B"], liveRoles: ["A"] });
+      await assertVideoSenderIDs(fixture, senderIDs, "B-first B stop/resume while A stays live");
+      await assertCameraScenarioHealthy(fixture, "B-first B stop/resume while A stays live");
+    }
+  },
+  {
+    name: "B stop/resume keeps A camera live as the comparison",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "B camera comparison startup");
+      await enableCamera(fixture, "A", "A starts before B comparison");
+      await enableCamera(fixture, "B", "B starts before comparison toggle");
+      const senderIDs = await videoSenderIDs(fixture);
+
+      const capture = await fixture.beginCameraQualityCapture("B stop/resume while A stays live");
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      await transitionCamera(fixture, "B", false, "B camera paused while A stays live");
+      await transitionCamera(fixture, "B", true, "B camera resumed while A stays live");
+      await fixture.endCameraQualityCapture(capture, { toggledRoles: ["B"], liveRoles: ["A"] });
+      await assertVideoSenderIDs(fixture, senderIDs, "B stop/resume while A stays live");
+      await assertCameraScenarioHealthy(fixture, "B stop/resume while A stays live");
+    }
+  },
+  {
+    name: "repeated camera stop/resume cycles preserve the other participant video",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "rapid camera toggle startup");
+      for (const role of roles) await enableCamera(fixture, role, `${role} camera before rapid toggles`);
+      const senderIDs = await videoSenderIDs(fixture);
+
+      for (const role of roles) {
+        const capture = await fixture.beginCameraQualityCapture(
+          `${role} rapid camera toggles while ${otherRole(role)} stays live`);
+        await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+        for (let cycle = 0; cycle < 3; cycle += 1) {
+          await transitionCamera(fixture, role, false, `${role} rapid camera pause ${cycle + 1}`);
+          await transitionCamera(fixture, role, true, `${role} rapid camera resume ${cycle + 1}`);
+          await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+        }
+        await fixture.endCameraQualityCapture(capture, {
+          toggledRoles: [role],
+          liveRoles: [otherRole(role)],
+          expectedResumeCycles: 3
+        });
+        await assertVideoSenderIDs(fixture, senderIDs, `${role} repeated camera stop/resume`);
+        await assertCameraScenarioHealthy(fixture, `${role} rapid camera toggle recovery`);
+      }
+    }
+  },
+  {
+    name: "back-to-back camera pause and resume bursts from both participants",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "back-to-back camera transition startup");
+      for (const role of roles) await enableCamera(fixture, role, `${role} camera before back-to-back requests`);
+      const senderIDs = await videoSenderIDs(fixture);
+      for (const role of roles) {
+        const other = otherRole(role);
+        const capture = await fixture.beginCameraQualityCapture(`${role} back-to-back pause/resume requests`);
+        await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+
+        await transitionCamera(fixture, role, false, `${role} acknowledged camera pause before request burst`);
+        await transitionCamera(fixture, role, true, `${role} acknowledged camera resume before request burst`);
+        await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+        for (let cycle = 0; cycle < 3; cycle += 1) {
+          await fixture.setPressed(role, "#camera", false);
+          await fixture.setPressed(role, "#camera", true);
+        }
+        await fixture.waitForRemoteState(other, participants[role], "camera", "on");
+        await fixture.assertPeersConnected(`${role} back-to-back camera requests settle`);
+        await fixture.endCameraQualityCapture(capture, {
+          toggledRoles: [role],
+          liveRoles: [other],
+          expectedResumeCycles: 2,
+          allowAdditionalResumeCycles: true
+        });
+        await assertVideoSenderIDs(fixture, senderIDs, `${role} back-to-back camera requests`);
+        await assertCameraScenarioHealthy(fixture, `${role} back-to-back camera pause/resume`);
+      }
+    }
+  },
+  {
+    name: "near-simultaneous camera starts and stop/resumes in both directions",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "near-simultaneous camera transition startup");
+      const capture = await fixture.beginCameraQualityCapture("near-simultaneous camera starts and resumes");
+
+      await transitionCamerasTogether(fixture, true, "both cameras started near-simultaneously");
+      await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+      const senderIDs = await videoSenderIDs(fixture);
+      await transitionCamerasTogether(fixture, false, "both cameras stopped near-simultaneously");
+      await transitionCamerasTogether(fixture, true, "both cameras resumed near-simultaneously");
+      await fixture.endCameraQualityCapture(capture, {
+        toggledRoles: ["A", "B"],
+        liveRoles: [],
+        expectedResumeCycles: 1
+      });
+      await assertVideoSenderIDs(fixture, senderIDs, "near-simultaneous camera stop/resume");
+      await assertCameraScenarioHealthy(fixture, "near-simultaneous camera start and stop/resume");
     }
   },
   {

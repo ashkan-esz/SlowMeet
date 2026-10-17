@@ -17,6 +17,7 @@ const axeCore = (() => {
 })();
 const participantFlowScenarios = require("./media-e2e/participant-flows").scenarios;
 const mediaLifecycleScenarios = require("./media-e2e/media-lifecycle").scenarios;
+const { installCameraQualityRecorder, validateCameraQualityReports } = require("./media-e2e/camera-quality");
 
 const root = path.join(__dirname, "..");
 const stabilityMs = Number(process.env.MEDIA_E2E_STABILITY_MS || 30000);
@@ -39,6 +40,8 @@ const pollIntervalMs = 1000;
 const noProgressLimitMs = 5000;
 const cameraStopObservationMs = 1200;
 const cameraStopTimeoutMs = 8000;
+const cameraQualitySettleMs = 500;
+const cameraQualityWindowMs = 5000;
 const mediaProgressTimeoutMs = 15000;
 const mediaProgressPollMs = 250;
 const transientDisconnectGraceMs = 0;
@@ -433,12 +436,65 @@ async function diagnostics(page) {
       signalingMessages: window.__slowMeetTest?.signalingMessages.slice(-20) || [],
       cameraButton: document.querySelector("#camera")?.getAttribute("aria-pressed"),
       micButton: document.querySelector("#mic")?.getAttribute("aria-pressed"),
-      incomingVideoButton: document.querySelector("#receive-video")?.getAttribute("aria-pressed")
+      incomingVideoButton: document.querySelector("#receive-video")?.getAttribute("aria-pressed"),
+      cameraQualityCapture: window.__slowMeetTest?.cameraQualityCapture?.lastSummary ||
+        window.__slowMeetTest?.cameraQualityCapture?.snapshot?.() || null
     };
   });
 }
 
-async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true) {
+async function beginCameraQualityCapture(pageA, pageB, label) {
+  const pages = { A: pageA, B: pageB };
+  await Promise.all(Object.entries(pages).map(([pageRole, page]) =>
+    page.evaluate(installCameraQualityRecorder, { label, pageRole })));
+  return { label, pages };
+}
+
+async function waitForCameraQualityBaseline(capture, roles, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let readiness = [];
+  do {
+    readiness = await Promise.all(Object.values(capture.pages).map((page) => page.evaluate((expectedRoles) => {
+      const recorder = window.__slowMeetTest?.cameraQualityCapture;
+      if (!recorder?.active || typeof recorder.baselineReadiness !== "function") return [];
+      return recorder.baselineReadiness(expectedRoles);
+    }, roles)));
+    if (readiness.length === 2 && readiness.every((page) =>
+      page.length === roles.length && page.every((role) => role.ready))) return;
+    if (Date.now() < deadline) await delay(50);
+  } while (Date.now() < deadline);
+  throw new Error(`${capture.label}: live camera marker baseline was not ready within ${timeoutMs}ms: ${JSON.stringify(readiness)}`);
+}
+
+async function endCameraQualityCapture(capture, options) {
+  const { pages } = capture;
+  let reports;
+  try {
+    await delay(cameraQualitySettleMs);
+    await Promise.all(Object.values(pages).map((page) => page.evaluate(() => {
+      const recorder = window.__slowMeetTest?.cameraQualityCapture;
+      if (!recorder?.active) throw new Error("camera quality capture is not active");
+      recorder.markStableStart();
+    })));
+    await delay(cameraQualityWindowMs);
+    reports = await Promise.all(Object.values(pages).map((page) => page.evaluate(() =>
+      window.__slowMeetTest?.cameraQualityCapture?.finish())));
+    return validateCameraQualityReports(reports, {
+      label: capture.label,
+      ...options
+    });
+  } catch (error) {
+    if (reports) error.cameraQualityReports = reports;
+    throw error;
+  } finally {
+    await Promise.all(Object.values(pages).map((page) => page.evaluate(() => {
+      window.__slowMeetTest?.cameraQualityCapture?.stop();
+    }).catch(() => {})));
+  }
+}
+
+async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true,
+  timeCodedCameraRole = undefined) {
   const page = await context.newPage();
   const pageEvents = [];
   page.__mediaE2EEvents = pageEvents;
@@ -461,7 +517,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
   page.on("requestfailed", (request) => pageEvents.push({
     type: "requestfailed", method: request.method(), url: request.url(), error: request.failure()?.errorText, timestamp: Date.now()
   }));
-  await page.addInitScript((installDeviceFixtures) => {
+  await page.addInitScript(({ installDeviceFixtures, timeCodedCameraRole }) => {
     const NativePeerConnection = window.RTCPeerConnection;
     const NativeWebSocket = window.WebSocket;
     const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
@@ -477,7 +533,9 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       acceptedRemoteCandidates: [],
       signalingMessages: [],
       deviceSelectionRequests: [],
-      capturedTracks: []
+      capturedTracks: [],
+      cameraQualityCapture: null,
+      timeCodedCamera: null
     };
     const mediaDevices = navigator.mediaDevices;
     const nativeEnumerateDevices = mediaDevices.enumerateDevices.bind(mediaDevices);
@@ -509,7 +567,78 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
             delete constraint.deviceId;
           }
         }
-        const stream = await nativeGetUserMedia(normalized);
+        let stream;
+        if (timeCodedCameraRole && normalized?.video) {
+          const nativeConstraints = { ...normalized, video: false };
+          stream = nativeConstraints.audio
+            ? await nativeGetUserMedia(nativeConstraints)
+            : new MediaStream();
+          const canvas = document.createElement("canvas");
+          canvas.width = 640;
+          canvas.height = 480;
+          const context = canvas.getContext("2d", { alpha: false });
+          if (!context) throw new Error("could not create the E2E time-coded camera canvas");
+          const roleBit = timeCodedCameraRole === "B" ? 1 : 0;
+          let animationFrame = 0;
+          let stopped = false;
+          const drawFrame = () => {
+            if (stopped) return;
+            const epoch = Math.floor(performance.timeOrigin + performance.now());
+            const marker = epoch % 16777216;
+            context.fillStyle = "#16202a";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.fillStyle = "#243c50";
+            context.fillRect(0, 100, canvas.width, 380);
+            const phase = (epoch % 3000) / 3000;
+            const centerX = 80 + Math.round(phase * 480);
+            context.fillStyle = roleBit ? "#48d597" : "#f0b84d";
+            context.beginPath();
+            context.arc(centerX, 285, 58, 0, Math.PI * 2);
+            context.fill();
+            context.fillStyle = "#ffffff";
+            context.font = "bold 36px sans-serif";
+            context.fillText("E2E CAMERA " + timeCodedCameraRole, 24, 90);
+            const bits = [1, 0, 1, 0, roleBit];
+            for (let bit = 23; bit >= 0; bit -= 1) bits.push((marker >>> bit) & 1);
+            bits.forEach((value, index) => {
+              context.fillStyle = value ? "#ffffff" : "#000000";
+              context.fillRect(12 + index * 20, 200, 16, 80);
+            });
+            animationFrame = requestAnimationFrame(drawFrame);
+          };
+          drawFrame();
+          const syntheticStream = canvas.captureStream(30);
+          const videoTrack = syntheticStream.getVideoTracks()[0];
+          if (!videoTrack) throw new Error("the E2E time-coded camera produced no video track");
+          videoTrack.addEventListener("ended", () => {
+            stopped = true;
+            cancelAnimationFrame(animationFrame);
+            if (window.__slowMeetTest.timeCodedCamera?.videoTrack === videoTrack) {
+              window.__slowMeetTest.timeCodedCamera = null;
+            }
+          }, { once: true });
+          stream.addTrack(videoTrack);
+          window.__slowMeetTest.timeCodedCamera = {
+            role: timeCodedCameraRole,
+            canvas,
+            stream: syntheticStream,
+            videoTrack,
+            get animationFrame() { return animationFrame; }
+          };
+          window.__slowMeetTest.capturedTracks.push({
+            source: "synthetic-test-camera",
+            kind: "video",
+            id: videoTrack.id,
+            track: videoTrack
+          });
+          for (const track of stream.getTracks()) {
+            if (track !== videoTrack) {
+              window.__slowMeetTest.capturedTracks.push({ source: "user-media", kind: track.kind, id: track.id, track });
+            }
+          }
+          return stream;
+        }
+        stream = await nativeGetUserMedia(normalized);
         for (const track of stream.getTracks()) {
           window.__slowMeetTest.capturedTracks.push({ source: "user-media", kind: track.kind, id: track.id, track });
         }
@@ -642,7 +771,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       });
       return originalReplaceTrack.call(this, track);
     };
-  }, installDeviceFixtures);
+  }, { installDeviceFixtures, timeCodedCameraRole });
   await page.goto(`${baseURL}/`);
   if (!autoJoin) return page;
   await page.locator("#name").fill(name);
@@ -662,7 +791,7 @@ function contextForRole(fixture, role) {
   return role === "A" ? fixture.contextA : fixture.contextB;
 }
 
-async function createScenarioFixture({ browserA, browserB, baseURL, contexts, traceContexts }) {
+async function createScenarioFixture({ browserA, browserB, baseURL, contexts, traceContexts, timeCodedCamera = false }) {
   const contextA = await browserA.newContext({ viewport: { width: 1440, height: 960 } });
   contexts.push(contextA);
   const contextB = await browserB.newContext({ viewport: { width: 1440, height: 960 } });
@@ -674,8 +803,8 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
   }));
 
   const [pageA, pageB] = await Promise.all([
-    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false),
-    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false)
+    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false, timeCodedCamera ? "A" : undefined),
+    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false, timeCodedCamera ? "B" : undefined)
   ]);
   const joined = new Set();
   const expectedPeerCounts = new Map();
@@ -686,6 +815,7 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
     password: testMeetingPassword,
     browserA,
     browserB,
+    timeCodedCamera,
     contextA,
     contextB,
     pageA,
@@ -711,34 +841,48 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
       return page;
     },
     async newPage(role) {
-      return joinMeeting(contextForRole(fixture, role), fixture.names[role], baseURL, deviceFixtures, false);
+      return joinMeeting(contextForRole(fixture, role), fixture.names[role], baseURL, deviceFixtures, false,
+        timeCodedCamera ? role : undefined);
     },
     async diagnostics(role) {
       return diagnostics(pageForRole(fixture, role));
     },
-      async capturedTrackStates(role) {
-        return pageForRole(fixture, role).evaluate(() =>
-          (window.__slowMeetTest?.capturedTracks || []).map(({ source, kind, id, track }) => ({
-            source,
-            kind,
-            id,
+    async beginCameraQualityCapture(label) {
+      assert.ok(fixture.timeCodedCamera, `${label}: scenario must use time-coded synthetic cameras`);
+      return beginCameraQualityCapture(fixture.pageA, fixture.pageB, label);
+    },
+    async waitForCameraQualityBaseline(capture, roles) {
+      return waitForCameraQualityBaseline(capture, roles);
+    },
+    async endCameraQualityCapture(capture, options) {
+      const summary = await endCameraQualityCapture(capture, options);
+      await fixture.assertPeersConnected(`${capture.label} quality window`);
+      console.log(`[camera quality] ${JSON.stringify(summary)}`);
+      return summary;
+    },
+    async capturedTrackStates(role) {
+      return pageForRole(fixture, role).evaluate(() =>
+        (window.__slowMeetTest?.capturedTracks || []).map(({ source, kind, id, track }) => ({
+          source,
+          kind,
+          id,
           readyState: track.readyState,
           enabled: track.enabled
         })));
     },
-      async assertNoLiveCapturedTracks(role, label = `participant ${role} media cleanup`) {
-        const tracks = await fixture.capturedTrackStates(role);
-        assert.ok(tracks.length > 0, `${label}: no captured media tracks were recorded`);
-        const liveTracks = tracks.filter((track) => track.readyState !== "ended");
-        assert.deepEqual(liveTracks, [], `${label}: captured tracks remain live: ${JSON.stringify(liveTracks)}`);
-      },
-      async assertDisplayCaptureEnded(role, label = `participant ${role} screen-share cleanup`) {
-        const tracks = (await fixture.capturedTrackStates(role))
-          .filter((track) => track.source === "display-media" && track.kind === "video");
-        assert.ok(tracks.length > 0, `${label}: no display-capture video tracks were recorded`);
-        const liveTracks = tracks.filter((track) => track.readyState !== "ended");
-        assert.deepEqual(liveTracks, [], `${label}: display-capture tracks remain live: ${JSON.stringify(liveTracks)}`);
-      },
+    async assertNoLiveCapturedTracks(role, label = `participant ${role} media cleanup`) {
+      const tracks = await fixture.capturedTrackStates(role);
+      assert.ok(tracks.length > 0, `${label}: no captured media tracks were recorded`);
+      const liveTracks = tracks.filter((track) => track.readyState !== "ended");
+      assert.deepEqual(liveTracks, [], `${label}: captured tracks remain live: ${JSON.stringify(liveTracks)}`);
+    },
+    async assertDisplayCaptureEnded(role, label = `participant ${role} screen-share cleanup`) {
+      const tracks = (await fixture.capturedTrackStates(role))
+        .filter((track) => track.source === "display-media" && track.kind === "video");
+      assert.ok(tracks.length > 0, `${label}: no display-capture video tracks were recorded`);
+      const liveTracks = tracks.filter((track) => track.readyState !== "ended");
+      assert.deepEqual(liveTracks, [], `${label}: display-capture tracks remain live: ${JSON.stringify(liveTracks)}`);
+    },
     async waitForConnected(role) {
       const roles = role ? [role] : [...joined];
       await Promise.all(roles.map((participantRole) =>
@@ -2212,7 +2356,8 @@ async function main() {
           browserB,
           baseURL: scenarioBaseURL,
           contexts,
-          traceContexts
+          traceContexts,
+          timeCodedCamera: scenario.timecodedCamera === true
         });
         await scenario.run(fixture);
         results.push({ name: scenario.name, status: "PASS", required: true, durationMs: Date.now() - startedAt });

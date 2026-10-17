@@ -7,6 +7,40 @@ microphone media, reports every scenario as `PASS`, `FAIL`, or `NOT RUN`, and
 continues after an individual scenario fails. Any selected scenario failure
 returns a nonzero exit status.
 
+## Camera stop/resume regression
+
+The required `full` profile includes a time-coded synthetic-camera transition
+regression. It covers A sharing before B, B sharing before A, each participant
+stopping and resuming while the other camera remains live, repeated toggles
+for both participants, back-to-back pause/resume bursts from both participants,
+and near-simultaneous transitions. These scenarios run through the normal
+two-Chromium/two-context media path; the time-coded camera source is installed
+only for the marked test scenarios.
+
+The capture waits for fresh, correctly routed local and remote marker frames
+before measuring stop/resume transitions. Initial camera starts do not count as
+resumes. It checks every orderly resumed frame and requires at least one
+delivered, fresh frame from the rapid burst after its acknowledged prelude.
+After the final transition,
+the suite allows 500 ms to settle and observes five seconds of
+stable playback. It fails if a decoded-frame gap exceeds 500 ms, decoded frame
+age exceeds one second, any overlapping one-second playback or source-rate
+window (sampled every 250 ms) falls outside 0.9–1.1×, the page
+heartbeat stalls for more than 500 ms, or the resumed camera does not produce
+a moving frame within one second of its remote camera-on state. The camera
+that is intentionally off is excluded during that pause; the other participant
+and both browser pages must remain responsive. ICE, peer-connection, and
+signaling-socket health are checked throughout.
+
+Run these required regression cases with the complete deterministic suite:
+
+```sh
+make test-media-e2e
+```
+
+The physical-camera profile remains a separate, optional acceptance run; it
+does not replace the reproducible time-coded regression.
+
 Install the browser-check dependencies once, then run the full local suite:
 
 ```sh
@@ -88,7 +122,8 @@ production meeting.
 
 For each failed scenario, the runner saves both participants' screenshots,
 Playwright traces, console and page errors, request/response events, peer
-statistics, and relevant server logs. By default artifacts go under a unique
+statistics, camera-transition samples, and relevant server logs. By default
+artifacts go under a unique
 `/tmp/slowmeet-media-e2e-failure-*` directory. Set
 `MEDIA_E2E_ARTIFACT_DIR` to choose a parent directory. Successful scenarios do
 not save artifacts.
