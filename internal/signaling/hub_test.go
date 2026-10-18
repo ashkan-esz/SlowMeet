@@ -110,6 +110,66 @@ func TestHubJoinLeaveLifecycle(t *testing.T) {
 	}
 }
 
+func TestVideoMediaStateBecameActive(t *testing.T) {
+	state := func(enabled bool, paused *bool) Message {
+		return Message{VideoEnabled: &enabled, VideoPaused: paused}
+	}
+	paused := true
+	unpaused := false
+
+	tests := []struct {
+		name     string
+		previous Message
+		current  Message
+		want     bool
+	}{
+		{
+			name:     "camera resumed after off",
+			previous: state(false, nil),
+			current:  state(true, nil),
+			want:     true,
+		},
+		{
+			name:     "video unpaused while enabled",
+			previous: state(true, &paused),
+			current:  state(true, &unpaused),
+			want:     true,
+		},
+		{
+			name:     "initial enabled state is not a resume",
+			previous: Message{},
+			current:  state(true, nil),
+			want:     false,
+		},
+		{
+			name:     "repeated enabled state is not a resume",
+			previous: state(true, nil),
+			current:  state(true, nil),
+			want:     false,
+		},
+		{
+			name:     "camera disabled",
+			previous: state(true, nil),
+			current:  state(false, nil),
+			want:     false,
+		},
+		{
+			name:     "video remains paused",
+			previous: state(true, &paused),
+			current:  state(true, &paused),
+			want:     false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := videoMediaStateBecameActive(test.previous, test.current); got != test.want {
+				t.Fatalf("videoMediaStateBecameActive() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHubReplaysLatestMediaStateToLateJoiners(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr:            ":8080",

@@ -429,7 +429,9 @@ async function diagnostics(page) {
         kind,
         id,
         readyState: track.readyState,
-        enabled: track.enabled
+        enabled: track.enabled,
+        label: track.label,
+        settings: track.getSettings?.() || {}
       })),
       replaceTrackEvents: window.__slowMeetTest?.replaceTrackEvents || [],
       connectionEvents: window.__slowMeetTest?.connectionEvents.slice(-80) || [],
@@ -540,6 +542,36 @@ async function realCameraVideoSenderIDs(fixture) {
     assert.ok(sender?.senderID, `${["A", "B"][index]}: video sender identity was not recorded`);
     return [["A", "B"][index], sender.senderID];
   }));
+}
+
+async function assertRealCameraCapture(fixture, role) {
+  const state = await fixture.diagnostics(role);
+  const capture = state.capturedTracks.find((track) => track.kind === "video" &&
+    track.readyState === "live" && track.label && !/fake device/i.test(track.label) &&
+    track.settings?.deviceId);
+  assert.ok(capture,
+    `${role}: expected a live camera capture from a real device, got ${JSON.stringify(state.capturedTracks)}`);
+  console.log(`[pass] ${role} camera capture uses a live device (${capture.settings.width || "?"}x${capture.settings.height || "?"})`);
+}
+
+function decodedVideoKeyFrameCount(state) {
+  return state.videoRtpStats.filter((stat) => stat.type === "inbound-rtp" && Number.isFinite(stat.keyFramesDecoded))
+    .reduce((total, stat) => total + stat.keyFramesDecoded, 0);
+}
+
+async function waitForDecodedVideoKeyFrame(fixture, receiverRole, baseline, label, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  let latestCount = baseline;
+  do {
+    const state = await fixture.diagnostics(receiverRole);
+    latestCount = decodedVideoKeyFrameCount(state);
+    if (latestCount > baseline) {
+      console.log(`[real-camera decoded keyframe] ${JSON.stringify({ label, receiverRole, baseline, latestCount })}`);
+      return;
+    }
+    if (Date.now() < deadline) await delay(50);
+  } while (Date.now() < deadline);
+  throw new Error(`${label}: remote decoder did not decode a post-resume keyframe within ${timeoutMs}ms (before=${baseline}, after=${latestCount})`);
 }
 
 async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true,
@@ -840,7 +872,18 @@ function contextForRole(fixture, role) {
   return role === "A" ? fixture.contextA : fixture.contextB;
 }
 
-async function createScenarioFixture({ browserA, browserB, baseURL, contexts, traceContexts, timeCodedCamera = false }) {
+async function createScenarioFixture({
+  browserA,
+  browserB,
+  baseURL,
+  contexts,
+  traceContexts,
+  timeCodedCamera = false,
+  timeCodedCameraRoles
+}) {
+  const generatedCameraRoles = new Set(timeCodedCameraRoles ?? (timeCodedCamera ? ["A", "B"] : []));
+  assert.ok([...generatedCameraRoles].every((role) => role === "A" || role === "B"),
+    "time-coded camera roles must be A or B");
   const contextA = await browserA.newContext({ viewport: { width: 1440, height: 960 } });
   contexts.push(contextA);
   const contextB = await browserB.newContext({ viewport: { width: 1440, height: 960 } });
@@ -852,8 +895,8 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
   }));
 
   const [pageA, pageB] = await Promise.all([
-    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false, timeCodedCamera ? "A" : undefined),
-    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false, timeCodedCamera ? "B" : undefined)
+    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false, generatedCameraRoles.has("A") ? "A" : undefined),
+    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false, generatedCameraRoles.has("B") ? "B" : undefined)
   ]);
   const joined = new Set();
   const expectedPeerCounts = new Map();
@@ -865,6 +908,7 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
     browserA,
     browserB,
     timeCodedCamera,
+    generatedCameraRoles,
     contextA,
     contextB,
     pageA,
@@ -891,7 +935,7 @@ async function createScenarioFixture({ browserA, browserB, baseURL, contexts, tr
     },
     async newPage(role) {
       return joinMeeting(contextForRole(fixture, role), fixture.names[role], baseURL, deviceFixtures, false,
-        timeCodedCamera ? role : undefined);
+        generatedCameraRoles.has(role) ? role : undefined);
     },
     async diagnostics(role) {
       return diagnostics(pageForRole(fixture, role));
@@ -2256,9 +2300,10 @@ async function main() {
   const launchOptions = { headless: !headed, args: launchArgs };
   if (chromePath) launchOptions.executablePath = chromePath;
 
-  const runRealCameraToggleScenario = async (fixture, toggledRole) => {
+  const runRealCameraToggleScenario = async (fixture, toggledRole, { sourceLabels = { A: "real", B: "real" } } = {}) => {
     const otherRole = toggledRole === "A" ? "B" : "A";
-    const label = `${toggledRole} real camera stop/resume while ${otherRole} remains live`;
+    const cameraName = (role) => `${sourceLabels[role]} camera`;
+    const label = `${toggledRole} ${cameraName(toggledRole)} stop/resume while ${otherRole} remains live`;
     await fixture.join("A");
     await fixture.join("B");
     await fixture.waitForConnected();
@@ -2267,7 +2312,11 @@ async function main() {
       const receiverRole = role === "A" ? "B" : "A";
       await fixture.setPressed(role, "#camera", true);
       await fixture.waitForRemoteState(receiverRole, fixture.names[role], "camera", "on");
-      await fixture.assertRemoteVideoMoves(role, receiverRole, `real camera ${role} starts ${role === "A" ? "first" : "second"}`);
+      await fixture.assertRemoteVideoMoves(role, receiverRole,
+        `${cameraName(role)} ${role} starts ${role === "A" ? "first" : "second"}`);
+    }
+    for (const role of ["A", "B"]) {
+      if (sourceLabels[role] === "physical") await assertRealCameraCapture(fixture, role);
     }
 
     await fixture.assertPeersConnected(`${label} baseline`);
@@ -2277,21 +2326,24 @@ async function main() {
       includeFrameObservations: true
     });
     await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
-    await logRealCameraDiagnostics(fixture, label, "both cameras live before toggle");
+    await logRealCameraDiagnostics(fixture, label, "both participant video feeds live before toggle");
 
     await fixture.setPressed(toggledRole, "#camera", false);
     await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "off");
     await fixture.assertPeersConnected(`${label} camera off`);
     await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera off`);
+    const keyFramesBeforeResume = decodedVideoKeyFrameCount(await fixture.diagnostics(otherRole));
 
     await fixture.setPressed(toggledRole, "#camera", true);
     await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "on");
     await fixture.assertPeersConnected(`${label} camera resumed`);
+    await waitForDecodedVideoKeyFrame(fixture, otherRole, keyFramesBeforeResume, label);
     await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera resumed`);
 
-  await fixture.endCameraQualityCapture(capture, {
+    await fixture.endCameraQualityCapture(capture, {
       toggledRoles: [toggledRole],
-      liveRoles: [otherRole]
+      liveRoles: [otherRole],
+      maxResumeFrameMs: 500
     });
     await logRealCameraDiagnostics(fixture, label, "after stable quality window");
   assert.deepEqual(await realCameraVideoSenderIDs(fixture), senderIDs,
@@ -2372,6 +2424,18 @@ async function main() {
       required: false,
       async run(fixture) {
         await runRealCameraToggleScenario(fixture, "B");
+      }
+    },
+    {
+      name: "single physical camera A-first stop/resume with generated B control",
+      when: "realMedia",
+      profile: "real-media",
+      required: false,
+      timeCodedCameraRoles: ["B"],
+      async run(fixture) {
+        const sourceLabels = { A: "physical", B: "generated" };
+        await runRealCameraToggleScenario(fixture, "A", { sourceLabels });
+        await runRealCameraToggleScenario(fixture, "B", { sourceLabels });
       }
     },
     {
@@ -2478,7 +2542,8 @@ async function main() {
           baseURL: scenarioBaseURL,
           contexts,
           traceContexts,
-          timeCodedCamera: scenario.timecodedCamera === true
+          timeCodedCamera: scenario.timecodedCamera === true,
+          timeCodedCameraRoles: scenario.timeCodedCameraRoles
         });
         await scenario.run(fixture);
         results.push({ name: scenario.name, status: "PASS", required: true, durationMs: Date.now() - startedAt });

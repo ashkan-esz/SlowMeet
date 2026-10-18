@@ -125,8 +125,10 @@ function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingK
   const hasSignal = rttKnown || lossKnown || jitterKnown || capacityKnown;
   const poor = (rttKnown && rttMs > 250) || (lossKnown && packetLoss > 5) ||
     (jitterKnown && jitterMs > 50) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 220));
+  // Capacity estimates can briefly under-report while a sender starts or resumes.
+  // Use measured transport impairment to decide when video must be suspended.
   const critical = (rttKnown && rttMs > 500) || (lossKnown && packetLoss > 10) ||
-    (jitterKnown && jitterMs > 120) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 120));
+    (jitterKnown && jitterMs > 120);
   const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
     (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
   return { poor, critical, good };

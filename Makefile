@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real smoke \
+	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -88,6 +88,9 @@ test-media-e2e-picker: ## Run headed native Chromium screen-picker scenarios (ma
 
 test-media-e2e-real: ## Run headed real camera and microphone acceptance scenarios
 	MEDIA_E2E_PROFILE=real-media MEDIA_E2E_REAL_MEDIA=1 MEDIA_E2E_HEADED=1 $(NODE) scripts/test-media-e2e.js
+
+test-media-e2e-real-single: ## Run headed physical A camera toggles with generated B control
+	MEDIA_E2E_PROFILE=real-media MEDIA_E2E_REAL_MEDIA=1 MEDIA_E2E_HEADED=1 MEDIA_E2E_SCENARIO="single physical camera A-first stop/resume with generated B control" $(NODE) scripts/test-media-e2e.js
 
 smoke: ## Run the local HTTP smoke test
 	./scripts/smoke.sh

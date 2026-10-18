@@ -110,6 +110,18 @@ type Hub struct {
 	closed       bool
 }
 
+func videoMediaStateBecameActive(previous, current Message) bool {
+	if previous.VideoEnabled == nil || current.VideoEnabled == nil {
+		return false
+	}
+
+	active := func(state Message) bool {
+		return state.VideoEnabled != nil && *state.VideoEnabled &&
+			(state.VideoPaused == nil || !*state.VideoPaused)
+	}
+	return !active(previous) && active(current)
+}
+
 func (h *Hub) ActiveParticipants() int {
 	return h.Meeting.Count()
 }
@@ -595,9 +607,16 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == TypeMediaState {
 				msg.ParticipantID = c.participant.ID
 				h.mu.Lock()
+				previousState, hadPreviousState := h.mediaStates[c.participant.ID]
 				h.mediaStates[c.participant.ID] = msg
 				h.mu.Unlock()
 				h.broadcastExcept(c, msg)
+				if hadPreviousState && videoMediaStateBecameActive(previousState, msg) {
+					h.router.RequestVideoKeyFrameForPublisher(c.participant.ID, func(err error) {
+						h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID,
+							"direction", "publisher", "trigger", "media_state_resume", "error", err)
+					})
+				}
 				continue
 			}
 			if msg.Type == TypeVideoSubscriptions {

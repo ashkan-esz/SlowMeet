@@ -142,8 +142,14 @@ if (missingNetworkSample.poor || missingNetworkSample.critical || missingNetwork
 const constrainedCapacity = classifyNetworkSample({
   rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 100
 });
-if (!constrainedCapacity.poor || !constrainedCapacity.critical || constrainedCapacity.good) {
-  throw new Error("available outgoing bitrate should identify a critical uplink constraint");
+if (!constrainedCapacity.poor || constrainedCapacity.critical || constrainedCapacity.good) {
+  throw new Error("low available outgoing bitrate alone should downshift quality without marking the connection critical");
+}
+const constrainedCapacityWithHighRTT = classifyNetworkSample({
+  rttMs: 600, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 100
+});
+if (!constrainedCapacityWithHighRTT.poor || !constrainedCapacityWithHighRTT.critical || constrainedCapacityWithHighRTT.good) {
+  throw new Error("low available outgoing bitrate should remain critical when severe measured latency corroborates it");
 }
 const startupCapacityEstimate = classifyNetworkSample({ availableOutgoingKbps: 0 });
 const healthyStartupCapacityEstimate = classifyNetworkSample({
