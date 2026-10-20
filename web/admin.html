@@ -38,9 +38,8 @@
     <section class="admin-main">
       <header class="admin-header">
         <div>
-          <p class="eyebrow">SlowMeet / Operations</p>
           <h1>Overview</h1>
-          <p class="admin-intro">A calm view of service readiness, meeting capacity, and the policies protecting audio continuity.</p>
+          <p class="admin-intro">Service health, meeting capacity, and active media policy.</p>
         </div>
         <div class="header-actions">
           <span id="updated-at" class="updated-at" aria-live="polite">Not refreshed</span>
@@ -78,18 +77,12 @@
           <span id="network-detail" class="summary-detail">Awaiting network sample</span>
         </article>
       </section>
-      <section class="quick-actions" aria-label="Quick actions">
-        <a class="quick-action" href="#settings"><strong>Edit meeting policy</strong><span>Update capacity and media limits.</span></a>
-        <a class="quick-action" href="#network"><strong>Inspect network health</strong><span>Review the latest available sample.</span></a>
-        <a class="quick-action" href="#diagnostics"><strong>Prepare diagnostics</strong><span>Copy a redacted support snapshot.</span></a>
-      </section>
       </section>
 
       <div class="admin-columns">
         <section id="settings" class="admin-card settings-card" aria-labelledby="settings-title">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">Policy</p>
               <h2 id="settings-title">Meeting settings</h2>
             </div>
             <span id="save-state" class="status-chip">Protected</span>
@@ -175,7 +168,6 @@
         <section id="network" class="admin-card" aria-labelledby="network-title">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">Network watch</p>
               <h2 id="network-title">Latest signal</h2>
             </div>
             <span id="network-health-status" class="status-chip" data-level="unknown">No sample</span>
@@ -199,7 +191,6 @@
         <section class="admin-card policy-card" aria-labelledby="policy-title">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">Active policy</p>
               <h2 id="policy-title">What the room allows</h2>
             </div>
           </div>
@@ -215,7 +206,6 @@
       <section id="diagnostics" class="admin-card diagnostics-card" aria-labelledby="diagnostics-title">
         <div class="card-heading">
           <div>
-            <p class="eyebrow">Support</p>
             <h2 id="diagnostics-title">Diagnostics</h2>
           </div>
           <button id="copy-diagnostics" class="button-secondary" type="button">Copy diagnostics</button>
@@ -227,10 +217,8 @@
       <section class="admin-card events-card" aria-labelledby="events-title">
         <div class="card-heading">
           <div>
-            <p class="eyebrow">This session</p>
             <h2 id="events-title">Recent activity</h2>
           </div>
-          <span class="updated-at">Not a durable audit log</span>
         </div>
         <p class="card-copy activity-note">In-memory operational events from this session. This is not a durable audit log.</p>
         <ol id="recent-events" class="recent-events">
@@ -239,8 +227,7 @@
       </section>
 
       <footer class="admin-footer">
-        <span id="endpoint-status">Endpoints: /health · /ready · /metrics · /ws</span>
-        <a href="/">Open meeting</a>
+        <span id="endpoint-status">Endpoints: /health, /ready, /metrics, /ws</span>
       </footer>
     </section>
   </main>
