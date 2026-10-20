@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -54,7 +54,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-layout
+	$(MAKE) test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout
 
 test-admin: ## Test the admin dashboard
 	$(NODE) scripts/test-admin.js
@@ -70,6 +70,12 @@ test-screen-share-adaptation: ## Test screen-share sender rate adaptation
 
 test-remote-camera-video: ## Test remote camera playback binding and recovery
 	$(NODE) scripts/test-remote-camera-video.js
+
+test-camera-quality: ## Test camera quality acceptance rules
+	$(NODE) scripts/test-camera-quality.js
+
+test-camera-readiness: ## Test advancing camera frame readiness checks
+	$(NODE) scripts/test-camera-readiness.js
 
 test-layout: ## Test responsive meeting layout behavior
 	$(NODE) scripts/test-meeting-layout.js

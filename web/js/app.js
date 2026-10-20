@@ -1475,6 +1475,7 @@ let screenStream;
 let localCameraTrack;
 let localScreenTrack;
 let cameraOperation;
+let cameraRequestedTarget;
 let cameraSender;
 let cameraSenderPeer;
 let cameraSenderNegotiated = false;
@@ -1952,7 +1953,16 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
     { video: { ...cameraConstraints } }
   );
   const track = stream.getVideoTracks()[0];
-  if (!track) throw new Error("camera is unavailable");
+  if (!track) {
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    throw new Error("camera is unavailable");
+  }
+  if (peer !== currentPeer) {
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    throw new Error("media connection changed");
+  }
+  const captureProfileName = profile.value;
+  const captureProfile = resolveVideoProfile(captureProfileName, stream);
   if (peer !== currentPeer) {
     stream.getTracks().forEach((streamTrack) => streamTrack.stop());
     throw new Error("media connection changed");
@@ -1968,6 +1978,24 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
   cameraTrack = track;
   track.enabled = !videoSuspended && !audioOnly?.checked;
   localStream?.addTrack(track);
+  const local = participantElements.get(localParticipantID);
+  if (local) local.cameraVideo.srcObject = stream;
+  if (markRequested) {
+    cameraRequested = true;
+    meetingViewState.cameraEnabled = true;
+  }
+  setLocalVideoMirror(true);
+  setLocalMediaControls();
+  try {
+    await applyVideoCaptureConstraints(track, captureProfile);
+  } catch (error) {
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    throw error;
+  }
+  if (peer !== currentPeer) {
+    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+    throw new Error("media connection changed");
+  }
   if (existingSender) {
     await existingSender.replaceTrack(track);
   } else if (!simulcastEnabled && videoTransceiver &&
@@ -2012,19 +2040,20 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
     cameraSenderPeer = currentPeer;
     cameraSenderNegotiated = false;
   }
-  const local = participantElements.get(localParticipantID);
-  if (local) local.cameraVideo.srcObject = stream;
-  if (markRequested) {
-    cameraRequested = true;
-    meetingViewState.cameraEnabled = true;
-  }
   updateVideoTransceiverDirection();
-  setLocalVideoMirror(true);
   setLocalMediaControls();
-  await applyProfile(profile.value, currentPeer, stream);
+  await applyProfile(captureProfileName, currentPeer, stream, {
+    captureConstraintsApplied: true,
+    resolvedProfile: captureProfile
+  });
   if (peer !== currentPeer) throw new Error("media connection changed");
+  if (profile.value !== captureProfileName) {
+    await applyProfile(profile.value, currentPeer, stream);
+    if (peer !== currentPeer) throw new Error("media connection changed");
+  }
   if (!cameraSenderNegotiated && negotiate) {
     await renegotiateLocalMedia();
+    if (peer !== currentPeer) throw new Error("media connection changed");
     cameraSenderNegotiated = true;
   }
   sendMediaState();
@@ -2035,23 +2064,62 @@ async function disableCamera() {
   meetingViewState.cameraEnabled = false;
   const stoppedPeer = peer;
   const stoppedSender = cameraSender && cameraSenderPeer === stoppedPeer ? cameraSender : undefined;
+  const stoppedTrack = localCameraTrack;
+  const stoppedStream = localCameraStream;
+  const stoppedLocalStream = localStream;
   const detachPromise = stoppedSender
     ? stoppedSender.replaceTrack(null).catch((error) => error)
     : Promise.resolve(undefined);
-  localCameraTrack?.stop();
-  localStream?.removeTrack(localCameraTrack);
-  localCameraStream?.getTracks().forEach((track) => track.stop());
-  localCameraTrack = undefined;
-  localCameraStream = undefined;
-  cameraTrack = undefined;
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = null;
   setLocalMediaControls();
-  sendMediaState();
   const detachError = await detachPromise;
+  if (stoppedTrack) stoppedLocalStream?.removeTrack(stoppedTrack);
+  localCameraTrack = undefined;
+  localCameraStream = undefined;
+  cameraTrack = undefined;
+  for (const track of new Set([stoppedTrack, ...(stoppedStream?.getTracks() || [])].filter(Boolean))) {
+    track.stop();
+  }
+  sendMediaState();
   if (detachError && peer === stoppedPeer) {
     status.textContent = "Camera stopped, but media could not be detached. Try enabling it again.";
   }
+}
+
+function requestCameraState(target, { force = false } = {}) {
+  cameraRequestedTarget = target;
+  if (cameraOperation) return cameraOperation;
+
+  let operation;
+  operation = Promise.resolve().then(async () => {
+    let forceNextOperation = force;
+    try {
+      while (forceNextOperation || cameraRequested !== cameraRequestedTarget) {
+        forceNextOperation = false;
+        const nextTarget = cameraRequestedTarget;
+        const previousRequested = cameraRequested;
+        if (nextTarget) {
+          await enableCamera();
+          if (videoSuspendedAutomatically) await setVideoSending(true);
+        } else await disableCamera();
+        if (cameraRequested === previousRequested && cameraRequestedTarget === nextTarget) break;
+      }
+    } catch (error) {
+      cameraRequested = false;
+      meetingViewState.cameraEnabled = false;
+      cameraRequestedTarget = false;
+      setLocalMediaControls();
+      status.textContent = mediaAccessMessage("video", error);
+    } finally {
+      if (cameraOperation === operation) {
+        cameraOperation = undefined;
+        cameraRequestedTarget = undefined;
+      }
+    }
+  });
+  cameraOperation = operation;
+  return operation;
 }
 
 let sidebarFocusTrigger;
@@ -3793,19 +3861,36 @@ async function updateDiagnostics() {
   }
 }
 
-async function applyProfile(name, targetPeer = peer, targetStream = localStream) {
+function resolveVideoProfile(name, targetStream = localStream) {
   const selected = name === "auto" ? profiles[adaptationLevel] : profiles.find((item) => item.name === name);
   const selectedIndex = selected ? profiles.findIndex((item) => item.name === selected.name) : -1;
   const maximumIndex = profiles.findIndex((item) => item.name === profileNameForQuality(hostLimits.maxVideoQuality));
   const capped = maximumIndex >= 0 && selectedIndex > maximumIndex ? profiles[maximumIndex] : selected;
   const requested = applyServerDefaults(capped, hostDefaults, serverDefaultProfile && name !== "auto");
-  if (!requested || !targetPeer) return;
+  if (!requested) return null;
   const capturePreset = targetStream === screenStream ? undefined : cameraQualityPresets[selectedCameraQuality];
   const bitrate = Math.min(requested.bitrate, hostLimits.maxVideoBitrate);
   const fps = Math.min(requested.fps, hostLimits.maxVideoFPS, capturePreset?.fps || requested.fps);
   const width = capturePreset ? Math.min(requested.width, capturePreset.width) : requested.width;
   const height = capturePreset ? Math.min(requested.height, capturePreset.height) : requested.height;
   const audioBitrate = Math.min(requested.audioBitrate, hostLimits.maxAudioBitrate);
+  return { selected, requested, capturePreset, bitrate, fps, width, height, audioBitrate };
+}
+
+async function applyVideoCaptureConstraints(videoTrack, resolvedProfile) {
+  if (!videoTrack || !resolvedProfile?.capturePreset) return;
+  await videoTrack.applyConstraints({
+    width: { ideal: resolvedProfile.width, max: resolvedProfile.width },
+    height: { ideal: resolvedProfile.height, max: resolvedProfile.height },
+    frameRate: { ideal: resolvedProfile.fps, max: resolvedProfile.fps }
+  }).catch(() => {});
+}
+
+async function applyProfile(name, targetPeer = peer, targetStream = localStream, options = {}) {
+  if (!targetPeer) return;
+  const resolvedProfile = options.resolvedProfile || resolveVideoProfile(name, targetStream);
+  if (!resolvedProfile) return;
+  const { selected, requested, bitrate, fps, width, height, audioBitrate } = resolvedProfile;
   if (effectiveProfile) {
     effectiveProfile.textContent =
       `Requested: ${selected?.name || "unknown"}; effective: ${requested.name} ` +
@@ -3813,13 +3898,7 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream)
       `${fps} FPS / ${Math.round(bitrate / 1000)} kbps video / ${Math.round(audioBitrate / 1000)} kbps audio`;
   }
   const videoTrack = targetStream?.getVideoTracks()[0];
-  if (videoTrack && capturePreset) {
-    await videoTrack.applyConstraints({
-      width: { ideal: width, max: width },
-      height: { ideal: height, max: height },
-      frameRate: { ideal: fps, max: fps }
-    }).catch(() => {});
-  }
+  if (!options.captureConstraintsApplied) await applyVideoCaptureConstraints(videoTrack, resolvedProfile);
   for (const sender of targetPeer.getSenders()) {
     if (sender.track?.kind !== "video") continue;
     const parameters = sender.getParameters();
@@ -3872,9 +3951,10 @@ cameraQuality?.addEventListener("change", async () => {
   selectedCameraQuality = value;
   cameraConstraints = cameraConstraintsForQuality(value);
   writeStoredValue("meeting.cameraQuality", value);
-  if (value === "off") cameraRequested = false;
-  if (!screenStream) {
-    await setVideoSending(cameraRequested);
+  if (value === "off") {
+    await requestCameraState(false, { force: true });
+  } else if (!screenStream && cameraRequested) {
+    await setVideoSending(true);
   }
   await applyProfile(profile.value, peer, screenStream || localStream);
   showToast(value === "off" ? "Camera turned off" : `Camera quality set to ${value}`);
@@ -4510,31 +4590,21 @@ raiseHand?.addEventListener("click", () => {
 });
 
 camera.addEventListener("click", async () => {
-  if (cameraOperation) return;
   audioContext?.resume().catch(() => {});
-  if (audioOnly?.checked) {
+  const cameraOn = camera.getAttribute("aria-pressed") === "true";
+  const requestedTarget = !(cameraRequestedTarget ?? cameraOn);
+  if (requestedTarget && audioOnly?.checked) {
     showToast("Turn off Protect audio before enabling the camera");
     return;
   }
-  if (!cameraRequested && selectedCameraQuality === "off") {
+  if (requestedTarget && selectedCameraQuality === "off") {
     cameraQuality?.focus();
     showToast("Choose a camera quality before turning the camera on");
     return;
   }
-  cameraOperation = (async () => {
-    if (cameraRequested) await disableCamera();
-    else await enableCamera();
-  })();
-  try {
-    await cameraOperation;
-  } catch (error) {
-    cameraRequested = false;
-    meetingViewState.cameraEnabled = false;
-    setLocalMediaControls();
-    status.textContent = mediaAccessMessage("video", error);
-  } finally {
-    cameraOperation = undefined;
-  }
+  await requestCameraState(requestedTarget, {
+    force: requestedTarget && videoSuspendedAutomatically
+  });
 });
 
 screen.addEventListener("click", toggleScreenShare);

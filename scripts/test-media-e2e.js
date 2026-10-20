@@ -472,6 +472,61 @@ async function waitForCameraQualityBaseline(capture, roles, timeoutMs = 5000) {
   throw new Error(`${capture.label}: ${baseline} baseline was not ready within ${timeoutMs}ms: ${JSON.stringify(readiness)}`);
 }
 
+async function waitForCameraQualityResume(capture, role, resumeIndex, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  let readiness = [];
+  do {
+    readiness = await Promise.all(Object.entries(capture.pages).map(async ([pageRole, page]) =>
+      page.evaluate(({ expectedRole, expectedResumeIndex }) => {
+        const recorder = window.__slowMeetTest?.cameraQualityCapture;
+        const expectedView = recorder?.pageRole === expectedRole ? "local" : "remote";
+        const key = `${expectedRole}/${expectedView}`;
+        const resumeEvents = recorder?.snapshot?.().resumeEvents || [];
+        const resume = resumeEvents.filter((event) => event.role === expectedRole)[expectedResumeIndex];
+        const firstFrame = resume?.firstFrames?.[key];
+        return {
+          pageRole: recorder?.pageRole,
+          key,
+          resumeAt: resume?.at ?? null,
+          endAt: resume?.endAt ?? null,
+          firstFrame: firstFrame || null,
+          freshFrame: firstFrame?.frameAdvanced === true || firstFrame?.markerAdvanced === true
+        };
+      }, { expectedRole: role, expectedResumeIndex: resumeIndex })));
+    if (readiness.length === Object.keys(capture.pages).length &&
+        readiness.every((entry) => entry.freshFrame)) return readiness;
+    if (Date.now() < deadline) await delay(50);
+  } while (Date.now() < deadline);
+  throw new Error(`${capture.label} ${role} resume ${resumeIndex + 1} did not deliver fresh local and remote frames within ${timeoutMs}ms: ${JSON.stringify(readiness)}`);
+}
+
+async function waitForCameraQualityVisualSamples(capture, roles, minimumSamples = 8, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let observations = [];
+  do {
+    observations = await Promise.all(Object.values(capture.pages).map((page) => page.evaluate(() => {
+      const recorder = window.__slowMeetTest?.cameraQualityCapture;
+      const report = recorder?.snapshot?.();
+      return {
+        pageRole: recorder?.pageRole,
+        tiles: (report?.tiles || []).map(({ key, baselineVisual }) => ({ key, baselineVisual }))
+      };
+    })));
+    const ready = roles.every((role) => {
+      const localPage = observations.find((page) => page.pageRole === role);
+      const remotePage = observations.find((page) => page.pageRole !== role);
+      return [localPage, remotePage].every((page) => {
+        const view = page?.pageRole === role ? "local" : "remote";
+        const tile = page?.tiles.find((entry) => entry.key === `${role}/${view}`);
+        return tile?.baselineVisual?.sampleCount >= minimumSamples;
+      });
+    });
+    if (ready) return;
+    if (Date.now() < deadline) await delay(50);
+  } while (Date.now() < deadline);
+  throw new Error(`${capture.label}: camera image sampler did not collect ${minimumSamples} baseline samples: ${JSON.stringify(observations)}`);
+}
+
 async function endCameraQualityCapture(capture, options) {
   const { pages } = capture;
   let reports;
@@ -951,6 +1006,12 @@ async function createScenarioFixture({
     },
     async waitForCameraQualityBaseline(capture, roles) {
       return waitForCameraQualityBaseline(capture, roles);
+    },
+    async waitForCameraQualityResume(capture, role, resumeIndex) {
+      return waitForCameraQualityResume(capture, role, resumeIndex);
+    },
+    async waitForCameraQualityVisualSamples(capture, roles, minimumSamples) {
+      return waitForCameraQualityVisualSamples(capture, roles, minimumSamples);
     },
     async endCameraQualityCapture(capture, options) {
       const summary = await endCameraQualityCapture(capture, options);
@@ -2307,6 +2368,14 @@ async function main() {
     await fixture.join("A");
     await fixture.join("B");
     await fixture.waitForConnected();
+    const physicalCameraRole = Object.entries(sourceLabels)
+      .find(([, source]) => source === "physical")?.[0];
+    if (physicalCameraRole) {
+      await fixture.page(physicalCameraRole).evaluate(() => window.setVideoSending(false, true));
+    }
+    if (Object.values(sourceLabels).includes("physical")) {
+      console.log(`[camera content motion] ${label}: sweep a bright, high-contrast object left and right across the physical camera view continuously, including the first second after resume`);
+    }
 
     for (const role of ["A", "B"]) {
       const receiverRole = role === "A" ? "B" : "A";
@@ -2321,21 +2390,197 @@ async function main() {
 
     await fixture.assertPeersConnected(`${label} baseline`);
     const senderIDs = await realCameraVideoSenderIDs(fixture);
+    const toggledPage = pageForRole(fixture, toggledRole);
+    await toggledPage.evaluate(() => {
+      const recorder = window.__slowMeetCameraLifecycleRecorder || { events: [] };
+      if (!recorder.installed) {
+        const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+        RTCRtpSender.prototype.replaceTrack = function (track) {
+          const cameraDetach = track === null && this.track?.kind === "video";
+          const cameraAttach = track?.kind === "video";
+          const eventTrackId = cameraDetach ? this.track?.id || null : track?.id || null;
+          const result = originalReplaceTrack.call(this, track);
+          if ((!cameraDetach && !cameraAttach) || !result || typeof result.then !== "function") return result;
+          return result.then((value) => {
+            recorder.events.push({
+              type: cameraDetach ? "sender-detached" : "sender-attached",
+              trackId: eventTrackId,
+              at: performance.now()
+            });
+            return value;
+          });
+        };
+        const originalApplyConstraints = MediaStreamTrack.prototype.applyConstraints;
+        MediaStreamTrack.prototype.applyConstraints = function (...args) {
+          if (this.kind !== "video") return originalApplyConstraints.apply(this, args);
+          const trackId = this.id;
+          const recordResult = (succeeded, error) => recorder.events.push({
+            type: "video-track-constraints",
+            trackId,
+            succeeded,
+            settings: this.getSettings?.() || null,
+            errorName: error?.name || null,
+            at: performance.now()
+          });
+          if (recorder.holdNextVideoConstraints) {
+            recorder.holdNextVideoConstraints = false;
+            return new Promise((resolve, reject) => {
+              recorder.releaseHeldVideoConstraints = () => {
+                recorder.releaseHeldVideoConstraints = undefined;
+                let heldResult;
+                try {
+                  heldResult = originalApplyConstraints.apply(this, args);
+                } catch (error) {
+                  recordResult(false, error);
+                  reject(error);
+                  return;
+                }
+                Promise.resolve(heldResult).then((value) => {
+                  recordResult(true);
+                  resolve(value);
+                }, (error) => {
+                  recordResult(false, error);
+                  reject(error);
+                });
+              };
+            });
+          }
+          let result;
+          try {
+            result = originalApplyConstraints.apply(this, args);
+          } catch (error) {
+            recordResult(false, error);
+            throw error;
+          }
+          return Promise.resolve(result).then((value) => {
+            recordResult(true);
+            return value;
+          }, (error) => {
+            recordResult(false, error);
+            throw error;
+          });
+        };
+        const originalStop = MediaStreamTrack.prototype.stop;
+        MediaStreamTrack.prototype.stop = function (...args) {
+          const trackId = this.id;
+          const result = originalStop.apply(this, args);
+          if (this.kind === "video") recorder.events.push({ type: "video-track-stopped", trackId, at: performance.now() });
+          return result;
+        };
+        recorder.installed = true;
+      }
+      recorder.events.length = 0;
+      recorder.holdNextVideoConstraints = false;
+      recorder.releaseHeldVideoConstraints = undefined;
+      window.__slowMeetCameraLifecycleRecorder = recorder;
+    });
     const capture = await fixture.beginCameraQualityCapture(label, {
       requireMarkers: false,
       includeFrameObservations: true
     });
     await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+    await fixture.waitForCameraQualityVisualSamples(capture, [toggledRole]);
     await logRealCameraDiagnostics(fixture, label, "both participant video feeds live before toggle");
+
+    if (sourceLabels[toggledRole] === "physical") {
+      const visualObservationStart = Date.now();
+      let visualReadiness;
+      do {
+        visualReadiness = await Promise.all(Object.values(capture.pages).map((page) => page.evaluate((role) => {
+          const recorder = window.__slowMeetTest?.cameraQualityCapture;
+          const report = recorder?.snapshot?.();
+          const view = recorder?.pageRole === role ? "local" : "remote";
+          const tile = report?.tiles?.find((entry) => entry.key === `${role}/${view}`);
+          return { pageRole: recorder?.pageRole, key: tile?.key, baselineVisual: tile?.baselineVisual };
+        }, toggledRole)));
+        if (visualReadiness.every((entry) => entry.baselineVisual?.meaningfulMotionSampleCount >= 2)) break;
+        if (Date.now() - visualObservationStart < 12000) await delay(100);
+      } while (Date.now() - visualObservationStart < 12000);
+      const visualEvidence = visualReadiness.map((entry) => ({
+        ...entry,
+        baselineVisual: entry.baselineVisual && {
+          sampleCount: entry.baselineVisual.sampleCount,
+          meaningfulMotionSampleCount: entry.baselineVisual.meaningfulMotionSampleCount,
+          maxChangedPixelFraction: entry.baselineVisual.maxChangedPixelFraction,
+          maxMeanLumaDelta: entry.baselineVisual.maxMeanLumaDelta
+        }
+      }));
+      console.log(`[camera content readiness] ${JSON.stringify({ label, observations: visualEvidence })}`);
+      assert.ok(visualReadiness.every((entry) => entry.baselineVisual?.meaningfulMotionSampleCount >= 2),
+        `${label}: physical camera scene did not show movement before toggle; aim it at a moving subject and retry: ${JSON.stringify(visualEvidence)}`);
+    }
 
     await fixture.setPressed(toggledRole, "#camera", false);
     await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "off");
+    await toggledPage.waitForFunction(() => {
+      const events = window.__slowMeetCameraLifecycleRecorder?.events || [];
+      return events.some((event) => event.type === "sender-detached") &&
+        events.some((event) => event.type === "video-track-stopped");
+    }, null, { timeout: 5000 });
+    const detachEvents = await toggledPage.evaluate(() =>
+      window.__slowMeetCameraLifecycleRecorder?.events || []);
+    const detachEvent = detachEvents.find((event) => event.type === "sender-detached");
+    const trackStopEvent = detachEvents.find((event) => event.type === "video-track-stopped");
+    assert.ok(detachEvent, `${label}: sender detach did not complete: ${JSON.stringify(detachEvents)}`);
+    assert.ok(trackStopEvent, `${label}: camera track was not stopped: ${JSON.stringify(detachEvents)}`);
+    assert.equal(trackStopEvent.trackId, detachEvent.trackId,
+      `${label}: stopped camera track did not match the detached sender track: ${JSON.stringify(detachEvents)}`);
+    assert.ok(detachEvent.at <= trackStopEvent.at,
+      `${label}: camera track stopped before sender detach completed: ${JSON.stringify(detachEvents)}`);
+    console.log(`[camera sender lifecycle] ${JSON.stringify({
+      label,
+      events: detachEvents.map(({ type, at }) => ({ type, atMs: Math.round(at) }))
+    })}`);
     await fixture.assertPeersConnected(`${label} camera off`);
     await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera off`);
     const keyFramesBeforeResume = decodedVideoKeyFrameCount(await fixture.diagnostics(otherRole));
 
-    await fixture.setPressed(toggledRole, "#camera", true);
+    if (sourceLabels[toggledRole] === "physical") {
+      console.log(`[camera content motion] ${label}: keep sweeping the bright object while the camera is off and through the first second after you resume it`);
+    }
+    await toggledPage.evaluate(() => {
+      window.__slowMeetCameraLifecycleRecorder.holdNextVideoConstraints = true;
+    });
+    await toggledPage.locator("#camera").click();
+    await toggledPage.waitForFunction(() =>
+      typeof window.__slowMeetCameraLifecycleRecorder?.releaseHeldVideoConstraints === "function",
+    null, { timeout: 10000 });
+    try {
+      const localPreview = await toggledPage.evaluate(() => {
+        const video = document.querySelector("video.local-camera-preview");
+        return {
+          buttonPressed: document.querySelector("#camera")?.getAttribute("aria-pressed"),
+          previewVisible: Boolean(video && !video.hidden),
+          previewHasStream: Boolean(video?.srcObject)
+        };
+      });
+      assert.equal(localPreview.buttonPressed, "true",
+        `${label}: camera button stayed off while capture constraints were pending`);
+      assert.equal(localPreview.previewVisible, true,
+        `${label}: local preview stayed hidden while capture constraints were pending`);
+      assert.equal(localPreview.previewHasStream, true,
+        `${label}: local preview had no stream while capture constraints were pending`);
+    } finally {
+      await toggledPage.evaluate(() =>
+        window.__slowMeetCameraLifecycleRecorder.releaseHeldVideoConstraints?.());
+    }
     await fixture.waitForRemoteState(otherRole, fixture.names[toggledRole], "camera", "on");
+    const resumeLifecycle = await toggledPage.evaluate(() =>
+      window.__slowMeetCameraLifecycleRecorder?.events || []);
+    const senderAttachEvent = [...resumeLifecycle].reverse().find((event) => event.type === "sender-attached");
+    const captureConstraintsEvent = resumeLifecycle.find((event) =>
+      event.type === "video-track-constraints" && event.trackId === senderAttachEvent?.trackId);
+    assert.ok(senderAttachEvent, `${label}: resumed camera did not reuse its established sender: ${JSON.stringify(resumeLifecycle)}`);
+    assert.ok(captureConstraintsEvent?.succeeded,
+      `${label}: resumed camera constraints did not complete successfully: ${JSON.stringify(resumeLifecycle)}`);
+    assert.ok(captureConstraintsEvent.settings?.width > 0 && captureConstraintsEvent.settings?.height > 0,
+      `${label}: resumed camera did not report usable capture settings: ${JSON.stringify(captureConstraintsEvent)}`);
+    assert.ok(captureConstraintsEvent.at < senderAttachEvent.at,
+      `${label}: camera capture was reconfigured after sender attachment: ${JSON.stringify(resumeLifecycle)}`);
+    console.log(`[camera resume lifecycle] ${JSON.stringify({
+      label,
+      events: resumeLifecycle.map(({ type, trackId, at }) => ({ type, trackId, atMs: Math.round(at) }))
+    })}`);
     await fixture.assertPeersConnected(`${label} camera resumed`);
     await waitForDecodedVideoKeyFrame(fixture, otherRole, keyFramesBeforeResume, label);
     await logRealCameraDiagnostics(fixture, label, `${toggledRole} camera resumed`);
@@ -2343,7 +2588,8 @@ async function main() {
     await fixture.endCameraQualityCapture(capture, {
       toggledRoles: [toggledRole],
       liveRoles: [otherRole],
-      maxResumeFrameMs: 500
+      maxResumeFrameMs: 1000,
+      requireVisualMotion: sourceLabels[toggledRole] === "physical"
     });
     await logRealCameraDiagnostics(fixture, label, "after stable quality window");
   assert.deepEqual(await realCameraVideoSenderIDs(fixture), senderIDs,

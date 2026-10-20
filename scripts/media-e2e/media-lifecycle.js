@@ -149,6 +149,201 @@ async function assertRemoteScreenPixelsChange(page, senderName, label) {
 
 const scenarios = [
   {
+    name: "camera resume click is preserved while camera stop is pending",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "camera queued resume startup");
+      await enableCamera(fixture, "A", "A camera before queued resume");
+      await enableCamera(fixture, "B", "B camera stays live during queued resume");
+      const senderIDs = await videoSenderIDs(fixture);
+      const page = fixture.page("A");
+
+      await page.evaluate(() => {
+        const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+        const gate = { waiting: false, released: false, release: null };
+        window.__slowMeetTest.cameraDetachGate = gate;
+        RTCRtpSender.prototype.replaceTrack = function (track) {
+          if (track !== null || this.track?.kind !== "video" || gate.released) {
+            return originalReplaceTrack.call(this, track);
+          }
+          const sender = this;
+          gate.waiting = true;
+          return new Promise((resolve, reject) => {
+            gate.release = () => {
+              if (gate.released) return;
+              gate.released = true;
+              Promise.resolve(originalReplaceTrack.call(sender, track)).then(resolve, reject);
+            };
+          });
+        };
+      });
+
+      try {
+        await fixture.setPressed("A", "#camera", false);
+        await page.waitForFunction(() => window.__slowMeetTest?.cameraDetachGate?.waiting === true);
+        await page.locator("#camera").click();
+        await page.evaluate(() => window.__slowMeetTest?.cameraDetachGate?.release?.());
+        await page.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true",
+          null, { timeout: 5000 });
+        await fixture.waitForRemoteState("B", fixture.names.A, "camera", "on");
+        await fixture.assertRemoteVideoMoves("A", "B", "A queued resume after pending stop");
+        await assertVideoSenderIDs(fixture, senderIDs, "A queued resume after pending stop");
+        await assertCameraScenarioHealthy(fixture, "A queued resume after pending stop while B stays live");
+      } finally {
+        await page.evaluate(() => window.__slowMeetTest?.cameraDetachGate?.release?.());
+      }
+    }
+  },
+  {
+    name: "camera button starts and resumes while video is automatically suspended",
+    timecodedCamera: true,
+    async run(fixture) {
+      await joinPair(fixture, "automatic camera suspension startup");
+      const page = pageFor(fixture, "A");
+      await page.evaluate(() => window.setVideoSending(false, true));
+
+      await page.locator("#camera").click();
+      await page.waitForFunction(() =>
+        document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 5000 });
+      await page.waitForFunction(() => {
+        const localVideo = [...document.querySelectorAll("#participants video[data-media-role='camera']")]
+          .find((video) => video.closest("li")?.classList.contains("is-local"));
+        return localVideo && !localVideo.hidden && localVideo.readyState >= 2 && localVideo.currentTime > 0;
+      }, null, { timeout: 5000 });
+      await fixture.waitForRemoteState("B", participants.A, "camera", "on");
+      await fixture.assertRemoteVideoMoves("A", "B", "A camera starts while automatically suspended");
+      const senderID = await activeVideoSenderID(fixture, "A");
+
+      await page.evaluate(() => window.setVideoSending(false, true));
+      await fixture.waitForRemoteState("B", participants.A, "camera", "paused");
+      await page.waitForFunction(() =>
+        document.querySelector("#camera")?.getAttribute("aria-pressed") === "false");
+
+      await page.locator("#camera").click();
+      await page.waitForFunction(() =>
+        document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 5000 });
+      await page.waitForFunction(() => {
+        const localVideo = [...document.querySelectorAll("#participants video[data-media-role='camera']")]
+          .find((video) => video.closest("li")?.classList.contains("is-local"));
+        return localVideo && !localVideo.hidden && localVideo.readyState >= 2 && localVideo.currentTime > 0;
+      }, null, { timeout: 5000 });
+      await fixture.waitForRemoteState("B", participants.A, "camera", "on");
+      await fixture.assertRemoteVideoMoves("A", "B", "A camera resumes from its off-looking paused state");
+      assert.equal(await activeVideoSenderID(fixture, "A"), senderID,
+        "resuming a paused camera should keep the established video sender");
+      await assertCameraScenarioHealthy(fixture, "camera resumes after automatic suspension");
+    }
+  },
+  {
+    name: "camera can resume after quality is changed from off",
+    async run(fixture) {
+      await joinPair(fixture, "camera quality off recovery startup");
+      await enableCamera(fixture, "A", "A camera starts before quality change");
+      const page = pageFor(fixture, "A");
+      const initialState = await fixture.diagnostics("A");
+      const initialTrack = initialState.capturedTracks.find((track) => track.kind === "video" &&
+        track.readyState === "live");
+      assert.ok(initialTrack, "A camera should have a live track before the quality change");
+      const initialTrackID = initialTrack.id;
+      const initialSenderID = await activeVideoSenderID(fixture, "A");
+
+      await fixture.openSidebar("A");
+      await page.locator("#camera-quality").selectOption("off");
+      await fixture.waitForRemoteState("B", participants.A, "camera", "off");
+      const offState = await fixture.diagnostics("A");
+      assert.equal(offState.capturedTracks.find((track) => track.id === initialTrackID)?.readyState, "ended",
+        "camera quality Off should release the previous capture track");
+      await page.locator("#camera-quality").selectOption("360p");
+      await fixture.closeSidebar("A");
+
+      await fixture.setPressed("A", "#camera", true);
+      await fixture.waitForRemoteState("B", participants.A, "camera", "on");
+      await fixture.assertRemoteVideoMoves("A", "B", "A camera resumes after restoring quality");
+      assert.notEqual((await activeTracks(page)).video, initialTrackID,
+        "quality recovery should capture a fresh track after quality Off released the previous track");
+      assert.equal(await activeVideoSenderID(fixture, "A"), initialSenderID,
+        "quality recovery should reuse the established video sender");
+      await assertCameraScenarioHealthy(fixture, "camera quality off recovery");
+    }
+  },
+  {
+    name: "camera quality off cancels a pending camera capture",
+    async run(fixture) {
+      await joinPair(fixture, "camera quality off during capture startup");
+      const page = pageFor(fixture, "A");
+      await page.evaluate(() => {
+        const mediaDevices = navigator.mediaDevices;
+        const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+        const gate = { waiting: false, released: false, captureResolved: false, release: null };
+        window.__slowMeetTest.cameraCaptureGate = gate;
+        Object.defineProperty(mediaDevices, "getUserMedia", {
+          configurable: true,
+          value: (constraints = {}) => {
+            if (!constraints.video || gate.released) return originalGetUserMedia(constraints);
+            gate.waiting = true;
+            return new Promise((resolve, reject) => {
+              gate.release = () => {
+                if (gate.released) return;
+                gate.released = true;
+                Promise.resolve(originalGetUserMedia(constraints)).then((stream) => {
+                  gate.captureResolved = true;
+                  resolve(stream);
+                }, reject);
+              };
+            });
+          }
+        });
+      });
+
+      try {
+        await page.locator("#camera").click();
+        await page.waitForFunction(() => window.__slowMeetTest?.cameraCaptureGate?.waiting === true,
+          null, { timeout: 5000 });
+        await fixture.openSidebar("A");
+        await page.locator("#camera-quality").selectOption("off");
+        await page.evaluate(() => window.__slowMeetTest?.cameraCaptureGate?.release?.());
+        await page.waitForFunction(() => {
+          const camera = document.querySelector("#camera");
+          const captureResolved = window.__slowMeetTest?.cameraCaptureGate?.captureResolved === true;
+          const liveCapturedVideo = (window.__slowMeetTest?.capturedTracks || []).some(({ kind, track }) =>
+            kind === "video" && track.readyState !== "ended");
+          const liveVideoSender = window.__slowMeetTest?.peerConnections.at(-1)?.getSenders()
+            .some((sender) => sender.track?.kind === "video");
+          return captureResolved && camera?.getAttribute("aria-pressed") === "false" &&
+            !liveCapturedVideo && !liveVideoSender;
+        }, null, { timeout: 15000 });
+        await fixture.waitForRemoteState("B", participants.A, "camera", "off");
+        await fixture.assertPeersConnected("camera quality Off cancels pending capture");
+        const liveVideoTracks = (await fixture.capturedTrackStates("A"))
+          .filter((track) => track.kind === "video" && track.readyState !== "ended");
+        assert.deepEqual(liveVideoTracks, [], "quality Off must stop a capture that resolves after Off is selected");
+      } finally {
+        await page.evaluate(() => window.__slowMeetTest?.cameraCaptureGate?.release?.()).catch(() => {});
+      }
+    }
+  },
+  {
+    name: "camera quality off is safe while camera is already off",
+    async run(fixture) {
+      await joinPair(fixture, "camera quality Off while already off startup");
+      const page = pageFor(fixture, "A");
+      const previousPageErrorCount = page.__mediaE2EEvents.filter((event) => event.type === "pageerror").length;
+      await fixture.openSidebar("A");
+      await page.locator("#camera-quality").selectOption("off");
+      await delay(100);
+
+      const pageErrors = page.__mediaE2EEvents.filter((event) => event.type === "pageerror")
+        .slice(previousPageErrorCount);
+      assert.deepEqual(pageErrors, [], "selecting camera quality Off while already off must not throw");
+      assert.equal(await page.locator("#camera").getAttribute("aria-pressed"), "false",
+        "camera quality Off must leave the camera button off");
+      const liveVideoTracks = (await fixture.capturedTrackStates("A"))
+        .filter((track) => track.kind === "video" && track.readyState !== "ended");
+      assert.deepEqual(liveVideoTracks, [], "camera quality Off must not leave a live video capture");
+      await fixture.assertPeersConnected("camera quality Off while camera is already off");
+    }
+  },
+  {
     name: "camera toggles and rapid repeated recovery in both directions",
     async run(fixture) {
       await joinPair(fixture, "camera lifecycle startup");
@@ -291,6 +486,7 @@ const scenarios = [
         for (let cycle = 0; cycle < 3; cycle += 1) {
           await transitionCamera(fixture, role, false, `${role} rapid camera pause ${cycle + 1}`);
           await transitionCamera(fixture, role, true, `${role} rapid camera resume ${cycle + 1}`);
+          await fixture.waitForCameraQualityResume(capture, role, cycle);
           await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
         }
         await fixture.endCameraQualityCapture(capture, {
@@ -312,11 +508,9 @@ const scenarios = [
       const senderIDs = await videoSenderIDs(fixture);
       for (const role of roles) {
         const other = otherRole(role);
-        const capture = await fixture.beginCameraQualityCapture(`${role} back-to-back pause/resume requests`);
-        await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
-
         await transitionCamera(fixture, role, false, `${role} acknowledged camera pause before request burst`);
         await transitionCamera(fixture, role, true, `${role} acknowledged camera resume before request burst`);
+        const capture = await fixture.beginCameraQualityCapture(`${role} back-to-back pause/resume requests`);
         await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
         for (let cycle = 0; cycle < 3; cycle += 1) {
           await fixture.setPressed(role, "#camera", false);
@@ -327,7 +521,7 @@ const scenarios = [
         await fixture.endCameraQualityCapture(capture, {
           toggledRoles: [role],
           liveRoles: [other],
-          expectedResumeCycles: 2,
+          expectedResumeCycles: 1,
           allowAdditionalResumeCycles: true
         });
         await assertVideoSenderIDs(fixture, senderIDs, `${role} back-to-back camera requests`);
@@ -425,6 +619,47 @@ const scenarios = [
       await fixture.waitForConnected("B");
       assert.equal(await fixture.pageB.locator("#participants li[data-participant-id]").count(), 1,
         "B should have exactly one local participant after A leaves during capture");
+    }
+  },
+  {
+    name: "leaving during pending camera sender detach releases every capture track",
+    async run(fixture) {
+      await joinPair(fixture, "leave during camera sender detach startup");
+      await enableCamera(fixture, "A", "A camera before leave during sender detach");
+      await enableMicrophone(fixture, "A", "A microphone before leave during sender detach");
+      const page = fixture.page("A");
+
+      await page.evaluate(() => {
+        const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+        const gate = { waiting: false, released: false, release: null };
+        window.__slowMeetTest.cameraDetachGate = gate;
+        RTCRtpSender.prototype.replaceTrack = function (track) {
+          if (track !== null || this.track?.kind !== "video" || gate.released) {
+            return originalReplaceTrack.call(this, track);
+          }
+          const sender = this;
+          gate.waiting = true;
+          return new Promise((resolve, reject) => {
+            gate.release = () => {
+              if (gate.released) return;
+              gate.released = true;
+              Promise.resolve(originalReplaceTrack.call(sender, track)).then(resolve, reject);
+            };
+          });
+        };
+      });
+
+      try {
+        await page.locator("#camera").click();
+        await page.waitForFunction(() => window.__slowMeetTest?.cameraDetachGate?.waiting === true,
+          null, { timeout: 5000 });
+        await page.locator("#leave").click();
+        await page.locator("#meeting-ended").waitFor({ state: "visible", timeout: 10000 });
+        await fixture.assertNoLiveCapturedTracks("A", "leave during pending camera sender detach");
+      } finally {
+        await page.evaluate(() => window.__slowMeetTest?.cameraDetachGate?.release?.()).catch(() => {});
+      }
+      await fixture.assertNoLiveCapturedTracks("A", "leave after pending camera sender detach");
     }
   },
   {

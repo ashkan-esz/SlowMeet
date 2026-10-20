@@ -16,6 +16,10 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
   const resumeEvents = [];
   const tiles = Object.create(null);
   const videoTiles = new WeakMap();
+  const visualCanvas = document.createElement("canvas");
+  visualCanvas.width = 32;
+  visualCanvas.height = 18;
+  const visualContext = visualCanvas.getContext("2d", { willReadFrequently: true });
   const markerCanvas = requireMarkers ? document.createElement("canvas") : null;
   if (markerCanvas) {
     markerCanvas.width = 640;
@@ -63,16 +67,19 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
         const baselineMarkers = Object.fromEntries(roleTiles.map((tile) => [tile.key, tile.lastOnMarkerValue]));
         const expectedView = participantRole === pageRole ? "local" : "remote";
         if (Number.isFinite(baselineMarkers[`${participantRole}/${expectedView}`])) {
-          resumeEvents.push({ role: participantRole, at, baselineMarkers, firstFrames: {} });
+          resumeEvents.push({ role: participantRole, at, endAt: null, baselineMarkers, firstFrames: {} });
         }
       } else {
         const baselineFrames = Object.fromEntries(roleTiles.map((tile) => [tile.key, tile.lastOnFrame]));
         if (Object.values(baselineFrames).some(Boolean)) {
-          resumeEvents.push({ role: participantRole, at, baselineFrames, pendingFrames: {}, firstFrames: {} });
+          resumeEvents.push({ role: participantRole, at, endAt: null, baselineFrames, pendingFrames: {}, firstFrames: {} });
         }
       }
     }
     if (next !== "on") {
+      for (const resume of resumeEvents) {
+        if (resume.role === participantRole && resume.endAt === null) resume.endAt = at;
+      }
       for (const tile of Object.values(tiles)) {
         if (tile.participantRole === participantRole) tile.lastOnFrameAt = null;
       }
@@ -105,6 +112,46 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
     }
   }
 
+  function sampleVisual(video, tile, at, cameraState) {
+    if (!visualContext || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+    const last = tile.visualSamples.at(-1);
+    if (last && at - last.at < 100) return null;
+    try {
+      visualContext.drawImage(video, 0, 0, visualCanvas.width, visualCanvas.height);
+      const rgba = visualContext.getImageData(0, 0, visualCanvas.width, visualCanvas.height).data;
+      const luminance = new Uint8Array(visualCanvas.width * visualCanvas.height);
+      let hash = 2166136261;
+      let deltaTotal = 0;
+      let changedPixels = 0;
+      const previous = tile.previousVisual && tile.previousVisual.cameraState === cameraState &&
+        at - tile.previousVisual.at <= 500 ? tile.previousVisual : null;
+      for (let index = 0; index < luminance.length; index += 1) {
+        const offset = index * 4;
+        const value = Math.round(0.299 * rgba[offset] + 0.587 * rgba[offset + 1] + 0.114 * rgba[offset + 2]);
+        luminance[index] = value;
+        hash = Math.imul(hash ^ value, 16777619) >>> 0;
+        if (previous) {
+          const delta = Math.abs(value - previous.luminance[index]);
+          deltaTotal += delta;
+          if (delta >= 4) changedPixels += 1;
+        }
+      }
+      const sample = {
+        at,
+        cameraState,
+        hash,
+        identical: previous ? hash === previous.hash : null,
+        meanLumaDelta: previous ? deltaTotal / luminance.length : null,
+        changedPixelFraction: previous ? changedPixels / luminance.length : null
+      };
+      tile.visualSamples.push(sample);
+      tile.previousVisual = { hash, luminance, at, cameraState };
+      return sample;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function ensureVideo(video) {
     const row = video.closest("li[data-participant-id]");
     if (!row) return;
@@ -120,6 +167,8 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
       participantRole,
       view,
       frames: [],
+      visualSamples: [],
+      previousVisual: null,
       elementsSeen: 0,
       maxOnFrameGapMs: 0,
       lastOnFrameAt: null,
@@ -145,18 +194,25 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
       const marker = decodeMarker(video, currentRole);
       const frameReady = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         video.videoWidth > 0 && video.videoHeight > 0;
+      const visible = video.getClientRects().length > 0 && !currentRow.hidden &&
+        getComputedStyle(video).visibility !== "hidden";
+      if (frameReady && visible) sampleVisual(video, tile, at, cameraState);
       const sample = {
         at,
         mediaTime: Number.isFinite(metadata.mediaTime) ? metadata.mediaTime : null,
         presentedFrames: Number.isFinite(metadata.presentedFrames) ? metadata.presentedFrames : null,
         currentTime: Number.isFinite(video.currentTime) ? video.currentTime : null,
+        sourceVideoTracks: (video.srcObject?.getVideoTracks?.() || []).map((track) => ({
+          id: track.id,
+          readyState: track.readyState,
+          enabled: track.enabled
+        })),
         width: video.videoWidth,
         height: video.videoHeight,
         readyState: video.readyState,
         frameReady,
         paused: video.paused,
-        visible: video.getClientRects().length > 0 && !currentRow.hidden &&
-          getComputedStyle(video).visibility !== "hidden",
+        visible,
         cameraState,
         markerValid: marker.valid,
         markerAgeMs: marker.ageMs,
@@ -189,7 +245,9 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
         const hasBaseline = requireMarkers
           ? Number.isFinite(candidate.baselineMarkers?.[tile.key])
           : Boolean(candidate.baselineFrames?.[tile.key]);
-        if (candidate.role === currentRole && at >= candidate.at && !candidate.firstFrames[tile.key] && hasBaseline) {
+        const resumeStillActive = candidate.endAt === null || at <= candidate.endAt;
+        if (candidate.role === currentRole && cameraState === "on" && at >= candidate.at && resumeStillActive &&
+            !candidate.firstFrames[tile.key] && hasBaseline) {
           pendingResume = candidate;
           break;
         }
@@ -210,7 +268,8 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
               markerValue: marker.marker,
               baselineMarkerValue,
               markerAdvanced: marker.marker !== baselineMarkerValue,
-              mediaTime: sample.mediaTime
+              mediaTime: sample.mediaTime,
+              sourceVideoTracks: sample.sourceVideoTracks
             };
           }
         } else if (sample.frameReady && sample.visible && !sample.paused) {
@@ -241,7 +300,8 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
               mediaTime: firstFrame.mediaTime,
               presentedFrames: firstFrame.presentedFrames,
               baselineMediaTime: baselineFrame?.mediaTime ?? null,
-              baselinePresentedFrames: baselineFrame?.presentedFrames ?? null
+              baselinePresentedFrames: baselineFrame?.presentedFrames ?? null,
+              sourceVideoTracks: firstFrame.sourceVideoTracks
             };
           } else if (!pendingFrame) {
             resume.pendingFrames[tile.key] = sample;
@@ -257,7 +317,18 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
   function scan() {
     for (const row of document.querySelectorAll("#participants li[data-participant-id]")) recordState(row);
     for (const video of document.querySelectorAll(
-      "#participants li.is-local video.camera-video, #participants video[data-media-role='camera']")) ensureVideo(video);
+      "#participants li.is-local video.camera-video, #participants video[data-media-role='camera']")) {
+      ensureVideo(video);
+      const registration = videoTiles.get(video);
+      const row = video.closest("li[data-participant-id]");
+      const frameReady = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        video.videoWidth > 0 && video.videoHeight > 0;
+      const visible = video.getClientRects().length > 0 && !row?.hidden &&
+        getComputedStyle(video).visibility !== "hidden";
+      if (registration && row && frameReady && visible) {
+        sampleVisual(video, registration.tile, performance.now(), row.dataset.camera || "unknown");
+      }
+    }
   }
 
   function snapshot() {
@@ -308,6 +379,87 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
       const stableTrailingFrameGapMs = stableFrames.length
         ? Math.max(0, endedAt - stableFrames[stableFrames.length - 1].at)
         : Infinity;
+      const summarizeVisual = (samples, startAt = samples[0]?.at) => {
+        const comparisons = samples.filter((sample) => Number.isFinite(sample.changedPixelFraction));
+        const changed = comparisons.filter((sample) => sample.changedPixelFraction >= 0.01);
+        const meaningfulMotion = comparisons.filter((sample) =>
+          sample.changedPixelFraction >= 0.05 && sample.meanLumaDelta >= 1);
+        const firstChange = changed[0];
+        const firstMeaningfulMotion = meaningfulMotion[0];
+        return {
+          sampleCount: samples.length,
+          comparisonCount: comparisons.length,
+          changedSampleCount: changed.length,
+          changedSampleFraction: comparisons.length ? changed.length / comparisons.length : 0,
+          firstChangeMs: firstChange && Number.isFinite(startAt) ? Math.round(firstChange.at - startAt) : null,
+          meaningfulMotionSampleCount: meaningfulMotion.length,
+          firstMeaningfulChangeMs: firstMeaningfulMotion && Number.isFinite(startAt)
+            ? Math.round(firstMeaningfulMotion.at - startAt)
+            : null,
+          maxChangedPixelFraction: comparisons.length
+            ? Math.max(...comparisons.map((sample) => sample.changedPixelFraction))
+            : null,
+          maxMeanLumaDelta: comparisons.length
+            ? Math.max(...comparisons.map((sample) => sample.meanLumaDelta))
+            : null
+        };
+      };
+      const stableVisualSamples = tile.visualSamples.filter((sample) => stableStart !== null &&
+        sample.at >= stableStart && sample.at <= endedAt && sample.cameraState === "on");
+      const visual = summarizeVisual(stableVisualSamples, stableStart);
+      const firstCameraOff = stateEvents.find((event) => event.role === tile.participantRole &&
+        event.previous === "on" && event.current === "off");
+      const baselineVisualSamples = tile.visualSamples.filter((sample) => sample.cameraState === "on" &&
+        (!firstCameraOff || sample.at < firstCameraOff.at));
+      const baselineVisual = summarizeVisual(baselineVisualSamples, capture.startedAt);
+      const resumeVisual = resumeEvents.filter((resume) => resume.role === tile.participantRole).map((resume) => {
+        const windowEndAt = Math.min(resume.at + 1000, resume.endAt ?? Infinity);
+        const samples = tile.visualSamples.filter((sample) => sample.at >= resume.at && sample.at <= windowEndAt);
+        const frames = tile.frames.filter((frame) => frame.at >= resume.at && frame.at <= windowEndAt &&
+          frame.cameraState === "on");
+        let previousAt = resume.at;
+        const frameGaps = frames.map((frame) => {
+          const frameGap = frame.at - previousAt;
+          previousAt = frame.at;
+          return frameGap;
+        });
+        frameGaps.push(Math.max(0, windowEndAt - previousAt));
+        const firstFrame = frames[0];
+        const lastFrame = frames.at(-1);
+        return {
+          windowMs: windowEndAt - resume.at,
+          ...summarizeVisual(samples, resume.at),
+          frameCount: frames.length,
+          firstFrameMs: firstFrame ? Math.round(firstFrame.at - resume.at) : null,
+          maxFrameGapMs: frames.length ? Math.max(...frameGaps) : null,
+          mediaTimeAdvanceSeconds: Number.isFinite(firstFrame?.mediaTime) && Number.isFinite(lastFrame?.mediaTime)
+            ? lastFrame.mediaTime - firstFrame.mediaTime
+            : null,
+          presentedFrameAdvance: Number.isFinite(firstFrame?.presentedFrames) && Number.isFinite(lastFrame?.presentedFrames)
+            ? lastFrame.presentedFrames - firstFrame.presentedFrames
+            : null,
+          ...(includeFrameObservations ? {
+            frameObservations: frames.map((frame) => ({
+              atMs: Math.round(frame.at - resume.at),
+              mediaTime: frame.mediaTime,
+              presentedFrames: frame.presentedFrames,
+              currentTime: frame.currentTime,
+              width: frame.width,
+              height: frame.height,
+              readyState: frame.readyState,
+              paused: frame.paused,
+              visible: frame.visible,
+              sourceVideoTracks: frame.sourceVideoTracks
+            })),
+            visualObservations: samples.map((sample) => ({
+              atMs: Math.round(sample.at - resume.at),
+              identical: sample.identical,
+              changedPixelFraction: sample.changedPixelFraction,
+              meanLumaDelta: sample.meanLumaDelta
+            }))
+          } : {})
+        };
+      });
       const stableValidMarkers = stableFrames.filter((frame) => frame.markerValid && Number.isFinite(frame.markerAgeMs));
       const markerPoints = stableValidMarkers.map((frame) => ({ at: frame.at, markerValue: frame.markerValue }));
       let markerOffset = 0;
@@ -342,6 +494,9 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
         stableMarkerValidFraction: stableFrames.length ? stableValidMarkers.length / stableFrames.length : 0,
         stableMarkerCount: stableValidMarkers.length,
         stableUniqueMarkerCount: markerValues.size,
+        baselineVisual,
+        visual,
+        resumeVisual,
         stableMaxMarkerAgeMs: ageValues.length ? Math.max(...ageValues) : null,
         stableMinMarkerAgeMs: ageValues.length ? Math.min(...ageValues) : null,
         playbackRate: slope(mediaPoints, "mediaTime"),
@@ -447,13 +602,43 @@ function validateCameraQualityReports(reports, {
   allowAdditionalResumeCycles = false,
   minPlaybackRate = 0.9,
   maxPlaybackRate = 1.1,
-  requireMarkers = true
+  requireMarkers = true,
+  requireVisualMotion = false
 }) {
   assert.equal(reports.length, 2, `${label}: quality capture must include both Chromium pages`);
   const fail = (message, extra) => {
     throw new Error(`${label}: ${message}; camera quality report=${JSON.stringify(extra)}`);
   };
-
+  if (requireVisualMotion) {
+    const evidence = reports.map((report) => ({
+      pageRole: report.pageRole,
+      maxHeartbeatGapMs: report.maxHeartbeatGapMs,
+      cameras: [...new Set([...toggledRoles, ...liveRoles])].map((role) => {
+        const view = report.pageRole === role ? "local" : "remote";
+        const tile = report.tiles.find((entry) => entry.key === `${role}/${view}`);
+        return {
+          key: tile?.key,
+          stableFrames: tile?.stableFrameCount,
+          maxFrameGapMs: tile?.stableMaxFrameGapMs,
+          playbackRate: tile?.playbackRate,
+          resumeFrames: report.resumeEvents.filter((event) => event.role === role).map((event) =>
+            event.firstFrames?.[`${role}/${view}`] || null),
+          baselineMotion: tile?.baselineVisual?.meaningfulMotionSampleCount,
+          resumeMotion: tile?.resumeVisual?.map((visual) => ({
+            samples: visual.sampleCount,
+            meaningfulSamples: visual.meaningfulMotionSampleCount,
+            firstMeaningfulChangeMs: visual.firstMeaningfulChangeMs,
+            frameCount: visual.frameCount,
+            firstFrameMs: visual.firstFrameMs,
+            maxFrameGapMs: visual.maxFrameGapMs,
+            mediaTimeAdvanceSeconds: visual.mediaTimeAdvanceSeconds,
+            presentedFrameAdvance: visual.presentedFrameAdvance
+          }))
+        };
+      })
+    }));
+    console.log(`[real-camera quality evidence] ${JSON.stringify(evidence)}`);
+  }
   for (const report of reports) {
     if (report.maxHeartbeatGapMs > maxHeartbeatGapMs) {
       fail(`page ${report.pageRole} heartbeat gap ${report.maxHeartbeatGapMs.toFixed(1)}ms exceeds ${maxHeartbeatGapMs}ms`, report);
@@ -506,6 +691,33 @@ function validateCameraQualityReports(reports, {
           });
         }
       }
+      if (requireVisualMotion) {
+        const tile = report.tiles.find((entry) => entry.key === `${role}/${expectedView}`);
+        const baselineVisual = tile?.baselineVisual;
+        if (!Number.isFinite(baselineVisual?.sampleCount) || baselineVisual.sampleCount < 5 ||
+            !Number.isFinite(baselineVisual.meaningfulMotionSampleCount) ||
+            baselineVisual.meaningfulMotionSampleCount < 2) {
+          fail(`${report.pageRole} ${role}/${expectedView} baseline picture did not show moving content before the toggle`, {
+            baselineVisual,
+            stimulus: "Aim the camera at a changing scene or move in front of it during the test."
+          });
+        }
+        for (const resume of resumesToValidate) {
+          const resumeIndex = observedResumes.indexOf(resume);
+          const visual = tile.resumeVisual?.[resumeIndex];
+          if (!Number.isFinite(visual?.sampleCount) || visual.sampleCount < 5 ||
+              !Number.isFinite(visual.meaningfulMotionSampleCount) || visual.meaningfulMotionSampleCount < 2 ||
+              !Number.isFinite(visual.firstMeaningfulChangeMs) || visual.firstMeaningfulChangeMs > maxResumeFrameMs ||
+              !Number.isFinite(visual.frameCount) || visual.frameCount < 5 ||
+              !Number.isFinite(visual.maxFrameGapMs) || visual.maxFrameGapMs > maxFrameGapMs) {
+            fail(`${report.pageRole} ${role}/${expectedView} resumed frames did not show moving picture content within ${maxResumeFrameMs}ms`, {
+              visual,
+              limits: { maxResumeFrameMs, maxFrameGapMs, minimumMeaningfulMotionSamples: 2, minimumResumeFrames: 5 },
+              stimulus: "Sweep a bright, high-contrast object across the physical camera view continuously, including the first second after resume."
+            });
+          }
+        }
+      }
     }
   }
 
@@ -527,6 +739,9 @@ function validateCameraQualityReports(reports, {
         stableLeadingFrameGapMs: tile.stableLeadingFrameGapMs,
         stableTrailingFrameGapMs: tile.stableTrailingFrameGapMs,
         maxOnFrameGapMs: tile.maxOnFrameGapMs,
+        baselineVisual: tile.baselineVisual,
+        visual: tile.visual,
+        resumeVisual: tile.resumeVisual,
         ...(tile.frameObservations ? { frameObservations: tile.frameObservations } : {}),
         stableMarkerValidFraction: tile.stableMarkerValidFraction,
         stableMaxMarkerAgeMs: tile.stableMaxMarkerAgeMs,
