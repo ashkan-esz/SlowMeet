@@ -95,11 +95,15 @@ function summarizePeerState(state) {
     socketCount: state.socketCount,
     framesDecoded: state.framesDecoded,
     networkQuality: state.networkQuality,
+    connectionUI: state.connectionUI,
+    participantTiles: state.participantTiles,
     adaptationState: state.adaptationState,
     videoBytesSent: state.videoBytesSent,
     videoBytesReceived: state.videoBytesReceived,
     audioBytesSent: state.audioBytesSent,
     audioBytesReceived: state.audioBytesReceived,
+    audioStats: state.audioStats,
+    audioRtpStats: state.audioRtpStats,
     candidatePair: state.candidatePair,
     videoRtpStats: state.videoRtpStats,
     videoSenderStats: state.videoSenderStats,
@@ -108,6 +112,7 @@ function summarizePeerState(state) {
     iceCandidateErrors: state.iceCandidateErrors.slice(-4),
     transports: state.transports,
     remoteVideos: state.remoteVideos,
+    remoteAudios: state.remoteAudios,
     remoteParticipants: state.remoteParticipants,
     transceivers: state.transceivers,
     localUfrag: state.localUfrag,
@@ -294,6 +299,24 @@ async function diagnostics(page) {
         receiveVideo: item.dataset.receiveVideo,
         sharing: item.dataset.sharing
       }));
+    const remoteAudios = [...document.querySelectorAll("#participants li[data-participant-id] audio")]
+      .map((audio) => ({
+        participantID: audio.closest("li")?.dataset.participantId || "",
+        participant: audio.closest("li")?.textContent?.trim() || "",
+        currentTime: audio.currentTime,
+        paused: audio.paused,
+        readyState: audio.readyState,
+        muted: audio.muted,
+        volume: audio.volume,
+        audioTracks: audio.srcObject?.getAudioTracks?.().map((track) => ({
+          readyState: track.readyState,
+          enabled: track.enabled,
+          muted: track.muted
+        })) || []
+      }));
+    const localAudioTrack = window.__slowMeetTest?.capturedTracks?.find((entry) =>
+      entry.kind === "audio" && entry.track?.readyState === "live")?.track;
+    const audioCaptureSettings = localAudioTrack?.getSettings?.() || null;
     const selectedTransport = stats.find((item) => item.type === "transport");
     const selectedPair = stats.find((item) => item.type === "candidate-pair" &&
       item.id === selectedTransport?.selectedCandidatePairId) || stats.find((item) => item.type === "candidate-pair" &&
@@ -333,6 +356,64 @@ async function diagnostics(page) {
       jitterBufferDelay: item.jitterBufferDelay,
       jitterBufferEmittedCount: item.jitterBufferEmittedCount
     }));
+    const audioRtpStats = stats.filter((item) =>
+      (item.type === "inbound-rtp" || item.type === "outbound-rtp") &&
+      (item.kind || item.mediaType) === "audio").map((item) => ({
+      type: item.type,
+      ssrc: item.ssrc,
+      packetsReceived: item.packetsReceived,
+      packetsSent: item.packetsSent,
+      packetsLost: item.packetsLost,
+      bytesReceived: item.bytesReceived,
+      bytesSent: item.bytesSent,
+      trackIdentifier: item.trackIdentifier || report.get(item.trackId)?.trackIdentifier,
+      trackId: item.trackId,
+      mid: item.mid,
+      jitter: item.jitter,
+      jitterBufferDelay: item.jitterBufferDelay,
+      jitterBufferEmittedCount: item.jitterBufferEmittedCount,
+      totalSamplesReceived: item.totalSamplesReceived,
+      concealedSamples: item.concealedSamples,
+      concealmentEvents: item.concealmentEvents,
+      audioLevel: item.audioLevel
+    }));
+    const summarizeAudioRtp = (type) => {
+      const items = audioRtpStats.filter((item) => item.type === type);
+      const sumField = (field) => items.reduce((total, item) => total + (Number(item[field]) || 0), 0);
+      const sumOptionalField = (field) => {
+        const values = items.map((item) => item[field]).filter(Number.isFinite);
+        return values.length ? values.reduce((total, value) => total + value, 0) : null;
+      };
+      const jitterValues = items.map((item) => item.jitter).filter(Number.isFinite);
+      const jitterBufferDelay = sumField("jitterBufferDelay");
+      const jitterBufferDelayAvailable = items.some((item) => Number.isFinite(item.jitterBufferDelay));
+      const jitterBufferEmittedCount = sumOptionalField("jitterBufferEmittedCount");
+      const packetsReceived = sumField("packetsReceived");
+      const packetsLost = type === "inbound-rtp" ? sumOptionalField("packetsLost") : null;
+      const totalPackets = packetsReceived + (packetsLost || 0);
+      return {
+        streams: items.length,
+        bytesSent: sumField("bytesSent"),
+        bytesReceived: sumField("bytesReceived"),
+        packetsSent: sumField("packetsSent"),
+        packetsReceived,
+        packetsLost,
+        packetLossPct: totalPackets > 0 && packetsLost !== null
+          ? Number((packetsLost / totalPackets * 100).toFixed(2)) : null,
+        jitterMs: jitterValues.length ? Math.max(...jitterValues) * 1000 : null,
+        jitterBufferDelayTotalMs: jitterBufferDelayAvailable ? jitterBufferDelay * 1000 : null,
+        jitterBufferDelayMs: jitterBufferDelayAvailable && jitterBufferEmittedCount > 0
+          ? jitterBufferDelay / jitterBufferEmittedCount * 1000 : null,
+        jitterBufferEmittedCount,
+        totalSamplesReceived: sumOptionalField("totalSamplesReceived"),
+        concealedSamples: sumOptionalField("concealedSamples"),
+        concealmentEvents: sumOptionalField("concealmentEvents")
+      };
+    };
+    const audioStats = {
+      outbound: summarizeAudioRtp("outbound-rtp"),
+      inbound: summarizeAudioRtp("inbound-rtp")
+    };
     const videoSenderStats = await Promise.all((window.__slowMeetTest?.videoSenders || []).map(async ({ senderID, sender }) => {
       try {
         const senderReport = await sender.getStats();
@@ -364,12 +445,29 @@ async function diagnostics(page) {
       videoBytesReceived: sum("inbound-rtp", "video", "bytesReceived"),
       audioBytesReceived: sum("inbound-rtp", "audio", "bytesReceived"),
       audioBytesSent: sum("outbound-rtp", "audio", "bytesSent"),
+      audioStats,
+      audioRtpStats,
       videoBytesSent: sum("outbound-rtp", "video", "bytesSent"),
       networkQuality: {
         ...(window.__slowMeetTest?.networkQuality || {}),
         selectedPairAvailableOutgoingKbps: Number.isFinite(selectedPair?.availableOutgoingBitrate)
           ? Math.round(selectedPair.availableOutgoingBitrate / 1000) : null
       },
+      connectionUI: {
+        level: document.querySelector("#connection")?.className.split(/\s+/).at(-1) || "unknown",
+        label: document.querySelector("#connection")?.getAttribute("aria-label") || "",
+        warningVisible: Boolean(document.querySelector("#meeting-alert") &&
+          !document.querySelector("#meeting-alert").hidden),
+        warning: document.querySelector("#meeting-alert")?.textContent || ""
+      },
+      participantTiles: [...document.querySelectorAll("#participants li[data-participant-id]")].map((item) => ({
+        name: item.querySelector(".participant-name")?.textContent?.trim() || item.textContent.trim(),
+        local: item.classList.contains("is-local"),
+        quality: item.dataset.quality || "unknown",
+        connection: item.dataset.connection || "connected",
+        mic: item.dataset.mic || "unknown",
+        camera: item.dataset.camera || "unknown"
+      })),
       adaptationState: {
         ...(window.__slowMeetTest?.adaptationState || {}),
         selectedProfile: window.__slowMeetTest?.adaptationState?.selectedProfile ??
@@ -380,6 +478,12 @@ async function diagnostics(page) {
       videoRtpStats,
       videoSenderStats,
       remoteVideos,
+      remoteAudios,
+      audioCaptureSettings: audioCaptureSettings ? {
+        echoCancellation: audioCaptureSettings.echoCancellation ?? null,
+        noiseSuppression: audioCaptureSettings.noiseSuppression ?? null,
+        autoGainControl: audioCaptureSettings.autoGainControl ?? null
+      } : null,
       remoteParticipants,
       candidatePair: selectedPair ? {
         state: selectedPair.state,
@@ -630,7 +734,7 @@ async function waitForDecodedVideoKeyFrame(fixture, receiverRole, baseline, labe
 }
 
 async function joinMeeting(context, name, baseURL, installDeviceFixtures = false, autoJoin = true,
-  timeCodedCameraRole = undefined) {
+  timeCodedCameraRole = undefined, timeCodedAudioRole = undefined) {
   const page = await context.newPage();
   const pageEvents = [];
   page.__mediaE2EEvents = pageEvents;
@@ -653,7 +757,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
   page.on("requestfailed", (request) => pageEvents.push({
     type: "requestfailed", method: request.method(), url: request.url(), error: request.failure()?.errorText, timestamp: Date.now()
   }));
-  await page.addInitScript(({ installDeviceFixtures, timeCodedCameraRole }) => {
+  await page.addInitScript(({ installDeviceFixtures, timeCodedCameraRole, timeCodedAudioRole }) => {
     const NativePeerConnection = window.RTCPeerConnection;
     const NativeWebSocket = window.WebSocket;
     const originalReplaceTrack = RTCRtpSender.prototype.replaceTrack;
@@ -670,8 +774,10 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       signalingMessages: [],
       deviceSelectionRequests: [],
       capturedTracks: [],
+      audioEchoCancellationRequested: null,
       cameraQualityCapture: null,
-      timeCodedCamera: null
+      timeCodedCamera: null,
+      timeCodedAudio: null
     };
     const mediaDevices = navigator.mediaDevices;
     const nativeEnumerateDevices = mediaDevices.enumerateDevices.bind(mediaDevices);
@@ -703,7 +809,58 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
             delete constraint.deviceId;
           }
         }
+        if (normalized?.audio) {
+          window.__slowMeetTest.audioEchoCancellationRequested =
+            typeof normalized.audio === "object" ? normalized.audio.echoCancellation ?? null : null;
+        }
         let stream;
+        if (timeCodedAudioRole && normalized?.audio) {
+          const nativeConstraints = { ...normalized, audio: false };
+          stream = nativeConstraints.video
+            ? await nativeGetUserMedia(nativeConstraints)
+            : new MediaStream();
+          const audioContext = new AudioContext();
+          const destination = audioContext.createMediaStreamDestination();
+          const oscillator = audioContext.createOscillator();
+          const gain = audioContext.createGain();
+          oscillator.frequency.value = 997;
+          gain.gain.value = 0;
+          oscillator.connect(gain).connect(destination);
+          oscillator.start();
+          const audioTrack = destination.stream.getAudioTracks()[0];
+          if (!audioTrack) throw new Error("the E2E time-coded audio source produced no audio track");
+          stream.addTrack(audioTrack);
+          audioTrack.addEventListener("ended", () => {
+            oscillator.stop();
+            audioContext.close().catch(() => {});
+            if (window.__slowMeetTest.timeCodedAudio?.track === audioTrack) {
+              window.__slowMeetTest.timeCodedAudio = null;
+            }
+          }, { once: true });
+          window.__slowMeetTest.timeCodedAudio = {
+            role: timeCodedAudioRole,
+            context: audioContext,
+            gain,
+            track: audioTrack,
+            async scheduleMarker() {
+              await audioContext.resume();
+              const now = audioContext.currentTime;
+              const markerAt = now + 0.8;
+              gain.gain.cancelScheduledValues(now);
+              gain.gain.setValueAtTime(0, now);
+              gain.gain.setValueAtTime(0.25, markerAt);
+              gain.gain.setValueAtTime(0, markerAt + 0.18);
+              return performance.timeOrigin + performance.now() + (markerAt - audioContext.currentTime) * 1000;
+            }
+          };
+          window.__slowMeetTest.capturedTracks.push({
+            source: "synthetic-test-audio",
+            kind: "audio",
+            id: audioTrack.id,
+            track: audioTrack
+          });
+          return stream;
+        }
         if (timeCodedCameraRole && normalized?.video) {
           const nativeConstraints = { ...normalized, video: false };
           stream = nativeConstraints.audio
@@ -907,7 +1064,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       });
       return originalReplaceTrack.call(this, track);
     };
-  }, { installDeviceFixtures, timeCodedCameraRole });
+  }, { installDeviceFixtures, timeCodedCameraRole, timeCodedAudioRole });
   await page.goto(`${baseURL}/`);
   if (!autoJoin) return page;
   await page.locator("#name").fill(name);
@@ -934,11 +1091,15 @@ async function createScenarioFixture({
   contexts,
   traceContexts,
   timeCodedCamera = false,
-  timeCodedCameraRoles
+  timeCodedCameraRoles,
+  timeCodedAudioRoles
 }) {
   const generatedCameraRoles = new Set(timeCodedCameraRoles ?? (timeCodedCamera ? ["A", "B"] : []));
+  const generatedAudioRoles = new Set(timeCodedAudioRoles ?? []);
   assert.ok([...generatedCameraRoles].every((role) => role === "A" || role === "B"),
     "time-coded camera roles must be A or B");
+  assert.ok([...generatedAudioRoles].every((role) => role === "A" || role === "B"),
+    "time-coded audio roles must be A or B");
   const contextA = await browserA.newContext({ viewport: { width: 1440, height: 960 } });
   contexts.push(contextA);
   const contextB = await browserB.newContext({ viewport: { width: 1440, height: 960 } });
@@ -950,8 +1111,10 @@ async function createScenarioFixture({
   }));
 
   const [pageA, pageB] = await Promise.all([
-    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false, generatedCameraRoles.has("A") ? "A" : undefined),
-    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false, generatedCameraRoles.has("B") ? "B" : undefined)
+    joinMeeting(contextA, "Media A", baseURL, deviceFixtures, false,
+      generatedCameraRoles.has("A") ? "A" : undefined, generatedAudioRoles.has("A") ? "A" : undefined),
+    joinMeeting(contextB, "Media B", baseURL, deviceFixtures, false,
+      generatedCameraRoles.has("B") ? "B" : undefined, generatedAudioRoles.has("B") ? "B" : undefined)
   ]);
   const joined = new Set();
   const expectedPeerCounts = new Map();
@@ -964,6 +1127,7 @@ async function createScenarioFixture({
     browserB,
     timeCodedCamera,
     generatedCameraRoles,
+    generatedAudioRoles,
     contextA,
     contextB,
     pageA,
@@ -990,11 +1154,53 @@ async function createScenarioFixture({
     },
     async newPage(role) {
       return joinMeeting(contextForRole(fixture, role), fixture.names[role], baseURL, deviceFixtures, false,
-        generatedCameraRoles.has(role) ? role : undefined);
+        generatedCameraRoles.has(role) ? role : undefined, generatedAudioRoles.has(role) ? role : undefined);
     },
-    async diagnostics(role) {
-      return diagnostics(pageForRole(fixture, role));
-    },
+      async diagnostics(role) {
+        return diagnostics(pageForRole(fixture, role));
+      },
+      async copyDiagnostics(role) {
+        return pageForRole(fixture, role).evaluate(async () => {
+          let copied = "";
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: { writeText: async (value) => { copied = value; } }
+          });
+          document.querySelector("#copy-diagnostics").click();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return copied;
+        });
+      },
+      async captureConnectionTimeline(label, durationMs) {
+        const startedAt = Date.now();
+        const samples = [];
+        while (Date.now() - startedAt < durationMs) {
+          const roles = [...joined].sort();
+          const states = await Promise.all(roles.map(async (role) => {
+            const state = await diagnostics(pageForRole(fixture, role));
+            return {
+              role,
+              connectionState: state.connectionState,
+              iceConnectionState: state.iceConnectionState,
+              signalingState: state.signalingState,
+              networkQuality: state.networkQuality,
+              connectionUI: state.connectionUI,
+              participantTiles: state.participantTiles,
+              audio: {
+                bytesSent: state.audioBytesSent,
+                bytesReceived: state.audioBytesReceived,
+                outbound: state.audioStats?.outbound,
+                inbound: state.audioStats?.inbound
+              }
+            };
+          }));
+          samples.push({ elapsedMs: Date.now() - startedAt, browsers: states });
+          const remaining = durationMs - (Date.now() - startedAt);
+          if (remaining > 0) await delay(Math.min(pollIntervalMs, remaining));
+        }
+        console.log(`[connection timeline] ${label}: ${JSON.stringify(samples)}`);
+        return samples;
+      },
     async beginCameraQualityCapture(label, options = {}) {
       const requireMarkers = options.requireMarkers ?? true;
       assert.ok(!requireMarkers || fixture.timeCodedCamera,
@@ -1132,7 +1338,75 @@ async function createScenarioFixture({
       ]);
       await waitForAudioProgress(pageForRole(fixture, senderRole), pageForRole(fixture, receiverRole),
         beforeSender, beforeReceiver, label);
+      await fixture.assertRemoteAudioPlayback(senderRole, receiverRole, label);
       await fixture.assertPeersConnected(label);
+    },
+    async assertRemoteAudioPlayback(senderRole, receiverRole, label = `${senderRole} audio playback -> ${receiverRole}`) {
+      const receiverPage = pageForRole(fixture, receiverRole);
+      const senderName = fixture.names[senderRole];
+      const findRemoteAudios = (state) => state.remoteAudios.filter((audio) => audio.participant.includes(senderName));
+      await receiverPage.waitForFunction((name) => [...document.querySelectorAll(
+        "#participants li[data-participant-id] audio")].some((audio) =>
+        audio.closest("li")?.textContent?.includes(name) &&
+        !audio.paused && !audio.muted && audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        audio.srcObject?.getAudioTracks?.().some((track) => track.readyState === "live")),
+      senderName, { timeout: 10000 });
+      const beforeAudio = findRemoteAudios(await diagnostics(receiverPage))[0];
+      assert.ok(beforeAudio, `${label}: remote audio element was not present`);
+      await delay(1000);
+      const afterState = await diagnostics(receiverPage);
+      const matchingAudios = findRemoteAudios(afterState);
+      assert.equal(matchingAudios.length, 1, `${label}: expected one remote audio element for the sender`);
+      const afterAudio = matchingAudios[0];
+      assert.equal(afterAudio.audioTracks.filter((track) => track.readyState === "live").length, 1,
+        `${label}: expected one live remote audio track`);
+      assert.ok(afterAudio && !afterAudio.paused && !afterAudio.muted,
+        `${label}: remote audio playback stopped: ${JSON.stringify(afterState.remoteAudios)}`);
+      assert.ok(afterAudio.currentTime > beforeAudio.currentTime,
+        `${label}: remote audio playback time did not advance (${beforeAudio.currentTime} -> ${afterAudio.currentTime})`);
+      console.log(`[pass] ${label}: remote audio element playback advanced`);
+    },
+    async assertAudioMarkerDelay(senderRole, receiverRole, label = `${senderRole} audio marker -> ${receiverRole}`) {
+      assert.ok(fixture.generatedAudioRoles.has(senderRole), `${label}: sender has no time-coded audio source`);
+      const senderPage = pageForRole(fixture, senderRole);
+      const receiverPage = pageForRole(fixture, receiverRole);
+      const senderName = fixture.names[senderRole];
+      const markerAt = await senderPage.evaluate(async () =>
+        window.__slowMeetTest?.timeCodedAudio?.scheduleMarker());
+      assert.ok(Number.isFinite(markerAt), `${label}: could not schedule a source audio marker`);
+      const delayMs = await receiverPage.evaluate(async ({ senderName, markerAt }) => {
+        const audio = [...document.querySelectorAll("#participants li[data-participant-id] audio")]
+          .find((element) => element.closest("li")?.textContent?.includes(senderName));
+        if (!audio?.srcObject) throw new Error("remote audio element has no stream");
+        const context = new AudioContext();
+        const source = context.createMediaStreamSource(audio.srcObject);
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 2048;
+        source.connect(analyser);
+        await context.resume();
+        const samples = new Float32Array(analyser.fftSize);
+        const deadline = performance.now() + 5000;
+        try {
+          while (performance.now() < deadline) {
+            analyser.getFloatTimeDomainData(samples);
+            let power = 0;
+            for (const sample of samples) power += sample * sample;
+            if (Math.sqrt(power / samples.length) > 0.025) {
+              return performance.timeOrigin + performance.now() - markerAt;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          throw new Error("remote audio marker was not detected within five seconds");
+        } finally {
+          source.disconnect();
+          analyser.disconnect();
+          await context.close();
+        }
+      }, { senderName, markerAt });
+      assert.ok(Number.isFinite(delayMs) && delayMs >= -50 && delayMs < 5000,
+        `${label}: invalid one-way audio marker delay (${delayMs}ms)`);
+      console.log(`[audio delay] ${label}: ${delayMs.toFixed(1)}ms (synthetic source to remote Web Audio capture)`);
+      return delayMs;
     },
     async assertCameraRTPContinues(senderRole, receiverRole, label = `${senderRole} camera RTP -> ${receiverRole}`) {
       const senderPage = pageForRole(fixture, senderRole);
@@ -1564,6 +1838,9 @@ async function monitorCamera(label, senderName, receivingPage, peers, expectedPe
           type, ssrc, packetsReceived, packetsSent, packetsLost, bytesReceived, bytesSent,
           framesDecoded: decoded, framesEncoded, keyFramesDecoded, keyFramesEncoded, nackCount, pliCount
         })),
+        audioStats: state.audioStats,
+        audioRtpStats: state.audioRtpStats,
+        remoteAudios: state.remoteAudios,
         remoteVideos: state.remoteVideos.map(({ role, width, height, currentTime, paused, participant }) => ({
           role, width, height, currentTime, paused, participant
         }))
@@ -1660,13 +1937,68 @@ async function assertRemoteVideoMoves(page, role, label) {
   console.log(`[pass] ${label}: remote ${role} video time advanced`);
 }
 
+function audioQualitySample(state) {
+  const rttSeconds = state.candidatePair?.currentRoundTripTime;
+  return {
+    rttMs: Number.isFinite(rttSeconds) ? Number((rttSeconds * 1000).toFixed(1)) : null,
+    outbound: state.audioStats?.outbound || null,
+    inbound: state.audioStats?.inbound || null
+  };
+}
+
+function audioQualityDelta(before, after) {
+  if (!before || !after) return null;
+  const delta = (field) => Number.isFinite(before[field]) && Number.isFinite(after[field])
+    ? after[field] - before[field] : null;
+  const jitterBufferDelay = delta("jitterBufferDelayTotalMs");
+  const emitted = delta("jitterBufferEmittedCount");
+  const packetsReceived = delta("packetsReceived");
+  const packetsLost = delta("packetsLost");
+  return {
+    bytesSent: delta("bytesSent"),
+    bytesReceived: delta("bytesReceived"),
+    packetsSent: delta("packetsSent"),
+    packetsReceived: delta("packetsReceived"),
+    packetsLost: delta("packetsLost"),
+    packetLossPct: packetsReceived !== null && packetsLost !== null && packetsReceived + packetsLost > 0
+      ? Number((packetsLost / (packetsReceived + packetsLost) * 100).toFixed(2)) : null,
+    jitterMs: after.jitterMs,
+    jitterBufferDelayMs: jitterBufferDelay !== null && emitted > 0 ? jitterBufferDelay / emitted : null,
+    jitterBufferEmittedCount: emitted,
+    totalSamplesReceived: delta("totalSamplesReceived"),
+    concealedSamples: delta("concealedSamples"),
+    concealmentEvents: delta("concealmentEvents")
+  };
+}
+
+function reportAudioQuality(label, states, previousStates = null) {
+  console.log(`[audio] ${label}: ${JSON.stringify(states.map((state, index) => ({
+    participant: index === 0 ? "A" : "B",
+    ...audioQualitySample(state),
+    interval: previousStates ? {
+      outbound: audioQualityDelta(previousStates[index]?.audioStats?.outbound, state.audioStats?.outbound),
+      inbound: audioQualityDelta(previousStates[index]?.audioStats?.inbound, state.audioStats?.inbound)
+    } : null
+  })))}`);
+}
+
 async function waitForAudioProgress(sender, receiver, beforeSender, beforeReceiver, label) {
   const start = Date.now();
   while (Date.now() - start < 10000) {
     const [senderState, receiverState] = await Promise.all([diagnostics(sender), diagnostics(receiver)]);
     if (senderState.audioBytesSent > beforeSender.audioBytesSent &&
         receiverState.audioBytesReceived > beforeReceiver.audioBytesReceived) {
+      assert.ok(senderState.audioStats?.outbound?.streams > 0,
+        `${label}: outbound audio RTP stats were unavailable`);
+      assert.ok(receiverState.audioStats?.inbound?.streams > 0,
+        `${label}: inbound audio RTP stats were unavailable`);
       console.log(`[pass] ${label}: outbound and remote audio RTP advanced after unmute`);
+      if (requestedScenario === "microphone mute and unmute with repeated toggles in both directions") {
+        console.log(`[audio] ${label}: ${JSON.stringify({
+          sender: audioQualitySample(senderState),
+          receiver: audioQualitySample(receiverState)
+        })}`);
+      }
       return;
     }
     await delay(250);
@@ -1676,6 +2008,37 @@ async function waitForAudioProgress(sender, receiver, beforeSender, beforeReceiv
     receiver: await diagnostics(receiver),
     beforeSender,
     beforeReceiver
+  })}`);
+}
+
+async function monitorAudio(label, sender, receiver, durationMs = 6000) {
+  const [beforeSender, beforeReceiver] = await Promise.all([diagnostics(sender), diagnostics(receiver)]);
+  const startedAt = Date.now();
+  let senderState = beforeSender;
+  let receiverState = beforeReceiver;
+  while (Date.now() - startedAt < durationMs) {
+    [senderState, receiverState] = await Promise.all([diagnostics(sender), diagnostics(receiver)]);
+    assert.equal(senderState.connectionState, "connected", `${label}: sender peer left connected state`);
+    assert.equal(receiverState.connectionState, "connected", `${label}: receiver peer left connected state`);
+    await delay(Math.min(pollIntervalMs, Math.max(1, durationMs - (Date.now() - startedAt))));
+  }
+  assert.ok(senderState.audioBytesSent > beforeSender.audioBytesSent,
+    `${label}: sender audio RTP bytes did not advance (${beforeSender.audioBytesSent} -> ${senderState.audioBytesSent})`);
+  assert.ok(receiverState.audioBytesReceived > beforeReceiver.audioBytesReceived,
+    `${label}: receiver audio RTP bytes did not advance (${beforeReceiver.audioBytesReceived} -> ${receiverState.audioBytesReceived})`);
+  assert.ok(senderState.audioStats?.outbound?.streams > 0, `${label}: outbound audio stats unavailable`);
+  assert.ok(receiverState.audioStats?.inbound?.streams > 0, `${label}: inbound audio stats unavailable`);
+  const beforePlayback = beforeReceiver.remoteAudios.find((audio) =>
+    audio.audioTracks.some((track) => track.readyState === "live"));
+  const afterPlayback = receiverState.remoteAudios.find((audio) =>
+    audio.audioTracks.some((track) => track.readyState === "live"));
+  assert.ok(afterPlayback && !afterPlayback.paused && !afterPlayback.muted && afterPlayback.volume > 0,
+    `${label}: remote audio element is not actively playing: ${JSON.stringify(receiverState.remoteAudios)}`);
+  assert.ok(beforePlayback && afterPlayback.currentTime > beforePlayback.currentTime,
+    `${label}: remote audio playback time did not advance: ${JSON.stringify({ beforePlayback, afterPlayback })}`);
+  console.log(`[pass] ${label}: audio RTP advanced; ${JSON.stringify({
+    sender: audioQualitySample(senderState),
+    receiver: audioQualitySample(receiverState)
   })}`);
 }
 
@@ -1981,15 +2344,24 @@ function receivedVideoLoss(states) {
     .reduce((subtotal, stat) => subtotal + (Number(stat.packetsLost) || 0), 0), 0);
 }
 
+function receivedAudioLoss(states) {
+  const samples = states.map((state) => state.audioStats?.inbound?.packetsLost)
+    .filter(Number.isFinite);
+  return samples.length ? samples.reduce((total, sample) => total + sample, 0) : null;
+}
+
 async function testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnectionCounts,
   expectedSocketCounts, mediaStartedAt) {
   if (!testNetworkImpairment) return;
   if (!testNetworkNamespace) throw new Error("isolated network namespace is required for netem scenarios");
 
   const beforeStates = await Promise.all(peers.map(diagnostics));
+  reportAudioQuality("baseline", beforeStates);
   const baselineRTT = maximumRoundTripMs(beforeStates);
   let maximumImpairedRTT = baselineRTT;
+  let previousStates = beforeStates;
   let previousLoss = receivedVideoLoss(beforeStates);
+  let previousAudioLoss = receivedAudioLoss(beforeStates);
   let sawImpairment = false;
   const profiles = [
     { label: "1mbit / 100ms", rate: "1mbit", delay: "100ms", loss: "0%" },
@@ -2002,20 +2374,27 @@ async function testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnec
       applyNetworkProfile(profile);
       await Promise.all([
         monitorCamera(`${profile.label} A -> B`, "Media A", pageB, peers, expectedPeerConnectionCounts, 6000),
-        monitorCamera(`${profile.label} B -> A`, "Media B", pageA, peers, expectedPeerConnectionCounts, 6000)
+        monitorCamera(`${profile.label} B -> A`, "Media B", pageA, peers, expectedPeerConnectionCounts, 6000),
+        monitorAudio(`${profile.label} audio A -> B`, pageA, pageB, 6000),
+        monitorAudio(`${profile.label} audio B -> A`, pageB, pageA, 6000)
       ]);
       const afterStates = await Promise.all(peers.map(diagnostics));
       const rtt = maximumRoundTripMs(afterStates);
       const loss = receivedVideoLoss(afterStates);
+      const audioLoss = receivedAudioLoss(afterStates);
       const queueAfter = networkQueueStats();
       const queueDrops = droppedPacketCount(queueAfter) - droppedPacketCount(queueBefore);
-      const rttIncreased = rtt !== null && (baselineRTT === null || rtt >= baselineRTT + 50);
+      const rttIncreased = rtt !== null && baselineRTT !== null && rtt >= baselineRTT + 50;
       const rtpLossIncreased = loss > previousLoss;
+      const audioLossIncreased = audioLoss !== null && previousAudioLoss !== null && audioLoss > previousAudioLoss;
       assert.match(queueAfter, /qdisc netem/, `${profile.label}: isolated netem profile was not installed`);
       maximumImpairedRTT = rtt === null ? maximumImpairedRTT : Math.max(maximumImpairedRTT ?? 0, rtt);
       previousLoss = loss;
-      sawImpairment ||= rttIncreased || rtpLossIncreased || queueDrops > 0;
-      console.log(`[pass] isolated network profile ${profile.label}: rtt=${rtt ?? "unavailable"}ms, inboundVideoLoss=${loss}, qdiscDrops=${queueDrops}`);
+      previousAudioLoss = audioLoss;
+      sawImpairment ||= rttIncreased || rtpLossIncreased || audioLossIncreased || queueDrops > 0;
+      reportAudioQuality(`impaired ${profile.label}`, afterStates, previousStates);
+      previousStates = afterStates;
+      console.log(`[pass] isolated network profile ${profile.label}: rtt=${rtt ?? "unavailable"}ms, inboundVideoLoss=${loss}, inboundAudioLoss=${audioLoss ?? "unavailable"}, qdiscDrops=${queueDrops}`);
     }
   } finally {
     clearNetworkProfile();
@@ -2024,10 +2403,13 @@ async function testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnec
   await waitForPeerStability(peers, 1500, 20000);
   await Promise.all([
     monitorCamera("network recovery A -> B", "Media A", pageB, peers, expectedPeerConnectionCounts, 6000),
-    monitorCamera("network recovery B -> A", "Media B", pageA, peers, expectedPeerConnectionCounts, 6000)
+    monitorCamera("network recovery B -> A", "Media B", pageA, peers, expectedPeerConnectionCounts, 6000),
+    monitorAudio("network recovery audio A -> B", pageA, pageB, 6000),
+    monitorAudio("network recovery audio B -> A", pageB, pageA, 6000)
   ]);
   const recovered = await Promise.all(peers.map(diagnostics));
   const recoveredRTT = maximumRoundTripMs(recovered);
+  reportAudioQuality("recovery", recovered, previousStates);
   const queueAfterRecovery = networkQueueStats();
   assert.doesNotMatch(queueAfterRecovery, /qdisc netem/, "netem should be removed after recovery");
   if (maximumImpairedRTT !== null && recoveredRTT !== null) {
@@ -2035,7 +2417,7 @@ async function testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnec
       `RTT did not recover after impairment removal: impaired=${maximumImpairedRTT}ms recovered=${recoveredRTT}ms`);
   }
   assert.ok(sawImpairment, "at least one isolated network profile must measurably affect the media path");
-  console.log(`[pass] isolated network impairment recovered: rtt=${recoveredRTT ?? "unavailable"}ms; both video streams continued`);
+  console.log(`[pass] isolated network impairment recovered: rtt=${recoveredRTT ?? "unavailable"}ms; both audio and video directions continued`);
 }
 
 async function requestIceRestart(page) {
@@ -2630,6 +3012,30 @@ async function main() {
       }
     },
     {
+      name: "real microphone first-enable echo and capture-processing acceptance",
+      when: "realMedia",
+      profile: "real-media",
+      required: false,
+      async run(fixture) {
+        await fixture.join("A");
+        await fixture.join("B");
+        console.log("[manual audio check] A and B share this device's microphone and speakers. Speak a short phrase after each first mic enable; listen for echo, then repeat with headphones.");
+        await fixture.captureConnectionTimeline("five-second real-microphone baseline", 5000);
+        for (const role of ["A", "B"]) {
+          const receiverRole = role === "A" ? "B" : "A";
+          await fixture.setPressed(role, "#mic", true);
+          await fixture.waitForRemoteState(receiverRole, fixture.names[role], "mic", "on");
+          await fixture.assertAudioProgress(role, receiverRole, `${role} real microphone first enable`);
+          const state = await fixture.diagnostics(role);
+          assert.equal(state.audioCaptureSettings?.echoCancellation, true,
+            `${role}: real microphone capture should report echo cancellation enabled`);
+        }
+        await fixture.captureConnectionTimeline("15 seconds after first microphone enables", 15000);
+        await fixture.assertPeersConnected("real microphone first-enable echo acceptance");
+        await fixture.assertNoDuplicateParticipants();
+      }
+    },
+    {
       name: "real camera acceptance: moving video and connected peers",
       when: "realMedia",
       profile: "real-media",
@@ -2649,6 +3055,7 @@ async function main() {
           fixture.assertAudioProgress("A", "B", "real microphone A -> B"),
           fixture.assertAudioProgress("B", "A", "real microphone B -> A")
         ]);
+        reportAudioQuality("real-media live", await Promise.all([fixture.diagnostics("A"), fixture.diagnostics("B")]));
         await fixture.waitForStability(stabilityMs, stabilityMs + 30000);
         await fixture.assertPeersConnected("real capture stability");
         await fixture.assertNoDuplicateParticipants();
@@ -2692,6 +3099,13 @@ async function main() {
       async run(fixture) {
         await fixture.join("A");
         await fixture.join("B");
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#mic", true)));
+        await Promise.all([
+          fixture.waitForRemoteState("B", fixture.names.A, "mic", "on"),
+          fixture.waitForRemoteState("A", fixture.names.B, "mic", "on"),
+          fixture.assertAudioProgress("A", "B", "network profile baseline audio A -> B"),
+          fixture.assertAudioProgress("B", "A", "network profile baseline audio B -> A")
+        ]);
         await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#camera", true)));
         await Promise.all([
           fixture.waitForRemoteState("B", fixture.names.A, "camera", "on"),
@@ -2789,7 +3203,8 @@ async function main() {
           contexts,
           traceContexts,
           timeCodedCamera: scenario.timecodedCamera === true,
-          timeCodedCameraRoles: scenario.timeCodedCameraRoles
+          timeCodedCameraRoles: scenario.timeCodedCameraRoles,
+          timeCodedAudioRoles: scenario.timeCodedAudioRoles
         });
         await scenario.run(fixture);
         results.push({ name: scenario.name, status: "PASS", required: true, durationMs: Date.now() - startedAt });

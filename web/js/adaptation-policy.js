@@ -21,6 +21,56 @@ function packetLossPercentFromDeltas(lostPackets, receivedPackets) {
   return Number((lostPackets / totalPackets * 100).toFixed(1));
 }
 
+function packetCounterDeltas(previous, current) {
+  if (!previous || !current ||
+      !Number.isFinite(previous.lost) || previous.lost < 0 ||
+      !Number.isFinite(previous.received) || previous.received < 0 ||
+      !Number.isFinite(current.lost) || current.lost < 0 ||
+      !Number.isFinite(current.received) || current.received < 0 ||
+      current.lost < previous.lost || current.received < previous.received) {
+    return null;
+  }
+  return {
+    lost: current.lost - previous.lost,
+    received: current.received - previous.received
+  };
+}
+
+function classifyParticipantQuality(stats, rttMs) {
+  if (!stats || !stats.hasData) return "unknown";
+  const loss = Number.isFinite(stats.packetLossPct) && stats.packetLossPct >= 0
+    ? stats.packetLossPct
+    : null;
+  if ((loss != null && loss > 5) || (rttMs != null && rttMs > 300)) return "poor";
+  if ((loss != null && loss >= 2) || (rttMs != null && rttMs >= 150)) return "degraded";
+  if (loss != null || rttMs != null) return "good";
+  return "unknown";
+}
+
+function stabilizeParticipantQuality(current, candidate, poorSamples = 0, goodSamples = 0) {
+  const quality = ["good", "degraded", "poor", "unknown"].includes(current) ? current : "unknown";
+  if (candidate === "unknown") {
+    return { quality, poorSamples: 0, goodSamples: 0 };
+  }
+  if (candidate === "good") {
+    const nextGoodSamples = goodSamples + 1;
+    return {
+      quality: nextGoodSamples >= 5 ? "good" : quality,
+      poorSamples: 0,
+      goodSamples: nextGoodSamples
+    };
+  }
+  if (candidate !== "degraded" && candidate !== "poor") {
+    return { quality, poorSamples: 0, goodSamples: 0 };
+  }
+  const nextPoorSamples = poorSamples + 1;
+  return {
+    quality: nextPoorSamples >= 2 ? candidate : quality,
+    poorSamples: nextPoorSamples,
+    goodSamples: 0
+  };
+}
+
 function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
   if (poorSamples >= 2 && level > 0) {
     return { level: level - 1, reset: "poor" };
@@ -201,7 +251,10 @@ if (typeof module !== "undefined") {
   module.exports = {
     normalizePacketCounter,
     normalizePacketLoss10,
+    packetCounterDeltas,
     packetLossPercentFromDeltas,
+    classifyParticipantQuality,
+    stabilizeParticipantQuality,
     chooseAdaptationLevel,
     shouldRecoverVideo,
     chooseCameraLayer,

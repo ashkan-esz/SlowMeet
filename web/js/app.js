@@ -1503,6 +1503,8 @@ let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
 let statsTimer;
 let previousStats;
+const connectionDiagnosticHistory = [];
+const maxConnectionDiagnosticSamples = 30;
 const connectionMetrics = {
   status: "Connecting",
   iceState: "new",
@@ -1606,6 +1608,7 @@ const pendingCandidates = [];
 const participantElements = new Map();
 const participantRemovalTimers = new Map();
 const remoteAudioElements = new Set();
+const participantQualitySamples = new Map();
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
@@ -1698,6 +1701,24 @@ function isUnavailableDeviceError(error) {
   return error?.name === "NotFoundError" || error?.name === "OverconstrainedError";
 }
 
+function audioCaptureConstraints(deviceID) {
+  return {
+    audio: {
+      echoCancellation: { ideal: true },
+      ...(deviceID ? { deviceId: { exact: deviceID } } : {})
+    }
+  };
+}
+
+function audioProcessingSettings(track) {
+  const settings = track?.getSettings?.() || {};
+  return {
+    echoCancellation: typeof settings.echoCancellation === "boolean" ? settings.echoCancellation : null,
+    noiseSuppression: typeof settings.noiseSuppression === "boolean" ? settings.noiseSuppression : null,
+    autoGainControl: typeof settings.autoGainControl === "boolean" ? settings.autoGainControl : null
+  };
+}
+
 async function getUserMediaWithDeviceFallback(kind, deviceID, preferredConstraints, fallbackConstraints) {
   try {
     return await navigator.mediaDevices.getUserMedia(preferredConstraints);
@@ -1730,10 +1751,10 @@ async function replaceLocalDevice(kind, deviceID) {
     showToast("The camera will switch after screen sharing stops.");
   }
   const constraints = kind === "audio"
-    ? { audio: deviceID ? { deviceId: { exact: deviceID } } : true }
+    ? audioCaptureConstraints(deviceID)
     : { video: { ...cameraConstraints, ...(deviceID ? { deviceId: { exact: deviceID } } : {}) } };
   const fallbackConstraints = kind === "audio"
-    ? { audio: true }
+    ? audioCaptureConstraints()
     : { video: { ...cameraConstraints } };
   try {
     const stream = await getUserMediaWithDeviceFallback(kind, deviceID, constraints, fallbackConstraints);
@@ -2073,13 +2094,14 @@ async function disableCamera() {
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = null;
   setLocalMediaControls();
+  localCameraTrack?.stop();
   const detachError = await detachPromise;
   if (stoppedTrack) stoppedLocalStream?.removeTrack(stoppedTrack);
   localCameraTrack = undefined;
   localCameraStream = undefined;
   cameraTrack = undefined;
-  for (const track of new Set([stoppedTrack, ...(stoppedStream?.getTracks() || [])].filter(Boolean))) {
-    track.stop();
+  for (const track of new Set((stoppedStream?.getTracks() || []).filter(Boolean))) {
+    if (track !== stoppedTrack) track.stop();
   }
   sendMediaState();
   if (detachError && peer === stoppedPeer) {
@@ -2280,6 +2302,23 @@ function setParticipantQuality(element, quality) {
   updateParticipantAriaLabel(element);
 }
 
+function setParticipantQualityFromSample(element, participantID, candidate) {
+  const current = element.item.dataset.quality || "unknown";
+  const previous = participantQualitySamples.get(participantID) || {
+    quality: current,
+    poorSamples: 0,
+    goodSamples: 0
+  };
+  const next = stabilizeParticipantQuality(
+    current,
+    candidate,
+    previous.poorSamples,
+    previous.goodSamples
+  );
+  participantQualitySamples.set(participantID, next);
+  setParticipantQuality(element, next.quality);
+}
+
 function participantForInboundStat(stat, trackStatsOwners) {
   for (const key of [stat.trackIdentifier, stat.trackId, stat.receiverId]) {
     if (!key) continue;
@@ -2289,15 +2328,6 @@ function participantForInboundStat(stat, trackStatsOwners) {
     if (statOwner) return statOwner;
   }
   return undefined;
-}
-
-function classifyParticipantQuality(stats, rttMs) {
-  if (!stats || !stats.hasData) return "unknown";
-  const loss = stats.totalPackets > 0 ? stats.lostPackets / stats.totalPackets * 100 : null;
-  if ((loss != null && loss > 5) || (rttMs != null && rttMs > 300)) return "poor";
-  if ((loss != null && loss >= 2) || (rttMs != null && rttMs >= 150)) return "degraded";
-  if (loss != null || rttMs != null) return "good";
-  return "unknown";
 }
 
 function remoteMediaStream(streams, track) {
@@ -2358,10 +2388,12 @@ function setParticipantConnectionState(state) {
     element.item.dataset.connection = state;
     element.item.classList.toggle("is-disconnected", disconnected);
     if (disconnected) {
+      participantQualitySamples.delete(participantID);
       setParticipantQuality(element, "poor");
       element.micIndicator.setAttribute("aria-label", `${element.name.textContent} disconnected`);
       updateParticipantAriaLabel(element);
     } else {
+      participantQualitySamples.delete(participantID);
       setParticipantQuality(element, element.item.dataset.debugPoorConnection === "true" ? "poor" : "unknown");
       if (element.item.dataset.camera !== "unknown" || element.item.dataset.mic !== "unknown") {
         updateMediaState({
@@ -2491,9 +2523,17 @@ function resetSpeakerDetection() {
     audioContext = undefined;
   }
 }
+function diagnosticCopyPayload() {
+  let current = diagnostics.textContent || "";
+  try {
+    current = JSON.parse(current);
+  } catch (_) {}
+  return JSON.stringify({ current, recentSamples: connectionDiagnosticHistory }, null, 2);
+}
+
 copyDiagnostics.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(diagnostics.textContent || "");
+    await navigator.clipboard.writeText(diagnosticCopyPayload());
     diagnosticsStatus.textContent = "Diagnostics copied.";
   } catch (_) {
     diagnosticsStatus.textContent = "Clipboard access is unavailable.";
@@ -2857,6 +2897,7 @@ function connectSocket(name, password) {
       if (element) {
         if (participantMenuOwner?.participantID === message.participant.id) closeParticipantMenu(false);
         if (pinnedParticipantIDs.includes(message.participant.id)) setPinnedParticipant(message.participant.id);
+        participantQualitySamples.delete(message.participant.id);
         remoteAudioElements.delete(element.audio);
         removeSpeakerAnalyzer(message.participant.id);
         forgetRemoteTracks(element, message.participant.id);
@@ -3153,8 +3194,8 @@ async function startWebRTC() {
       const audioStream = await getUserMediaWithDeviceFallback(
         "audio",
         selectedDeviceIDs.audio,
-        { audio: selectedDeviceIDs.audio ? { deviceId: { exact: selectedDeviceIDs.audio } } : true },
-        { audio: true }
+        audioCaptureConstraints(selectedDeviceIDs.audio),
+        audioCaptureConstraints()
       );
       audioStream.getAudioTracks().forEach((track) => {
         track.enabled = false;
@@ -3569,11 +3610,24 @@ async function updateDiagnostics() {
   let receivedPacketsSincePreviousSample = 0;
   const recordPacketCounters = (stat, lostPackets, receivedPackets) => {
     const previous = previousStats?.packetCounters?.get(stat.id);
-    if (previous && lostPackets >= previous.lost && receivedPackets >= previous.received) {
-      lostPacketsSincePreviousSample += lostPackets - previous.lost;
-      receivedPacketsSincePreviousSample += receivedPackets - previous.received;
+    const current = { lost: lostPackets, received: receivedPackets };
+    const deltas = packetCounterDeltas(previous, current);
+    if (stat.id) packetCounters.set(stat.id, current);
+    if (deltas) {
+      lostPacketsSincePreviousSample += deltas.lost;
+      receivedPacketsSincePreviousSample += deltas.received;
     }
-    packetCounters.set(stat.id, { lost: lostPackets, received: receivedPackets });
+    return deltas;
+  };
+  const recordParticipantPacketDeltas = (participantID, deltas) => {
+    if (!participantID || !deltas) return;
+    const stats = participantStats.get(participantID) || {
+      hasData: false, lostPackets: 0, receivedPackets: 0
+    };
+    stats.hasData = true;
+    stats.lostPackets += deltas.lost;
+    stats.receivedPackets += deltas.received;
+    participantStats.set(participantID, stats);
   };
   const selectedPair = selectedCandidatePair(report);
   values.rttMs = selectedCandidatePairRTT(report);
@@ -3611,7 +3665,7 @@ async function updateDiagnostics() {
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
-      recordPacketCounters(stat, lostPackets, receivedPackets);
+      const packetDeltas = recordPacketCounters(stat, lostPackets, receivedPackets);
       hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
@@ -3637,39 +3691,17 @@ async function updateDiagnostics() {
           hasCameraFrameStats = true;
         }
       }
-      totalLost += lostPackets;
-      totalReceived += receivedPackets;
       const participantID = participantForInboundStat(stat, trackStatsOwners);
-      if (participantID) {
-        const stats = participantStats.get(participantID) || {
-          hasData: false, lostPackets: 0, receivedPackets: 0, totalPackets: 0
-        };
-        stats.hasData = true;
-        stats.lostPackets += lostPackets;
-        stats.receivedPackets += receivedPackets;
-        stats.totalPackets = stats.lostPackets + stats.receivedPackets;
-        participantStats.set(participantID, stats);
-      }
+      recordParticipantPacketDeltas(participantID, packetDeltas);
     }
     if (stat.type === "inbound-rtp" && stat.kind === "audio") {
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
-      recordPacketCounters(stat, lostPackets, receivedPackets);
+      const packetDeltas = recordPacketCounters(stat, lostPackets, receivedPackets);
       receivedAudioBytes += stat.bytesReceived || 0;
       if (stat.jitter != null && values.jitterMs == null) values.jitterMs = Math.round(stat.jitter * 1000);
-      totalLost += lostPackets;
-      totalReceived += receivedPackets;
       const participantID = participantForInboundStat(stat, trackStatsOwners);
-      if (participantID) {
-        const stats = participantStats.get(participantID) || {
-          hasData: false, lostPackets: 0, receivedPackets: 0, totalPackets: 0
-        };
-        stats.hasData = true;
-        stats.lostPackets += lostPackets;
-        stats.receivedPackets += receivedPackets;
-        stats.totalPackets = stats.lostPackets + stats.receivedPackets;
-        participantStats.set(participantID, stats);
-      }
+      recordParticipantPacketDeltas(participantID, packetDeltas);
     }
   });
   if (selectedCandidatePair) {
@@ -3750,26 +3782,29 @@ async function updateDiagnostics() {
   updateConnectionMetrics(values);
   participantElements.forEach((element, id) => {
     if (element.item.dataset.debugPoorConnection === "true") {
+      participantQualitySamples.delete(id);
       setParticipantQuality(element, "poor");
       return;
     }
     if (id === localParticipantID) {
       const localStats = {
-        hasData: totalLost + totalReceived > 0 || values.rttMs != null,
-        lostPackets: totalLost,
-        receivedPackets: totalReceived,
-        totalPackets: totalLost + totalReceived
+        hasData: lossKnown || values.rttMs != null,
+        packetLossPct: values.packetLoss
       };
-      setParticipantQuality(element, classifyParticipantQuality(localStats, values.rttMs));
+      setParticipantQualityFromSample(element, id, classifyParticipantQuality(localStats, values.rttMs));
       return;
     }
-    const remoteStats = participantStats.get(id) || {
-      hasData: values.rttMs != null || values.packetLoss != null,
-      lostPackets: 0,
-      receivedPackets: 0,
-      totalPackets: 0
-    };
-    setParticipantQuality(element, classifyParticipantQuality(remoteStats, values.rttMs));
+    const participantLossStats = participantStats.get(id);
+    const remoteStats = participantLossStats
+      ? {
+        hasData: participantLossStats.hasData || values.rttMs != null,
+        packetLossPct: packetLossPercentFromDeltas(
+          participantLossStats.lostPackets,
+          participantLossStats.receivedPackets
+        )
+      }
+      : { hasData: lossKnown || values.rttMs != null, packetLossPct: values.packetLoss };
+    setParticipantQualityFromSample(element, id, classifyParticipantQuality(remoteStats, values.rttMs));
   });
   const packetLoss = values.packetLoss ?? 0;
   const networkCondition = classifyNetworkSample({
@@ -3845,6 +3880,48 @@ async function updateDiagnostics() {
       videoSuspended,
       videoSuspendedAutomatically
     };
+  }
+  values.audioProcessing = audioProcessingSettings(localStream?.getAudioTracks()[0]);
+  connectionDiagnosticHistory.push({
+    timestamp: new Date(values.timestamp).toISOString(),
+    micEnabled: Boolean(localStream?.getAudioTracks().some((track) =>
+      track.readyState === "live" && track.enabled)),
+    audioProcessing: values.audioProcessing,
+    peerState: peer?.connectionState || "missing",
+    iceState: peer?.iceConnectionState || "missing",
+    signalingState: peer?.signalingState || "missing",
+    connectionLevel: lastConnectionLevel || "connecting",
+    connectionStatus: connectionMetrics.status,
+    warning: meetingAlert && !meetingAlert.hidden ? meetingAlert.textContent : "",
+    metrics: {
+      rttMs: values.rttMs,
+      jitterMs: values.jitterMs,
+      packetLossPct: values.packetLoss,
+      inboundAudioKbps: values.inboundAudioKbps,
+      outboundAudioKbps: values.outboundAudioKbps,
+      audioBytesReceived: receivedAudioBytes,
+      audioBytesSent: sentAudioBytes
+    },
+    tiles: [...participantElements.entries()].map(([participantID, element]) => ({
+      local: participantID === localParticipantID,
+      quality: element.item.dataset.quality || "unknown",
+      rttMs: values.rttMs,
+      packetLossPct: participantID === localParticipantID
+        ? values.packetLoss
+        : participantStats.has(participantID)
+          ? packetLossPercentFromDeltas(
+            participantStats.get(participantID).lostPackets,
+            participantStats.get(participantID).receivedPackets
+          )
+          : values.packetLoss,
+      connection: element.item.dataset.connection || "connected",
+      mic: element.item.dataset.mic || "unknown",
+      camera: element.item.dataset.camera || "unknown"
+    }))
+  });
+  if (connectionDiagnosticHistory.length > maxConnectionDiagnosticSamples) {
+    connectionDiagnosticHistory.splice(0,
+      connectionDiagnosticHistory.length - maxConnectionDiagnosticSamples);
   }
   diagnostics.textContent = JSON.stringify(values, null, 2);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
@@ -4709,6 +4786,7 @@ leave.addEventListener("click", () => {
   lastConnectionLevel = "";
   pendingConnectionLevel = "";
   pendingConnectionSamples = 0;
+  connectionDiagnosticHistory.splice(0);
   diagnostics.textContent = "Waiting for media statistics…";
   if (settingsPreview) {
     settingsPreview.srcObject = null;

@@ -551,6 +551,65 @@ const scenarios = [
     }
   },
   {
+    name: "A microphone start captures both browsers' connection quality timeline",
+    timeCodedAudioRoles: ["A", "B"],
+    async run(fixture) {
+      await joinPair(fixture, "A microphone diagnostics startup");
+      for (const role of roles) {
+        const requestedEchoCancellation = await fixture.page(role).evaluate(() =>
+          window.__slowMeetTest?.audioEchoCancellationRequested);
+        assert.equal(requestedEchoCancellation?.ideal, true,
+          `${role}: microphone capture should request echo cancellation`);
+      }
+      await fixture.captureConnectionTimeline("five-second pre-microphone baseline", 5000);
+
+      await fixture.setPressed("A", "#mic", true);
+      const afterOpen = fixture.captureConnectionTimeline("15 seconds after A opens microphone", 15000);
+      await fixture.waitForRemoteState("B", participants.A, "mic", "on");
+      await fixture.assertAudioProgress("A", "B", "A microphone start diagnostic flow");
+      await fixture.assertAudioMarkerDelay("A", "B", "first A microphone marker to B");
+      await afterOpen;
+      await fixture.assertPeersConnected("A microphone start diagnostic flow");
+      await fixture.assertNoDuplicateParticipants();
+      let browserBDiagnostics;
+      for (const [role, copiedText] of await Promise.all(["A", "B"].map(async (role) =>
+        [role, await fixture.copyDiagnostics(role)]))) {
+        const copied = JSON.parse(copiedText);
+        if (role === "B") browserBDiagnostics = copied;
+        assert.ok(Array.isArray(copied.recentSamples) && copied.recentSamples.length > 0,
+          `${role}: copied diagnostics should include the recent connection timeline`);
+        assert.ok(copied.recentSamples.length <= 30,
+          `${role}: copied diagnostics should stay within the bounded 30-sample history`);
+        assert.ok(copied.recentSamples.every((sample) => sample.peerState && sample.iceState &&
+          sample.connectionLevel && typeof sample.warning === "string" && sample.metrics &&
+          Array.isArray(sample.tiles) && sample.tiles.some((tile) => tile.local) &&
+          sample.tiles.some((tile) => !tile.local) &&
+          sample.tiles.every((tile) => "rttMs" in tile && "packetLossPct" in tile)),
+        `${role}: copied diagnostics should include connection metrics and both tile states per sample`);
+        assert.ok(copied.recentSamples.some((sample) => sample.micEnabled === (role === "A")),
+          `${role}: copied diagnostics should record the local microphone state`);
+        assert.ok(copied.recentSamples.every((sample) => sample.audioProcessing &&
+          (typeof sample.audioProcessing.echoCancellation === "boolean" ||
+            sample.audioProcessing.echoCancellation === null)),
+        `${role}: copied diagnostics should record available echo-cancellation settings`);
+        assert.ok(!JSON.stringify(copied).includes("Media A") && !JSON.stringify(copied).includes("Media B"),
+          `${role}: copied diagnostics should omit participant names`);
+      }
+      const afterRemoteMicSamples = browserBDiagnostics.recentSamples.filter((sample) =>
+        sample.tiles.some((tile) => !tile.local && tile.mic === "on"));
+      assert.ok(afterRemoteMicSamples.length >= 2,
+        "B should retain multiple diagnostic samples after A's microphone becomes active");
+      assert.ok(afterRemoteMicSamples.every((sample) => sample.tiles.every((tile) =>
+        tile.quality !== "degraded" && tile.quality !== "poor")),
+      "healthy loopback audio after A opens the microphone must not mark either B tile unstable");
+
+      await fixture.setPressed("B", "#mic", true);
+      await fixture.waitForRemoteState("A", participants.B, "mic", "on");
+      await fixture.assertAudioProgress("B", "A", "B microphone first enable diagnostic flow");
+      await fixture.assertAudioMarkerDelay("B", "A", "first B microphone marker to A");
+    }
+  },
+  {
     name: "microphone mute and unmute with repeated toggles in both directions",
     async run(fixture) {
       await joinPair(fixture, "microphone lifecycle startup");

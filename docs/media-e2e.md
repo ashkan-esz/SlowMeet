@@ -7,6 +7,44 @@ microphone media, reports every scenario as `PASS`, `FAIL`, or `NOT RUN`, and
 continues after an individual scenario fails. Any selected scenario failure
 returns a nonzero exit status.
 
+## Audio quality and delay
+
+Microphone E2E checks verify outbound and inbound audio RTP progress in both
+directions, then verify the remote audio element is playing and its playback
+time advances. Diagnostics report packet loss, RTP jitter, average jitter-buffer
+delay, sample concealment counters when Chromium exposes them, and candidate-pair
+RTT. RTT and jitter-buffer delay are separate indicators; neither is a
+one-way mouth-to-ear measurement. The first-microphone scenario also sends a
+time-coded synthetic audio marker in each direction and reports its one-way
+arrival at the remote Web Audio capture. This measures the browser media path,
+not physical microphone-to-speaker delay or acoustic echo. Missing optional
+browser statistics are reported as unavailable rather than treated as zero.
+
+Print per-direction audio samples during the microphone toggle scenario with:
+
+```sh
+MEDIA_E2E_SCENARIO='microphone mute and unmute with repeated toggles in both directions' make test-media-e2e
+```
+
+To capture the connection warning around A's one-way microphone start in both
+browser contexts, run:
+
+```sh
+MEDIA_E2E_SCENARIO="A microphone start captures both browsers' connection quality timeline" make test-media-e2e
+```
+
+The browser's **Copy diagnostics** action includes the current sample and the
+latest 30 one-second samples. Samples contain local/remote tile quality, the
+connection warning, peer and ICE states, RTT, jitter, packet loss, and audio
+rates and byte counters. The history stays in memory in that browser and is
+cleared when the meeting ends; it is copied only after the user selects the
+diagnostics action. Participant names and device details are not included.
+
+The isolated network profile records baseline, impaired, and recovery audio
+statistics while keeping both microphones active. It uses the same loopback
+delay, bandwidth, and packet-loss profiles described below and verifies that
+audio RTP continues in each direction.
+
 ## Camera stop/resume regression
 
 The required `full` profile includes a time-coded synthetic-camera transition
@@ -81,9 +119,15 @@ other known-good capture sources:
 make test-media-e2e-real
 ```
 
-Acceptance requires decoded remote frames and playback time to advance in both
-directions while both participants remain connected. A synthetic pass does not
-replace this hardware check.
+Acceptance requires decoded remote frames and remote audio playback time to
+advance in both directions while both participants remain connected. During the
+headed stability window, speak a short phrase in each direction and listen for
+gaps, distortion, or echo; headphones help avoid feedback. The E2E report records
+network and jitter-buffer indicators, while the listening check covers audible
+quality. The real-media profile also checks first mic enable with A and B using
+the same device's microphone and speakers, records whether echo cancellation is
+active, and asks the operator to repeat with headphones. A synthetic pass does
+not replace this hardware check.
 
 Run generated changing-content screen-share tests in headed Chromium:
 

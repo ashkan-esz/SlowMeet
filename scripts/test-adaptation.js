@@ -1,7 +1,10 @@
 const {
   normalizePacketCounter,
   normalizePacketLoss10,
+  packetCounterDeltas,
   packetLossPercentFromDeltas,
+  classifyParticipantQuality,
+  stabilizeParticipantQuality,
   chooseAdaptationLevel,
   shouldRecoverVideo,
   chooseCameraLayer,
@@ -35,6 +38,64 @@ if (packetLossPercentFromDeltas(0, 0) !== null ||
     packetLossPercentFromDeltas(0, 10) !== 0 ||
     packetLossPercentFromDeltas(-1, 10) !== null) {
   throw new Error("packet loss must reflect the current counter interval and ignore empty or invalid samples");
+}
+const packetDeltas = packetCounterDeltas(
+  { lost: 40, received: 960 },
+  { lost: 41, received: 1960 }
+);
+if (packetDeltas?.lost !== 1 || packetDeltas?.received !== 1000 ||
+    packetLossPercentFromDeltas(packetDeltas.lost, packetDeltas.received) !== 0.1 ||
+    classifyParticipantQuality({
+      hasData: true,
+      lostPackets: 40,
+      receivedPackets: 960,
+      totalPackets: 1000,
+      packetLossPct: packetLossPercentFromDeltas(packetDeltas.lost, packetDeltas.received)
+    }, 45) !== "good") {
+  throw new Error("participant quality must use current RTP counter deltas, not cumulative packet loss");
+}
+if (packetCounterDeltas(undefined, { lost: 3, received: 10 }) !== null ||
+    packetCounterDeltas({ lost: 5, received: 10 }, { lost: 0, received: 0 }) !== null ||
+    packetCounterDeltas({ lost: 5, received: 10 }, { lost: 5, received: 10 })?.lost !== 0) {
+  throw new Error("new or reset RTP counters must establish a baseline without fabricating packet loss");
+}
+if (classifyParticipantQuality({ hasData: true, packetLossPct: 2 }, 45) !== "degraded" ||
+    classifyParticipantQuality({ hasData: true, packetLossPct: 5.1 }, 45) !== "poor" ||
+    classifyParticipantQuality({ hasData: true, packetLossPct: null }, 151) !== "degraded") {
+  throw new Error("participant quality must preserve existing interval-loss and RTT thresholds");
+}
+
+let participantQuality = stabilizeParticipantQuality("unknown", "good");
+if (participantQuality.quality !== "unknown" || participantQuality.goodSamples !== 1) {
+  throw new Error("participant quality must wait for five healthy samples before showing good");
+}
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "poor", participantQuality.poorSamples, participantQuality.goodSamples);
+if (participantQuality.quality !== "unknown" || participantQuality.poorSamples !== 1) {
+  throw new Error("one poor sample must not mark participant tiles unstable");
+}
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "good", participantQuality.poorSamples, participantQuality.goodSamples);
+if (participantQuality.quality !== "unknown" || participantQuality.poorSamples !== 0) {
+  throw new Error("a healthy sample must reset a pending poor streak");
+}
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "degraded", participantQuality.poorSamples, participantQuality.goodSamples);
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "degraded", participantQuality.poorSamples, participantQuality.goodSamples);
+if (participantQuality.quality !== "degraded") {
+  throw new Error("two consecutive degraded samples should mark participant tiles degraded");
+}
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "poor", participantQuality.poorSamples, participantQuality.goodSamples);
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "poor", participantQuality.poorSamples, participantQuality.goodSamples);
+if (participantQuality.quality !== "poor") {
+  throw new Error("two consecutive poor samples should mark participant tiles poor");
+}
+for (let sample = 0; sample < 4; sample += 1) {
+  participantQuality = stabilizeParticipantQuality(participantQuality.quality, "good", participantQuality.poorSamples, participantQuality.goodSamples);
+}
+if (participantQuality.quality !== "poor") {
+  throw new Error("participant warnings should remain until five healthy samples arrive");
+}
+participantQuality = stabilizeParticipantQuality(participantQuality.quality, "good", participantQuality.poorSamples, participantQuality.goodSamples);
+if (participantQuality.quality !== "good") {
+  throw new Error("five consecutive healthy samples should clear participant warnings");
 }
 
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
@@ -289,7 +350,7 @@ if (cameraStopStart < 0 || cameraStopEnd < 0 ||
 const cameraStartStart = appSource.indexOf("async function enableCameraOnce");
 const cameraStartEnd = appSource.indexOf("\nasync function disableCamera()", cameraStartStart);
 const cameraStartSource = appSource.slice(cameraStartStart, cameraStartEnd);
-const cameraRenegotiationGuard = /if\s*\(\s*!cameraSenderNegotiated\s*&&\s*negotiate\s*\)\s*\{\s*await renegotiateLocalMedia\(\);\s*cameraSenderNegotiated\s*=\s*true;\s*\}/;
+const cameraRenegotiationGuard = /if\s*\(\s*!cameraSenderNegotiated\s*&&\s*negotiate\s*\)\s*\{\s*await renegotiateLocalMedia\(\);\s*(?:if\s*\(\s*peer\s*!==\s*currentPeer\s*\)\s*throw new Error\("media connection changed"\);\s*)?cameraSenderNegotiated\s*=\s*true;\s*\}/;
 if (cameraStartStart < 0 || cameraStartEnd < 0 ||
     !cameraStartSource.includes("cameraSender && cameraSenderPeer === currentPeer") ||
     !cameraStartSource.includes("await existingSender.replaceTrack(track)") ||
@@ -526,10 +587,13 @@ for (const behavior of [
   "videoSuspendedAutomatically",
   "setVideoSending(false, true)",
   "participantForInboundStat",
-  "setParticipantQuality(element, classifyParticipantQuality",
+  "setParticipantQualityFromSample(element, id, classifyParticipantQuality",
+  "stabilizeParticipantQuality(",
   "trackIdentifier",
   "packetsLost",
   "normalizePacketCounter(stat.packetsLost)",
+  "packetCounterDeltas(previous, current)",
+  "packetLossPercentFromDeltas(",
   "packet_loss10: normalizePacketLoss10(values.packetLoss)"
 ]) {
   if (!appSource.includes(behavior)) {
