@@ -160,6 +160,54 @@ function selectedCandidatePairRTT(report) {
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
 }
 
+function sampleMinimumJitterBufferTarget(previous, stat) {
+  const emittedCount = stat?.jitterBufferEmittedCount;
+  const minimumDelay = stat?.jitterBufferMinimumDelay;
+  const id = stat?.id;
+  if (typeof id !== "string" || !Number.isFinite(emittedCount) || emittedCount < 0 ||
+      !Number.isFinite(minimumDelay) || minimumDelay < 0) {
+    return { state: previous || null, targetMs: null };
+  }
+
+  const state = previous && previous.id === id
+    ? { ...previous, recent: [...previous.recent] }
+    : { id, emittedCount, minimumDelay, recent: [] };
+  if (previous && previous.id === id) {
+    const emittedDelta = emittedCount - state.emittedCount;
+    const delayDelta = minimumDelay - state.minimumDelay;
+    if (emittedDelta < 0 || delayDelta < 0) {
+      return { state: { id, emittedCount, minimumDelay, recent: [] }, targetMs: null };
+    }
+    state.emittedCount = emittedCount;
+    state.minimumDelay = minimumDelay;
+    if (emittedDelta > 0) {
+      state.recent.push(delayDelta / emittedDelta * 1000);
+      if (state.recent.length > 3) state.recent.shift();
+    }
+  }
+
+  if (state.recent.length === 0) return { state, targetMs: null };
+  const sorted = [...state.recent].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+  return { state, targetMs: Math.min(4000, Math.max(0, Math.round(median))) };
+}
+
+function setVideoJitterBufferTarget(receiver, targetMs) {
+  if (!receiver || !("jitterBufferTarget" in receiver) ||
+      !Number.isFinite(targetMs) || targetMs < 0) return false;
+  const boundedTarget = Math.min(4000, Math.max(0, Math.round(targetMs)));
+  try {
+    if (receiver.jitterBufferTarget === boundedTarget) return true;
+    receiver.jitterBufferTarget = boundedTarget;
+    return receiver.jitterBufferTarget === boundedTarget;
+  } catch (_) {
+    return false;
+  }
+}
+
 function formatRTT(rttMs) {
   if (!Number.isFinite(rttMs) || rttMs < 0) return null;
   if (rttMs < 1) return "<1 ms";
@@ -264,6 +312,8 @@ if (typeof module !== "undefined") {
     isBelowBitrate,
     selectedCandidatePair,
     selectedCandidatePairRTT,
+    sampleMinimumJitterBufferTarget,
+    setVideoJitterBufferTarget,
     formatRTT,
     classifyNetworkSample,
     shouldPauseVideo,

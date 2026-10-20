@@ -147,5 +147,5 @@ assert.match(appSource, /bindRemoteCameraTrack\(video, track, \(\) => updatePart
 assert.match(appSource, /bindRemoteCameraTrack\(element\.cameraVideo, track, \(\) => updateParticipantVideoVisibility\(element\)\)/);
 assert.match(appSource, /remoteCameraLayerTracks\.get\(participantID\) !== tracks \|\| tracks\.get\(layer\) !== track/);
 assert.match(appSource, /bindRemoteCameraTrack\.selectLayer\(tracks, cameraLayer\)/);
-assert.match(pageSource, /<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
+assert.match(pageSource, /<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/camera-readiness\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
 console.log("remote camera video tests passed");

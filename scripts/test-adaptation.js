@@ -14,6 +14,8 @@ const {
   isBelowBitrate,
   selectedCandidatePair,
   selectedCandidatePairRTT,
+  sampleMinimumJitterBufferTarget,
+  setVideoJitterBufferTarget,
   formatRTT,
   classifyNetworkSample,
   shouldPauseVideo,
@@ -22,6 +24,45 @@ const {
 
 const transition = (level, poor, good) =>
   chooseAdaptationLevel(level, poor, good, 4);
+
+let jitterBufferSample = sampleMinimumJitterBufferTarget(null, {
+  id: "video-in-1", jitterBufferMinimumDelay: 0.1, jitterBufferEmittedCount: 10
+});
+if (jitterBufferSample.targetMs !== null) {
+  throw new Error("the first jitter-buffer sample must establish a counter baseline");
+}
+jitterBufferSample = sampleMinimumJitterBufferTarget(jitterBufferSample.state, {
+  id: "video-in-1", jitterBufferMinimumDelay: 0.2, jitterBufferEmittedCount: 20
+});
+if (jitterBufferSample.targetMs !== 10) {
+  throw new Error("minimum jitter-buffer delay should use the latest emitted-frame interval");
+}
+jitterBufferSample = sampleMinimumJitterBufferTarget(jitterBufferSample.state, {
+  id: "video-in-1", jitterBufferMinimumDelay: 0.25, jitterBufferEmittedCount: 30
+});
+if (jitterBufferSample.targetMs !== 8) {
+  throw new Error("minimum jitter-buffer targets should use a three-sample median");
+}
+const resetJitterBufferSample = sampleMinimumJitterBufferTarget(jitterBufferSample.state, {
+  id: "video-in-1", jitterBufferMinimumDelay: 0.01, jitterBufferEmittedCount: 1
+});
+if (resetJitterBufferSample.targetMs !== null || resetJitterBufferSample.state.recent.length !== 0) {
+  throw new Error("a jitter-buffer counter reset must clear its sample history");
+}
+if (sampleMinimumJitterBufferTarget(jitterBufferSample.state, {}).targetMs !== null) {
+  throw new Error("missing jitter-buffer stats must not produce a target");
+}
+
+let assignedJitterBufferTarget = null;
+const jitterBufferReceiver = {
+  get jitterBufferTarget() { return assignedJitterBufferTarget; },
+  set jitterBufferTarget(value) { assignedJitterBufferTarget = value; }
+};
+if (!setVideoJitterBufferTarget(jitterBufferReceiver, 24.6) || assignedJitterBufferTarget !== 25 ||
+    !setVideoJitterBufferTarget(jitterBufferReceiver, 5000) || assignedJitterBufferTarget !== 4000 ||
+    setVideoJitterBufferTarget({}, 25) || setVideoJitterBufferTarget(jitterBufferReceiver, NaN)) {
+  throw new Error("video jitter-buffer targets must be bounded and safely feature-detected");
+}
 
 if (normalizePacketCounter(-4) !== 0 || normalizePacketCounter(17) !== 17 ||
     normalizePacketCounter(Number.NaN) !== 0 || normalizePacketCounter(Number.POSITIVE_INFINITY) !== 0) {

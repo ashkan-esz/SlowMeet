@@ -3551,7 +3551,7 @@ function updateConnectionMetrics(values) {
     ? formatRTT(connectionMetrics.rttMs) : connectionMetrics.status;
   if (networkLabel && networkLabel.textContent !== chipLabel) networkLabel.textContent = chipLabel;
   const connectionDescription = lastConnectionLevel === "good" && connectionMetrics.rttMs != null
-    ? `Connection status: ${connectionMetrics.status}, round-trip time ${formatRTT(connectionMetrics.rttMs)}`
+    ? `Connection status: ${connectionMetrics.status}, path round-trip time ${formatRTT(connectionMetrics.rttMs)}`
     : `Connection status: ${connectionMetrics.status}`;
   connection?.setAttribute("aria-label", connectionDescription);
   syncConnectionPopoverStats();
@@ -3603,9 +3603,20 @@ async function updateDiagnostics() {
   let hasInboundVideo = false;
   const codecById = new Map();
   const candidatesById = new Map();
+  const videoReceiversByTrackID = new Map();
+  try {
+    for (const receiver of currentPeer.getReceivers()) {
+      if (receiver.track?.kind === "video" && receiver.track.id) {
+        videoReceiversByTrackID.set(receiver.track.id, receiver);
+      }
+    }
+  } catch (_) {
+    // Keep diagnostics available on implementations without receiver enumeration.
+  }
   const trackStatsOwners = new Map();
   const participantStats = new Map();
   const packetCounters = new Map();
+  const videoPlayoutSamples = new Map(previousStats?.videoPlayoutSamples || []);
   let lostPacketsSincePreviousSample = 0;
   let receivedPacketsSincePreviousSample = 0;
   const recordPacketCounters = (stat, lostPackets, receivedPackets) => {
@@ -3663,6 +3674,12 @@ async function updateDiagnostics() {
       sentAudioBytes += stat.bytesSent || 0;
     }
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
+      const jitterBufferSample = sampleMinimumJitterBufferTarget(videoPlayoutSamples.get(stat.id), stat);
+      if (stat.id) videoPlayoutSamples.set(stat.id, jitterBufferSample.state);
+      const receiver = videoReceiversByTrackID.get(stat.trackIdentifier);
+      if (receiver && jitterBufferSample.targetMs != null) {
+        setVideoJitterBufferTarget(receiver, jitterBufferSample.targetMs);
+      }
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
       const packetDeltas = recordPacketCounters(stat, lostPackets, receivedPackets);
@@ -3755,7 +3772,7 @@ async function updateDiagnostics() {
   previousStats = {
     timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes,
     cameraLost, cameraReceived, cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats,
-    packetCounters
+    packetCounters, videoPlayoutSamples
   };
   const lossKnown = values.packetLoss != null;
   const connectionHasMetrics = values.rttMs != null || lossKnown;

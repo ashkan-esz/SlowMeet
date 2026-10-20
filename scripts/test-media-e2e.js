@@ -269,6 +269,11 @@ async function diagnostics(page) {
                 packetsReceived: stat.packetsReceived,
                 framesReceived: stat.framesReceived,
                 framesDecoded: stat.framesDecoded,
+                jitterBufferMinimumDelay: stat.jitterBufferMinimumDelay,
+                jitterBufferTargetDelay: stat.jitterBufferTargetDelay,
+                jitterBufferEmittedCount: stat.jitterBufferEmittedCount,
+                supportsJitterBufferTarget: "jitterBufferTarget" in receiver,
+                jitterBufferTarget: receiver.jitterBufferTarget ?? null,
                 timestamp: stat.timestamp
               });
             }
@@ -3059,6 +3064,55 @@ async function main() {
         await fixture.waitForStability(stabilityMs, stabilityMs + 30000);
         await fixture.assertPeersConnected("real capture stability");
         await fixture.assertNoDuplicateParticipants();
+      }
+    },
+      {
+      name: "path RTT and video playback age are measured independently",
+      profile: "full",
+      timecodedCamera: true,
+      timeCodedCameraRoles: ["A", "B"],
+      async run(fixture) {
+        await fixture.join("A");
+        await fixture.join("B");
+        await fixture.waitForConnected();
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#camera", true)));
+        await Promise.all([
+          fixture.waitForRemoteState("A", fixture.names.B, "camera", "on"),
+          fixture.waitForRemoteState("B", fixture.names.A, "camera", "on"),
+          fixture.assertRemoteVideoMoves("A", "B", "path/playback delay measurement B -> A"),
+          fixture.assertRemoteVideoMoves("B", "A", "path/playback delay measurement A -> B")
+        ]);
+        const capture = await fixture.beginCameraQualityCapture("path RTT versus playback age");
+        await fixture.waitForCameraQualityBaseline(capture, ["A", "B"]);
+        const playback = await fixture.endCameraQualityCapture(capture, {
+          toggledRoles: [],
+          liveRoles: ["A", "B"],
+          requireMarkers: true
+        });
+        const receiverState = await fixture.diagnostics("A");
+        const pathRttMs = Number.isFinite(receiverState.candidatePair?.currentRoundTripTime)
+          ? receiverState.candidatePair.currentRoundTripTime * 1000 : null;
+        const remoteCamera = receiverState.remoteVideos.find((video) => video.role === "camera");
+        const videoPlayout = remoteCamera?.inboundVideoStats.find((stat) =>
+          Number.isFinite(stat.jitterBufferEmittedCount));
+        const playbackAgeMs = playback.tiles.find((tile) => tile.role === "B" && tile.view === "remote")
+          ?.stableMaxMarkerAgeMs;
+        assert.ok(Number.isFinite(pathRttMs) && pathRttMs >= 0,
+          `selected candidate-pair path RTT must be measured independently: ${JSON.stringify(receiverState.candidatePair)}`);
+        assert.ok(Number.isFinite(playbackAgeMs) && playbackAgeMs >= -250 && playbackAgeMs <= 1000,
+          `timestamp-coded source-to-render age must remain independently measurable: ${JSON.stringify(playback.tiles)}`);
+        assert.ok(remoteCamera && (!videoPlayout || remoteCamera.inboundVideoStats.some((stat) => stat.framesDecoded > 0)),
+          `inbound video must continue decoding when receiver stats are available: ${JSON.stringify(receiverState.remoteVideos)}`);
+        assert.ok(!videoPlayout?.supportsJitterBufferTarget || Number.isFinite(videoPlayout.jitterBufferTarget),
+          `supported video jitter-buffer targets must be applied safely: ${JSON.stringify(videoPlayout)}`);
+        await fixture.assertPeersConnected("path RTT and playback age measurement");
+        console.log(`[delay measurements] ${JSON.stringify({
+          pathRttMs,
+          playbackAgeMs,
+          videoJitterBufferTargetMs: videoPlayout?.jitterBufferTarget ?? null,
+          jitterBufferMinimumDelaySeconds: videoPlayout?.jitterBufferMinimumDelay ?? null,
+          jitterBufferEmittedCount: videoPlayout?.jitterBufferEmittedCount ?? null
+        })}`);
       }
     },
     {
