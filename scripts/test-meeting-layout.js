@@ -4,6 +4,8 @@ const {
   deriveMeetingLayoutMode,
   pinParticipant,
   unpinParticipant,
+  participantPairKey,
+  reconcileAutomaticParticipantPin,
   visibleParticipantIds,
   formatMetric,
   parseDebugMode,
@@ -28,9 +30,57 @@ if (pinParticipant([], "p1").join(",") !== "p1" ||
     unpinParticipant(["p1", "p2"], "p1").join(",") !== "p2") {
   throw new Error("two-participant pin state should preserve order and replace the oldest pin");
 }
+const automaticPair = reconcileAutomaticParticipantPin({
+  participantIds: ["local", "remote"],
+  localParticipantId: "local"
+});
+if (automaticPair.pinnedParticipantIds.join(",") !== "remote" ||
+    automaticPair.automaticParticipantId !== "remote" ||
+    automaticPair.pairKey !== participantPairKey(["local", "remote"], "local")) {
+  throw new Error("a two-person room should automatically pin the remote participant");
+}
+const dismissedPair = reconcileAutomaticParticipantPin({
+  participantIds: ["local", "remote"],
+  localParticipantId: "local",
+  dismissedPairKey: automaticPair.pairKey
+});
+if (dismissedPair.pinnedParticipantIds.length !== 0 || dismissedPair.automaticParticipantId) {
+  throw new Error("a manual unpin should remain in effect for the same participant pair");
+}
+const changedPair = reconcileAutomaticParticipantPin({
+  pinnedParticipantIds: ["remote"],
+  participantIds: ["local", "replacement"],
+  localParticipantId: "local",
+  automaticParticipantId: "remote",
+  dismissedPairKey: automaticPair.pairKey
+});
+if (changedPair.pinnedParticipantIds.join(",") !== "replacement" ||
+    changedPair.automaticParticipantId !== "replacement" ||
+    changedPair.dismissedPairKey !== null) {
+  throw new Error("a changed two-person room should automatically pin its new remote participant");
+}
+const expandedRoom = reconcileAutomaticParticipantPin({
+  pinnedParticipantIds: ["remote", "manual"],
+  participantIds: ["local", "remote", "manual"],
+  localParticipantId: "local",
+  automaticParticipantId: "remote"
+});
+if (expandedRoom.pinnedParticipantIds.join(",") !== "manual" || expandedRoom.automaticParticipantId) {
+  throw new Error("leaving a two-person room should clear only the automatic pin");
+}
+const hiddenRemote = reconcileAutomaticParticipantPin({
+  participantIds: ["local", "remote"],
+  localParticipantId: "local",
+  hiddenParticipantIds: ["remote"]
+});
+if (hiddenRemote.pinnedParticipantIds.length !== 0 || hiddenRemote.automaticParticipantId) {
+  throw new Error("a hidden remote tile should not be automatically pinned");
+}
 const pinAppSource = fs.readFileSync(path.join(__dirname, "../web/js/app.js"), "utf8");
 const pinStyleSource = fs.readFileSync(path.join(__dirname, "../web/css/style.css"), "utf8");
 if (!pinAppSource.includes("let pinnedParticipantIDs = []") ||
+    !pinAppSource.includes("syncAutomaticParticipantPin();") ||
+    !pinAppSource.includes("setPinnedParticipant(owner.participantID, { userInitiated: true })") ||
     !pinAppSource.includes("meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs]") ||
     !pinAppSource.includes("pinnedParticipantIDs.includes(participantID)")) {
   throw new Error("two-participant pin state wiring is missing");

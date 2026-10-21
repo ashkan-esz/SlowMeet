@@ -22,6 +22,48 @@ function unpinParticipant(pinnedParticipantIds, participantId) {
     .filter((id) => id !== participantId);
 }
 
+function participantPairKey(participantIds, localParticipantId) {
+  const uniqueIds = [...new Set(Array.isArray(participantIds) ? participantIds.filter(Boolean) : [])];
+  if (uniqueIds.length !== 2 || !uniqueIds.includes(localParticipantId)) return null;
+  return JSON.stringify(uniqueIds.sort());
+}
+
+function reconcileAutomaticParticipantPin({
+  pinnedParticipantIds = [],
+  participantIds = [],
+  localParticipantId,
+  automaticParticipantId = null,
+  dismissedPairKey = null,
+  hiddenParticipantIds = []
+} = {}) {
+  const roster = [...new Set(Array.isArray(participantIds) ? participantIds.filter(Boolean) : [])];
+  const hidden = new Set(Array.isArray(hiddenParticipantIds) ? hiddenParticipantIds : []);
+  const pairKey = participantPairKey(roster, localParticipantId);
+  let pins = Array.isArray(pinnedParticipantIds) ? pinnedParticipantIds.slice() : [];
+  let automaticId = automaticParticipantId;
+
+  if (!pairKey || !roster.includes(automaticId) || hidden.has(automaticId)) {
+    if (automaticId) pins = unpinParticipant(pins, automaticId);
+    automaticId = null;
+  }
+
+  const nextDismissedPairKey = dismissedPairKey === pairKey ? dismissedPairKey : null;
+  if (pairKey && !nextDismissedPairKey && !automaticId && pins.length === 0) {
+    const remoteId = roster.find((participantId) => participantId !== localParticipantId && !hidden.has(participantId));
+    if (remoteId) {
+      pins = pinParticipant(pins, remoteId, 2);
+      automaticId = remoteId;
+    }
+  }
+
+  return {
+    pinnedParticipantIds: pins,
+    automaticParticipantId: automaticId,
+    dismissedPairKey: nextDismissedPairKey,
+    pairKey
+  };
+}
+
 function visibleParticipantIds(participantOrder, localParticipantId, showSelfView, hiddenParticipantIds = []) {
   const hidden = new Set(hiddenParticipantIds || []);
   return (participantOrder || []).filter((id) =>
@@ -134,6 +176,8 @@ if (typeof module !== "undefined") {
     deriveMeetingLayoutMode,
     pinParticipant,
     unpinParticipant,
+    participantPairKey,
+    reconcileAutomaticParticipantPin,
     visibleParticipantIds,
     parseDebugMode,
     createPoorConnectionFixture,

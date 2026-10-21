@@ -150,6 +150,8 @@ let participantPage = 0;
 let focusedParticipantID;
 let pipDragState;
 let pinnedParticipantIDs = [];
+let automaticPinnedParticipantID = null;
+let automaticPinDismissedPairKey = null;
 const hiddenParticipantIDs = new Set();
 let participantMenuOwner;
 let stageFocusParticipantID;
@@ -501,10 +503,36 @@ function renderPeopleList() {
 
 function updateParticipantCount() {
   const count = participantElements.size;
+  const pinsChanged = syncAutomaticParticipantPin();
   updateParticipantPagination();
+  if (pinsChanged) renderMeetingLayout();
   if (participantCount) participantCount.textContent = `${count} participant${count === 1 ? "" : "s"}`;
   if (participantCountBadge) participantCountBadge.textContent = String(count);
   renderPeopleList();
+}
+
+function syncAutomaticParticipantPin() {
+  const next = reconcileAutomaticParticipantPin({
+    pinnedParticipantIds: pinnedParticipantIDs,
+    participantIds: [...participantElements.keys()],
+    localParticipantId: localParticipantID,
+    automaticParticipantId: automaticPinnedParticipantID,
+    dismissedPairKey: automaticPinDismissedPairKey,
+    hiddenParticipantIds: [...hiddenParticipantIDs]
+  });
+  automaticPinnedParticipantID = next.automaticParticipantId;
+  automaticPinDismissedPairKey = next.dismissedPairKey;
+  if (next.pinnedParticipantIds.join("\u0000") === pinnedParticipantIDs.join("\u0000")) return;
+
+  pinnedParticipantIDs = next.pinnedParticipantIds;
+  meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs];
+  participantElements.forEach((element, participantID) => {
+    element.item.classList.toggle("is-pinned", pinnedParticipantIDs.includes(participantID));
+    updateParticipantAriaLabel(element);
+  });
+  participants.classList.toggle("has-pinned", pinnedParticipantIDs.length > 0);
+  participants.dataset.pinned = pinnedParticipantIDs.length > 0 ? "true" : "false";
+  return true;
 }
 
 function updateParticipantAriaLabel(element) {
@@ -689,7 +717,13 @@ function positionParticipantMenu() {
   participantMenu.style.insetBlockStart = `${top}px`;
 }
 
-function setPinnedParticipant(participantID) {
+function setPinnedParticipant(participantID, { userInitiated = false } = {}) {
+  if (userInitiated) {
+    automaticPinDismissedPairKey = participantPairKey([...participantElements.keys()], localParticipantID);
+    automaticPinnedParticipantID = null;
+  } else if (automaticPinnedParticipantID === participantID) {
+    automaticPinnedParticipantID = null;
+  }
   const validID = participantID && participantElements.has(participantID) &&
     (participantID !== localParticipantID || selfViewVisible) ? participantID : undefined;
   if (!validID) {
@@ -719,6 +753,10 @@ function setParticipantTileHidden(participantID, hidden) {
   if (shouldHide) {
     hiddenParticipantIDs.add(participantID);
     if (pinnedParticipantIDs.includes(participantID)) {
+      if (automaticPinnedParticipantID === participantID) {
+        automaticPinDismissedPairKey = participantPairKey([...participantElements.keys()], localParticipantID);
+        automaticPinnedParticipantID = null;
+      }
       pinnedParticipantIDs = unpinParticipant(pinnedParticipantIDs, participantID);
       meetingViewState.pinnedParticipantIds = [...pinnedParticipantIDs];
       element.item.classList.remove("is-pinned");
@@ -864,7 +902,7 @@ participantMenu?.addEventListener("click", (event) => {
   }
   if (action === "pin") {
     const shouldPin = !pinnedParticipantIDs.includes(owner.participantID);
-    setPinnedParticipant(owner.participantID);
+    setPinnedParticipant(owner.participantID, { userInitiated: true });
     if (participantFocusStatus) participantFocusStatus.textContent = shouldPin
       ? `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} pinned.`
       : `${owner.item.querySelector(".participant-name")?.textContent || "Participant"} unpinned.`;
