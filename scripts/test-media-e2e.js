@@ -1186,6 +1186,29 @@ async function createScenarioFixture({
           tile.quality === "degraded" || tile.quality === "poor"));
         assert.deepEqual(unhealthy, [],
           `${label}: healthy audio must not trigger connection warnings or degraded tiles: ${JSON.stringify(samples)}`);
+        const renderedTiles = await pageForRole(fixture, receiverRole).evaluate(() =>
+          [...document.querySelectorAll("#participants li[data-participant-id]")].map((tile) => {
+            const badge = tile.querySelector(".participant-quality");
+            return {
+              local: tile.classList.contains("is-local"),
+              quality: tile.dataset.quality || "unknown",
+              poorConnectionClass: tile.classList.contains("is-poor-connection"),
+              qualityBadge: badge ? {
+                hidden: badge.hidden,
+                label: badge.getAttribute("aria-label") || "",
+                title: badge.title || ""
+              } : null
+            };
+          }));
+        assert.equal(renderedTiles.length, 2,
+          `${label}: expected both participant tiles in the receiver browser`);
+        assert.ok(renderedTiles.some((tile) => tile.local) && renderedTiles.some((tile) => !tile.local),
+          `${label}: expected one local and one remote tile: ${JSON.stringify(renderedTiles)}`);
+        const renderedUnhealthy = renderedTiles.filter((tile) =>
+          tile.quality === "degraded" || tile.quality === "poor" || tile.poorConnectionClass ||
+          /degraded|poor/i.test(`${tile.qualityBadge?.label || ""} ${tile.qualityBadge?.title || ""}`));
+        assert.deepEqual(renderedUnhealthy, [],
+          `${label}: neither rendered tile may show a degraded or red poor-connection state: ${JSON.stringify(renderedTiles)}`);
       },
       async captureConnectionTimeline(label, durationMs) {
         const startedAt = Date.now();

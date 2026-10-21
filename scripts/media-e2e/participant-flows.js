@@ -42,6 +42,59 @@ async function waitForReactionOverParticipant(page, senderName, emoji) {
   }, { senderName, emoji }, { timeout: 10000 });
 }
 
+async function waitForReactionRising(page, senderName, emoji) {
+  await page.waitForFunction(({ senderName, emoji }) => {
+    const tile = [...document.querySelectorAll(".participant-tile")]
+      .find((element) => element.querySelector(".participant-name")?.textContent.trim() === senderName);
+    const bubble = tile?.querySelector(".participant-reaction-bubble");
+    if (!bubble || bubble.textContent !== emoji) return false;
+    const tileRect = tile.getBoundingClientRect();
+    const bubbleRect = bubble.getBoundingClientRect();
+    const animation = bubble.getAnimations().find((item) => item.playState === "running");
+    const frames = animation?.effect?.getKeyframes();
+    const startTransform = frames?.[0]?.transform || "";
+    const endTransform = frames?.at(-1)?.transform || "";
+    return bubbleRect.bottom <= tileRect.bottom && bubbleRect.bottom > tileRect.bottom - 100 &&
+      /translate\(-50%, 0(?:px)?\)/.test(startTransform) &&
+      /translate\(-50%, -[\d.]+px\)/.test(endTransform);
+  }, { senderName, emoji }, { timeout: 10000 });
+}
+
+async function waitForStageReactionBubble(page, emoji) {
+  await page.waitForFunction(({ emoji }) => {
+    const bubble = [...document.querySelectorAll("#reaction-overlay .participant-reaction-bubble--stage")]
+      .find((element) => element.textContent === emoji);
+    const animation = bubble?.getAnimations().find((item) => item.playState === "running");
+    const endTransform = animation?.effect?.getKeyframes().at(-1)?.transform || "";
+    return Boolean(animation) && /translate\(0(?:px)?, -[\d.]+px\)/.test(endTransform);
+  }, { emoji }, { timeout: 10000 });
+}
+
+async function waitForReactionBubblesSeparated(page, senderName) {
+  await page.waitForFunction((senderName) => {
+    const tile = [...document.querySelectorAll(".participant-tile")]
+      .find((element) => element.querySelector(".participant-name")?.textContent.trim() === senderName);
+    const bubbles = [...(tile?.querySelectorAll(".participant-reaction-bubble") || [])];
+    if (bubbles.length < 2) return false;
+    const first = bubbles.at(-2).getBoundingClientRect();
+    const second = bubbles.at(-1).getBoundingClientRect();
+    return Math.abs(first.left - second.left) >= 20;
+  }, senderName, { timeout: 10000 });
+}
+
+async function waitForReactionAtStageBottomRight(page, emoji) {
+  await page.waitForFunction(({ emoji }) => {
+    const reaction = [...document.querySelectorAll("#reaction-overlay .participant-reaction--stage")]
+      .find((element) => element.textContent === emoji);
+    const overlay = document.querySelector("#reaction-overlay");
+    if (!reaction || !overlay) return false;
+    const reactionRect = reaction.getBoundingClientRect();
+    const overlayRect = overlay.getBoundingClientRect();
+    return reactionRect.right <= overlayRect.right && reactionRect.right > overlayRect.right - 48 &&
+      reactionRect.bottom <= overlayRect.bottom && reactionRect.bottom > overlayRect.bottom - 48;
+  }, { emoji }, { timeout: 10000 });
+}
+
 async function waitForParticipantNames(page, expectedNames) {
   const expected = [...expectedNames].sort();
   await page.waitForFunction((expected) => {
@@ -261,47 +314,56 @@ const scenarios = [
       const pageB = pageFor(fixture, "B");
 
       await pageA.locator("#reactions").click();
+      await pageA.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
       await pageA.locator('[data-reaction="👏"]').click();
+      await pageA.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
+      await waitForText(pageA, "#reaction-announcements", "Alice sent 👏");
       await waitForText(pageB, "#reaction-announcements", "Alice sent 👏");
+      await Promise.all([pageA, pageB].map((page) => waitForReactionRising(page, "Alice", "👏")));
+      await waitForReactionOverParticipant(pageA, "Alice", "👏");
       await waitForReactionOverParticipant(pageB, "Alice", "👏");
-      await pageA.locator("#reactions").click();
       await pageA.locator('[data-reaction="❤️"]').click();
+      await pageA.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
+      await waitForText(pageA, "#reaction-announcements", "Alice sent ❤️");
       await waitForText(pageB, "#reaction-announcements", "Alice sent ❤️");
+      await waitForReactionOverParticipant(pageA, "Alice", "❤️");
       await waitForReactionOverParticipant(pageB, "Alice", "❤️");
+      await waitForReactionOverParticipant(pageA, "Alice", "❤️");
+      await waitForReactionOverParticipant(pageB, "Alice", "❤️");
+      await Promise.all([pageA, pageB].map((page) => waitForReactionBubblesSeparated(page, "Alice")));
+      await pageA.waitForTimeout(2000);
+      await waitForReactionOverParticipant(pageA, "Alice", "❤️");
+      await waitForReactionOverParticipant(pageB, "Alice", "❤️");
+      await Promise.all([pageA, pageB].map((page) => page.waitForFunction(() =>
+        document.querySelectorAll(".participant-reaction").length === 0,
+      null, { timeout: 5000 })));
 
       await pageB.locator(".participant-tile").evaluateAll((tiles) => {
         const senderTile = tiles.find((tile) =>
           tile.querySelector(".participant-name")?.textContent.trim() === "Bob");
-        if (senderTile) senderTile.hidden = true;
+        if (senderTile) senderTile.style.transform = "translateX(200vw)";
       });
       await pageB.locator("#reactions").click();
+      await pageB.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
       await pageB.locator('[data-reaction="👍"]').click();
+      await pageB.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
       await waitForText(pageB, "#reaction-announcements", "Bob sent 👍");
-      await pageB.waitForFunction(() => {
-        const reaction = [...document.querySelectorAll("#reaction-overlay .participant-reaction--stage")]
-          .find((element) => element.textContent === "👍");
-        const aliceTile = [...document.querySelectorAll(".participant-tile")]
-          .find((tile) => tile.querySelector(".participant-name")?.textContent.trim() === "Alice");
-        const aliceReaction = aliceTile?.querySelector(".participant-reaction");
-        const overlay = document.querySelector("#reaction-overlay");
-        if (!reaction || !overlay || aliceReaction?.textContent !== "❤️") return false;
-        const reactionRect = reaction.getBoundingClientRect();
-        const overlayRect = overlay.getBoundingClientRect();
-        return reactionRect.left >= overlayRect.left && reactionRect.right <= overlayRect.right &&
-          reactionRect.top >= overlayRect.top && reactionRect.bottom <= overlayRect.bottom;
-      }, null, { timeout: 10000 });
+      await waitForReactionAtStageBottomRight(pageB, "👍");
+      await waitForStageReactionBubble(pageB, "👍");
       await pageB.locator(".participant-tile").evaluateAll((tiles) => {
         const senderTile = tiles.find((tile) =>
           tile.querySelector(".participant-name")?.textContent.trim() === "Bob");
-        if (senderTile) senderTile.hidden = false;
+        if (senderTile) senderTile.style.removeProperty("transform");
       });
       await pageB.waitForFunction(() =>
         document.querySelectorAll(".participant-reaction").length === 0,
       null, { timeout: 5000 });
 
-      await pageB.locator("#reactions").click();
       await pageB.locator('[data-reaction="👏"]').click();
+      await pageB.waitForFunction(() => !document.querySelector("#reaction-picker")?.hidden);
+      await waitForText(pageB, "#reaction-announcements", "Bob sent 👏");
       await waitForText(pageA, "#reaction-announcements", "Bob sent 👏");
+      await waitForReactionOverParticipant(pageB, "Bob", "👏");
       await waitForReactionOverParticipant(pageA, "Bob", "👏");
 
       await fixture.setPressed("A", "#raise-hand", true);

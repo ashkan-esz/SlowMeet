@@ -980,6 +980,8 @@ let reactionFocusTrigger;
 let reactionAnnouncementTimer;
 const reactionElements = new Map();
 const reactionTimers = new Map();
+const reactionBadgeInDuration = 160;
+const reactionBubbleDuration = 1800;
 const reactionDisplayDuration = 3000;
 
 function setReactionPickerOpen(open, restoreFocus = true) {
@@ -1042,13 +1044,17 @@ function announceReaction(name, emoji) {
 function renderReaction(message) {
   if (!reactionOverlay || !reactionEmojiSet.has(message?.emoji)) return;
   const participantID = message.participant_id || message.name || "unknown";
-  const senderTile = participantElements.get(message.participant_id)?.item;
+  const senderTile = participantElements.get(participantID)?.item;
   const tileRect = senderTile?.getBoundingClientRect();
   const overlayRect = reactionOverlay.getBoundingClientRect();
+  const tileIntersectsViewport = tileRect && tileRect.right > 0 && tileRect.left < window.innerWidth &&
+    tileRect.bottom > 0 && tileRect.top < window.innerHeight;
   const tileVisible = senderTile?.isConnected && !senderTile.hidden &&
     tileRect?.width > 0 && tileRect?.height > 0 &&
+    tileIntersectsViewport &&
     tileRect.right > overlayRect.left && tileRect.left < overlayRect.right &&
     tileRect.bottom > overlayRect.top && tileRect.top < overlayRect.bottom;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   let reaction = reactionElements.get(participantID);
   if (!reaction) {
     reaction = document.createElement("span");
@@ -1056,10 +1062,70 @@ function renderReaction(message) {
     reaction.setAttribute("aria-hidden", "true");
     reactionElements.set(participantID, reaction);
   }
+  reaction.getAnimations().forEach((animation) => animation.cancel());
   reaction.textContent = message.emoji;
   reaction.classList.toggle("participant-reaction--stage", !tileVisible);
+  let fallbackIndex = 0;
+  if (tileVisible) {
+    reaction.style.removeProperty("--reaction-stage-offset-x");
+    reaction.style.removeProperty("--reaction-stage-offset-y");
+  } else {
+    fallbackIndex = [...reactionElements.entries()]
+      .filter(([id, element]) => id !== participantID && element.parentElement === reactionOverlay)
+      .length;
+    reaction.style.setProperty("--reaction-stage-offset-x", `${(fallbackIndex % 4) * 44}px`);
+    reaction.style.setProperty("--reaction-stage-offset-y", `${Math.floor(fallbackIndex / 4) * 44}px`);
+  }
   const target = tileVisible ? senderTile : reactionOverlay;
   if (reaction.parentElement !== target) target.append(reaction);
+
+  if (!reducedMotion && typeof reaction.animate === "function") {
+    reaction.animate([
+      { opacity: 0.65, transform: "scale(.72)" },
+      { opacity: 1, transform: "scale(1)" },
+    ], {
+      duration: reactionBadgeInDuration,
+      easing: "cubic-bezier(.2, .75, .25, 1)",
+    });
+  }
+
+  if (!reducedMotion && typeof Element.prototype.animate === "function") {
+    const bubble = document.createElement("span");
+    bubble.className = "participant-reaction-bubble";
+    bubble.setAttribute("aria-hidden", "true");
+    bubble.textContent = message.emoji;
+    if (!tileVisible) {
+      bubble.classList.add("participant-reaction-bubble--stage");
+      bubble.style.setProperty("--reaction-stage-offset-x", `${fallbackIndex * 44}px`);
+      bubble.style.setProperty("--reaction-stage-offset-y", `${fallbackIndex * 44}px`);
+    }
+    const bubbleTarget = tileVisible ? senderTile : reactionOverlay;
+    const bubbleLanes = [0, -28, 28, -48, 48];
+    const activeBubbleCount = bubbleTarget.querySelectorAll(".participant-reaction-bubble").length;
+    bubble.style.setProperty("--reaction-bubble-offset-x", `${bubbleLanes[activeBubbleCount % bubbleLanes.length]}px`);
+    bubbleTarget.append(bubble);
+    const riseDistance = tileVisible
+      ? Math.max(52, Math.min(260, tileRect.height * 0.72))
+      : 112;
+    const startTransform = tileVisible ? "translate(-50%, 0) scale(.68)" : "translate(0, 0) scale(.68)";
+    const endTransform = tileVisible
+      ? `translate(-50%, -${riseDistance}px) scale(.78)`
+      : `translate(0, -${riseDistance}px) scale(.78)`;
+    const animation = bubble.animate([
+      { opacity: 0, transform: startTransform, offset: 0 },
+      { opacity: 1, transform: tileVisible
+        ? `translate(-50%, -${riseDistance * 0.2}px) scale(1)`
+        : `translate(0, -${riseDistance * 0.2}px) scale(1)`, offset: 0.14 },
+      { opacity: 0.92, transform: endTransform, offset: 0.78 },
+      { opacity: 0, transform: tileVisible
+        ? `translate(-50%, -${riseDistance + 24}px) scale(.72)`
+        : `translate(0, -${riseDistance + 24}px) scale(.72)`, offset: 1 },
+    ], {
+      duration: reactionBubbleDuration,
+      easing: "cubic-bezier(.18, .67, .3, 1)",
+    });
+    animation.finished.then(() => bubble.remove()).catch(() => bubble.remove());
+  }
 
   clearTimeout(reactionTimers.get(participantID));
   const timer = setTimeout(() => {

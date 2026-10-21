@@ -760,10 +760,10 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .meeting-toolbar #reactions .control-icon { width: 20px; height: 22px; font-size: 20px; line-height: 1; }
 .stage-panel { position: relative; }
 .reaction-overlay { position: absolute; inset: 0; z-index: 100; overflow: hidden; pointer-events: none; }
-.participant-reaction { position: absolute; inset-block-start: 8px; inset-inline-start: 8px; z-index: 8; display: grid; min-width: 36px; height: 36px; place-items: center; padding-inline: 6px; color: var(--lm-text); background: rgba(22, 24, 29, .94); border: 1px solid var(--lm-border); border-radius: 999px; box-shadow: 0 4px 10px rgba(0,0,0,.28); font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: 22px; line-height: 1; pointer-events: none; animation: reaction-badge-in 140ms ease-out; }
-.participant-reaction--stage { inset-block-start: 50%; inset-inline-start: 50%; transform: translate(-50%, -50%); }
-@keyframes reaction-badge-in { from { opacity: 0; scale: .85; } to { opacity: 1; scale: 1; } }
-@media (prefers-reduced-motion: reduce) { .participant-reaction { animation: none; } }
+.participant-reaction { position: absolute; inset-block-start: 8px; inset-inline-start: 8px; z-index: 8; display: grid; min-width: 36px; height: 36px; place-items: center; padding-inline: 6px; color: var(--lm-text); background: rgba(22, 24, 29, .94); border: 1px solid var(--lm-border); border-radius: 999px; box-shadow: 0 4px 10px rgba(0,0,0,.28); font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: 22px; line-height: 1; pointer-events: none; }
+.participant-reaction--stage { inset-block-start: auto; inset-inline-start: auto; inset-block-end: calc(16px + var(--reaction-stage-offset-y, 0px)); inset-inline-end: calc(16px + var(--reaction-stage-offset-x, 0px)); }
+.participant-reaction-bubble { position: absolute; inset-block-end: 12px; inset-inline-start: calc(50% + var(--reaction-bubble-offset-x, 0px)); z-index: 7; display: grid; width: 48px; height: 48px; place-items: center; color: #fff; font-family: "Apple Color Emoji", "Segoe UI Emoji", sans-serif; font-size: 38px; line-height: 1; pointer-events: none; filter: drop-shadow(0 2px 7px rgba(0,0,0,.55)); }
+.participant-reaction-bubble--stage { inset-block-end: calc(16px + var(--reaction-stage-offset-y, 0px)); inset-inline-start: auto; inset-inline-end: calc(64px + var(--reaction-stage-offset-x, 0px) - var(--reaction-bubble-offset-x, 0px)); }
 .send-button { display: grid; width: 36px; height: 36px; min-height: 36px; place-items: center; padding: 0; color: var(--lm-bg); background: var(--lm-accent); border: 0; border-radius: var(--lm-r-sm); }
 .send-button svg { width: 16px; height: 16px; }
 .new-messages { position: absolute; inset-block-end: 62px; inset-inline: 50%; z-index: 2; width: max-content; min-height: 28px; padding: 0 10px; color: var(--lm-text); background: var(--lm-surface-2); border: 1px solid var(--lm-border); border-radius: 999px; font-size: 10px; transform: translateX(-50%); }
@@ -2873,6 +2873,11 @@ body { overflow-x: hidden; }
   border-color: var(--lm-accent);
 }
 .meeting-toolbar .control-button:active { background: var(--lm-surface-3); }
+.meeting-toolbar #camera.control-button--pending {
+  color: var(--lm-warning);
+  background-color: rgba(242, 198, 109, .12);
+  border-color: rgba(242, 198, 109, .24);
+}
 .meeting-toolbar #camera.control-button--pending .control-icon { color: var(--lm-warning); }
 .meeting-toolbar .control-button--danger,
 .meeting-toolbar > #leave { flex-basis: 68px; width: 68px; min-width: 60px; }
