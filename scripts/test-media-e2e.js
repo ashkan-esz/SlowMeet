@@ -1176,6 +1176,17 @@ async function createScenarioFixture({
           return copied;
         });
       },
+      async assertHealthyParticipantTiles(receiverRole, senderRole, label) {
+        const copied = JSON.parse(await fixture.copyDiagnostics(receiverRole));
+        const samples = (copied.recentSamples || []).filter((sample) =>
+          sample.tiles?.some((tile) => !tile.local && tile.mic === "on"));
+        assert.ok(samples.length >= 2,
+          `${label}: expected multiple receiver diagnostic samples with ${senderRole}'s microphone on`);
+        const unhealthy = samples.filter((sample) => sample.warning || sample.tiles.some((tile) =>
+          tile.quality === "degraded" || tile.quality === "poor"));
+        assert.deepEqual(unhealthy, [],
+          `${label}: healthy audio must not trigger connection warnings or degraded tiles: ${JSON.stringify(samples)}`);
+      },
       async captureConnectionTimeline(label, durationMs) {
         const startedAt = Date.now();
         const samples = [];
@@ -1436,6 +1447,13 @@ async function createScenarioFixture({
         afterReceiver.currentTime > beforeReceiver.currentTime,
       `${label}: received RTP, decoded frames, and playback time must advance`);
       await fixture.assertPeersConnected(label);
+    },
+    async assertCameraRTPStopped(senderRole, receiverRole, label = `${senderRole} camera RTP stopped`) {
+      const peerRoles = [...joined];
+      await waitForCameraStopped(label, fixture.names[senderRole], pageForRole(fixture, receiverRole),
+        peerRoles.map((role) => pageForRole(fixture, role)),
+        peerRoles.map((role) => expectedPeerCounts.get(role)),
+        peerRoles.map((role) => expectedSocketCounts.get(role)), Date.now());
     },
     async createChangingContentPage(role) {
       return createChangingContentPage(contextForRole(fixture, role));
@@ -2505,8 +2523,82 @@ async function testUnavailableCamera(browser, baseURL, contexts, traceContexts) 
     await page.waitForFunction(() => document.querySelector("#status")?.textContent.includes("Camera unavailable"),
       null, { timeout: 15000 });
     assert.equal(await page.locator("#camera").getAttribute("aria-pressed"), "false");
+    assert.equal(await page.locator("#camera").getAttribute("aria-busy"), null,
+      "failed camera requests must clear the busy state");
+    assert.equal(await page.locator("#camera").evaluate((button) =>
+      button.classList.contains("control-button--pending")), false,
+    "failed camera requests must clear the pending style");
     await waitForPeerConnection(page);
     console.log("[pass] unavailable camera: meeting stayed connected and continued without video");
+    passed = true;
+  } finally {
+    if (passed) await closeSuccessfulDiagnosticContext(context, contexts, traceContexts);
+  }
+}
+
+async function testCameraPendingState(browser, baseURL, contexts, traceContexts) {
+  const context = await createFailureTrackedContext(browser, baseURL, contexts, traceContexts);
+  let passed = false;
+  try {
+    const page = await joinMeeting(context, "Camera pending", baseURL);
+    await waitForPeerConnection(page);
+    await page.evaluate(() => {
+      const originalApplyConstraints = MediaStreamTrack.prototype.applyConstraints;
+      let shouldHold = true;
+      MediaStreamTrack.prototype.applyConstraints = function (...args) {
+        if (this.kind !== "video" || !shouldHold) return originalApplyConstraints.apply(this, args);
+        shouldHold = false;
+        return new Promise((resolve, reject) => {
+          window.__releasePendingCameraCapture = () => {
+            MediaStreamTrack.prototype.applyConstraints = originalApplyConstraints;
+            Promise.resolve(originalApplyConstraints.apply(this, args)).then(resolve, reject);
+          };
+        });
+      };
+    });
+
+    const cameraButton = page.locator("#camera");
+    await cameraButton.click();
+    await page.waitForFunction(() => typeof window.__releasePendingCameraCapture === "function" &&
+      document.querySelector("#camera")?.getAttribute("aria-busy") === "true", null, { timeout: 10000 });
+    const pendingState = await cameraButton.evaluate((button) => {
+      const expectedWarning = getComputedStyle(button).getPropertyValue("--lm-warning").trim();
+      const probe = document.createElement("span");
+      probe.style.color = expectedWarning;
+      document.body.append(probe);
+      const warningColor = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        busy: button.getAttribute("aria-busy"),
+        pressed: button.getAttribute("aria-pressed"),
+        pending: button.classList.contains("control-button--pending"),
+        iconColor: getComputedStyle(button.querySelector(".control-icon")).color,
+        warningColor
+      };
+    });
+    assert.equal(pendingState.busy, "true", "camera capture should expose a busy state");
+    assert.equal(pendingState.pressed, "true", "aria-pressed should reflect the locally active camera track");
+    assert.equal(pendingState.pending, true, "camera capture should set the pending class");
+    assert.equal(pendingState.iconColor, pendingState.warningColor,
+      "camera icon should use the existing warning color while pending");
+
+    await cameraButton.click();
+    assert.equal(await cameraButton.getAttribute("aria-busy"), "true",
+      "a queued camera target must not clear pending state");
+    await page.evaluate(() => window.__releasePendingCameraCapture());
+    await page.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-busy") !== "true" &&
+      document.querySelector("#camera")?.getAttribute("aria-pressed") === "false", null, { timeout: 15000 });
+    assert.equal(await cameraButton.evaluate((button) =>
+      button.classList.contains("control-button--pending")), false,
+    "pending state should clear after the queued camera target settles");
+
+    await cameraButton.click();
+    await page.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-busy") !== "true" &&
+      document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
+    assert.equal(await cameraButton.evaluate((button) =>
+      button.classList.contains("control-button--pending")), false,
+    "successful camera requests must clear the pending style");
+    console.log("[pass] camera pending UI: warning icon and busy state persist through queued targets, then clear on settle");
     passed = true;
   } finally {
     if (passed) await closeSuccessfulDiagnosticContext(context, contexts, traceContexts);
@@ -2582,9 +2674,12 @@ async function testAutoScreenShare(pageA, pageB, sourcePage, peers, expectedPeer
         null, { timeout: 60000 });
       await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "true");
       await assertRemoteVideoMoves(receiverPage, "screen", `${direction} ${label}`);
-      await assertCameraRTPContinues(sharerPage, receiverPage, senderName, cameraSenderID,
-        `${direction} camera RTP during ${label}`, peers, expectedPeerConnectionCounts,
-        expectedSocketCounts, mediaStartedAt);
+      assert.equal(await sharerPage.locator("#camera").isDisabled(), true,
+        `${direction}: camera control must stay disabled while screen sharing`);
+      assert.equal(await sharerPage.locator("#camera").getAttribute("aria-pressed"), "false",
+        `${direction}: camera must turn off when screen sharing starts`);
+      await waitForCameraStopped(`${direction} camera during ${label}`, senderName, receiverPage,
+        peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
     };
 
     const stopShare = async (label) => {
@@ -2592,6 +2687,10 @@ async function testAutoScreenShare(pageA, pageB, sourcePage, peers, expectedPeer
       await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false",
         null, { timeout: 15000 });
       await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "false");
+      assert.equal(await sharerPage.locator("#camera").isDisabled(), false,
+        `${direction}: camera control must be available after screen sharing stops`);
+      assert.equal(await sharerPage.locator("#camera").getAttribute("aria-pressed"), "false",
+        `${direction}: camera must remain off after screen sharing stops`);
       await waitForPeerStability(peers, 750, 10000);
       await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts,
         `${direction} ${label}`, mediaStartedAt);
@@ -2614,6 +2713,11 @@ async function testAutoScreenShare(pageA, pageB, sourcePage, peers, expectedPeer
     await stopShare("toolbar stop");
     await startShare("restart after toolbar stop");
     await stopShare("final toolbar stop");
+    await setButtonPressed(sharerPage, "#camera", true);
+    assert.equal(await activeVideoSenderID(sharerPage), cameraSenderID,
+      `${direction}: manually re-enabling camera after screen share must reuse its sender`);
+    await waitForCameraProgress(`${direction} camera manually re-enabled after screen share`, senderName,
+      receiverPage, peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
     console.log(`[pass] automatic screen share ${direction}: changing source delivered, stopped, and restarted`);
   }
 }
@@ -2624,24 +2728,28 @@ async function testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnection
     { sharerPage: pageA, receiverPage: pageB, senderName: "Media A", direction: "A -> B" },
     { sharerPage: pageB, receiverPage: pageA, senderName: "Media B", direction: "B -> A" }
   ]) {
-    const cameraSenderID = await sharerPage.evaluate(() => window.__slowMeetTest.cameraSenderID);
-    assert.ok(cameraSenderID, `${direction}: camera sender identity was not recorded before screen sharing`);
-
     const startShare = async (label) => {
       console.log(`[screen] ${direction}: select a screen or window in Chromium's native picker for ${label}.`);
       await sharerPage.locator("#screen").click();
       await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true", null, { timeout: 60000 });
       await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "true");
       await assertRemoteVideoMoves(receiverPage, "screen", `${direction} ${label}`);
-      await assertCameraRTPContinues(sharerPage, receiverPage, senderName, cameraSenderID,
-        `${direction} camera RTP during ${label}`, peers, expectedPeerConnectionCounts,
-        expectedSocketCounts, mediaStartedAt);
+      assert.equal(await sharerPage.locator("#camera").isDisabled(), true,
+        `${direction}: camera control must stay disabled while screen sharing`);
+      assert.equal(await sharerPage.locator("#camera").getAttribute("aria-pressed"), "false",
+        `${direction}: camera must turn off when screen sharing starts`);
+      await waitForCameraStopped(`${direction} camera during ${label}`, senderName, receiverPage,
+        peers, expectedPeerConnectionCounts, expectedSocketCounts, mediaStartedAt);
     };
 
     const stopFromToolbar = async () => {
       await sharerPage.locator("#screen").click();
       await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false");
       await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "false");
+      assert.equal(await sharerPage.locator("#camera").isDisabled(), false,
+        `${direction}: camera control must be available after screen sharing stops`);
+      assert.equal(await sharerPage.locator("#camera").getAttribute("aria-pressed"), "false",
+        `${direction}: camera must remain off after screen sharing stops`);
       await waitForPeerStability(peers, 750, 10000);
       await assertPeersConnected(peers, expectedPeerConnectionCounts, expectedSocketCounts,
         `${direction} toolbar screen stop`, mediaStartedAt);
@@ -2663,6 +2771,9 @@ async function testHeadedScreenShare(pageA, pageB, peers, expectedPeerConnection
     await sharerPage.waitForFunction(() => window.__slowMeetTest?.browserStoppedScreenShare === true, null, { timeout: 120000 });
     await sharerPage.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false", null, { timeout: 15000 });
     await waitForRemoteParticipantState(receiverPage, senderName, "sharing", "false");
+    await sharerPage.waitForFunction(() =>
+      document.querySelector("#camera")?.disabled === false &&
+      document.querySelector("#camera")?.getAttribute("aria-pressed") === "false");
     await startShare("restart after browser-indicator stop");
     await stopFromToolbar();
     console.log(`[pass] headed screen share ${direction}: native picker, toolbar stop, restart, indicator stop, and restart`);
@@ -2989,10 +3100,16 @@ async function main() {
     ...participantFlowScenarios,
     ...mediaLifecycleScenarios,
     {
+      name: "camera control shows pending capture and settles queued toggles",
+      async run(fixture) {
+        await testCameraPendingState(fixture.browserA, baseURL, contexts, traceContexts);
+        await testUnavailableCamera(fixture.browserA, baseURL, contexts, traceContexts);
+      }
+    },
+    {
       name: "capture failures report device errors and keep participants usable",
       async run(fixture) {
         await testUnavailableMicrophone(fixture.browserA, baseURL, contexts, traceContexts);
-        await testUnavailableCamera(fixture.browserA, baseURL, contexts, traceContexts);
         await testDeniedCapturePermissions(fixture.browserA, baseURL, contexts, traceContexts);
       }
     },
@@ -3025,17 +3142,29 @@ async function main() {
         await fixture.join("A");
         await fixture.join("B");
         console.log("[manual audio check] A and B share this device's microphone and speakers. Speak a short phrase after each first mic enable; listen for echo, then repeat with headphones.");
+        await Promise.all(["A", "B"].map((role) => fixture.setPressed(role, "#mic", false)));
+        await Promise.all([
+          fixture.waitForRemoteState("A", fixture.names.B, "mic", "off"),
+          fixture.waitForRemoteState("B", fixture.names.A, "mic", "off")
+        ]);
         await fixture.captureConnectionTimeline("five-second real-microphone baseline", 5000);
         for (const role of ["A", "B"]) {
           const receiverRole = role === "A" ? "B" : "A";
+          if (role === "B") {
+            await fixture.setPressed("A", "#mic", false);
+            await fixture.waitForRemoteState("B", fixture.names.A, "mic", "off");
+          }
           await fixture.setPressed(role, "#mic", true);
           await fixture.waitForRemoteState(receiverRole, fixture.names[role], "mic", "on");
           await fixture.assertAudioProgress(role, receiverRole, `${role} real microphone first enable`);
+          await fixture.captureConnectionTimeline(`15 seconds after ${role} opens real microphone`, 15000);
+          await fixture.assertPeersConnected(`${role} real microphone first enable`);
+          await fixture.assertHealthyParticipantTiles(receiverRole, role,
+            `${role} real microphone start at ${receiverRole}`);
           const state = await fixture.diagnostics(role);
           assert.equal(state.audioCaptureSettings?.echoCancellation, true,
             `${role}: real microphone capture should report echo cancellation enabled`);
         }
-        await fixture.captureConnectionTimeline("15 seconds after first microphone enables", 15000);
         await fixture.assertPeersConnected("real microphone first-enable echo acceptance");
         await fixture.assertNoDuplicateParticipants();
       }

@@ -599,14 +599,17 @@ const scenarios = [
         sample.tiles.some((tile) => !tile.local && tile.mic === "on"));
       assert.ok(afterRemoteMicSamples.length >= 2,
         "B should retain multiple diagnostic samples after A's microphone becomes active");
-      assert.ok(afterRemoteMicSamples.every((sample) => sample.tiles.every((tile) =>
-        tile.quality !== "degraded" && tile.quality !== "poor")),
-      "healthy loopback audio after A opens the microphone must not mark either B tile unstable");
+      await fixture.assertHealthyParticipantTiles("B", "A", "A microphone start at B");
 
+      await fixture.setPressed("A", "#mic", false);
+      await fixture.waitForRemoteState("B", participants.A, "mic", "off");
       await fixture.setPressed("B", "#mic", true);
       await fixture.waitForRemoteState("A", participants.B, "mic", "on");
       await fixture.assertAudioProgress("B", "A", "B microphone first enable diagnostic flow");
       await fixture.assertAudioMarkerDelay("B", "A", "first B microphone marker to A");
+      await fixture.captureConnectionTimeline("15 seconds after B opens microphone", 15000);
+      await fixture.assertPeersConnected("B microphone start diagnostic flow");
+      await fixture.assertHealthyParticipantTiles("A", "B", "B microphone start at A");
     }
   },
   {
@@ -1010,6 +1013,31 @@ const scenarios = [
       const sourcePage = await fixture.createChangingContentPage("A");
       await sourcePage.bringToFront();
 
+      await fixture.pageA.evaluate(() => {
+        const mediaDevices = navigator.mediaDevices;
+        const descriptor = Object.getOwnPropertyDescriptor(mediaDevices, "getDisplayMedia");
+        Object.defineProperty(mediaDevices, "getDisplayMedia", {
+          configurable: true,
+          value: () => Promise.reject(new DOMException("screen picker dismissed", "NotAllowedError"))
+        });
+        window.__restoreGetDisplayMedia = () => {
+          if (descriptor) Object.defineProperty(mediaDevices, "getDisplayMedia", descriptor);
+          else delete mediaDevices.getDisplayMedia;
+          delete window.__restoreGetDisplayMedia;
+        };
+      });
+      try {
+        await fixture.pageA.locator("#screen").click();
+        await fixture.pageA.waitForFunction(() =>
+          document.querySelector("#camera")?.disabled === false &&
+          document.querySelector("#camera")?.getAttribute("aria-pressed") === "true",
+        null, { timeout: 10000 });
+        await fixture.waitForRemoteState("B", participants.A, "camera", "on");
+        await fixture.assertCameraRTPContinues("A", "B", "camera remains live after dismissing screen picker");
+      } finally {
+        await fixture.pageA.evaluate(() => window.__restoreGetDisplayMedia?.());
+      }
+
       const startShare = async (label) => {
         await sourcePage.bringToFront();
         await fixture.pageA.bringToFront();
@@ -1018,13 +1046,23 @@ const scenarios = [
           document.querySelector("#screen")?.getAttribute("aria-pressed") === "true",
         null, { timeout: 60000 });
         await fixture.waitForRemoteState("B", participants.A, "sharing", "true");
+        assert.equal(await fixture.pageA.locator("#camera").isDisabled(), true,
+          `${label}: camera control must stay disabled while screen sharing`);
+        assert.equal(await fixture.pageA.locator("#camera").getAttribute("aria-pressed"), "false",
+          `${label}: camera must turn off when screen sharing starts`);
+        await fixture.pageA.locator("#camera").evaluate((button) =>
+          button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        await delay(100);
+        assert.equal(await fixture.pageA.locator("#camera").getAttribute("aria-pressed"), "false",
+          `${label}: camera must not turn on from a request during screen sharing`);
+        await fixture.waitForRemoteState("B", participants.A, "camera", "off");
         const sourceFrameBefore = await sourcePage.evaluate(() => window.__shareSourceFrame);
         await fixture.assertRemoteVideoMoves("A", "B", label, "screen");
         await assertRemoteScreenPixelsChange(fixture.pageB, participants.A, label);
         const sourceFrameAfter = await sourcePage.evaluate(() => window.__shareSourceFrame);
         assert.ok(sourceFrameAfter > sourceFrameBefore,
           `${label}: generated source frame counter did not advance during the active share`);
-        await fixture.assertCameraRTPContinues("A", "B", `${label}; camera continues`);
+        await fixture.assertCameraRTPStopped("A", "B", `${label}; camera stops`);
       };
 
       const stopShare = async (label) => {
@@ -1033,6 +1071,10 @@ const scenarios = [
           document.querySelector("#screen")?.getAttribute("aria-pressed") === "false",
         null, { timeout: 15000 });
         await fixture.waitForRemoteState("B", participants.A, "sharing", "false");
+        assert.equal(await fixture.pageA.locator("#camera").isDisabled(), false,
+          `${label}: camera control must be available after screen sharing stops`);
+        assert.equal(await fixture.pageA.locator("#camera").getAttribute("aria-pressed"), "false",
+          `${label}: camera must stay off after screen sharing stops`);
         await fixture.assertDisplayCaptureEnded("A", label);
         await fixture.waitForStability(750, 15000);
         await fixture.assertPeersConnected(label);
@@ -1057,6 +1099,9 @@ const scenarios = [
       await stopShare("A generated screen share stopped");
       await startShare("A generated screen share restart");
       await stopShare("A restarted generated screen share stopped");
+      await fixture.setPressed("A", "#camera", true);
+      await fixture.waitForRemoteState("B", participants.A, "camera", "on");
+      await fixture.assertRemoteVideoMoves("A", "B", "camera manually re-enabled after screen sharing", "camera");
       await fixture.assertNoDuplicateParticipants();
     }
   },

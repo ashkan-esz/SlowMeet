@@ -116,6 +116,12 @@ function updateControlLabel(button, label) {
   button.setAttribute("title", label);
 }
 
+function setCameraPending(pending) {
+  camera.classList.toggle("control-button--pending", pending);
+  if (pending) camera.setAttribute("aria-busy", "true");
+  else camera.removeAttribute("aria-busy");
+}
+
 function mediaAccessMessage(kind, error) {
   const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
   if (kind === "audio") {
@@ -972,7 +978,9 @@ let chatFocusTrigger;
 const reactionEmojiSet = new Set(["👍", "👎", "❤️", "😂", "🎉", "😮", "👏", "🙌", "🔥", "💯", "😢", "🤔"]);
 let reactionFocusTrigger;
 let reactionAnnouncementTimer;
-let reactionSequence = 0;
+const reactionElements = new Map();
+const reactionTimers = new Map();
+const reactionDisplayDuration = 3000;
 
 function setReactionPickerOpen(open, restoreFocus = true) {
   if (!reactionPicker || !reactions) return;
@@ -1033,13 +1041,35 @@ function announceReaction(name, emoji) {
 
 function renderReaction(message) {
   if (!reactionOverlay || !reactionEmojiSet.has(message?.emoji)) return;
-  const reaction = document.createElement("span");
-  const sequence = reactionSequence++;
-  reaction.className = "floating-reaction";
+  const participantID = message.participant_id || message.name || "unknown";
+  const senderTile = participantElements.get(message.participant_id)?.item;
+  const tileRect = senderTile?.getBoundingClientRect();
+  const overlayRect = reactionOverlay.getBoundingClientRect();
+  const tileVisible = senderTile?.isConnected && !senderTile.hidden &&
+    tileRect?.width > 0 && tileRect?.height > 0 &&
+    tileRect.right > overlayRect.left && tileRect.left < overlayRect.right &&
+    tileRect.bottom > overlayRect.top && tileRect.top < overlayRect.bottom;
+  let reaction = reactionElements.get(participantID);
+  if (!reaction) {
+    reaction = document.createElement("span");
+    reaction.className = "participant-reaction";
+    reaction.setAttribute("aria-hidden", "true");
+    reactionElements.set(participantID, reaction);
+  }
   reaction.textContent = message.emoji;
-  reaction.style.setProperty("--reaction-offset", `${((sequence * 37) % 120) - 60}px`);
-  reactionOverlay.append(reaction);
-  setTimeout(() => reaction.remove(), 2600);
+  reaction.classList.toggle("participant-reaction--stage", !tileVisible);
+  const target = tileVisible ? senderTile : reactionOverlay;
+  if (reaction.parentElement !== target) target.append(reaction);
+
+  clearTimeout(reactionTimers.get(participantID));
+  const timer = setTimeout(() => {
+    if (reactionTimers.get(participantID) !== timer) return;
+    reactionTimers.delete(participantID);
+    if (reactionElements.get(participantID) !== reaction) return;
+    reaction.remove();
+    reactionElements.delete(participantID);
+  }, reactionDisplayDuration);
+  reactionTimers.set(participantID, timer);
   announceReaction(message.name, message.emoji);
 }
 
@@ -1902,7 +1932,7 @@ function setLocalMediaControls() {
   const audioOn = audioAvailable && audioTrack.enabled;
   const cameraOn = videoAvailable && cameraRequested && !videoSuspended && !audioOnly?.checked;
   mic.disabled = !audioAvailable;
-  camera.disabled = meeting.hidden || !peer;
+  camera.disabled = meeting.hidden || !peer || Boolean(screenShareStartPromise || screenStream || screenShareStopPromise);
   updateControlLabel(mic, audioOn ? "Mute microphone" : "Unmute microphone");
   mic.setAttribute("aria-pressed", String(audioAvailable && audioTrack.enabled));
   updateControlLabel(camera, cameraOn ? "Turn camera off" : "Turn camera on");
@@ -2110,6 +2140,10 @@ async function disableCamera() {
 }
 
 function requestCameraState(target, { force = false } = {}) {
+  if (target && (screenShareStartPromise || screenStream || screenShareStopPromise)) {
+    setLocalMediaControls();
+    return Promise.resolve();
+  }
   cameraRequestedTarget = target;
   if (cameraOperation) return cameraOperation;
 
@@ -2117,6 +2151,7 @@ function requestCameraState(target, { force = false } = {}) {
   operation = Promise.resolve().then(async () => {
     let forceNextOperation = force;
     try {
+      setCameraPending(true);
       while (forceNextOperation || cameraRequested !== cameraRequestedTarget) {
         forceNextOperation = false;
         const nextTarget = cameraRequestedTarget;
@@ -2137,6 +2172,7 @@ function requestCameraState(target, { force = false } = {}) {
       if (cameraOperation === operation) {
         cameraOperation = undefined;
         cameraRequestedTarget = undefined;
+        setCameraPending(false);
       }
     }
   });
@@ -3805,22 +3841,25 @@ async function updateDiagnostics() {
     }
     if (id === localParticipantID) {
       const localStats = {
-        hasData: lossKnown || values.rttMs != null,
-        packetLossPct: values.packetLoss
+        // Inbound RTP loss belongs to remote senders; do not attribute it to the local tile.
+        hasData: values.rttMs != null,
+        packetLossPct: null
       };
       setParticipantQualityFromSample(element, id, classifyParticipantQuality(localStats, values.rttMs));
       return;
     }
     const participantLossStats = participantStats.get(id);
+    // Connection-wide loss can include other participants' streams. When receiver ownership
+    // is unavailable, leave this tile unknown instead of assigning that loss to its participant.
     const remoteStats = participantLossStats
       ? {
-        hasData: participantLossStats.hasData || values.rttMs != null,
+        hasData: participantLossStats.hasData,
         packetLossPct: packetLossPercentFromDeltas(
           participantLossStats.lostPackets,
           participantLossStats.receivedPackets
         )
       }
-      : { hasData: lossKnown || values.rttMs != null, packetLossPct: values.packetLoss };
+      : { hasData: false, packetLossPct: null };
     setParticipantQualityFromSample(element, id, classifyParticipantQuality(remoteStats, values.rttMs));
   });
   const packetLoss = values.packetLoss ?? 0;
@@ -4435,7 +4474,9 @@ async function toggleScreenShare() {
   if (screen.disabled || audioOnly?.checked || !peer || (screenShareOwner && screenShareOwner !== localParticipantID)) return;
   screenShareStartPromise = startScreenShare().finally(() => {
     screenShareStartPromise = undefined;
+    setLocalMediaControls();
   });
+  setLocalMediaControls();
   return screenShareStartPromise;
 }
 
@@ -4453,6 +4494,7 @@ async function startScreenShare() {
       if (screenShareStartPromise) screenShareStartPromise.then(stopAfterStart).catch(() => {});
       else stopAfterStart();
     }, { once: true });
+    await requestCameraState(false, { force: Boolean(localCameraTrack) });
     await requestScreenShare(true, screenStream.id, localScreenTrack.id);
     if (generation !== socketGeneration || peer !== sharePeer) throw new Error("media connection changed");
     if (screenSender && screenSenderPeer === sharePeer &&
@@ -4581,7 +4623,9 @@ async function stopScreenShare() {
     });
   })().finally(() => {
     screenShareStopPromise = undefined;
+    setLocalMediaControls();
   });
+  setLocalMediaControls();
   return screenShareStopPromise;
 }
 
