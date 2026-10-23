@@ -871,10 +871,14 @@ for (const element of [
 ]) {
   if (!indexSource.includes(element)) throw new Error(`emoji UI contract is missing: ${element}`);
 }
+const reactionClassMatch = appSource.match(/reaction\.className\s*=\s*["']([^"']+)["']/);
+if (!reactionClassMatch) throw new Error("reaction renderer class is missing");
+const reactionStyleSelector = new RegExp("\\." + reactionClassMatch[1] + "\\s*\\{");
+if (!reactionStyleSelector.test(styleSource)) {
+  throw new Error(`reaction style is missing for renderer class: ${reactionClassMatch[1]}`);
+}
 for (const style of [
   ".reaction-overlay",
-  ".floating-reaction",
-  "@keyframes reaction-float",
   "@media (prefers-reduced-motion: reduce)",
   ".emoji-picker--toolbar",
   ".emoji-picker--chat"
