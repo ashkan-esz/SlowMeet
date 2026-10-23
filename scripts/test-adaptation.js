@@ -519,7 +519,7 @@ for (const element of [
 if (appSource.includes('if (setupStream.getTracks().length === 0) throw new Error("No microphone is available");')) {
   throw new Error("joining must continue when the microphone is unavailable");
 }
-if (!appSource.includes("if (localStream.getAudioTracks().length) attachSpeakerAnalyzer(localParticipantID, localStream);")) {
+if (!appSource.includes("if (localStream.getAudioTracks().length) attachLocalMicrophoneAnalyzer();")) {
   throw new Error("local speaker analysis must be skipped without an audio track");
 }
 for (const behavior of [

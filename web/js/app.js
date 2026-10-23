@@ -1609,6 +1609,7 @@ let renegotiationChain = Promise.resolve();
 let renegotiationQueue;
 let localStream;
 let localAudioStream;
+let localMicrophoneAnalysisTrack;
 let localCameraStream;
 let localScreenStream;
 let screenStream;
@@ -1707,6 +1708,7 @@ const speakerStartHoldMs = 200;
 const speakerStopHoldMs = 300;
 const speakerActivationDelayMs = 300;
 const speakerDeactivationHoldMs = 1000;
+const mutedSpeechWarningRepeatIntervalMs = 10000;
 let hostLimits = {
   maxVideoBitrate: 500000,
   maxVideoFPS: 30,
@@ -1924,7 +1926,7 @@ async function replaceLocalDevice(kind, deviceID) {
       : cameraRequested && !videoSuspended && !audioOnly?.checked;
     if (kind === "audio") {
       removeSpeakerAnalyzer(localParticipantID);
-      attachSpeakerAnalyzer(localParticipantID, localStream);
+      attachLocalMicrophoneAnalyzer();
     } else {
       const local = participantElements.get(localParticipantID);
       if (local && !screenStream) local.video.srcObject = localStream;
@@ -2577,21 +2579,38 @@ function runSpeakerDetection(timestamp) {
       micLevelMeter.firstElementChild.style.setProperty("--level-meter-fill", String(level / 100));
     }
     const muted = participantElements.get(participantID)?.item.dataset.mic === "off";
-    const aboveThreshold = !muted && levelDb > speakerThresholdDb;
-    if (aboveThreshold) {
+    const aboveThreshold = levelDb > speakerThresholdDb;
+    if (participantID === localParticipantID) {
+      const warning = MutedSpeechWarning.advance(
+        entry.mutedSpeechWarning,
+        muted && aboveThreshold,
+        now,
+        speakerActivationDelayMs,
+        speakerDeactivationHoldMs,
+        mutedSpeechWarningRepeatIntervalMs
+      );
+      entry.mutedSpeechWarning = warning.state;
+      if (warning.shouldWarn) showToast("You're speaking, but your microphone is muted.", "warning");
+    }
+    if (aboveThreshold && !muted) {
       entry.quietSince = 0;
       if (!entry.speaking && !entry.speakingSince) entry.speakingSince = now;
       if (!entry.speaking && now - entry.speakingSince >= speakerActivationDelayMs) {
         entry.speaking = true;
         setSpeakerState(participantID, true);
       }
-    } else {
+    } else if (!muted || participantID !== localParticipantID) {
       entry.speakingSince = 0;
       if (entry.speaking && !entry.quietSince) entry.quietSince = now;
       if (entry.speaking && now - entry.quietSince >= speakerDeactivationHoldMs) {
         entry.speaking = false;
         setSpeakerState(participantID, false);
       }
+    } else if (entry.speaking) {
+      entry.speaking = false;
+      entry.speakingSince = 0;
+      entry.quietSince = 0;
+      setSpeakerState(participantID, false);
     }
   });
   speakerAnimationFrame = speakerAnalyzers.size > 0
@@ -2625,7 +2644,31 @@ function attachSpeakerAnalyzer(participantID, source, preserveOutput = false) {
   }
 }
 
+function attachLocalMicrophoneAnalyzer() {
+  const track = localStream?.getAudioTracks()[0];
+  if (!track || track.readyState !== "live") return;
+  let analysisTrack;
+  try {
+    analysisTrack = track.clone();
+    analysisTrack.enabled = true;
+    attachSpeakerAnalyzer(localParticipantID, new MediaStream([analysisTrack]));
+    if (speakerAnalyzers.has(localParticipantID)) {
+      localMicrophoneAnalysisTrack = analysisTrack;
+    } else {
+      analysisTrack.stop();
+    }
+  } catch (_) {
+    analysisTrack?.stop();
+  }
+}
+
+function stopLocalMicrophoneAnalyzer() {
+  localMicrophoneAnalysisTrack?.stop();
+  localMicrophoneAnalysisTrack = undefined;
+}
+
 function removeSpeakerAnalyzer(participantID) {
+  if (participantID === localParticipantID) stopLocalMicrophoneAnalyzer();
   const entry = speakerAnalyzers.get(participantID);
   if (!entry) return;
   try {
@@ -2653,6 +2696,7 @@ function resetSpeakerDetection() {
       entry.analyser.disconnect();
     } catch (_) {}
   }
+  stopLocalMicrophoneAnalyzer();
   speakerAnalyzers.clear();
   activeSpeakers.clear();
   participantElements.forEach((element) => {
@@ -3364,7 +3408,7 @@ async function startWebRTC() {
     cameraSenderNegotiated = false;
     screenSender = undefined;
     setLocalMediaControls();
-    if (localStream.getAudioTracks().length) attachSpeakerAnalyzer(localParticipantID, localStream);
+    if (localStream.getAudioTracks().length) attachLocalMicrophoneAnalyzer();
     const local = participantElements.get(localParticipantID);
     if (local) {
       local.cameraVideo.srcObject = null;
