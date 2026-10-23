@@ -1249,6 +1249,11 @@ function addChatMessage(author, body, system = false, own = false, timestampValu
       chatBadge.hidden = false;
       chatBadge.textContent = String(unreadMessages);
     }
+    chatToggle?.classList.add("has-unread");
+    if (!own) {
+      const preview = body.length > 120 ? `${body.slice(0, 120)}…` : body;
+      showToast(`${author}: ${preview}`);
+    }
   } else if (!chatPinnedToBottom && !chatClosed && newMessages) {
     newMessages.hidden = false;
   }
@@ -1311,6 +1316,7 @@ function setChatOpen(open, trigger = null, restoreFocus = true) {
   if (open) {
     unreadMessages = 0;
     if (chatBadge) chatBadge.hidden = true;
+    chatToggle?.classList.remove("has-unread");
     setTimeout(() => chatInput?.focus(), 0);
   }
 }

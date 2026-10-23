@@ -694,9 +694,9 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .participant-tile[data-quality="good"] .participant-quality { background: #22c55e; }
 .participant-tile[data-quality="degraded"] .participant-quality { background: #facc15; }
 .participant-tile[data-quality="poor"] .participant-quality { background: #ef4444; }
-.toast-region { position: absolute; inset-inline-start: 16px; inset-block-end: 16px; z-index: 5; display: grid; gap: 8px; pointer-events: none; }
-.toast { max-width: min(360px, calc(100vw - 32px)); padding: 10px 12px; color: var(--lm-text); background: var(--lm-surface); border: 1px solid var(--lm-border); border-radius: var(--lm-r-sm); font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.22); }
-.toast--warning { color: var(--lm-warning); border-color: var(--lm-warning); }
+.toast-region { position: absolute; inset-inline-start: 16px; inset-block-end: calc(env(safe-area-inset-bottom, 0px) + 16px); z-index: 5; display: grid; width: max-content; max-width: min(420px, calc(100vw - 32px)); gap: 8px; pointer-events: none; }
+.toast { box-sizing: border-box; width: max-content; min-width: min(280px, 100%); max-width: 100%; padding: 12px 16px; color: var(--lm-text); background: var(--lm-surface-active); border: 1px solid var(--lm-border); border-inline-start: 3px solid var(--lm-accent); border-radius: var(--lm-r-md); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; box-shadow: 0 12px 32px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.05); }
+.toast--warning { color: var(--lm-warning); border-color: var(--lm-warning); border-inline-start-color: var(--lm-warning); }
 .meeting-sidebar, .chat-rail { grid-area: rail; position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: var(--lm-text); background: var(--lm-surface); border-inline-start: 1px solid var(--lm-border); }
 .meeting-sidebar { padding: 16px; overflow-y: auto; transform: translateX(0); }
 .meeting-sidebar[aria-hidden="true"] { display: none; }
@@ -1704,6 +1704,7 @@ html:has(.meeting-shell:not([hidden])) #root {
 .control-button[aria-pressed="false"] { color: var(--lm-text-muted); background: transparent; border-color: transparent; }
 .control-button[aria-pressed="false"]#mic { color: var(--lm-danger); background: rgba(239, 101, 109, .12); border-color: rgba(239, 101, 109, .24); }
 .control-button[aria-pressed="false"]#receive-video { color: var(--lm-warning); background: rgba(242, 198, 109, .1); border-color: rgba(242, 198, 109, .22); }
+#chat.has-unread { color: var(--lm-accent); background: var(--lm-accent-soft); border-color: rgba(133, 173, 255, .28); }
 .control-button--quiet { width: auto; min-width: 44px; margin-inline-start: 0; padding-inline: 12px; }
 .control-icon { position: relative; display: grid; width: 22px; height: 22px; place-items: center; }
 .control-icon svg { width: 19px; height: 19px; }
