@@ -553,6 +553,7 @@ const scenarios = [
   {
     name: "A microphone start captures both browsers' connection quality timeline",
     timeCodedAudioRoles: ["A", "B"],
+    sharedBrowserContext: true,
     async run(fixture) {
       await joinPair(fixture, "A microphone diagnostics startup");
       for (const role of roles) {
@@ -565,10 +566,11 @@ const scenarios = [
 
       await fixture.setPressed("A", "#mic", true);
       const afterOpen = fixture.captureConnectionTimeline("15 seconds after A opens microphone", 15000);
+      // Capture the quality window even if remote media-state signaling stalls.
+      await afterOpen;
       await fixture.waitForRemoteState("B", participants.A, "mic", "on");
       await fixture.assertAudioProgress("A", "B", "A microphone start diagnostic flow");
       await fixture.assertAudioMarkerDelay("A", "B", "first A microphone marker to B");
-      await afterOpen;
       await fixture.assertPeersConnected("A microphone start diagnostic flow");
       await fixture.assertNoDuplicateParticipants();
       let browserBDiagnostics;

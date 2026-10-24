@@ -7,7 +7,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
-const { chromium } = require("playwright-core");
+const { chromium, firefox } = require("playwright-core");
 const axeCore = (() => {
   try {
     return require("axe-core");
@@ -30,6 +30,7 @@ const testNetworkImpairment = process.env.MEDIA_E2E_NETWORK_IMPAIRMENT === "1";
 const testNetworkNamespace = process.env.MEDIA_E2E_NETNS === "1";
 const suiteProfile = process.env.MEDIA_E2E_PROFILE || (screenShareOnly ? "screen-share" : "full");
 const requestedScenario = process.env.MEDIA_E2E_SCENARIO;
+const browserName = process.env.MEDIA_E2E_BROWSER || "chromium";
 const externalBaseURL = process.env.MEDIA_E2E_BASE_URL;
 const testMeetingPassword = process.env.MEDIA_E2E_MEETING_PASSWORD ??
   (externalBaseURL ? "" : "slowmeet-e2e-password");
@@ -45,6 +46,13 @@ const cameraQualityWindowMs = 5000;
 const mediaProgressTimeoutMs = 15000;
 const mediaProgressPollMs = 250;
 const transientDisconnectGraceMs = 0;
+
+if (!["chromium", "firefox"].includes(browserName)) {
+  throw new Error("MEDIA_E2E_BROWSER must be chromium or firefox");
+}
+if (browserName === "firefox" && (testScreenShare || testNativeScreenShare || screenShareOnly)) {
+  throw new Error("the Firefox media E2E runner does not support screen-share scenarios");
+}
 
 if (!Number.isFinite(stabilityMs) || stabilityMs < 1000) {
   throw new Error("MEDIA_E2E_STABILITY_MS must be at least 1000 milliseconds");
@@ -86,6 +94,24 @@ function findChrome() {
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
+function findLocalIPv4Address() {
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    const address = addresses?.find((entry) => entry.family === "IPv4" && !entry.internal);
+    if (address) return address.address;
+  }
+  return undefined;
+}
+
+function findFirefox() {
+  const candidates = [
+    process.env.FIREFOX_PATH,
+    "/usr/bin/firefox",
+    "/usr/bin/firefox-esr",
+    "/Applications/Firefox.app/Contents/MacOS/firefox"
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
 function summarizePeerState(state) {
   return {
     connectionState: state.connectionState,
@@ -121,6 +147,11 @@ function summarizePeerState(state) {
     signalingMessages: state.signalingMessages.filter((message) => message.type !== "network_state").slice(-12).map((message) => ({
       direction: message.direction,
       type: message.type,
+      error: message.error,
+      participantID: message.participantID,
+      participantName: message.participant?.name,
+      audioEnabled: message.audioEnabled,
+      videoEnabled: message.videoEnabled,
       candidateType: message.candidateType,
       usernameFragment: message.usernameFragment,
       sdpMid: message.sdpMid,
@@ -164,6 +195,10 @@ async function waitForServer(url, processHandle, output) {
 
 async function startLocalServer(maxParticipants = 2) {
   const host = process.env.MEDIA_E2E_HOST || "127.0.0.1";
+  const loopbackHost = ["localhost", "127.0.0.1", "::1"].includes(host);
+  const defaultICEPublicIP = browserName === "firefox" && loopbackHost
+    ? findLocalIPv4Address() || host
+    : host;
   const port = await reserveLocalPort(host);
   const address = `${host}:${port}`;
   const output = [];
@@ -172,7 +207,7 @@ async function startLocalServer(maxParticipants = 2) {
     env: {
       ...process.env,
       HTTP_ADDR: address,
-      ICE_PUBLIC_IP: process.env.MEDIA_E2E_ICE_PUBLIC_IP ?? host,
+      ICE_PUBLIC_IP: process.env.MEDIA_E2E_ICE_PUBLIC_IP ?? defaultICEPublicIP,
       MEETING_PASSWORD: testMeetingPassword,
       MAX_PARTICIPANTS: String(maxParticipants),
       RECONNECT_TIMEOUT_SECONDS: "1",
@@ -1011,7 +1046,14 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
             window.__slowMeetTest.signalingMessages.push({
               direction: "in",
               type: message.type,
+              error: message.error,
               participantID: message.participant_id,
+              participant: message.participant && {
+                id: message.participant.id,
+                name: message.participant.name
+              },
+              audioEnabled: message.audio_enabled,
+              videoEnabled: message.video_enabled,
               screenShareActive: message.screen_share_active,
               candidateType: message.candidate?.match(/\btyp\s+(\S+)/)?.[1],
               usernameFragment: message.candidate?.match(/\bufrag\s+(\S+)/)?.[1],
@@ -1034,7 +1076,14 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
             window.__slowMeetTest.signalingMessages.push({
               direction: "out",
               type: message.type,
+              error: message.error,
               participantID: message.participant_id,
+              participant: message.participant && {
+                id: message.participant.id,
+                name: message.participant.name
+              },
+              audioEnabled: message.audio_enabled,
+              videoEnabled: message.video_enabled,
               screenShareActive: message.screen_share_active,
               candidateType: message.candidate?.match(/\btyp\s+(\S+)/)?.[1],
               usernameFragment: message.candidate?.match(/\bufrag\s+(\S+)/)?.[1],
@@ -1092,6 +1141,7 @@ function contextForRole(fixture, role) {
 async function createScenarioFixture({
   browserA,
   browserB,
+  sharedBrowserContext = false,
   baseURL,
   contexts,
   traceContexts,
@@ -1107,12 +1157,16 @@ async function createScenarioFixture({
     "time-coded audio roles must be A or B");
   const contextA = await browserA.newContext({ viewport: { width: 1440, height: 960 } });
   contexts.push(contextA);
-  const contextB = await browserB.newContext({ viewport: { width: 1440, height: 960 } });
-  contexts.push(contextB);
-  await Promise.all([contextA, contextB].map(async (context) => {
+  const contextB = sharedBrowserContext
+    ? contextA
+    : await browserB.newContext({ viewport: { width: 1440, height: 960 } });
+  if (contextB !== contextA) contexts.push(contextB);
+  await Promise.all([...new Set([contextA, contextB])].map(async (context) => {
     await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
     traceContexts.add(context);
-    await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
+    if (browserName === "chromium") {
+      await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
+    }
   }));
 
   const [pageA, pageB] = await Promise.all([
@@ -2491,7 +2545,9 @@ async function createFailureTrackedContext(browser, baseURL, contexts, traceCont
   contexts.push(context);
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   traceContexts.add(context);
-  await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
+  if (browserName === "chromium") {
+    await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
+  }
   return context;
 }
 
@@ -2863,24 +2919,38 @@ async function main() {
     console.warn("[media] external target has no MEDIA_E2E_MEETING_PASSWORD; password validation is environment-qualified");
   }
 
-  console.log(`[media] profile=${suiteProfile}; ${realDevices ? "real capture devices" : "Chromium-generated camera/microphone"}; ${headed ? "headed" : "headless"} Chromium`);
-  const chromePath = findChrome();
-  const launchArgs = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-    "--force-webrtc-ip-handling-policy=default_public_interface_only",
-    `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
-    "--autoplay-policy=no-user-gesture-required",
-    "--disable-features=WebRtcHideLocalIpsWithMdns"
-  ];
-  if (localTarget) launchArgs.push("--allow-loopback-in-peer-connection");
-  if (!realDevices) launchArgs.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
-  if (testScreenShare) launchArgs.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
-  const launchOptions = { headless: !headed, args: launchArgs };
-  if (chromePath) launchOptions.executablePath = chromePath;
+  const browserType = browserName === "firefox" ? firefox : chromium;
+  console.log(`[media] profile=${suiteProfile}; ${realDevices ? "real capture devices" : `${browserName}-generated camera/microphone`}; ${headed ? "headed" : "headless"} ${browserName}`);
+  const launchArgs = [];
+  const launchOptions = { headless: !headed };
+  if (browserName === "chromium") {
+    launchArgs.push(
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--force-webrtc-ip-handling-policy=default_public_interface_only",
+      `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
+      "--autoplay-policy=no-user-gesture-required",
+      "--disable-features=WebRtcHideLocalIpsWithMdns"
+    );
+    if (localTarget) launchArgs.push("--allow-loopback-in-peer-connection");
+    if (!realDevices) launchArgs.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
+    if (testScreenShare) launchArgs.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
+    launchOptions.args = launchArgs;
+    const chromePath = findChrome();
+    if (chromePath) launchOptions.executablePath = chromePath;
+  } else {
+    launchOptions.firefoxUserPrefs = {
+      "media.navigator.permission.disabled": true,
+      "media.peerconnection.ice.loopback": true,
+      "media.autoplay.default": 0
+    };
+    if (!realDevices) launchOptions.firefoxUserPrefs["media.navigator.streams.fake"] = true;
+    const firefoxPath = findFirefox();
+    if (firefoxPath) launchOptions.executablePath = firefoxPath;
+  }
 
   const runRealCameraToggleScenario = async (fixture, toggledRole, { sourceLabels = { A: "real", B: "real" } } = {}) => {
     const otherRole = toggledRole === "A" ? "B" : "A";
@@ -3360,8 +3430,8 @@ async function main() {
   };
 
   try {
-    browserA = await chromium.launch({ ...launchOptions, args: [...launchArgs] });
-    browserB = await chromium.launch({ ...launchOptions, args: [...launchArgs] });
+    browserA = await browserType.launch({ ...launchOptions, ...(launchArgs.length ? { args: [...launchArgs] } : {}) });
+    browserB = await browserType.launch({ ...launchOptions, ...(launchArgs.length ? { args: [...launchArgs] } : {}) });
 
     for (const scenario of scenarios) {
       const scenarioSelected = !requestedScenario || scenario.name === requestedScenario;
@@ -3404,7 +3474,8 @@ async function main() {
         }
         fixture = await createScenarioFixture({
           browserA,
-          browserB,
+          browserB: scenario.sharedBrowserContext ? browserA : browserB,
+          sharedBrowserContext: scenario.sharedBrowserContext === true,
           baseURL: scenarioBaseURL,
           contexts,
           traceContexts,
