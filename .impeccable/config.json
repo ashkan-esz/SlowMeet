@@ -44,6 +44,15 @@
         ],
         "createdAt": "2026-10-01T10:45:58.539Z",
         "reason": "False positive: fullscreen actions reuse established centered controls; toolbar buttons are 48-56px tall and mobile quick action uses 46px min-height with 12px horizontal padding."
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "web/admin.html"
+        ],
+        "createdAt": "2026-10-24T21:05:06.954Z",
+        "reason": "Codex: the settings fieldsets use only a top divider with 1.1rem top padding; there is no side border or flush text edge, and horizontal padding would break the form's shared alignment."
       }
     ]
   }

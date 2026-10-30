@@ -59,6 +59,17 @@
           <label for="password">Meeting password <span>(if required)</span></label>
           <input id="password" name="password" type="password" autocomplete="current-password">
         </div>
+        <div class="form-field">
+          <label for="join-connection-method">Connection method</label>
+          <select id="join-connection-method" autocomplete="off" aria-describedby="join-connection-method-help">
+            <option value="auto">Automatic</option>
+            <option value="direct">Direct</option>
+            <option value="turn-udp">TURN over UDP</option>
+            <option value="turn-tcp">TURN over TCP</option>
+            <option value="turn-tls">TURN over TLS</option>
+          </select>
+          <span id="join-connection-method-help" class="field-help">Choose a network path for this meeting.</span>
+        </div>
         <section class="device-test" aria-labelledby="device-test-title">
           <div class="device-test-summary">
             <div class="device-test-heading">
@@ -141,6 +152,17 @@
             <div class="connection-summary-heading"><span class="connection-summary-dot" aria-hidden="true"></span><div><p class="eyebrow">Live status</p><h3 id="connection-summary-title">Connecting</h3></div></div>
             <p id="connection-summary-copy" class="setting-note">Connecting to the room.</p>
             <p id="connection-preference" class="setting-note">Data preference: Automatic</p>
+            <div class="setting-line">
+              <label for="settings-connection-method">Connection method</label>
+              <select id="settings-connection-method" autocomplete="off" aria-describedby="settings-connection-method-help">
+                <option value="auto">Automatic</option>
+                <option value="direct">Direct</option>
+                <option value="turn-udp">TURN over UDP</option>
+                <option value="turn-tcp">TURN over TCP</option>
+                <option value="turn-tls">TURN over TLS</option>
+              </select>
+            </div>
+            <p id="settings-connection-method-help" class="setting-note" role="status">Choose a network path for this meeting.</p>
             <p class="setting-note incoming-video-help">Incoming video controls only what this device receives. Others can still see you if your camera is on.</p>
           </section>
           <section id="connection-metrics" class="settings-section" data-panel="settings" aria-labelledby="connection-metrics-title">
@@ -242,6 +264,7 @@
   <script src="/js/screen-share-adaptation.js"></script>
   <script src="/js/camera-readiness.js"></script>
   <script src="/js/muted-speech-warning.js"></script>
+  <script src="/js/connection-methods.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

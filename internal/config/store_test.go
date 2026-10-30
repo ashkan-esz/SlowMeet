@@ -93,6 +93,53 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 	}
 }
 
+func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
+	cfg := Config{HTTPAddr: ":8080", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
+		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
+		DefaultVideoQuality: "low"}
+	if got := cfg.EffectiveEnabledConnectionMethods(); strings.Join(got, ",") != "direct,turn-udp,turn-tcp,turn-tls" {
+		t.Fatalf("default enabled methods = %v", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg.ConfigFile = path
+	store, err := LoadStore(cfg)
+	if err != nil {
+		t.Fatalf("LoadStore() error = %v", err)
+	}
+	enabled := []string{"direct", "turn-tls"}
+	if err := store.Update(AdminUpdate{EnabledConnectionMethods: &enabled}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	reloaded, err := LoadStore(cfg)
+	if err != nil {
+		t.Fatalf("reload error = %v", err)
+	}
+	if got := reloaded.Snapshot().EffectiveEnabledConnectionMethods(); strings.Join(got, ",") != "direct,turn-tls" {
+		t.Fatalf("reloaded enabled methods = %v", got)
+	}
+	disabled := []string{}
+	if err := reloaded.Update(AdminUpdate{EnabledConnectionMethods: &disabled}); err != nil {
+		t.Fatalf("disable all connection methods: %v", err)
+	}
+	fullyDisabled, err := LoadStore(cfg)
+	if err != nil {
+		t.Fatalf("reload disabled methods: %v", err)
+	}
+	if got := fullyDisabled.Snapshot().EffectiveEnabledConnectionMethods(); len(got) != 0 {
+		t.Fatalf("reloaded disabled methods = %v, want empty", got)
+	}
+}
+
+func TestEnabledConnectionMethodsRejectUnknownOrDuplicate(t *testing.T) {
+	for _, methods := range [][]string{{"unknown"}, {"direct", "direct"}} {
+		cfg := Config{HTTPAddr: ":8080", EnabledConnectionMethods: methods}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate() accepted methods %v", methods)
+		}
+	}
+}
+
 func TestStoreUpdateDoesNotMutateWhenPersistenceFails(t *testing.T) {
 	path := t.TempDir()
 	cfg := Config{

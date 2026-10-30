@@ -427,7 +427,7 @@ if (!appSource.includes("if (generation !== socketGeneration || peer !== sharePe
     !appSource.includes('localScreenTrack.addEventListener("ended", () => {')) {
   throw new Error("screen share must serialize start/stop, clean up ended capture, and report renegotiation failures");
 }
-if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });\n  restartRequested = false;")) {
+if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers: selectedICEServers, iceTransportPolicy: selectedICEPolicy });\n  restartRequested = false;")) {
   throw new Error("new WebRTC generations must reset ICE restart state");
 }
 for (const behavior of [

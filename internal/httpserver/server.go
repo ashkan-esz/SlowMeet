@@ -142,12 +142,14 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		if iceTransportPolicy == "" {
 			iceTransportPolicy = "all"
 		}
+		iceServers := browserICEServers(cfg, time.Now())
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ice_servers":          browserICEServers(cfg, time.Now()),
+			"ice_servers":          iceServers,
 			"ice_transport_policy": iceTransportPolicy,
 			"simulcast_enabled":    cfg.SimulcastEnabled,
+			"connection_methods":   browserConnectionMethods(cfg, iceServers),
 		})
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -301,9 +303,95 @@ func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
 		"max_video_quality":     cfg.EffectiveMaxVideoQuality(),
 		"default_video_fps":     cfg.DefaultVideoFPS, "default_audio_bitrate": cfg.DefaultAudioBitrate,
 		"max_video_fps": cfg.MaxVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,
-		"screen_share_enabled": cfg.EnableScreenShare,
-		"retain_chat_history":  cfg.RetainChatHistory,
+		"screen_share_enabled":       cfg.EnableScreenShare,
+		"retain_chat_history":        cfg.RetainChatHistory,
+		"enabled_connection_methods": cfg.EffectiveEnabledConnectionMethods(),
 	})
+}
+
+type browserConnectionMethod struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	Enabled      bool   `json:"enabled"`
+	Available    bool   `json:"available"`
+	AdminEnabled bool   `json:"admin_enabled"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+func browserConnectionMethods(cfg config.Config, servers []browserICEServer) []browserConnectionMethod {
+	enabled := make(map[string]bool)
+	configuredTURN := make(map[string]bool)
+	for _, id := range cfg.EffectiveEnabledConnectionMethods() {
+		enabled[id] = true
+	}
+	for _, rawURL := range cfg.EffectiveTURNURLs() {
+		if id := turnConnectionMethod(rawURL); id != "" {
+			configuredTURN[id] = true
+		}
+	}
+	available := map[string]bool{"direct": cfg.ICETransportPolicy != "relay"}
+	for _, server := range servers {
+		for _, rawURL := range server.URLs {
+			if id := turnConnectionMethod(rawURL); id != "" {
+				available[id] = true
+			}
+		}
+	}
+	methods := []browserConnectionMethod{
+		{ID: "auto", Label: "Automatic", Enabled: true, Available: true, AdminEnabled: true},
+		{ID: "direct", Label: "Direct", Available: available["direct"], AdminEnabled: enabled["direct"]},
+		{ID: "turn-udp", Label: "TURN over UDP", Available: available["turn-udp"], AdminEnabled: enabled["turn-udp"]},
+		{ID: "turn-tcp", Label: "TURN over TCP", Available: available["turn-tcp"], AdminEnabled: enabled["turn-tcp"]},
+		{ID: "turn-tls", Label: "TURN over TLS", Available: available["turn-tls"], AdminEnabled: enabled["turn-tls"]},
+	}
+	for i := range methods {
+		method := &methods[i]
+		method.Enabled = method.Enabled || (method.Available && method.AdminEnabled)
+		if method.ID == "auto" || method.Enabled {
+			continue
+		}
+		switch {
+		case !method.Available:
+			method.Reason = "Not configured on this server"
+			if configuredTURN[method.ID] {
+				method.Reason = "TURN credentials are unavailable"
+			}
+			if method.ID == "direct" && cfg.ICETransportPolicy == "relay" {
+				method.Reason = "Disabled by the server ICE policy"
+			}
+		case !method.AdminEnabled:
+			method.Reason = "Disabled by the administrator"
+		}
+	}
+	return methods
+}
+
+func turnConnectionMethod(raw string) string {
+	parts := strings.SplitN(raw, "?", 2)
+	address := strings.ToLower(parts[0])
+	if strings.HasPrefix(address, "turns:") {
+		return "turn-tls"
+	}
+	if !strings.HasPrefix(address, "turn:") {
+		return ""
+	}
+	transport := "udp"
+	if len(parts) == 2 {
+		for _, parameter := range strings.Split(parts[1], "&") {
+			pair := strings.SplitN(parameter, "=", 2)
+			if len(pair) == 2 && strings.EqualFold(pair[0], "transport") {
+				transport = strings.ToLower(pair[1])
+			}
+		}
+	}
+	switch transport {
+	case "udp":
+		return "turn-udp"
+	case "tcp":
+		return "turn-tcp"
+	default:
+		return ""
+	}
 }
 
 type browserICEServer struct {

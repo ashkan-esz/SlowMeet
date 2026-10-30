@@ -193,7 +193,7 @@ async function waitForServer(url, processHandle, output) {
   throw new Error(`SlowMeet did not become ready: ${lastError?.message || "timeout"}\n${output.join("")}`);
 }
 
-async function startLocalServer(maxParticipants = 2) {
+async function startLocalServer(maxParticipants = 2, { connectionMethodTest = false } = {}) {
   const host = process.env.MEDIA_E2E_HOST || "127.0.0.1";
   const loopbackHost = ["localhost", "127.0.0.1", "::1"].includes(host);
   const defaultICEPublicIP = browserName === "firefox" && loopbackHost
@@ -201,16 +201,22 @@ async function startLocalServer(maxParticipants = 2) {
     : host;
   const port = await reserveLocalPort(host);
   const address = `${host}:${port}`;
+  const configFile = path.join(os.tmpdir(), `slowmeet-media-e2e-${process.pid}-${port}.json`);
   const output = [];
   const processHandle = spawn("go", ["run", "."], {
     cwd: root,
     env: {
       ...process.env,
       HTTP_ADDR: address,
+      CONFIG_FILE: configFile,
       ICE_PUBLIC_IP: process.env.MEDIA_E2E_ICE_PUBLIC_IP ?? defaultICEPublicIP,
       MEETING_PASSWORD: testMeetingPassword,
       MAX_PARTICIPANTS: String(maxParticipants),
       RECONNECT_TIMEOUT_SECONDS: "1",
+      ...(connectionMethodTest ? {
+        ADMIN_PASSWORD: "slowmeet-e2e-admin-password",
+        ICE_TRANSPORT_POLICY: "all"
+      } : {}),
       GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-media-e2e-gocache"
     },
     detached: true,
@@ -239,6 +245,7 @@ async function startLocalServer(maxParticipants = 2) {
           processHandle.kill("SIGKILL");
         }
       }
+      fs.rmSync(configFile, { force: true });
     },
     output
   };
@@ -3193,6 +3200,157 @@ async function main() {
     ...participantFlowScenarios,
     ...mediaLifecycleScenarios,
     {
+      name: "connection method switch and admin policy refresh",
+      when: "localCapacity",
+      localCapacityLimit: 2,
+      connectionMethodTest: true,
+      async run(fixture) {
+        const pageA = fixture.pageA;
+        const pageB = fixture.pageB;
+        await Promise.all([
+          pageA.locator('#join-connection-method').locator('option[value="direct"]').waitFor({ state: "attached" }),
+          pageB.locator('#join-connection-method').locator('option[value="direct"]').waitFor({ state: "attached" })
+        ]);
+        await pageA.waitForFunction(() => {
+          const option = document.querySelector('#join-connection-method option[value="direct"]');
+          return option && !option.disabled;
+        });
+        await Promise.all([fixture.join("A"), fixture.join("B")]);
+        const participantLayoutSnapshot = async () => pageA.locator(
+          "#meeting-layout-host li[data-participant-id]"
+        ).evaluateAll((items) => {
+          const describe = (item) => ({
+            id: item.dataset.participantId,
+            name: item.querySelector(".participant-name")?.textContent?.trim() || "",
+            local: item.classList.contains("is-local")
+          });
+          return {
+            all: items.map(describe).sort((left, right) => left.id.localeCompare(right.id)),
+            visible: items.filter((item) => item.getClientRects().length > 0 &&
+              getComputedStyle(item).visibility !== "hidden").map(describe)
+              .sort((left, right) => left.id.localeCompare(right.id))
+          };
+        });
+        const assertParticipantLayoutStable = async (expected, label) => {
+          const actual = await participantLayoutSnapshot();
+          assert.deepEqual(actual.all, expected.all,
+            `${label}: all layout containers should retain exactly one tile per participant`);
+          assert.deepEqual(actual.visible, expected.visible,
+            `${label}: visible participant identities should remain stable`);
+          const ids = actual.all.map((item) => item.id);
+          assert.deepEqual(ids.filter((id, index) => ids.indexOf(id) !== index), [],
+            `${label}: participant tiles should not be duplicated across layout containers`);
+          assert.equal(actual.visible.filter((item) => item.local).length, expected.visible.filter((item) => item.local).length,
+            `${label}: reconnect should preserve the visible local tile marker`);
+          await fixture.assertNoDuplicateParticipants();
+        };
+        let config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
+        assert.ok(Array.isArray(config.iceServers), "automatic mode should apply the server ICE configuration");
+        await fixture.assertPeersConnected("initial automatic connection");
+        const peerCountBeforeDirectSwitch = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length);
+        await pageA.locator('#settings-connection-method').selectOption('direct', { force: true });
+        try {
+          await pageA.waitForFunction((previousCount) =>
+            window.__slowMeetTest.peerConnections.length > previousCount,
+          peerCountBeforeDirectSwitch, { timeout: 5000 });
+        } catch (_) {
+          const switchFailure = await pageA.evaluate(() => ({
+            joinMethod: document.querySelector('#join-connection-method')?.value,
+            settingsMethod: document.querySelector('#settings-connection-method')?.value,
+            settingsDisabled: document.querySelector('#settings-connection-method option:checked')?.disabled,
+            settingsHelp: document.querySelector('#settings-connection-method-help')?.textContent,
+            sockets: window.__slowMeetTest.sockets.map((socket) => socket.readyState),
+            peerCount: window.__slowMeetTest.peerConnections.length,
+            status: document.querySelector('#status')?.textContent
+          }));
+          assert.fail(`connection method selection did not create a new peer: ${JSON.stringify(switchFailure)}`);
+        }
+        await waitForPeerConnection(pageA, "connected", 20000);
+        config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
+        assert.ok(!config.iceServers.some((server) =>
+          (Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => url.startsWith("turn:"))),
+        "direct mode must omit TURN servers from the peer configuration");
+        await Promise.all([
+          waitForPeerConnection(pageA, "connected", 20000),
+          waitForPeerConnection(pageB, "connected", 20000)
+        ]);
+        await fixture.waitForStability(10000, 15000);
+        await Promise.all([
+          waitForPeerConnection(pageA, "connected", 20000),
+          waitForPeerConnection(pageB, "connected", 20000)
+        ]);
+        const gridBeforeRapidSwitch = await participantLayoutSnapshot();
+        await assertParticipantLayoutStable(gridBeforeRapidSwitch, "direct connection method switch");
+        const peerCountBeforeRapidSwitch = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length);
+        await pageA.evaluate(() => {
+          const selector = document.querySelector('#settings-connection-method');
+          selector.value = 'auto';
+          selector.dispatchEvent(new Event('change', { bubbles: true }));
+          if (window.__slowMeetTest.sockets.at(-1)?.readyState !== WebSocket.CLOSING) {
+            throw new Error('first method change did not put the signaling socket into CLOSING');
+          }
+          selector.value = 'direct';
+          selector.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        await pageA.waitForFunction((previousCount) =>
+          window.__slowMeetTest.peerConnections.length > previousCount,
+        peerCountBeforeRapidSwitch, { timeout: 10000 });
+        await Promise.all([
+          waitForPeerConnection(pageA, "connected", 20000),
+          waitForPeerConnection(pageB, "connected", 20000)
+        ]);
+        await assertParticipantLayoutStable(gridBeforeRapidSwitch, "rapid connection method switch");
+        const staleJoinPage = await fixture.newPage("B");
+        await staleJoinPage.waitForFunction(() => {
+          const option = document.querySelector('#join-connection-method option[value="direct"]');
+          return option && !option.disabled;
+        });
+        const peerCountBeforeSwitch = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length);
+        const updateResponse = await fetch(`${fixture.baseURL}/admin/config`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Admin-Password": "slowmeet-e2e-admin-password"
+          },
+          body: JSON.stringify({ enabled_connection_methods: ["turn-udp", "turn-tcp", "turn-tls"] })
+        });
+        assert.equal(updateResponse.status, 200, "admin policy update should be accepted");
+
+        await pageA.bringToFront();
+        assert.equal(await pageA.evaluate(() => document.hidden), false,
+          "the policy refresh scenario requires a visible application tab");
+        await pageA.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+        await pageA.waitForFunction(() =>
+          document.querySelector('#settings-connection-method option[value="direct"]')?.disabled === true,
+        null, { timeout: 10000 });
+        await pageA.waitForFunction((previousCount) =>
+          window.__slowMeetTest.peerConnections.length > previousCount,
+        peerCountBeforeSwitch, { timeout: 20000 });
+        await waitForPeerConnection(pageA, "connected", 20000);
+        config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
+        assert.ok(Array.isArray(config.iceServers),
+          "automatic mode after policy refresh should apply the refreshed server ICE configuration");
+        await Promise.all([
+          waitForPeerConnection(pageA, "connected", 20000),
+          waitForPeerConnection(pageB, "connected", 20000)
+        ]);
+        await assertParticipantLayoutStable(gridBeforeRapidSwitch, "admin-triggered connection method fallback");
+        assert.equal(await pageA.locator('#connection-preference').textContent(),
+          "Connection method: Automatic", "policy revocation should move the active call to automatic mode");
+        assert.equal(await pageA.locator('#settings-connection-method option[value="direct"]').isDisabled(), true,
+          "the refreshed in-meeting selector should disable direct mode");
+
+        await staleJoinPage.locator('#join-connection-method').selectOption('direct');
+        await staleJoinPage.locator('#join').click();
+        await staleJoinPage.waitForFunction(() => !document.querySelector('#join').disabled, null, { timeout: 10000 });
+        assert.equal(await staleJoinPage.locator('#meeting').isVisible(), false,
+          "joining with a stale method disabled by the admin must be blocked");
+        assert.match(await staleJoinPage.locator('#status').textContent(), /administrator/i,
+          "the refreshed disabled method should explain why joining was blocked");
+        console.log("[pass] connection method switch and admin policy refresh");
+      }
+    },
+    {
       name: "camera control shows pending capture and settles queued toggles",
       async run(fixture) {
         await testCameraPendingState(fixture.browserA, baseURL, contexts, traceContexts);
@@ -3469,7 +3627,9 @@ async function main() {
       const startedAt = Date.now();
       try {
         if (scenario.localCapacityLimit && !externalBaseURL) {
-          scenarioServer = await startLocalServer(scenario.localCapacityLimit);
+          scenarioServer = await startLocalServer(scenario.localCapacityLimit, {
+            connectionMethodTest: scenario.connectionMethodTest === true
+          });
           scenarioBaseURL = scenarioServer.url;
         }
         fixture = await createScenarioFixture({

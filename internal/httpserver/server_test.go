@@ -159,7 +159,14 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	var values struct {
 		ICETransportPolicy string `json:"ice_transport_policy"`
 		SimulcastEnabled   bool   `json:"simulcast_enabled"`
-		ICEServers         []struct {
+		ConnectionMethods  []struct {
+			ID           string `json:"id"`
+			Enabled      bool   `json:"enabled"`
+			Available    bool   `json:"available"`
+			AdminEnabled bool   `json:"admin_enabled"`
+			Reason       string `json:"reason"`
+		} `json:"connection_methods"`
+		ICEServers []struct {
 			URLs       []string `json:"urls"`
 			Username   string   `json:"username"`
 			Credential string   `json:"credential"`
@@ -173,6 +180,26 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	}
 	if values.ICETransportPolicy != "relay" || !values.SimulcastEnabled {
 		t.Fatalf("ICE/simulcast settings were not returned: policy=%q simulcast=%t", values.ICETransportPolicy, values.SimulcastEnabled)
+	}
+	methods := make(map[string]struct {
+		Enabled      bool
+		Available    bool
+		AdminEnabled bool
+		Reason       string
+	})
+	for _, method := range values.ConnectionMethods {
+		methods[method.ID] = struct {
+			Enabled      bool
+			Available    bool
+			AdminEnabled bool
+			Reason       string
+		}{method.Enabled, method.Available, method.AdminEnabled, method.Reason}
+	}
+	if !methods["auto"].Enabled || methods["direct"].Enabled || methods["direct"].Available ||
+		!methods["turn-udp"].Enabled || !methods["turn-udp"].Available ||
+		!methods["turn-tls"].Enabled || !methods["turn-tls"].Available ||
+		methods["turn-tcp"].Enabled || methods["turn-tcp"].Available {
+		t.Fatalf("unexpected connection method availability: %#v", methods)
 	}
 	if values.ICEServers[0].URLs[0] != "stun:stun.example.com:3478" {
 		t.Fatalf("unexpected STUN server: %#v", values.ICEServers[0])
@@ -188,6 +215,87 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("ICE config Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestICEConfigMarksAdminDisabledMethods(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TURNURLs = []string{"turn:turn.example.com:3478?transport=udp"}
+	cfg.TURNSharedSecret = "shared-secret"
+	cfg.TURNCredentialTTL = time.Hour
+	cfg.EnabledConnectionMethods = []string{"direct"}
+	handler := New(cfg, NewLogger("error"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ice-config", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ICE config status = %d", response.Code)
+	}
+	var values struct {
+		Methods []struct {
+			ID           string `json:"id"`
+			Enabled      bool   `json:"enabled"`
+			Available    bool   `json:"available"`
+			AdminEnabled bool   `json:"admin_enabled"`
+			Reason       string `json:"reason"`
+		} `json:"connection_methods"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode ICE config: %v", err)
+	}
+	methods := make(map[string]struct {
+		Enabled      bool
+		Available    bool
+		AdminEnabled bool
+		Reason       string
+	})
+	for _, method := range values.Methods {
+		methods[method.ID] = struct {
+			Enabled      bool
+			Available    bool
+			AdminEnabled bool
+			Reason       string
+		}{method.Enabled, method.Available, method.AdminEnabled, method.Reason}
+	}
+	if !methods["direct"].Enabled || !methods["turn-udp"].Available || methods["turn-udp"].AdminEnabled ||
+		methods["turn-udp"].Enabled || methods["turn-udp"].Reason != "Disabled by the administrator" {
+		t.Fatalf("unexpected admin-disabled method details: %#v", methods)
+	}
+}
+
+func TestICEConfigDisablesUnconfiguredTURNMethods(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ice-config", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ICE config status = %d", response.Code)
+	}
+	var values struct {
+		Methods []struct {
+			ID        string `json:"id"`
+			Enabled   bool   `json:"enabled"`
+			Available bool   `json:"available"`
+			Reason    string `json:"reason"`
+		} `json:"connection_methods"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode ICE config: %v", err)
+	}
+	methods := make(map[string]struct {
+		Enabled   bool
+		Available bool
+		Reason    string
+	})
+	for _, method := range values.Methods {
+		methods[method.ID] = struct {
+			Enabled   bool
+			Available bool
+			Reason    string
+		}{method.Enabled, method.Available, method.Reason}
+	}
+	for _, id := range []string{"turn-udp", "turn-tcp", "turn-tls"} {
+		if methods[id].Enabled || methods[id].Available || methods[id].Reason != "Not configured on this server" {
+			t.Errorf("unconfigured method %q details = %#v", id, methods[id])
+		}
 	}
 }
 

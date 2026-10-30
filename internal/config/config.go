@@ -14,36 +14,37 @@ import (
 )
 
 type Config struct {
-	AppEnv              string
-	HTTPAddr            string
-	ConfigFile          string
-	MeetingPassword     string
-	AdminPassword       string
-	STUNServers         []string
-	TURNURL             string
-	TURNURLs            []string
-	TURNUsername        string
-	TURNPassword        string
-	TURNSharedSecret    string
-	TURNCredentialTTL   time.Duration
-	ICEIPv4Only         bool
-	ICETransportPolicy  string
-	SimulcastEnabled    bool
-	ICEUDPPortMin       int
-	ICEUDPPortMax       int
-	ICEPublicIP         string
-	MaxParticipants     int
-	DefaultVideoQuality string
-	MaxVideoQuality     string
-	DefaultVideoFPS     int
-	MaxVideoFPS         int
-	DefaultAudioBitrate int
-	MaxVideoBitrate     int
-	MaxAudioBitrate     int
-	EnableScreenShare   bool
-	RetainChatHistory   bool
-	ReconnectTimeout    time.Duration
-	LogLevel            string
+	AppEnv                   string
+	HTTPAddr                 string
+	ConfigFile               string
+	MeetingPassword          string
+	AdminPassword            string
+	STUNServers              []string
+	TURNURL                  string
+	TURNURLs                 []string
+	TURNUsername             string
+	TURNPassword             string
+	TURNSharedSecret         string
+	TURNCredentialTTL        time.Duration
+	ICEIPv4Only              bool
+	ICETransportPolicy       string
+	EnabledConnectionMethods []string
+	SimulcastEnabled         bool
+	ICEUDPPortMin            int
+	ICEUDPPortMax            int
+	ICEPublicIP              string
+	MaxParticipants          int
+	DefaultVideoQuality      string
+	MaxVideoQuality          string
+	DefaultVideoFPS          int
+	MaxVideoFPS              int
+	DefaultAudioBitrate      int
+	MaxVideoBitrate          int
+	MaxAudioBitrate          int
+	EnableScreenShare        bool
+	RetainChatHistory        bool
+	ReconnectTimeout         time.Duration
+	LogLevel                 string
 }
 
 const MaxAllowedParticipants = 100
@@ -150,6 +151,18 @@ func (c Config) Validate() error {
 	if c.ICETransportPolicy != "" && c.ICETransportPolicy != "all" && c.ICETransportPolicy != "relay" {
 		return fmt.Errorf("ICE_TRANSPORT_POLICY must be all or relay")
 	}
+	seenConnectionMethods := make(map[string]struct{}, len(c.EnabledConnectionMethods))
+	for _, method := range c.EnabledConnectionMethods {
+		switch method {
+		case "direct", "turn-udp", "turn-tcp", "turn-tls":
+		default:
+			return fmt.Errorf("enabled connection method %q is invalid", method)
+		}
+		if _, exists := seenConnectionMethods[method]; exists {
+			return fmt.Errorf("enabled connection method %q is duplicated", method)
+		}
+		seenConnectionMethods[method] = struct{}{}
+	}
 	if (c.ICEUDPPortMin == 0) != (c.ICEUDPPortMax == 0) ||
 		(c.ICEUDPPortMin != 0 &&
 			(c.ICEUDPPortMin < 1 || c.ICEUDPPortMin > 65535 ||
@@ -220,6 +233,15 @@ func (c Config) EffectiveTURNURLs() []string {
 		return []string{c.TURNURL}
 	}
 	return nil
+}
+
+func (c Config) EffectiveEnabledConnectionMethods() []string {
+	if c.EnabledConnectionMethods != nil {
+		methods := make([]string, len(c.EnabledConnectionMethods))
+		copy(methods, c.EnabledConnectionMethods)
+		return methods
+	}
+	return []string{"direct", "turn-udp", "turn-tcp", "turn-tls"}
 }
 
 // TURNCredentials returns coturn REST API credentials when a shared secret is

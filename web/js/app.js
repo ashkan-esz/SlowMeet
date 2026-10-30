@@ -47,6 +47,10 @@ const connectionSummary = document.querySelector("#connection-summary");
 const connectionSummaryTitle = document.querySelector("#connection-summary-title");
 const connectionSummaryCopy = document.querySelector("#connection-summary-copy");
 const connectionPreference = document.querySelector("#connection-preference");
+const joinConnectionMethod = document.querySelector("#join-connection-method");
+const settingsConnectionMethod = document.querySelector("#settings-connection-method");
+const joinConnectionMethodHelp = document.querySelector("#join-connection-method-help");
+const settingsConnectionMethodHelp = document.querySelector("#settings-connection-method-help");
 const connectionPopover = document.querySelector("#connection-popover");
 const closeConnectionPopover = document.querySelector("#close-connection-popover");
 const connectionPopoverTitle = document.querySelector("#connection-popover-title");
@@ -1392,7 +1396,10 @@ connectionPopoverRetry?.addEventListener("click", () => {
     requestIceRestart(peer, socket, socketGeneration);
     return;
   }
-  if (!meeting.hidden) connectSocket(nameInput.value.trim(), passwordInput.value);
+  if (!meeting.hidden) {
+    intentionalClose = false;
+    connectSocket(nameInput.value.trim(), passwordInput.value);
+  }
 });
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
@@ -1635,6 +1642,7 @@ let screenShareEnabled = true;
 let serverDefaultProfile = false;
 let remoteDescriptionSet = false;
 let reconnectTimer;
+let connectionMethodSwitchRequested = false;
 let intentionalClose = false;
 let restartRequested = false;
 let iceRestartAttempts = 0;
@@ -1722,30 +1730,127 @@ const hostDefaults = {
 let iceServers = [];
 let iceTransportPolicy = "all";
 let simulcastEnabled = false;
-const iceConfigReady = fetch("/ice-config", { cache: "no-store" })
-  .then((response) => {
-    if (!response.ok) throw new Error("ICE configuration unavailable");
-    return response.json();
-  })
-  .then((config) => {
-    if (config.ice_transport_policy === "relay" || config.ice_transport_policy === "all") {
-      iceTransportPolicy = config.ice_transport_policy;
+const connectionMethodOptions = new Map();
+let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
+let iceConfigRequest;
+async function refreshICEConfig() {
+  if (iceConfigRequest) return iceConfigRequest;
+  iceConfigRequest = (async () => {
+    try {
+      const response = await fetch("/ice-config", { cache: "no-store" });
+      if (!response.ok) throw new Error("ICE configuration unavailable");
+      const config = await response.json();
+      if (config.ice_transport_policy === "relay" || config.ice_transport_policy === "all") {
+        iceTransportPolicy = config.ice_transport_policy;
+      }
+      simulcastEnabled = config.simulcast_enabled === true;
+      connectionMethodOptions.clear();
+      if (Array.isArray(config.connection_methods)) {
+        config.connection_methods.forEach((method) => {
+          if (!method || typeof method.id !== "string") return;
+          connectionMethodOptions.set(method.id, method);
+        });
+      }
+      connectionMethodOptions.set("auto", connectionMethodOptions.get("auto") || {
+        id: "auto", label: "Automatic", enabled: true
+      });
+      if (Array.isArray(config.ice_servers)) {
+        iceServers = config.ice_servers.map((server) => {
+          const urls = Array.isArray(server.urls) ?
+            server.urls.filter((url) => typeof url === "string" && url.length > 0) : [];
+          if (urls.length === 0) return null;
+          const normalized = { urls };
+          if (typeof server.username === "string" && server.username) normalized.username = server.username;
+          if (typeof server.credential === "string" && server.credential) normalized.credential = server.credential;
+          return normalized;
+        }).filter(Boolean);
+      }
+      refreshConnectionMethodSelectors();
+      return true;
+    } catch (_) {
+      if (connectionMethodOptions.size === 0) {
+        connectionMethodOptions.set("auto", {id: "auto", label: "Automatic", enabled: true});
+        iceServers = [];
+        refreshConnectionMethodSelectors();
+      }
+      return false;
+    } finally {
+      iceConfigRequest = undefined;
     }
-    simulcastEnabled = config.simulcast_enabled === true;
-    if (!Array.isArray(config.ice_servers)) return;
-    iceServers = config.ice_servers.map((server) => {
-      const urls = Array.isArray(server.urls) ?
-        server.urls.filter((url) => typeof url === "string" && url.length > 0) : [];
-      if (urls.length === 0) return null;
-      const normalized = { urls };
-      if (typeof server.username === "string" && server.username) normalized.username = server.username;
-      if (typeof server.credential === "string" && server.credential) normalized.credential = server.credential;
-      return normalized;
-    }).filter(Boolean);
-  })
-  .catch(() => {
-    iceServers = [];
+  })();
+  return iceConfigRequest;
+}
+const iceConfigReady = refreshICEConfig();
+
+function refreshConnectionMethodSelectors() {
+  [joinConnectionMethod, settingsConnectionMethod].forEach((select) => {
+    if (!select) return;
+    [...select.options].forEach((option) => {
+      const method = connectionMethodOptions.get(option.value);
+      option.disabled = !method?.enabled;
+      option.textContent = method?.label || option.textContent.replace(/ \(.*\)$/, "");
+      if (!method?.enabled) option.textContent += ` (${method?.reason || "unavailable"})`;
+      option.title = method?.reason || "";
+    });
+    select.value = connectionMethodOptions.get(connectionMethod)?.enabled ? connectionMethod : "auto";
   });
+  const selectedMethod = connectionMethodOptions.get(connectionMethod);
+  if (!selectedMethod?.enabled) {
+    connectionMethod = "auto";
+    writeStoredValue("meeting.connectionMethod", connectionMethod);
+  }
+  const reason = connectionMethodOptions.get(connectionMethod)?.reason;
+  const help = reason || "Choose a network path for this meeting.";
+  if (joinConnectionMethodHelp) joinConnectionMethodHelp.textContent = help;
+  if (settingsConnectionMethodHelp) settingsConnectionMethodHelp.textContent = help;
+  updateConnectionMethodSummary();
+}
+
+function updateConnectionMethodSummary() {
+  const method = connectionMethodOptions.get(connectionMethod);
+  if (connectionPreference) connectionPreference.textContent = `Connection method: ${method?.label || "Automatic"}`;
+}
+
+function scheduleConnectionMethodReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    if (!connectionMethodSwitchRequested || intentionalClose || meeting.hidden) return;
+    connectionMethodSwitchRequested = false;
+    reconnectAttempts = 0;
+    resetMediaConnection();
+    connectSocket(nameInput.value.trim(), passwordInput.value);
+  }, 0);
+}
+
+function selectConnectionMethod(methodID) {
+  const method = connectionMethodOptions.get(methodID);
+  if (!method?.enabled) {
+    status.textContent = method?.reason || "That connection method is unavailable.";
+    refreshConnectionMethodSelectors();
+    return false;
+  }
+  if (connectionMethod === methodID) return true;
+  connectionMethod = methodID;
+  writeStoredValue("meeting.connectionMethod", methodID);
+  refreshConnectionMethodSelectors();
+  if (!meeting.hidden) {
+    connectionMethodSwitchRequested = true;
+    clearTimeout(reconnectTimer);
+    const readyState = socket?.readyState;
+    if (readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING) {
+      status.textContent = `Switching to ${method.label}. Reconnecting…`;
+      socket.close();
+    } else if (readyState === WebSocket.CLOSED || !socket) {
+      intentionalClose = false;
+      scheduleConnectionMethodReconnect();
+    }
+  }
+  return true;
+}
+
+function filteredICEServers(methodID) {
+  return window.SlowMeetConnectionMethods.filterICEServers(iceServers, methodID);
+}
 const pendingCandidates = [];
 const participantElements = new Map();
 const participantRemovalTimers = new Map();
@@ -2909,21 +3014,48 @@ document.addEventListener("visibilitychange", () => {
     stopRoomRosterRefresh();
     return;
   }
-  if (!welcomeGrid.hidden) refreshRoomRoster();
+  const activeMethod = connectionMethod;
+  refreshICEConfig().then((refreshed) => {
+    if (!refreshed) return;
+    if (!meeting.hidden && !connectionMethodOptions.get(activeMethod)?.enabled) {
+      connectionMethod = activeMethod;
+      selectConnectionMethod("auto");
+    }
+    if (!welcomeGrid.hidden) refreshRoomRoster();
+  });
 });
 refreshRoomRoster();
 
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (joinButton.disabled) return;
+  const requestedMethod = joinConnectionMethod?.value || "auto";
+  joinButton.disabled = true;
+  if (!(await refreshICEConfig())) {
+    status.textContent = "Connection settings could not be refreshed. Please try again.";
+    joinButton.disabled = false;
+    return;
+  }
+  const method = connectionMethodOptions.get(requestedMethod);
+  if (!method?.enabled) {
+    status.textContent = method?.reason || "That connection method is no longer available. Choose another method.";
+    joinButton.disabled = false;
+    return;
+  }
+  if (!selectConnectionMethod(requestedMethod)) {
+    joinButton.disabled = false;
+    return;
+  }
   const name = nameInput.value.trim();
   writeStoredValue("meeting.displayName", name);
   stopDeviceTest();
   deviceTestStatus.textContent = "";
   intentionalClose = false;
-  joinButton.disabled = true;
   connectSocket(name, passwordInput.value);
 });
+
+joinConnectionMethod?.addEventListener("change", () => selectConnectionMethod(joinConnectionMethod.value));
+settingsConnectionMethod?.addEventListener("change", () => selectConnectionMethod(settingsConnectionMethod.value));
 
 function connectSocket(name, password) {
   const generation = ++socketGeneration;
@@ -3135,6 +3267,10 @@ function connectSocket(name, password) {
       if (meeting.hidden) joinButton.disabled = false;
       return;
     }
+    if (connectionMethodSwitchRequested) {
+      scheduleConnectionMethodReconnect();
+      return;
+    }
     reconnectAttempts++;
     setConnection("fair", "Reconnecting");
     if (reconnectAttempts > maxReconnectAttempts) {
@@ -3164,6 +3300,9 @@ function resetMediaConnection() {
   meetingViewState.pinnedParticipantIds = [];
   participants.classList.remove("has-pinned");
   participants.dataset.pinned = "false";
+  pinnedMain.replaceChildren();
+  pinnedFilmstrip.replaceChildren();
+  layoutParking.replaceChildren();
   for (const timer of participantRemovalTimers.values()) clearTimeout(timer);
   participantRemovalTimers.clear();
   participants.replaceChildren();
@@ -3238,7 +3377,19 @@ async function startWebRTC() {
   clearTimeout(iceDisconnectRestartTimer);
   iceDisconnectRestartTimer = undefined;
   renegotiationQueue?.close(new Error("WebRTC connection replaced"));
-  const currentPeer = new RTCPeerConnection({ iceServers, iceTransportPolicy });
+  const selectedICEServers = filteredICEServers(connectionMethod);
+  const selectedICEPolicy = connectionMethod.startsWith("turn-")
+    ? "relay"
+    : connectionMethod === "direct" ? "all" : iceTransportPolicy;
+  if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(connectionMethod) &&
+      selectedICEServers.length === 0) {
+    status.textContent = "The selected connection method is unavailable. Choose another method and retry.";
+    setConnection("poor", "Method unavailable");
+    intentionalClose = true;
+    currentSocket.close();
+    return;
+  }
+  const currentPeer = new RTCPeerConnection({ iceServers: selectedICEServers, iceTransportPolicy: selectedICEPolicy });
   restartRequested = false;
   iceRestartAttempts = 0;
   peer = currentPeer;
@@ -3503,7 +3654,8 @@ function updateConnectionPopover(level, label) {
   const audioText = !audioAvailable ? "Audio is not available yet." : "Audio is connected.";
   const videoText = receiveVideoEnabled ? "Incoming video is on for this device." : "Incoming video is off for this device.";
   if (connectionPopoverCopy) {
-    connectionPopoverCopy.textContent = `${audioText} ${videoText}`;
+    const failureText = label === "Offline" ? `${connectionMethodFailureMessage()} ` : "";
+    connectionPopoverCopy.textContent = `${failureText}${audioText} ${videoText}`;
   }
   connectionPopover.dataset.level = level || "connecting";
   syncConnectionPopoverStats();
@@ -3549,7 +3701,7 @@ function updateConnectionSummary(level, label) {
     connectionSummaryCopy.textContent = `${audioText} ${videoText}`;
   }
   if (connectionPreference) {
-    connectionPreference.textContent = `Data preference: ${audioOnly?.checked ? "Protect audio" : "Automatic"}`;
+    updateConnectionMethodSummary();
   }
   updateConnectionPopover(level, label);
   if (!meetingAlert) return;
@@ -3588,6 +3740,11 @@ function isPeerConnectionConnected(targetPeer) {
     (targetPeer.iceConnectionState === "connected" || targetPeer.iceConnectionState === "completed");
 }
 
+function connectionMethodFailureMessage() {
+  const label = connectionMethodOptions.get(connectionMethod)?.label || "selected";
+  return `The ${label} connection failed. Retry or choose another method in Settings.`;
+}
+
 function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
   if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || targetPeer.connectionState === "closed") return;
   if (isPeerConnectionConnected(targetPeer)) {
@@ -3607,7 +3764,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     setConnection("poor", iceRestartAttempts >= maxIceRestartAttempts ? "Offline" : "Reconnecting");
     setParticipantConnectionState("disconnected");
     status.textContent = iceRestartAttempts >= maxIceRestartAttempts
-      ? "Media connection failed. Retry to reconnect."
+      ? connectionMethodFailureMessage()
       : "Restarting media...";
     requestIceRestart(targetPeer, targetSocket, generation);
     return;
@@ -3619,7 +3776,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     status.textContent = restartRequested ? "Restarting media..." : "Reconnecting media...";
     if (!restartRequested && iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
-      status.textContent = "Media connection failed. Retry to reconnect.";
+      status.textContent = connectionMethodFailureMessage();
       return;
     }
     scheduleIceRestartRetry(targetPeer, targetSocket, generation);

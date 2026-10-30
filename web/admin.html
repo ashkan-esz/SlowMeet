@@ -159,6 +159,14 @@
               <label class="checkbox-row" for="screen-share"><input id="screen-share" type="checkbox" checked> <span><strong>Allow screen sharing</strong><small>Participants can share their screen during meetings.</small></span></label>
               <label class="checkbox-row" for="retain-chat-history"><input id="retain-chat-history" type="checkbox"> <span><strong>Retain chat history</strong><small>Keep the last 100 messages in server memory. History is removed 30 minutes after the room becomes empty.</small></span></label>
             </fieldset>
+            <fieldset>
+              <legend>Connection methods</legend>
+              <p class="field-help">Choose which configured network paths participants may select. Automatic always remains available.</p>
+              <label class="checkbox-row" for="connection-direct"><input id="connection-direct" type="checkbox" checked> <span><strong>Direct</strong><small>Allow direct ICE connections.</small></span></label>
+              <label class="checkbox-row" for="connection-turn-udp"><input id="connection-turn-udp" type="checkbox" checked> <span><strong>TURN over UDP</strong><small>Allow configured TURN URLs using UDP.</small></span></label>
+              <label class="checkbox-row" for="connection-turn-tcp"><input id="connection-turn-tcp" type="checkbox" checked> <span><strong>TURN over TCP</strong><small>Allow configured TURN URLs using TCP.</small></span></label>
+              <label class="checkbox-row" for="connection-turn-tls"><input id="connection-turn-tls" type="checkbox" checked> <span><strong>TURN over TLS</strong><small>Allow configured secure TURN URLs.</small></span></label>
+            </fieldset>
             <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>
           </form>

@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-media-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+	test-js test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -54,13 +54,16 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-admin test-protocol test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning
+	$(MAKE) test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning
 
 test-admin: ## Test the admin dashboard
 	$(NODE) scripts/test-admin.js
 
 test-protocol: ## Test the signaling protocol
 	$(NODE) scripts/test-protocol.js
+
+test-connection-methods: ## Test strict ICE server selection by connection method
+	$(NODE) scripts/test-connection-methods.js
 
 test-adaptation: ## Test media adaptation behavior
 	$(NODE) scripts/test-adaptation.js
@@ -88,6 +91,9 @@ test-muted-speech-warning: ## Test muted speech warning state transitions
 
 test-media-e2e: ## Run the complete deterministic two-participant Chromium suite
 	$(NODE) scripts/test-media-e2e.js
+
+test-connection-methods-e2e: ## Verify live connection method switching and admin policy refresh
+	MEDIA_E2E_SCENARIO="connection method switch and admin policy refresh" $(NODE) scripts/test-media-e2e.js
 
 test-media-e2e-netns: ## Test media quality degradation and recovery in an isolated network namespace
 	./scripts/test-media-e2e-netns.sh

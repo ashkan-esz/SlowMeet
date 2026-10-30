@@ -30,6 +30,12 @@ const fields = {
   screen_share_enabled: document.querySelector("#screen-share"),
   retain_chat_history: document.querySelector("#retain-chat-history")
 };
+const connectionMethodFields = {
+  direct: document.querySelector("#connection-direct"),
+  "turn-udp": document.querySelector("#connection-turn-udp"),
+  "turn-tcp": document.querySelector("#connection-turn-tcp"),
+  "turn-tls": document.querySelector("#connection-turn-tls")
+};
 
 const metricFields = {
   active: document.querySelector("#active-participants"),
@@ -198,7 +204,10 @@ function collectSettings() {
     max_video_fps: Number(fields.max_video_fps.value),
     max_audio_bitrate: bitrateFromKbps(fields.max_audio_bitrate.value),
     screen_share_enabled: fields.screen_share_enabled.checked,
-    retain_chat_history: fields.retain_chat_history.checked
+    retain_chat_history: fields.retain_chat_history.checked,
+    enabled_connection_methods: Object.entries(connectionMethodFields)
+      .filter(([, field]) => field.checked)
+      .map(([method]) => method)
   };
 }
 
@@ -211,6 +220,11 @@ function applySettingsToForm(values) {
   if (values.max_audio_bitrate != null) fields.max_audio_bitrate.value = displayKbps(values.max_audio_bitrate);
   if (values.screen_share_enabled != null) fields.screen_share_enabled.checked = values.screen_share_enabled;
   if (values.retain_chat_history != null) fields.retain_chat_history.checked = values.retain_chat_history;
+  if (Array.isArray(values.enabled_connection_methods)) {
+    Object.entries(connectionMethodFields).forEach(([method, field]) => {
+      field.checked = values.enabled_connection_methods.includes(method);
+    });
+  }
 }
 
 function renderValidation(errors) {

@@ -66,14 +66,15 @@ func subtleCompare(a, b string) bool {
 }
 
 type AdminUpdate struct {
-	MaxParticipants     *int    `json:"max_participants"`
-	DefaultVideoQuality *string `json:"default_video_quality"`
-	MaxVideoQuality     *string `json:"max_video_quality"`
-	MaxVideoBitrate     *int    `json:"max_video_bitrate"`
-	MaxVideoFPS         *int    `json:"max_video_fps"`
-	MaxAudioBitrate     *int    `json:"max_audio_bitrate"`
-	ScreenShare         *bool   `json:"screen_share_enabled"`
-	RetainChatHistory   *bool   `json:"retain_chat_history"`
+	MaxParticipants          *int      `json:"max_participants"`
+	DefaultVideoQuality      *string   `json:"default_video_quality"`
+	MaxVideoQuality          *string   `json:"max_video_quality"`
+	MaxVideoBitrate          *int      `json:"max_video_bitrate"`
+	MaxVideoFPS              *int      `json:"max_video_fps"`
+	MaxAudioBitrate          *int      `json:"max_audio_bitrate"`
+	ScreenShare              *bool     `json:"screen_share_enabled"`
+	RetainChatHistory        *bool     `json:"retain_chat_history"`
+	EnabledConnectionMethods *[]string `json:"enabled_connection_methods"`
 }
 
 func (s *Store) Update(update AdminUpdate) error {
@@ -125,6 +126,10 @@ func updatedConfig(current Config, update AdminUpdate) (Config, error) {
 	if update.RetainChatHistory != nil {
 		next.RetainChatHistory = *update.RetainChatHistory
 	}
+	if update.EnabledConnectionMethods != nil {
+		next.EnabledConnectionMethods = make([]string, len(*update.EnabledConnectionMethods))
+		copy(next.EnabledConnectionMethods, *update.EnabledConnectionMethods)
+	}
 	if err := next.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -140,14 +145,15 @@ func persist(cfg Config, path string) error {
 		return nil
 	}
 	data, err := json.MarshalIndent(AdminUpdate{
-		MaxParticipants:     intPointer(cfg.MaxParticipants),
-		DefaultVideoQuality: stringPointer(cfg.DefaultVideoQuality),
-		MaxVideoQuality:     stringPointer(cfg.EffectiveMaxVideoQuality()),
-		MaxVideoBitrate:     intPointer(cfg.MaxVideoBitrate),
-		MaxVideoFPS:         intPointer(cfg.MaxVideoFPS),
-		MaxAudioBitrate:     intPointer(cfg.MaxAudioBitrate),
-		ScreenShare:         boolPointer(cfg.EnableScreenShare),
-		RetainChatHistory:   boolPointer(cfg.RetainChatHistory),
+		MaxParticipants:          intPointer(cfg.MaxParticipants),
+		DefaultVideoQuality:      stringPointer(cfg.DefaultVideoQuality),
+		MaxVideoQuality:          stringPointer(cfg.EffectiveMaxVideoQuality()),
+		MaxVideoBitrate:          intPointer(cfg.MaxVideoBitrate),
+		MaxVideoFPS:              intPointer(cfg.MaxVideoFPS),
+		MaxAudioBitrate:          intPointer(cfg.MaxAudioBitrate),
+		ScreenShare:              boolPointer(cfg.EnableScreenShare),
+		RetainChatHistory:        boolPointer(cfg.RetainChatHistory),
+		EnabledConnectionMethods: stringSlicePointer(cfg.EffectiveEnabledConnectionMethods()),
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -180,3 +186,5 @@ func intPointer(value int) *int { return &value }
 func stringPointer(value string) *string { return &value }
 
 func boolPointer(value bool) *bool { return &value }
+
+func stringSlicePointer(value []string) *[]string { return &value }
