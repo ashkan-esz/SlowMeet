@@ -458,8 +458,8 @@ if (!appSource.includes("screen.disabled = !screenShareEnabled || ownedByOther |
   throw new Error("disabled screen sharing must remain disabled after UI refresh");
 }
 if (!/\.device-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
-    !/\.participant-grid video\.local-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
-    !/\.participant-grid video\.remote-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
+    !/\.meeting-layout-host video\.local-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
+    !/\.meeting-layout-host video\.remote-camera-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSource) ||
     !appSource.includes("setLocalVideoMirror(true);") ||
     !appSource.includes("setLocalVideoMirror(false);") ||
     !appSource.includes("updateVideoOrientation(previousScreenShareOwner);") ||
