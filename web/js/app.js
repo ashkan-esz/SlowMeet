@@ -31,6 +31,16 @@ const sidebarBackdrop = document.querySelector("#sidebar-backdrop");
 const diagnostics = document.querySelector("#diagnostics");
 const copyDiagnostics = document.querySelector("#copy-diagnostics");
 const diagnosticsStatus = document.querySelector("#diagnostics-status");
+const startHistoryRecording = document.querySelector("#start-history-recording");
+const stopHistoryRecording = document.querySelector("#stop-history-recording");
+const showConnectionHistory = document.querySelector("#show-connection-history");
+const exportConnectionHistory = document.querySelector("#export-connection-history");
+const endedShowConnectionHistory = document.querySelector("#ended-show-connection-history");
+const endedExportConnectionHistory = document.querySelector("#ended-export-connection-history");
+const historyRecordingStatus = document.querySelector("#history-recording-status");
+const connectionHistoryPanel = document.querySelector("#connection-history");
+const hideConnectionHistory = document.querySelector("#hide-connection-history");
+const connectionHistoryModel = window.SlowMeetConnectionHistory?.createConnectionHistory();
 const enableAudio = document.querySelector("#enable-audio");
 const profile = document.querySelector("#profile");
 const cameraQuality = document.querySelector("#camera-quality");
@@ -114,6 +124,159 @@ const statBitrate = document.querySelector("#stat-bitrate");
 const statResolution = document.querySelector("#stat-resolution");
 const more = document.querySelector("#more");
 const moreStateBadge = document.querySelector("#more-state-badge");
+
+function updateConnectionHistoryControls() {
+  const snapshot = connectionHistoryModel?.get();
+  const hasHistory = Boolean(snapshot);
+  const active = connectionHistoryModel?.isRecording() || false;
+  if (startHistoryRecording) startHistoryRecording.hidden = active;
+  if (stopHistoryRecording) stopHistoryRecording.hidden = !active;
+  if (showConnectionHistory) showConnectionHistory.hidden = !hasHistory;
+  if (exportConnectionHistory) exportConnectionHistory.hidden = !hasHistory;
+  if (endedShowConnectionHistory) endedShowConnectionHistory.hidden = !hasHistory;
+  if (endedExportConnectionHistory) endedExportConnectionHistory.hidden = !hasHistory;
+  if (historyRecordingStatus) {
+    historyRecordingStatus.textContent = active ? "Recording connection states and quality samples in this browser." :
+      hasHistory ? `Stopped. Saved ${snapshot.samples.length} quality samples and ${snapshot.stateTransitions.length} state events in this browser.` : "";
+  }
+}
+
+function formatHistoryTime(timestamp) {
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+function renderConnectionHistory() {
+  const snapshot = connectionHistoryModel?.get();
+  if (!snapshot) return;
+  const summary = document.querySelector("#connection-history-summary");
+  const eventList = document.querySelector("#connection-history-events");
+  const sampleBody = document.querySelector("#connection-history-samples");
+  const chart = document.querySelector("#connection-history-chart");
+  const empty = document.querySelector("#connection-history-chart-empty");
+  const lineHost = document.querySelector("#connection-history-chart-lines");
+  const legend = document.querySelector("#connection-history-legend");
+  const metricSeries = [
+    ["RTT", "rttMs", "#2563eb"], ["Jitter", "jitterMs", "#7c3aed"],
+    ["Packet loss", "packetLossPct", "#dc2626"], ["Video in", "inboundVideoKbps", "#0891b2"],
+    ["Video out", "outboundVideoKbps", "#0f766e"], ["Audio in", "inboundAudioKbps", "#ca8a04"],
+    ["Audio out", "outboundAudioKbps", "#ea580c"]
+  ];
+  if (summary) summary.textContent = `Started ${new Date(snapshot.startedAt).toLocaleString()}; ` +
+    `${snapshot.samples.length} quality samples; ${snapshot.stateTransitions.length} state events` +
+    (snapshot.endedAt ? `; stopped ${new Date(snapshot.endedAt).toLocaleString()}.` : "; recording.");
+  if (eventList) {
+    eventList.replaceChildren(...snapshot.stateTransitions.map((event) => {
+      const item = document.createElement("li");
+      item.textContent = `${formatHistoryTime(event.at)} — ${event.state === "ice" ? "ICE" : "Connection"} state: ${event.value}${event.initial ? " (initial)" : ""}`;
+      return item;
+    }));
+  }
+  if (sampleBody) {
+    sampleBody.replaceChildren(...snapshot.samples.map((sample) => {
+      const row = document.createElement("tr");
+      const values = [sample.at, sample.rttMs, sample.jitterMs, sample.packetLossPct,
+        `${sample.inboundVideoKbps ?? "—"} / ${sample.outboundVideoKbps ?? "—"} kbps`,
+        `${sample.inboundAudioKbps ?? "—"} / ${sample.outboundAudioKbps ?? "—"} kbps`];
+      values.forEach((value, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = index === 0 ? formatHistoryTime(value) :
+          value == null ? "—" : index === 1 || index === 2 ? `${value} ms` :
+            index === 3 ? `${value}%` : value;
+        row.append(cell);
+      });
+      return row;
+    }));
+  }
+  if (!lineHost || !chart || !empty) return;
+  lineHost.replaceChildren();
+  legend?.replaceChildren();
+  chart.hidden = snapshot.samples.length < 2;
+  empty.hidden = snapshot.samples.length >= 2;
+  if (legend) legend.hidden = snapshot.samples.length < 2;
+  if (snapshot.samples.length < 2) return;
+  const left = 40, right = 625, top = 18, bottom = 190;
+  for (const [label, key, color] of metricSeries) {
+    const points = snapshot.samples.map((sample, index) => ({
+      x: left + (right - left) * index / (snapshot.samples.length - 1),
+      value: sample[key]
+    })).filter((point) => point.value != null);
+    if (points.length < 2) continue;
+    const min = Math.min(...points.map((point) => point.value));
+    const max = Math.max(...points.map((point) => point.value));
+    const range = max - min || Math.max(1, Math.abs(max) * 0.1);
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    path.setAttribute("points", points.map((point) =>
+      `${point.x},${bottom - (point.value - min) / range * (bottom - top)}`).join(" "));
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", color);
+    path.setAttribute("stroke-width", "2");
+    path.dataset.metric = label;
+    lineHost.append(path);
+    if (legend) {
+      const item = document.createElement("li");
+      const swatch = document.createElement("span");
+      swatch.className = "connection-history__swatch";
+      swatch.style.backgroundColor = color;
+      swatch.setAttribute("aria-hidden", "true");
+      item.append(swatch, document.createTextNode(label));
+      legend.append(item);
+    }
+  }
+}
+
+function showRecordedConnectionHistory() {
+  if (!connectionHistoryModel?.get() || !connectionHistoryPanel) return;
+  if (!meeting.hidden && meetingSidebar && connectionHistoryPanel.parentElement !== meetingSidebar) {
+    meetingSidebar.append(connectionHistoryPanel);
+  }
+  renderConnectionHistory();
+  connectionHistoryPanel.hidden = false;
+  showConnectionHistory?.setAttribute("aria-expanded", "true");
+  endedShowConnectionHistory?.setAttribute("aria-expanded", "true");
+  connectionHistoryPanel.scrollIntoView({block: "nearest"});
+}
+
+function hideRecordedConnectionHistory() {
+  if (connectionHistoryPanel) connectionHistoryPanel.hidden = true;
+  showConnectionHistory?.setAttribute("aria-expanded", "false");
+  endedShowConnectionHistory?.setAttribute("aria-expanded", "false");
+}
+
+function recordConnectionStateTransition(state, value) {
+  connectionHistoryModel?.addTransition(state, value);
+  if (connectionHistoryModel?.get()) updateConnectionHistoryControls();
+}
+
+function exportRecordedConnectionHistory() {
+  const data = connectionHistoryModel?.exportJSON();
+  if (!data) return;
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `slowmeet-connection-history-${new Date(data.startedAt).toISOString().replace(/[:.]/g, "-")}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+startHistoryRecording?.addEventListener("click", () => {
+  if (!connectionHistoryModel || !peer) {
+    if (historyRecordingStatus) historyRecordingStatus.textContent = "Join a meeting before starting a recording.";
+    return;
+  }
+  connectionHistoryModel.start(Date.now(), {connection: peer.connectionState, ice: peer.iceConnectionState});
+  hideRecordedConnectionHistory();
+  updateConnectionHistoryControls();
+});
+stopHistoryRecording?.addEventListener("click", () => {
+  connectionHistoryModel?.stop();
+  updateConnectionHistoryControls();
+});
+showConnectionHistory?.addEventListener("click", showRecordedConnectionHistory);
+endedShowConnectionHistory?.addEventListener("click", showRecordedConnectionHistory);
+hideConnectionHistory?.addEventListener("click", hideRecordedConnectionHistory);
+exportConnectionHistory?.addEventListener("click", exportRecordedConnectionHistory);
+endedExportConnectionHistory?.addEventListener("click", exportRecordedConnectionHistory);
 
 function updateControlLabel(button, label) {
   if (!button) return;
@@ -3047,6 +3210,9 @@ form.addEventListener("submit", async (event) => {
     joinButton.disabled = false;
     return;
   }
+  connectionHistoryModel?.clear();
+  hideRecordedConnectionHistory();
+  updateConnectionHistoryControls();
   const name = nameInput.value.trim();
   writeStoredValue("meeting.displayName", name);
   stopDeviceTest();
@@ -3432,9 +3598,11 @@ async function startWebRTC() {
     })
   });
   currentPeer.oniceconnectionstatechange = () => {
+    recordConnectionStateTransition("ice", currentPeer.iceConnectionState);
     updatePeerConnectionUI(currentPeer, currentSocket, generation);
   };
   currentPeer.onconnectionstatechange = () => {
+    recordConnectionStateTransition("connection", currentPeer.connectionState);
     updatePeerConnectionUI(currentPeer, currentSocket, generation);
   };
   currentPeer.addTransceiver("audio", { direction: "recvonly" });
@@ -4102,6 +4270,16 @@ async function updateDiagnostics() {
     lostPacketsSincePreviousSample,
     receivedPacketsSincePreviousSample
   );
+  connectionHistoryModel?.addSample({
+    at: values.timestamp,
+    rttMs: values.rttMs,
+    jitterMs: values.jitterMs,
+    packetLossPct: values.packetLoss,
+    inboundVideoKbps: values.inboundKbps,
+    outboundVideoKbps: values.outboundKbps,
+    inboundAudioKbps: values.inboundAudioKbps,
+    outboundAudioKbps: values.outboundAudioKbps
+  });
   if (previousStats && timestamp > previousStats.timestamp && hasCameraLossStats) {
     const lostDelta = Math.max(0, cameraLost - previousStats.cameraLost);
     const receivedDelta = Math.max(0, cameraReceived - previousStats.cameraReceived);
@@ -5061,6 +5239,11 @@ screen.addEventListener("click", toggleScreenShare);
 receiveVideo.addEventListener("click", () => setReceiveVideo(!receiveVideoEnabled));
 
 leave.addEventListener("click", () => {
+  connectionHistoryModel?.stop();
+  updateConnectionHistoryControls();
+  if (meetingEnded && connectionHistoryPanel?.parentElement !== meetingEnded.parentElement) {
+    meetingEnded.after(connectionHistoryPanel);
+  }
   hiddenParticipantIDs.clear();
   intentionalClose = true;
   socketGeneration++;
