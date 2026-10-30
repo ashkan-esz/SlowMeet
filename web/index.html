@@ -3,16 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="application-name" content="{{APP_NAME}}">
   <link rel="icon" href="/icon.png" type="image/png">
-  <title>SlowMeet</title>
+  <title>{{APP_NAME}}</title>
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body class="public-page">
   <main class="public-shell">
     <header class="brand-bar">
-      <a class="brand-mark" href="/" aria-label="SlowMeet home">
+      <a class="brand-mark" href="/" aria-label="{{APP_NAME}} home">
         <span class="brand-mark__dot" aria-hidden="true"></span>
-        <span>SlowMeet</span>
+        <span>{{APP_NAME}}</span>
       </a>
       <span class="page-context">Private, resilient meetings</span>
     </header>
@@ -20,8 +21,8 @@
     <section class="welcome-grid" aria-labelledby="welcome-title">
       <div class="welcome-copy">
         <h1 id="welcome-title"><span class="headline-desktop">Stay present. Keep the call moving.</span><span class="headline-mobile">Stay present. Keep moving.</span></h1>
-        <p class="lead">SlowMeet keeps audio useful and lets video adapt when the network gets difficult.</p>
-        <div class="principle-list" aria-label="SlowMeet principles">
+        <p class="lead">{{APP_NAME}} keeps audio useful and lets video adapt when the network gets difficult.</p>
+        <div class="principle-list" aria-label="{{APP_NAME}} principles">
           <div>
             <span class="principle-mark" aria-hidden="true">01</span>
             <span><strong>Audio first</strong><small>Stay connected when bandwidth is limited.</small></span>
@@ -50,7 +51,7 @@
           <span class="status-dot status-dot--quiet" aria-hidden="true"></span>
         </div>
         <p class="panel-copy">Use a name your teammates will recognize. A password is only needed when the room is protected.</p>
-        <p id="secure-origin-warning" class="secure-origin-warning" role="status" aria-live="polite" hidden>This address cannot access your camera or microphone because it is not using trusted HTTPS. Open SlowMeet using its HTTPS address. Plain HTTP addresses on another device cannot show a media permission prompt.</p>
+        <p id="secure-origin-warning" class="secure-origin-warning" role="status" aria-live="polite" hidden>This address cannot access your camera or microphone because it is not using trusted HTTPS. Open {{APP_NAME}} using its HTTPS address. Plain HTTP addresses on another device cannot show a media permission prompt.</p>
         <div class="form-field">
           <label for="name">Name</label>
           <input id="name" name="name" maxlength="32" autocomplete="name" required>
@@ -59,7 +60,7 @@
           <label for="password">Meeting password <span>(if required)</span></label>
           <input id="password" name="password" type="password" autocomplete="current-password">
         </div>
-        <div class="form-field">
+        <div class="form-field" hidden>
           <label for="join-connection-method">Connection method</label>
           <select id="join-connection-method" autocomplete="off" aria-describedby="join-connection-method-help">
             <option value="auto">Automatic</option>
@@ -100,7 +101,7 @@
         <div class="room-identity">
           <span class="room-mark" aria-hidden="true">L</span>
           <div>
-            <h1 id="meeting-title">SlowMeet</h1>
+            <h1 id="meeting-title">{{APP_NAME}}</h1>
             <p id="participant-count" class="room-meta">1 participant</p>
           </div>
         </div>

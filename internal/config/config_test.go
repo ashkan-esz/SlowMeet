@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoadFromEnvAppliesDefaults(t *testing.T) {
+	t.Setenv("APP_NAME", "")
 	t.Setenv("APP_ENV", "")
 	t.Setenv("HTTP_ADDR", "")
 	t.Setenv("MAX_PARTICIPANTS", "")
@@ -37,6 +38,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.HTTPAddr != ":8080" || cfg.MaxParticipants != 5 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+	if cfg.AppName != "SlowMeet" {
+		t.Fatalf("AppName = %q, want SlowMeet", cfg.AppName)
 	}
 	if cfg.DefaultVideoQuality != "low" || cfg.DefaultVideoFPS != 15 {
 		t.Fatalf("unexpected media defaults: %+v", cfg)
@@ -70,6 +74,18 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.RetainChatHistory {
 		t.Fatal("chat history retention must default to disabled")
+	}
+}
+
+func TestLoadFromEnvReadsAppName(t *testing.T) {
+	t.Setenv("APP_NAME", "Example Meet")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+	if cfg.AppName != "Example Meet" {
+		t.Fatalf("AppName = %q, want Example Meet", cfg.AppName)
 	}
 }
 

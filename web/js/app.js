@@ -67,6 +67,7 @@ const testMicrophone = document.querySelector("#test-microphone");
 const stopMediaTest = document.querySelector("#stop-media-test");
 const deviceTestStatus = document.querySelector("#device-test-status");
 const secureOriginWarning = document.querySelector("#secure-origin-warning");
+const applicationName = document.querySelector("meta[name=application-name]")?.content || document.title;
 const chatToggle = document.querySelector("#chat");
 const participantsButton = document.querySelector("#participants-button");
 const mobilePeople = document.querySelector("#mobile-people");
@@ -2071,7 +2072,7 @@ async function runDeviceTest() {
     setDeviceResult(testMicrophone, "error", "Microphone unavailable");
     deviceTestStatus.textContent = window.isSecureContext
       ? "This browser does not support camera and microphone checks."
-      : "Camera and microphone access needs trusted HTTPS on another device. Open SlowMeet using its HTTPS address.";
+      : `Camera and microphone access needs trusted HTTPS on another device. Open ${applicationName} using its HTTPS address.`;
     stopMediaTest.hidden = true;
     testMedia.disabled = false;
     return;

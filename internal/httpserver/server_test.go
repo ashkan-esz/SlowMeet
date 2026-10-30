@@ -18,6 +18,7 @@ import (
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	return config.Config{
+		AppName:             "SlowMeet",
 		HTTPAddr:            ":8080",
 		ConfigFile:          filepath.Join(t.TempDir(), "config.json"),
 		AdminPassword:       "admin-secret",
@@ -526,6 +527,67 @@ func TestFrontendAssetsAreEmbeddedAndServed(t *testing.T) {
 		if response.Body.Len() == 0 {
 			t.Fatalf("%s returned an empty body", path)
 		}
+		if path != "/js/admin-utils.js" && !strings.Contains(response.Body.String(), "SlowMeet") {
+			t.Errorf("%s does not contain the default app name", path)
+		}
+	}
+}
+
+func TestFrontendUsesConfiguredAppNameAndEscapesHTML(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.AppName = `Example "Meet" & <Meet>`
+	handler := New(cfg, NewLogger("error"))
+
+	for path, want := range map[string]string{
+		"/":           `<title>Example &#34;Meet&#34; &amp; &lt;Meet&gt;</title>`,
+		"/index.html": `<title>Example &#34;Meet&#34; &amp; &lt;Meet&gt;</title>`,
+		"/admin.html": `<title>Example &#34;Meet&#34; &amp; &lt;Meet&gt; admin</title>`,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, response.Code)
+		}
+		body := response.Body.String()
+		if !strings.Contains(body, want) {
+			t.Errorf("%s body does not contain escaped title %q", path, want)
+		}
+		if !strings.Contains(body, `aria-label="Example &#34;Meet&#34; &amp; &lt;Meet&gt; home"`) {
+			t.Errorf("%s body does not contain an escaped brand label", path)
+		}
+		if strings.Contains(body, "{{APP_NAME}}") || strings.Contains(body, "<Meet>") {
+			t.Errorf("%s contains an unresolved or unescaped app name", path)
+		}
+	}
+}
+
+func TestBrandedHTMLSupportsETagsAndHead(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/", nil))
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", get.Code)
+	}
+	etag := get.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("GET / did not return an ETag")
+	}
+	if get.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", get.Header().Get("Cache-Control"))
+	}
+
+	conditional := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("If-None-Match", etag)
+	handler.ServeHTTP(conditional, request)
+	if conditional.Code != http.StatusNotModified {
+		t.Fatalf("conditional GET status = %d, want 304", conditional.Code)
+	}
+
+	head := httptest.NewRecorder()
+	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("HEAD / status/body = %d/%d, want 200/0", head.Code, head.Body.Len())
 	}
 }
 

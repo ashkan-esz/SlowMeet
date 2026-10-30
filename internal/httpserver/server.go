@@ -1,10 +1,12 @@
 package httpserver
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -225,14 +227,16 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	})
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
-	mux.Handle("/", newStaticFileHandler())
+	mux.Handle("/", newStaticFileHandler(cfg.AppName))
 	app.handler = withSecurityHeaders(mux)
 	app.ready.Store(true)
 	return app
 }
 
-func newStaticFileHandler() http.Handler {
+func newStaticFileHandler(appName string) http.Handler {
+	appName = cmp.Or(appName, "SlowMeet")
 	etags := make(map[string]string)
+	brandedHTML := make(map[string][]byte)
 	err := fs.WalkDir(webassets.Files, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -243,6 +247,13 @@ func newStaticFileHandler() http.Handler {
 		contents, err := fs.ReadFile(webassets.Files, name)
 		if err != nil {
 			return err
+		}
+		if strings.HasSuffix(name, ".html") {
+			contents = []byte(strings.ReplaceAll(string(contents), "{{APP_NAME}}", html.EscapeString(appName)))
+			brandedHTML["/"+name] = contents
+			if name == "index.html" {
+				brandedHTML["/"] = contents
+			}
 		}
 		etag := fmt.Sprintf("\"%x\"", sha256.Sum256(contents))
 		etags["/"+name] = etag
@@ -257,6 +268,23 @@ func newStaticFileHandler() http.Handler {
 	staticFiles := http.FileServer(http.FS(webassets.Files))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if contents, ok := brandedHTML[r.URL.Path]; ok {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				etag := etags[r.URL.Path]
+				w.Header().Set("ETag", etag)
+				w.Header().Set("Cache-Control", "no-cache")
+				if matchesETag(r.Header.Get("If-None-Match"), etag) {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+			name := strings.TrimPrefix(r.URL.Path, "/")
+			if name == "" {
+				name = "index.html"
+			}
+			http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(contents))
+			return
+		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			if etag, ok := etags[r.URL.Path]; ok {
 				w.Header().Set("ETag", etag)

@@ -14,6 +14,7 @@ import (
 )
 
 type Config struct {
+	AppName                  string
 	AppEnv                   string
 	HTTPAddr                 string
 	ConfigFile               string
@@ -105,6 +106,7 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
+		AppName:             envString("APP_NAME", "SlowMeet"),
 		AppEnv:              envString("APP_ENV", "production"),
 		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
 		ConfigFile:          envString("CONFIG_FILE", "config.json"),
