@@ -47,6 +47,30 @@ type publication struct {
 	limiter      *bitrateLimiter
 	lastPacketAt atomic.Int64
 	paused       atomic.Bool
+
+	// stopped is closed when the publication is torn down while its publisher
+	// stays connected; forwardDone is closed by the forwarding goroutine when
+	// it has exited for any reason.
+	stopped     chan struct{}
+	stopOnce    sync.Once
+	forwardDone chan struct{}
+}
+
+// stop tears down a publication that is being removed. Setting a read
+// deadline unblocks the forwarding goroutine if it is parked in ReadRTP on a
+// publisher whose peer connection is still open.
+func (pub *publication) stop() {
+	pub.stopOnce.Do(func() {
+		if pub.stopped == nil {
+			// Publications constructed outside Publish (tests) have no stop
+			// channel; closing a fresh one keeps stop idempotent and safe.
+			pub.stopped = make(chan struct{})
+		}
+		close(pub.stopped)
+		if pub.remote != nil {
+			_ = pub.remote.SetReadDeadline(time.Now())
+		}
+	})
 }
 
 type videoKeyFrameRequestKey struct {
@@ -154,6 +178,7 @@ func (r *Router) Unregister(id string) {
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
+			pub.stop()
 			r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
 			for targetID, sender := range pub.senders {
 				if peer := r.peers[targetID]; peer != nil && sender != nil {
@@ -223,18 +248,20 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 	streamID := fmt.Sprintf("slowmeet-%s-%s", sourceID, role)
 	pub := &publication{
-		key:      key,
-		sourceID: sourceID,
-		role:     role,
-		layer:    layer,
-		trackID:  trackID,
-		streamID: streamID,
-		codec:    remote.Codec().RTPCodecCapability,
-		remote:   remote,
-		source:   source,
-		tracks:   make(map[string]*pion.TrackLocalStaticRTP),
-		senders:  make(map[string]*pion.RTPSender),
-		limiter:  newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
+		key:         key,
+		sourceID:    sourceID,
+		role:        role,
+		layer:       layer,
+		trackID:     trackID,
+		streamID:    streamID,
+		codec:       remote.Codec().RTPCodecCapability,
+		remote:      remote,
+		source:      source,
+		tracks:      make(map[string]*pion.TrackLocalStaticRTP),
+		senders:     make(map[string]*pion.RTPSender),
+		limiter:     newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
+		stopped:     make(chan struct{}),
+		forwardDone: make(chan struct{}),
 	}
 	limits := r.currentLimits()
 	pub.limiter.setFPS(limits.MaxVideoFPS)
@@ -635,7 +662,10 @@ func (r *Router) forward(pub *publication) {
 	frames := make(chan videoFrame, maxQueuedVideoFrames)
 	stopPacer := make(chan struct{})
 	go r.forwardVideoFrames(pub, frames, stopPacer)
-	defer close(stopPacer)
+	defer func() {
+		close(stopPacer)
+		close(pub.forwardDone)
+	}()
 	for {
 		packet, _, err := pub.remote.ReadRTP()
 		if err != nil {
@@ -1037,6 +1067,7 @@ func (r *Router) removePublication(pub *publication) {
 // removePublicationLocked detaches a publication's outgoing tracks. The
 // caller must hold r.mu; returned offers must run after the lock is released.
 func (r *Router) removePublicationLocked(pub *publication) []Offerer {
+	pub.stop()
 	r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
 	var offers []Offerer
 	for targetID, sender := range pub.senders {

@@ -19,6 +19,7 @@ import (
 	"SlowMeet/internal/media"
 	"SlowMeet/internal/meeting"
 	"SlowMeet/internal/metrics"
+	"SlowMeet/internal/ratelimit"
 	"SlowMeet/internal/webrtc"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -29,12 +30,18 @@ const (
 	websocketPongWait   = 60 * time.Second
 	websocketPingPeriod = (websocketPongWait * 9) / 10
 	websocketWriteWait  = 10 * time.Second
+	outboundQueueSize   = 256
 	maxJoinAttempts     = 5
 	chatRoomID          = "default"
 	chatHistoryLimit    = 100
 	chatHistoryTTL      = 30 * time.Minute
 	reactionBurstLimit  = 6
 	reactionBurstWindow = 3 * time.Second
+
+	// Failed meeting-password attempts are throttled per client IP to slow
+	// down online guessing of the room password.
+	joinPasswordFailuresPerMinute = 20
+	joinPasswordFailureBurst      = 20
 )
 
 var chatHistoryExpiry = chatHistoryTTL
@@ -47,7 +54,9 @@ type roomChatHistory struct {
 type client struct {
 	conn                      *websocket.Conn
 	finished                  chan struct{}
-	writeMu                   sync.Mutex
+	outbound                  chan Message
+	writerDone                chan struct{}
+	remoteIP                  string
 	participant               meeting.Participant
 	participantID             string
 	reconnectToken            string
@@ -96,6 +105,9 @@ type Hub struct {
 	Config   *config.Store
 	Logger   *slog.Logger
 	Upgrader websocket.Upgrader
+
+	// passwordLimiter throttles failed meeting-password attempts per client IP.
+	passwordLimiter *ratelimit.Limiter
 
 	mu           sync.RWMutex
 	clients      map[*client]struct{}
@@ -167,12 +179,12 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 	screenShareEnabled := cfg.EnableScreenShare
 	retainChatHistory := cfg.RetainChatHistory
 	releasedScreenShare := false
-	var releasedScreenSharer *client
+	releasedScreenSharerID := ""
 	h.mu.Lock()
 	if !cfg.EnableScreenShare && h.screenSharer != nil {
-		releasedScreenSharer = h.screenSharer
-		releasedScreenSharer.activeScreenMediaStreamID = ""
-		releasedScreenSharer.activeScreenMediaTrackID = ""
+		releasedScreenSharerID = h.screenSharer.participant.ID
+		h.screenSharer.activeScreenMediaStreamID = ""
+		h.screenSharer.activeScreenMediaTrackID = ""
 		h.screenSharer = nil
 		releasedScreenShare = true
 	}
@@ -182,8 +194,8 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		MaxVideoBitrate: cfg.MaxVideoBitrate,
 		MaxVideoFPS:     cfg.MaxVideoFPS,
 	})
-	if releasedScreenSharer != nil {
-		h.router.SetPublicationActive(releasedScreenSharer.participant.ID, media.SourceRoleScreen, false)
+	if releasedScreenSharerID != "" {
+		h.router.SetPublicationActive(releasedScreenSharerID, media.SourceRoleScreen, false)
 	}
 	h.broadcast(Message{
 		Version: ProtocolVersion, Type: TypeConfigUpdate,
@@ -204,14 +216,15 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	snapshot := cfg.Snapshot()
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
-		Upgrader:     websocket.Upgrader{CheckOrigin: sameOrigin},
-		clients:      make(map[*client]struct{}),
-		roomMembers:  make(map[*client]struct{}),
-		pending:      make(map[string]*pendingReconnect),
-		activeTokens: make(map[string]*client),
-		mediaStates:  make(map[string]Message),
-		chatHistory:  make(map[string]*roomChatHistory),
-		metrics:      &metrics.Metrics{},
+		passwordLimiter: ratelimit.New(joinPasswordFailuresPerMinute, joinPasswordFailureBurst),
+		Upgrader:        websocket.Upgrader{CheckOrigin: sameOrigin},
+		clients:         make(map[*client]struct{}),
+		roomMembers:     make(map[*client]struct{}),
+		pending:         make(map[string]*pendingReconnect),
+		activeTokens:    make(map[string]*client),
+		mediaStates:     make(map[string]Message),
+		chatHistory:     make(map[string]*roomChatHistory),
+		metrics:         &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
@@ -326,7 +339,13 @@ func (h *Hub) disconnect(c *client) {
 
 	timeout := h.Config.Snapshot().ReconnectTimeout
 	if timeout == 0 {
-		timeout = 30 * time.Second
+		// An explicitly zero reconnect timeout means no grace period: the
+		// participant leaves the meeting immediately instead of waiting for a
+		// reconnect.
+		h.mu.Unlock()
+		h.removeParticipant(c.participant)
+		h.Logger.Info("participant_disconnected", "participant_id", c.participant.ID, "name", c.participant.Name)
+		return
 	}
 	pending := &pendingReconnect{
 		participant: c.participant,
@@ -469,10 +488,15 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 		h.mu.Unlock()
 		return meeting.Participant{}, false, false
 	}
+	// c.participant and c.participantID are read by other goroutines (for
+	// example disconnect snapshotting clients under h.mu), so they must be
+	// written while h.mu is held.
 	if pending != nil {
 		c.participantID = pending.participant.ID
+		c.participant = pending.participant
 	} else {
 		c.participantID = previous.participantID
+		c.participant = previous.participant
 	}
 	c.reconnectToken = token
 	c.resumed = true
@@ -486,11 +510,6 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 		if previous.finished != nil {
 			<-previous.finished
 		}
-	}
-	if pending != nil {
-		c.participant = pending.participant
-	} else {
-		c.participant = previous.participant
 	}
 	return c.participant, true, activeTakeover
 }
@@ -540,14 +559,22 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
 	})
-	c := &client{conn: conn, finished: make(chan struct{})}
+	c := &client{
+		conn:       conn,
+		finished:   make(chan struct{}),
+		outbound:   make(chan Message, outboundQueueSize),
+		writerDone: make(chan struct{}),
+		remoteIP:   ratelimit.ClientIP(r),
+	}
 	done := make(chan struct{})
+	c.startWriter(done)
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 	defer func() {
 		close(done)
 		conn.Close()
+		<-c.writerDone
 		h.mu.Lock()
 		delete(h.clients, c)
 		delete(h.roomMembers, c)
@@ -580,7 +607,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == TypeJoin && c.participant.ID == "" {
 			c.joinAttempts++
 			if c.joinAttempts > maxJoinAttempts {
-				_ = c.write(Message{
+				c.writeAndFlush(Message{
 					Version: ProtocolVersion, Type: TypeError,
 					Error: "too many join attempts",
 				})
@@ -635,7 +662,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				for _, participant := range changed {
 					if participant.ID == c.participant.ID {
+						h.mu.Lock()
 						c.participant = participant
+						h.mu.Unlock()
 					}
 					raised := participant.RaisedHand
 					h.broadcast(Message{
@@ -664,7 +693,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				msg.ChatText = strings.TrimSpace(msg.ChatText)
 				if h.Config.Snapshot().RetainChatHistory {
 					h.recordChatMessage(chatRoomID, ChatHistoryEntry{
-						ID: uuid.NewString(), Author: c.participant.Name,
+						ID: uuid.NewString(), ParticipantID: c.participant.ID, Author: c.participant.Name,
 						Text: msg.ChatText, Timestamp: time.Now().UTC(),
 					})
 				}
@@ -689,6 +718,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg := h.Config.Snapshot()
 		if !cfg.CheckMeetingPassword(msg.Password) {
+			if !h.passwordLimiter.ReportFailure(c.remoteIP) {
+				c.writeAndFlush(Message{Version: ProtocolVersion, Type: TypeError, Error: "too many password attempts"})
+				return
+			}
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "invalid meeting password"})
 			continue
 		}
@@ -703,14 +736,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 				continue
 			}
+			h.mu.Lock()
 			c.participant = participant
 			c.participantID = participant.ID
 			c.reconnectToken = uuid.NewString()
-			h.mu.Lock()
 			h.activeTokens[c.reconnectToken] = c
 			h.mu.Unlock()
 		}
-		c.participant = participant
 		h.cancelChatHistoryExpiry(chatRoomID)
 		turnUsername := cfg.TURNUsername
 		turnPassword := cfg.TURNPassword
@@ -723,7 +755,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy, cfg.ICEPublicIP,
 		)
 		if err != nil {
-			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
+			c.writeAndFlush(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return
 		}
 		c.peer.OnICECandidate(func(candidate pion.ICECandidateInit) {
@@ -898,6 +930,7 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		c.negotiationMu.Lock()
 		if !c.offerInFlight {
 			c.negotiationMu.Unlock()
+			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "no offer in flight"})
 			return
 		}
 		err := applyRemoteAnswer(c, c.peer, msg.SDP)
@@ -1009,14 +1042,85 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 	return err
 }
 
+// write enqueues a message for the client's writer goroutine. It never blocks:
+// fan-out from other clients' read loops must not stall on a slow consumer. A
+// full queue means the connection is not draining, so it is closed and the
+// read loop's cleanup path takes over.
 func (c *client) write(msg Message) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	if c.conn == nil || c.outbound == nil {
+		return errors.New("client connection is not initialized")
+	}
+	select {
+	case c.outbound <- msg:
+		return nil
+	default:
+		_ = c.conn.Close()
+		return fmt.Errorf("outbound queue is full")
+	}
+}
+
+// writeFrame serializes one message onto the connection. Called only from the
+// writer goroutine, so no additional locking is required alongside the
+// concurrent WriteControl pings.
+func (c *client) writeFrame(msg Message) error {
+	if msg.flush != nil {
+		// A bare flush sentinel carries no payload and must not reach the
+		// wire; it only signals that everything queued before it was written.
+		close(msg.flush)
+		return nil
+	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteWait)); err != nil {
 		return err
 	}
-	defer c.conn.SetWriteDeadline(time.Time{})
-	return c.conn.WriteJSON(msg)
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return err
+	}
+	return c.conn.SetWriteDeadline(time.Time{})
+}
+
+// flushOutbound waits until every message enqueued so far has been handed to
+// the connection (or the writer gave up). It returns immediately when the
+// writer has already exited.
+func (c *client) flushOutbound() {
+	if c.conn == nil || c.outbound == nil {
+		return
+	}
+	sentinel := Message{flush: make(chan struct{})}
+	select {
+	case c.outbound <- sentinel:
+		select {
+		case <-sentinel.flush:
+		case <-c.writerDone:
+		}
+	case <-c.writerDone:
+	}
+}
+
+// writeAndFlush delivers a final message on a connection that is about to
+// close, so it is not silently discarded by the cleanup path.
+func (c *client) writeAndFlush(msg Message) {
+	_ = c.write(msg)
+	c.flushOutbound()
+}
+
+// startWriter launches the goroutine that serializes outbound frames for this
+// client. It exits when stop is closed or a frame write fails; closing the
+// connection unblocks an in-flight frame write immediately.
+func (c *client) startWriter(stop <-chan struct{}) {
+	go func() {
+		defer close(c.writerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			case msg := <-c.outbound:
+				if err := c.writeFrame(msg); err != nil {
+					_ = c.conn.Close()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (c *client) sendOrQueueLocalCandidate(candidate Message) error {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -437,14 +438,15 @@ func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
 	offer = *browserPeer.LocalDescription()
 
 	hub := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
-	c := &client{conn: serverConn, peer: serverPeer, negotiationReady: true}
-	c.writeMu.Lock()
-	writeLocked := true
-	defer func() {
-		if writeLocked {
-			c.writeMu.Unlock()
-		}
-	}()
+	c := &client{
+		conn:             serverConn,
+		finished:         make(chan struct{}),
+		outbound:         make(chan Message, outboundQueueSize),
+		writerDone:       make(chan struct{}),
+		peer:             serverPeer,
+		negotiationReady: true,
+	}
+	startTestWriter(t, c)
 
 	handledOffer := make(chan struct{})
 	go func() {
@@ -453,33 +455,16 @@ func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
 	}()
 	waitForLocalAnswer(t, serverPeer.Connection())
 
-	offerResult := make(chan error, 1)
-	go func() { offerResult <- hub.sendOffer(c, false) }()
-	deadline := time.After(2 * time.Second)
-	for {
-		c.negotiationMu.Lock()
-		pending, inFlight := c.pendingOffer, c.offerInFlight
-		c.negotiationMu.Unlock()
-		if pending || inFlight {
-			if !pending || inFlight {
-				t.Fatalf("offer was not deferred while answer write was blocked: pending=%t in_flight=%t", pending, inFlight)
-			}
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("router offer was not queued while browser answer write was blocked")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-
-	c.writeMu.Unlock()
-	writeLocked = false
+	// The router offer is requested while the browser answer is still being
+	// handed to the connection. The outbound queue must preserve the answer's
+	// head-of-line position so the browser sees the answer before the offer.
 	select {
 	case <-handledOffer:
 	case <-time.After(2 * time.Second):
 		t.Fatal("browser offer handling did not finish")
 	}
+	offerResult := make(chan error, 1)
+	go func() { offerResult <- hub.sendOffer(c, false) }()
 	select {
 	case err := <-offerResult:
 		if err != nil {
@@ -638,6 +623,9 @@ func TestCompletedNegotiationsRequestCameraKeyFrames(t *testing.T) {
 		participant:      meeting.Participant{ID: "receiver"},
 		negotiationReady: true,
 	}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	startTestWriter(t, c)
 	hub.handleWebRTCMessage(c, Message{
 		Version: ProtocolVersion,
 		Type:    TypeOffer,
@@ -717,6 +705,9 @@ func TestICERestartBuffersCandidatesUntilAnswer(t *testing.T) {
 		negotiationReady:  true,
 		remoteDescription: true,
 	}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	startTestWriter(t, c)
 	peer := &restartSignalingPeer{}
 
 	if err := sendOfferWithPeer(c, peer, true); err != nil {
@@ -790,6 +781,9 @@ func TestServerOfferIsWrittenBeforeGatheredCandidates(t *testing.T) {
 	defer serverConn.Close()
 
 	c := &client{conn: serverConn, negotiationReady: true, remoteDescription: true}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	startTestWriter(t, c)
 	candidate := Message{
 		Version:       ProtocolVersion,
 		Type:          TypeCandidate,
@@ -1678,6 +1672,15 @@ func writeTestMessage(t *testing.T, conn *websocket.Conn, msg Message) {
 	}
 }
 
+// startTestWriter launches the outbound writer goroutine for a client
+// constructed directly in a test and stops it when the test finishes.
+func startTestWriter(t *testing.T, c *client) {
+	t.Helper()
+	stop := make(chan struct{})
+	c.startWriter(stop)
+	t.Cleanup(func() { close(stop) })
+}
+
 func readTestMessage(t *testing.T, conn *websocket.Conn, msg *Message) {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
@@ -1701,5 +1704,232 @@ func assertNoTestMessage(t *testing.T, conn *websocket.Conn) {
 	var networkErr net.Error
 	if !errors.As(err, &networkErr) || !networkErr.Timeout() {
 		t.Fatalf("read without message returned %v, want timeout", err)
+	}
+}
+
+func TestHubZeroReconnectTimeoutLeavesImmediately(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 0,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	conn := dialTestSocket(t, socketURL)
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	if joined.Type != TypeParticipant {
+		t.Fatalf("join response = %+v", joined)
+	}
+	conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if hub.ActiveParticipants() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("participant slot held for %v after disconnect with zero reconnect timeout", hub.ActiveParticipants())
+}
+
+func TestHubBroadcastDoesNotBlockOnStalledClient(t *testing.T) {
+	hub := NewHub(meeting.New(4), config.NewStore(config.Config{}), slog.Default())
+
+	serverConnections := make(chan *websocket.Conn, 2)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+	dial := func() *websocket.Conn {
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+		if err != nil {
+			t.Fatalf("dial websocket test peer: %v", err)
+		}
+		return conn
+	}
+
+	// Healthy client: the peer side is drained by the test.
+	healthyConn := dial()
+	defer healthyConn.Close()
+	healthy := &client{
+		conn:       <-serverConnections,
+		finished:   make(chan struct{}),
+		outbound:   make(chan Message, outboundQueueSize),
+		writerDone: make(chan struct{}),
+	}
+	defer healthy.conn.Close()
+	startTestWriter(t, healthy)
+
+	// Stalled client: the peer side is never read, so its writer goroutine
+	// wedges in WriteJSON once the socket buffers fill up.
+	stalledPeer := dial()
+	defer stalledPeer.Close()
+	stalled := &client{
+		conn:       <-serverConnections,
+		finished:   make(chan struct{}),
+		outbound:   make(chan Message, outboundQueueSize),
+		writerDone: make(chan struct{}),
+	}
+	defer stalled.conn.Close()
+	startTestWriter(t, stalled)
+
+	hub.mu.Lock()
+	hub.clients[healthy] = struct{}{}
+	hub.clients[stalled] = struct{}{}
+	hub.mu.Unlock()
+
+	bulky := Message{Version: ProtocolVersion, Type: TypeOffer, SDP: strings.Repeat("a", 256*1024)}
+	for i := 0; i < 32; i++ {
+		if err := stalled.write(bulky); err != nil {
+			break
+		}
+	}
+
+	start := time.Now()
+	hub.broadcast(Message{Version: ProtocolVersion, Type: TypeConfigUpdate, MaxVideoFPS: 30})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("broadcast blocked for %v behind a stalled client", elapsed)
+	}
+	var received Message
+	readTestMessage(t, healthyConn, &received)
+	if received.Type != TypeConfigUpdate {
+		t.Fatalf("healthy client message type = %q, want config_update", received.Type)
+	}
+
+	// A client that stops draining its queue is disconnected instead of
+	// wedging the hub: once the queue is full, write fails and the
+	// connection is closed.
+	overflow := Message{Version: ProtocolVersion, Type: TypeConfigUpdate}
+	closed := false
+	for i := 0; i < outboundQueueSize+32; i++ {
+		if err := stalled.write(overflow); err != nil {
+			closed = true
+			break
+		}
+	}
+	if !closed {
+		t.Fatal("stalled client connection was not closed after its outbound queue overflowed")
+	}
+}
+
+func TestHubHandStateUnderConcurrentConfigBroadcast(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		EnableScreenShare: true,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	defer hub.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	sharerConn := dialTestSocket(t, socketURL)
+	defer sharerConn.Close()
+	writeTestMessage(t, sharerConn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var sharerJoined Message
+	readTestMessage(t, sharerConn, &sharerJoined)
+	if sharerJoined.Type != TypeParticipant {
+		t.Fatalf("sharer join response = %+v", sharerJoined)
+	}
+	observerConn := dialTestSocket(t, socketURL)
+	defer observerConn.Close()
+	writeTestMessage(t, observerConn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var observerJoined Message
+	readTestMessage(t, observerConn, &observerJoined)
+	if observerJoined.Type != TypeParticipant {
+		t.Fatalf("observer join response = %+v", observerJoined)
+	}
+
+	var sharer *client
+	hub.mu.RLock()
+	for c := range hub.clients {
+		if c.participant.ID == sharerJoined.Participant.ID {
+			sharer = c
+		}
+	}
+	hub.mu.RUnlock()
+	if sharer == nil {
+		t.Fatal("sharer client not found in hub registry")
+	}
+
+	// Exercise the hand-state participant update concurrently with config
+	// broadcasts that read the screen sharer's participant identity. Run
+	// under -race: the update must be synchronized with those readers.
+	toggles := make(chan error, 1)
+	go func() {
+		var err error
+		for i := 0; i < 200; i++ {
+			raised := i%2 == 0
+			err = sharerConn.WriteJSON(Message{
+				Version: ProtocolVersion, Type: TypeHandState,
+				ParticipantID: sharerJoined.Participant.ID, HandRaised: &raised,
+			})
+			if err != nil {
+				break
+			}
+		}
+		toggles <- err
+	}()
+
+	broadcastCfg := cfg
+	for i := 0; i < 100; i++ {
+		broadcastCfg.EnableScreenShare = i%2 == 1
+		if i%2 == 0 {
+			hub.mu.Lock()
+			hub.screenSharer = sharer
+			hub.mu.Unlock()
+		}
+		hub.BroadcastConfig(broadcastCfg)
+	}
+	if err := <-toggles; err != nil {
+		t.Fatalf("hand state toggling failed: %v", err)
+	}
+}
+
+func TestHubAnswerWithoutOfferReturnsError(t *testing.T) {
+	hub := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
+
+	serverConnections := make(chan *websocket.Conn, 1)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+
+	browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial websocket test peer: %v", err)
+	}
+	defer browserConn.Close()
+	serverConn := <-serverConnections
+	defer serverConn.Close()
+
+	c := &client{conn: serverConn, finished: make(chan struct{})}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	startTestWriter(t, c)
+
+	hub.handleWebRTCMessage(c, Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: "stray answer"})
+	var response Message
+	readTestMessage(t, browserConn, &response)
+	if response.Type != TypeError || response.Error != "no offer in flight" {
+		t.Fatalf("stray answer response = %+v, want no-offer error", response)
 	}
 }

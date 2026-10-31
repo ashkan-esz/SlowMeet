@@ -33,7 +33,7 @@ jobs:
           node-version: 22
 
       - name: Run application checks
-        run: make fmt-check test vet build test-admin test-protocol test-adaptation test-layout
+        run: make check
 
       - name: Verify release tag behavior
         shell: bash

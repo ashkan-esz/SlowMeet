@@ -19,8 +19,16 @@ import (
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/meeting"
+	"SlowMeet/internal/ratelimit"
 	"SlowMeet/internal/signaling"
 	webassets "SlowMeet/web"
+)
+
+// Password attempts on password-checking surfaces are throttled per client IP
+// to blunt online guessing.
+const (
+	passwordFailuresPerMinute = 10
+	passwordFailureBurst      = 10
 )
 
 type Server struct {
@@ -50,6 +58,8 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	meetingState := meeting.New(store.Snapshot().MaxParticipants)
 	hub := signaling.NewHub(meetingState, store, logger)
 	app := &Server{hub: hub}
+	roomPreviewLimiter := ratelimit.New(passwordFailuresPerMinute, passwordFailureBurst)
+	adminLimiter := ratelimit.New(passwordFailuresPerMinute, passwordFailureBurst)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -105,6 +115,10 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		}
 
 		if !store.Snapshot().CheckMeetingPassword(request.Password) {
+			if request.Password != "" && !roomPreviewLimiter.ReportFailure(ratelimit.ClientIP(r)) {
+				writeAPIJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too_many_attempts"})
+				return
+			}
 			status := http.StatusUnauthorized
 			errorCode := "password_required"
 			if request.Password != "" {
@@ -192,7 +206,15 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	})
 	mux.HandleFunc("/admin/config", func(w http.ResponseWriter, r *http.Request) {
 		cfg := store.Snapshot()
-		if cfg.AdminPassword == "" || !store.CheckAdminPassword(r.Header.Get("X-Admin-Password")) {
+		if cfg.AdminPassword == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !store.CheckAdminPassword(r.Header.Get("X-Admin-Password")) {
+			if !adminLimiter.ReportFailure(ratelimit.ClientIP(r)) {
+				http.Error(w, "too many attempts", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

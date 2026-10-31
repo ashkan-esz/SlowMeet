@@ -330,6 +330,54 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestPasswordSurfacesRateLimitFailedAttempts(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MeetingPassword = "room-secret"
+	handler := New(cfg, NewLogger("error"))
+
+	// Roster preview: failures beyond the burst are throttled per client IP.
+	for attempt := 0; attempt < passwordFailureBurst; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"wrong"}`))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("wrong-password attempt %d status = %d, want 403", attempt+1, response.Code)
+		}
+	}
+	throttled := httptest.NewRecorder()
+	handler.ServeHTTP(throttled, httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"wrong"}`)))
+	if throttled.Code != http.StatusTooManyRequests {
+		t.Fatalf("throttled preview status = %d, want 429", throttled.Code)
+	}
+
+	// The admin endpoint has its own budget: wrong passwords are throttled
+	// the same way, while a correct password still succeeds.
+	for attempt := 0; attempt < passwordFailureBurst; attempt++ {
+		request := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+		request.Header.Set("X-Admin-Password", "wrong")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("admin attempt %d status = %d, want 401", attempt+1, response.Code)
+		}
+	}
+	adminThrottled := httptest.NewRecorder()
+	throttledRequest := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+	throttledRequest.Header.Set("X-Admin-Password", "wrong")
+	handler.ServeHTTP(adminThrottled, throttledRequest)
+	if adminThrottled.Code != http.StatusTooManyRequests {
+		t.Fatalf("throttled admin status = %d, want 429", adminThrottled.Code)
+	}
+
+	adminRequest := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+	adminRequest.Header.Set("X-Admin-Password", "admin-secret")
+	adminResponse := httptest.NewRecorder()
+	handler.ServeHTTP(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusOK {
+		t.Fatalf("correct admin password after throttled wrong attempts = %d, want 200", adminResponse.Code)
+	}
+}
+
 func TestAdminConfigGetReturnsPublicRuntimeValues(t *testing.T) {
 	handler := New(testConfig(t), NewLogger("error"))
 	request := httptest.NewRequest(http.MethodGet, "/admin/config", nil)

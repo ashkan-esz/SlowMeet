@@ -283,6 +283,73 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	}
 }
 
+func TestRouterUnpublishStopsForwardingWhilePublisherStaysOpen(t *testing.T) {
+	router := NewRouter()
+	sourceClient := newIntegrationPeer(t)
+	sourceIngress := newIntegrationWrapperPeer(t)
+
+	t.Cleanup(func() {
+		router.Unregister("source")
+		_ = sourceClient.Close()
+		_ = sourceIngress.Close()
+	})
+
+	if _, err := sourceIngress.Connection().AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add screen receive transceiver: %v", err)
+	}
+
+	router.Register("source", sourceIngress, nil)
+	published := make(chan *publication, 1)
+	sourceIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("source", SourceRoleScreen, sourceIngress, track)
+		router.mu.RLock()
+		published <- router.pubs[publicationKey("source", SourceRoleScreen, "")]
+		router.mu.RUnlock()
+	})
+
+	screenTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90_000,
+	}, "source-screen")
+	if _, err := sourceClient.AddTrack(screenTrack); err != nil {
+		t.Fatalf("add screen track: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPeerConnected(t, sourceClient, "screen publisher")
+	waitIntegrationPeerConnected(t, sourceIngress.Connection(), "screen ingress")
+	sendIntegrationPacket(t, screenTrack, pion.RTPCodecTypeVideo, 90_000, 1)
+
+	var pub *publication
+	select {
+	case pub = <-published:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("screen publication was not created")
+	}
+	if pub == nil {
+		t.Fatal("publication registry entry was nil")
+	}
+
+	// The publisher stays connected (as the browser does when a screen-share
+	// lease is released and its sender is reused), so nothing naturally
+	// unblocks the forwarding goroutine's ReadRTP.
+	router.Unpublish("source", SourceRoleScreen)
+
+	select {
+	case <-pub.stopped:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("publication was not marked stopped after unpublish")
+	}
+	select {
+	case <-pub.forwardDone:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("forwarding goroutine did not exit after unpublish while the publisher stayed open")
+	}
+	if state := sourceClient.ConnectionState(); state != pion.PeerConnectionStateConnected {
+		t.Fatalf("publisher connection state after unpublish = %s, want connected", state)
+	}
+}
+
 func TestRouterRegistersLateReceiverForActiveCamera(t *testing.T) {
 	router := NewRouter()
 	sourceClient := newIntegrationPeer(t)

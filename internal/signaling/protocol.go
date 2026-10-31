@@ -9,10 +9,11 @@ import (
 )
 
 type ChatHistoryEntry struct {
-	ID        string    `json:"id"`
-	Author    string    `json:"author"`
-	Text      string    `json:"text"`
-	Timestamp time.Time `json:"timestamp"`
+	ID            string    `json:"id"`
+	ParticipantID string    `json:"participant_id,omitempty"`
+	Author        string    `json:"author"`
+	Text          string    `json:"text"`
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 const (
@@ -84,6 +85,11 @@ type Message struct {
 	ChatText             string               `json:"text,omitempty"`
 	Emoji                string               `json:"emoji,omitempty"`
 	ChatHistory          []ChatHistoryEntry   `json:"chat_history,omitempty"`
+
+	// flush is an internal sentinel that is never serialized: the writer
+	// goroutine closes it after every queued message before it has been
+	// written, so senders can wait for the outbound queue to drain.
+	flush chan struct{}
 }
 
 func (m Message) Validate() error {

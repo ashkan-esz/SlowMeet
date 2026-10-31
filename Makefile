@@ -18,8 +18,8 @@ COMPOSE ?= docker compose
 DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
-.PHONY: help run build test vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+.PHONY: help run build test cover vet fmt fmt-check tidy \
+	test-js test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -34,8 +34,12 @@ run: ## Run the service locally
 build: ## Build the application binary
 	$(GO) build -trimpath -o $(APP_NAME) .
 
-test: ## Run all Go tests
-	$(GO) test ./...
+test: ## Run all Go tests with the race detector
+	$(GO) test -race ./...
+
+cover: ## Run Go tests with a coverage report
+	$(GO) test -race -coverprofile=coverage.out ./...
+	$(GO) tool cover -func=coverage.out | tail -1
 
 vet: ## Run Go vet
 	$(GO) vet ./...
@@ -54,7 +58,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning
+	$(MAKE) test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video
 
 test-admin: ## Test the admin dashboard
 	$(NODE) scripts/test-admin.js
@@ -88,6 +92,18 @@ test-chat-notifications: ## Test notifications for incoming chat messages
 
 test-muted-speech-warning: ## Test muted speech warning state transitions
 	$(NODE) scripts/test-muted-speech-warning.js
+
+test-chat-history: ## Test reconnect-safe chat history application
+	$(NODE) scripts/test-chat-history.js
+
+test-meeting-status: ## Test the pre-join and in-meeting status router
+	$(NODE) scripts/test-meeting-status.js
+
+test-renegotiation-queue: ## Test the browser renegotiation queue and its app wiring
+	$(NODE) scripts/test-renegotiation-queue.js
+
+test-remote-screen-video: ## Test remote screen video binding and cleanup
+	$(NODE) scripts/test-remote-screen-video.js
 
 test-media-e2e: ## Run the complete deterministic two-participant Chromium suite
 	$(NODE) scripts/test-media-e2e.js

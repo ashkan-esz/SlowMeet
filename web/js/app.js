@@ -69,6 +69,7 @@ const connectionPopoverEmpty = document.querySelector("#connection-popover-empty
 const connectionPopoverRetry = document.querySelector("#connection-popover-retry");
 const connectionPopoverControls = document.querySelector("#connection-popover-controls");
 const meetingAlert = document.querySelector("#meeting-alert");
+const meetingStatusBanner = document.querySelector("#meeting-status");
 const testMedia = document.querySelector("#test-media");
 const deviceTest = document.querySelector(".device-test");
 const devicePreview = document.querySelector("#device-preview");
@@ -1178,6 +1179,25 @@ if (supportsMeetingFullscreen) {
 
 let unreadMessages = 0;
 let chatPinnedToBottom = true;
+const chatHistoryTracker = window.SlowMeetChatHistory ? window.SlowMeetChatHistory.newChatHistoryTracker() : null;
+const statusRouter = window.SlowMeetMeetingStatus
+  ? window.SlowMeetMeetingStatus.createMeetingStatusRouter({
+    joinStatus: status,
+    meetingStatus: meetingStatusBanner,
+    isInMeeting: () => !meeting.hidden
+  })
+  : null;
+
+// showStatus surfaces a message on the join form while it is visible and on
+// the in-meeting banner afterwards, so mid-meeting errors are never written
+// to the hidden join-form status line.
+function showStatus(message) {
+  if (statusRouter) {
+    statusRouter.show(message);
+    return;
+  }
+  status.textContent = message;
+}
 let pushToTalkActive = false;
 let chatCloseTimer;
 let chatFocusTrigger;
@@ -1556,7 +1576,7 @@ connectionPopoverRetry?.addEventListener("click", () => {
     iceDisconnectRestartTimer = undefined;
     iceRestartAttempts = 0;
     restartRequested = false;
-    status.textContent = "Restarting media...";
+    showStatus("Restarting media...");
     requestIceRestart(peer, socket, socketGeneration);
     return;
   }
@@ -1797,6 +1817,8 @@ let screenShareAdaptation;
 let cameraTrack;
 let localParticipantID;
 let pendingHandState;
+let handStatePendingTimer;
+const handStatePendingTimeout = 5000;
 let reconnectToken;
 let screenShareOwner;
 let screenShareRequest;
@@ -1989,7 +2011,7 @@ function scheduleConnectionMethodReconnect() {
 function selectConnectionMethod(methodID) {
   const method = connectionMethodOptions.get(methodID);
   if (!method?.enabled) {
-    status.textContent = method?.reason || "That connection method is unavailable.";
+    showStatus(method?.reason || "That connection method is unavailable.");
     refreshConnectionMethodSelectors();
     return false;
   }
@@ -2002,7 +2024,7 @@ function selectConnectionMethod(methodID) {
     clearTimeout(reconnectTimer);
     const readyState = socket?.readyState;
     if (readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING) {
-      status.textContent = `Switching to ${method.label}. Reconnecting…`;
+      showStatus(`Switching to ${method.label}. Reconnecting…`);
       socket.close();
     } else if (readyState === WebSocket.CLOSED || !socket) {
       intentionalClose = false;
@@ -2516,7 +2538,7 @@ async function disableCamera() {
   }
   sendMediaState();
   if (detachError && peer === stoppedPeer) {
-    status.textContent = "Camera stopped, but media could not be detached. Try enabling it again.";
+    showStatus("Camera stopped, but media could not be detached. Try enabling it again.");
   }
 }
 
@@ -2548,7 +2570,7 @@ function requestCameraState(target, { force = false } = {}) {
       meetingViewState.cameraEnabled = false;
       cameraRequestedTarget = false;
       setLocalMediaControls();
-      status.textContent = mediaAccessMessage("video", error);
+      showStatus(mediaAccessMessage("video", error));
     } finally {
       if (cameraOperation === operation) {
         cameraOperation = undefined;
@@ -2968,6 +2990,7 @@ function resetSpeakerDetection() {
   stopLocalMicrophoneAnalyzer();
   speakerAnalyzers.clear();
   activeSpeakers.clear();
+  speakerLevels.clear();
   participantElements.forEach((element) => {
     element.item.classList.remove("is-speaking");
   });
@@ -3009,7 +3032,7 @@ enableAudio.addEventListener("click", async () => {
     }
   }
   enableAudio.hidden = blocked || remoteAudioElements.size === 0;
-  if (!blocked) status.textContent = "Remote audio enabled.";
+  if (!blocked) showStatus("Remote audio enabled.");
 });
 fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
@@ -3236,15 +3259,20 @@ function connectSocket(name, password) {
     if (generation !== socketGeneration) return;
     clearTimeout(reconnectTimer);
     reconnectAttempts = 0;
-    currentSocket.send(JSON.stringify({
-      version: 1, type: "join", name, password, reconnect_token: reconnectToken
-    }));
+    try {
+      currentSocket.send(JSON.stringify({
+        version: 1, type: "join", name, password, reconnect_token: reconnectToken
+      }));
+    } catch (_) {
+      // The socket can close between open and the join send; the close
+      // handler drives the reconnect path.
+    }
   });
   currentSocket.addEventListener("message", ({ data }) => {
     if (generation !== socketGeneration) return;
     const message = parseSignalingMessage(data);
     if (!message) {
-      status.textContent = "Received an invalid server message.";
+      showStatus("Received an invalid server message.");
       return;
     }
     handleWebRTCMessage(message, generation);
@@ -3372,53 +3400,62 @@ function connectSocket(name, password) {
         meeting.hidden = false;
         if (meetingEnded) meetingEnded.hidden = true;
         status.textContent = "";
+        statusRouter?.clear();
         if (Array.isArray(message.chat_history)) {
-          message.chat_history.forEach((entry) => {
-            if (entry?.text) addChatMessage(entry.author || "Participant", entry.text, false, false, entry.timestamp);
-          });
+          const applyHistory = (entries) => {
+            entries.forEach((entry) => {
+              addChatMessage(entry.author, entry.text, false, entry.participantId === localParticipantID, entry.timestamp);
+            });
+          };
+          if (chatHistoryTracker) {
+            applyHistory(chatHistoryTracker.apply(message.chat_history));
+          } else {
+            applyHistory(message.chat_history.filter((entry) => entry?.text));
+          }
         }
         startWebRTC();
       }
     }
-    if (message.type === "participant_left") {
-      addChatSystem(`${message.participant.name} left the room`);
-      const element = participantElements.get(message.participant.id);
+    if (message.type === "participant_left" && message.participant?.id) {
+      const leftParticipant = message.participant;
+      addChatSystem(`${leftParticipant.name || "A participant"} left the room`);
+      const element = participantElements.get(leftParticipant.id);
       if (element) {
-        if (participantMenuOwner?.participantID === message.participant.id) closeParticipantMenu(false);
-        if (pinnedParticipantIDs.includes(message.participant.id)) setPinnedParticipant(message.participant.id);
-        participantQualitySamples.delete(message.participant.id);
+        if (participantMenuOwner?.participantID === leftParticipant.id) closeParticipantMenu(false);
+        if (pinnedParticipantIDs.includes(leftParticipant.id)) setPinnedParticipant(leftParticipant.id);
+        participantQualitySamples.delete(leftParticipant.id);
         remoteAudioElements.delete(element.audio);
-        removeSpeakerAnalyzer(message.participant.id);
-        forgetRemoteTracks(element, message.participant.id);
-        remoteCameraLayerTracks.delete(message.participant.id);
-        remoteScreenTracks.delete(message.participant.id);
+        removeSpeakerAnalyzer(leftParticipant.id);
+        forgetRemoteTracks(element, leftParticipant.id);
+        remoteCameraLayerTracks.delete(leftParticipant.id);
+        remoteScreenTracks.delete(leftParticipant.id);
         element.item.classList.remove("is-speaking");
         element.item.classList.add("is-disconnected");
         element.item.dataset.connection = "left";
         element.item.dataset.handRaised = "false";
         element.item.dataset.handOrder = "0";
         normalizeRaisedHandOrders();
-        element.micIndicator.setAttribute("aria-label", `${message.participant.name} disconnected`);
+        element.micIndicator.setAttribute("aria-label", `${leftParticipant.name || "A participant"} disconnected`);
         updateParticipantTileState(element);
         renderPeopleList();
         const removalTimer = setTimeout(() => {
-          participantRemovalTimers.delete(message.participant.id);
-          if (participantElements.get(message.participant.id)?.item === element.item) {
+          participantRemovalTimers.delete(leftParticipant.id);
+          if (participantElements.get(leftParticipant.id)?.item === element.item) {
             element.item.remove();
-            participantElements.delete(message.participant.id);
-            if (stageFocusParticipantID === message.participant.id) clearStageFocus(true);
-            remoteCameraLayerTracks.delete(message.participant.id);
-            const orderIndex = participantOrder.indexOf(message.participant.id);
+            participantElements.delete(leftParticipant.id);
+            if (stageFocusParticipantID === leftParticipant.id) clearStageFocus(true);
+            remoteCameraLayerTracks.delete(leftParticipant.id);
+            const orderIndex = participantOrder.indexOf(leftParticipant.id);
             if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);
             updateParticipantCount();
             renderMeetingLayout();
           }
         }, 1200);
-        const previousRemovalTimer = participantRemovalTimers.get(message.participant.id);
+        const previousRemovalTimer = participantRemovalTimers.get(leftParticipant.id);
         if (previousRemovalTimer) clearTimeout(previousRemovalTimer);
-        participantRemovalTimers.set(message.participant.id, removalTimer);
+        participantRemovalTimers.set(leftParticipant.id, removalTimer);
       }
-    if (message.participant.id === screenShareOwner) {
+      if (leftParticipant.id === screenShareOwner) {
         screenShareOwner = undefined;
         updateScreenShareUI();
       }
@@ -3443,11 +3480,11 @@ function connectSocket(name, password) {
     if (reconnectAttempts > maxReconnectAttempts) {
       resetMediaConnection();
       setConnection("poor", "Offline");
-      status.textContent = "Offline. Select Leave to try again.";
+      showStatus("Offline. Select Leave to try again.");
       return;
     }
     const delay = Math.min(30000, 2000 * 2 ** Math.min(reconnectAttempts - 1, 4));
-    status.textContent = `Reconnecting in ${Math.ceil(delay / 1000)}s...`;
+    showStatus(`Reconnecting in ${Math.ceil(delay / 1000)}s...`);
     reconnectTimer = setTimeout(() => {
       resetMediaConnection();
       connectSocket(nameInput.value.trim(), passwordInput.value);
@@ -3484,6 +3521,22 @@ function resetMediaConnection() {
   remoteTrackOwners.clear();
   remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
+  // Screen and camera-layer bindings point at the previous peer connection's
+  // tracks; the reconnect rebinds them from fresh signaling state.
+  remoteScreenTracks.clear();
+  remoteCameraLayerTracks.clear();
+  // The server replays the chat history after a reconnect; start from an
+  // empty rail so the snapshot is not duplicated.
+  chatMessages?.replaceChildren();
+  unreadMessages = 0;
+  chatPinnedToBottom = true;
+  if (chatBadge) {
+    chatBadge.hidden = true;
+    chatBadge.textContent = "";
+  }
+  chatToggle?.classList.remove("has-unread");
+  if (newMessages) newMessages.hidden = true;
+  chatHistoryTracker?.reset();
   enableAudio.hidden = true;
   renegotiationQueue?.close(new Error("signaling connection closed"));
   renegotiationQueue = undefined;
@@ -3550,7 +3603,7 @@ async function startWebRTC() {
     : connectionMethod === "direct" ? "all" : iceTransportPolicy;
   if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(connectionMethod) &&
       selectedICEServers.length === 0) {
-    status.textContent = "The selected connection method is unavailable. Choose another method and retry.";
+    showStatus("The selected connection method is unavailable. Choose another method and retry.");
     setConnection("poor", "Method unavailable");
     intentionalClose = true;
     currentSocket.close();
@@ -3567,7 +3620,7 @@ async function startWebRTC() {
     offerTimeoutMs: 15000,
     onTimeout: () => {
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-      status.textContent = "Media negotiation timed out. Reconnecting...";
+      showStatus("Media negotiation timed out. Reconnecting...");
       currentSocket.close();
     },
     sendOffer: () => enqueuePeerNegotiation(async () => {
@@ -3680,7 +3733,7 @@ async function startWebRTC() {
         if (remoteAudioElements.size > 0) enableAudio.hidden = true;
       }).catch(() => {
         enableAudio.hidden = false;
-        status.textContent = "Click “Enable remote audio” to hear participants.";
+        showStatus("Click “Enable remote audio” to hear participants.");
       });
     }
   };
@@ -3713,7 +3766,7 @@ async function startWebRTC() {
       });
       if (abortIfStale()) return;
     } catch (error) {
-      status.textContent = mediaAccessMessage("audio", error);
+      showStatus(mediaAccessMessage("audio", error));
     }
     if (abortIfStale()) return;
     localStream = setupStream;
@@ -3762,7 +3815,7 @@ async function startWebRTC() {
         meetingViewState.cameraEnabled = false;
         setLocalMediaControls();
         sendMediaState();
-        status.textContent = mediaAccessMessage("video", error);
+        showStatus(mediaAccessMessage("video", error));
       }
     }
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
@@ -3772,7 +3825,7 @@ async function startWebRTC() {
     await renegotiateLocalMedia();
     if (cameraSender && cameraSenderPeer === currentPeer) cameraSenderNegotiated = true;
   } catch (error) {
-    status.textContent = `Media unavailable: ${error.message}`;
+    showStatus(`Media unavailable: ${error.message}`);
   }
 }
 
@@ -3935,6 +3988,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     status.textContent = iceRestartAttempts >= maxIceRestartAttempts
       ? connectionMethodFailureMessage()
       : "Restarting media...";
+    if (iceRestartAttempts >= maxIceRestartAttempts) showStatus(connectionMethodFailureMessage());
     requestIceRestart(targetPeer, targetSocket, generation);
     return;
   }
@@ -3945,7 +3999,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     status.textContent = restartRequested ? "Restarting media..." : "Reconnecting media...";
     if (!restartRequested && iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
-      status.textContent = connectionMethodFailureMessage();
+      showStatus(connectionMethodFailureMessage());
       return;
     }
     scheduleIceRestartRetry(targetPeer, targetSocket, generation);
@@ -3980,7 +4034,7 @@ function scheduleIceRestartRetry(targetPeer, targetSocket, generation) {
     if (requestIceRestart(targetPeer, targetSocket, generation)) return;
     if (iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
-      status.textContent = "Media connection failed. Retry to reconnect.";
+      showStatus("Media connection failed. Retry to reconnect.");
     }
   }, 5000);
 }
@@ -4073,7 +4127,21 @@ function updateConnectionMetrics(values) {
   syncConnectionPopoverStats();
 }
 
+let diagnosticsUpdateRunning = false;
+
 async function updateDiagnostics() {
+  // The interval can fire again while an update is still awaiting stats or
+  // applying a profile; overlapping runs would double-send network_state.
+  if (diagnosticsUpdateRunning) return;
+  diagnosticsUpdateRunning = true;
+  try {
+    await runDiagnosticsUpdate();
+  } finally {
+    diagnosticsUpdateRunning = false;
+  }
+}
+
+async function runDiagnosticsUpdate() {
   const currentPeer = peer;
   if (!currentPeer) return;
   const report = await currentPeer.getStats().catch(() => undefined);
@@ -4803,7 +4871,17 @@ function sendHandState(raised) {
     pendingHandState = undefined;
     updateRaisedHandsUI();
     addChatSystem("Could not update your raised-hand state.");
+    return;
   }
+  // If the server echo is lost, the button must not stay disabled forever.
+  clearTimeout(handStatePendingTimer);
+  handStatePendingTimer = setTimeout(() => {
+    handStatePendingTimer = undefined;
+    if (pendingHandState !== undefined) {
+      pendingHandState = undefined;
+      updateRaisedHandsUI();
+    }
+  }, handStatePendingTimeout);
 }
 
 async function setVideoSending(enabled, automatic = false) {
@@ -5055,7 +5133,7 @@ async function startScreenShare() {
     if (local) local.screenVideo.srcObject = null;
     setLocalVideoMirror(true);
     updateScreenShareUI();
-    if (error.name !== "NotAllowedError") status.textContent = `Screen share unavailable: ${error.message}`;
+    if (error.name !== "NotAllowedError") showStatus(`Screen share unavailable: ${error.message}`);
   }
 }
 
@@ -5109,7 +5187,7 @@ async function stopScreenShare() {
     updateScreenShareUI();
     renderMeetingLayout();
     negotiation?.catch(() => {
-      status.textContent = "Screen share stopped; media renegotiation failed.";
+      showStatus("Screen share stopped; media renegotiation failed.");
     });
   })().finally(() => {
     screenShareStopPromise = undefined;
@@ -5174,8 +5252,13 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     const currentSocket = socket;
     if (!currentPeer || !currentSocket || generation !== socketGeneration) return;
     enqueuePeerNegotiation(async () => {
-      if (!isCurrentWebRTC(generation, currentPeer, currentSocket) ||
-          currentPeer.signalingState !== "have-local-offer") return;
+      if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+      if (currentPeer.signalingState !== "have-local-offer") {
+        // A stray answer must not leave a queued renegotiation waiting for
+        // its watchdog.
+        renegotiationQueue?.fail(new Error("received an answer without a local offer"));
+        return;
+      }
       await currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;

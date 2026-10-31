@@ -147,5 +147,9 @@ assert.match(appSource, /bindRemoteCameraTrack\(video, track, \(\) => updatePart
 assert.match(appSource, /bindRemoteCameraTrack\(element\.cameraVideo, track, \(\) => updateParticipantVideoVisibility\(element\)\)/);
 assert.match(appSource, /remoteCameraLayerTracks\.get\(participantID\) !== tracks \|\| tracks\.get\(layer\) !== track/);
 assert.match(appSource, /bindRemoteCameraTrack\.selectLayer\(tracks, cameraLayer\)/);
-assert.match(pageSource, /<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>\s*<script src="\/js\/camera-readiness\.js"><\/script>\s*<script src="\/js\/muted-speech-warning\.js"><\/script>\s*<script src="\/js\/connection-methods\.js"><\/script>\s*<script src="\/js\/app\.js"><\/script>/);
+// Helper modules only need to load in this relative order before app.js.
+const scriptOrder = ["remote-camera-video.js", "screen-share-adaptation.js", "connection-methods.js", "app.js"]
+  .map((name) => pageSource.indexOf(`/js/${name}`));
+assert.ok(scriptOrder.every((index) => index > 0), "expected helper scripts to be referenced from index.html");
+assert.deepEqual(scriptOrder, [...scriptOrder].sort((a, b) => a - b), "helper scripts must load before app.js");
 console.log("remote camera video tests passed");

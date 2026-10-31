@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -278,10 +279,14 @@ func (c Config) CheckMeetingPassword(candidate string) bool {
 	if c.MeetingPassword == "" {
 		return true
 	}
-	if len(candidate) != len(c.MeetingPassword) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(candidate), []byte(c.MeetingPassword)) == 1
+	// Comparing SHA-256 digests keeps the check constant-time without
+	// leaking the configured password's length through an early size test.
+	return subtle.ConstantTimeCompare(digest(candidate), digest(c.MeetingPassword)) == 1
+}
+
+func digest(value string) []byte {
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
 }
 
 func envString(key, fallback string) string {

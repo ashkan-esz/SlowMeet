@@ -13,9 +13,17 @@ runtime settings changed through `/admin`.
 - Set `ADMIN_PASSWORD` to protect `/admin` and its runtime controls.
 - Passwords and TURN secrets stay server-side and are not included in public
   configuration responses or application logs.
+- Failed password attempts on the join, roster-preview, and admin surfaces are
+  throttled per client IP; over the budget, requests are rejected until the
+  attempt budget refills.
 
 Each WebSocket connection allows up to five join attempts. Reconnecting clients
 can open a fresh connection when needed.
+
+`RECONNECT_TIMEOUT_SECONDS` is how long a disconnected participant keeps their
+slot before it is released (default 30, maximum 600). Setting it to `0`
+disables the grace period: the slot is released as soon as the connection
+drops and reconnects take a fresh slot.
 
 The admin page reports readiness, active participants, peer connections,
 reconnects, RTT, packet loss, jitter, and reported audio/video bitrate. It also

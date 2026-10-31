@@ -93,6 +93,26 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 	}
 }
 
+func TestLoadStoreToleratesUnknownKeysWithWarning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Config{ConfigFile: path, HTTPAddr: ":8080", MaxParticipants: 5, DefaultVideoFPS: 15,
+		MaxVideoFPS: 30, DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
+		DefaultVideoQuality: "low"}
+	if err := os.WriteFile(path, []byte(`{"max_paticipants":3,"max_participants":4}`), 0600); err != nil {
+		t.Fatalf("write config fixture: %v", err)
+	}
+	store, err := LoadStore(cfg)
+	if err != nil {
+		t.Fatalf("LoadStore() error = %v", err)
+	}
+	if got := store.Snapshot().MaxParticipants; got != 4 {
+		t.Fatalf("MaxParticipants with typo'd sibling key = %d, want 4", got)
+	}
+	if keys := unknownJSONKeys([]byte(`{"max_paticipants":3,"max_participants":4}`)); len(keys) != 1 || keys[0] != "max_paticipants" {
+		t.Fatalf("unknownJSONKeys() = %v, want [max_paticipants]", keys)
+	}
+}
+
 func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
 	cfg := Config{HTTPAddr: ":8080", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,

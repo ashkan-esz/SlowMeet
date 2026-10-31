@@ -43,6 +43,7 @@ func main() {
 	select {
 	case err := <-serveErr:
 		logger.Error("server_stopped", "error", err)
+		app.Close()
 		return
 	case <-shutdown:
 	}

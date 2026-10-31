@@ -801,6 +801,20 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .control-button--danger .control-icon { color: #fff; }
 .sidebar-backdrop { display: none; }
 .audio-prompt { width: 100%; min-height: 36px; padding: 0 10px; color: var(--lm-text); background: var(--lm-surface-2); border: 1px solid var(--lm-border); border-radius: var(--lm-r-sm); font-size: 11px; }
+
+/* The autoplay-blocked prompt lives in the stage panel so it stays reachable
+   while the settings sidebar is closed. */
+.stage-panel .audio-prompt {
+  position: absolute;
+  inset-block-end: 18px;
+  inset-inline-start: 50%;
+  z-index: var(--lm-z-popover);
+  width: auto;
+  min-height: 34px;
+  border-radius: 999px;
+  font-size: 12px;
+  transform: translateX(-50%);
+}
 .status-message { color: var(--lm-text-dim); font-size: 11px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
@@ -967,6 +981,24 @@ html:has(.meeting-shell:not([hidden])) #root {
   transform: translateX(-50%);
 }
 .meeting-alert[data-level="poor"] { color: var(--lm-danger); border-color: rgba(239, 102, 109, .35); }
+
+.meeting-status {
+  position: absolute;
+  inset-block-start: 60px;
+  inset-inline-start: 50%;
+  z-index: 5;
+  max-width: min(460px, calc(100% - 32px));
+  margin-block: 0;
+  padding: 9px 13px;
+  color: var(--lm-text);
+  background: rgba(32, 39, 49, .96);
+  border: 1px solid var(--lm-border);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  transform: translateX(-50%);
+}
 
 .participant-grid {
   display: flex;

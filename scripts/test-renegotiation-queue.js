@@ -303,15 +303,17 @@ async function run() {
   assert.match(appSource, /function isPeerConnectionConnected\(targetPeer\)[\s\S]*?targetPeer\?\.connectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "completed"/);
   assert.match(appSource, /if \(label === "Connected" && !isPeerConnectionConnected\(peer\)\) return;/,
     "stats must not replace a disconnected transport label with Connected");
-  assert.match(appSource, /iceDisconnectRestartTimer = setTimeout\([\s\S]*?type: "ice_restart"[\s\S]*?\}, 5000\);/,
+  assert.match(appSource, /iceDisconnectRestartTimer = setTimeout\(\(\) => \{[\s\S]*?if \(requestIceRestart\(targetPeer, targetSocket, generation\)\) return;[\s\S]*?\}, 5000\);/,
     "a sustained disconnected peer should request one delayed ICE restart");
+  assert.match(appSource, /function requestIceRestart\(targetPeer, targetSocket, generation\)[\s\S]*?type: "ice_restart"/,
+    "the delayed restart request should send an ice_restart message");
   assert.match(appSource, /renegotiationQueue = createRenegotiationQueue\(/);
   assert.match(appSource, /renegotiationQueue\?\.answer\(\)/);
   assert.match(appSource, /renegotiationQueue\?\.rollback\(\)/);
   assert.match(appSource, /renegotiationQueue\?\.resume\(\)/);
   assert.match(appSource, /return renegotiationQueue\.request\(\)/);
   assert.match(appSource, /offerTimeoutMs: 15000/);
-  assert.match(appSource, /status\.textContent = "Media negotiation timed out\. Reconnecting\.\.\.";\s*currentSocket\.close\(\);/);
+  assert.match(appSource, /showStatus\("Media negotiation timed out\. Reconnecting\.\.\."\);\s*currentSocket\.close\(\);/);
   assert.match(appSource, /statsTimer = setInterval\(updateDiagnostics, 1000\);\s*await renegotiateLocalMedia\(\);/);
   assert.equal([...appSource.matchAll(/currentPeer\.createOffer\(\)/g)].length, 1,
     "startup and media renegotiation should share the queued offer path");

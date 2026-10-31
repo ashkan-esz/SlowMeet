@@ -1,11 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 )
 
@@ -32,13 +35,53 @@ func LoadStore(cfg Config) (*Store, error) {
 		return nil, err
 	}
 	var update AdminUpdate
-	if err := json.Unmarshal(data, &update); err != nil {
-		return nil, err
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&update); err != nil {
+		var lenient AdminUpdate
+		if lenientErr := json.Unmarshal(data, &lenient); lenientErr != nil {
+			return nil, err
+		}
+		// A typo'd key would otherwise be silently dropped by the next admin
+		// update that persists the file. Load the known subset, but say so.
+		slog.Default().Warn("config_persistence_unknown_keys",
+			"file", store.path,
+			"unknown_keys", unknownJSONKeys(data),
+			"decode_error", err.Error())
+		update = lenient
 	}
 	if err := store.apply(update); err != nil {
 		return nil, err
 	}
 	return store, nil
+}
+
+// unknownJSONKeys lists the top-level keys in a persisted config that are not
+// part of AdminUpdate, so operators can spot typos.
+func unknownJSONKeys(data []byte) []string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	known := map[string]struct{}{
+		"max_participants":           {},
+		"default_video_quality":      {},
+		"max_video_quality":          {},
+		"max_video_bitrate":          {},
+		"max_video_fps":              {},
+		"max_audio_bitrate":          {},
+		"screen_share_enabled":       {},
+		"retain_chat_history":        {},
+		"enabled_connection_methods": {},
+	}
+	var unknown []string
+	for key := range raw {
+		if _, ok := known[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown
 }
 
 func (s *Store) Snapshot() Config {
@@ -55,14 +98,9 @@ func (c Config) checkAdminPassword(candidate string) bool {
 	if c.AdminPassword == "" {
 		return candidate == ""
 	}
-	if len(candidate) != len(c.AdminPassword) {
-		return false
-	}
-	return subtleCompare(candidate, c.AdminPassword)
-}
-
-func subtleCompare(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	// Digest comparison keeps the check constant-time without leaking the
+	// configured password's length through an early size test.
+	return subtle.ConstantTimeCompare(digest(candidate), digest(c.AdminPassword)) == 1
 }
 
 type AdminUpdate struct {
@@ -134,10 +172,6 @@ func updatedConfig(current Config, update AdminUpdate) (Config, error) {
 		return Config{}, err
 	}
 	return next, nil
-}
-
-func (s *Store) persistLocked() error {
-	return persist(s.cfg, s.path)
 }
 
 func persist(cfg Config, path string) error {
