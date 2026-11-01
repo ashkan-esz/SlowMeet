@@ -416,8 +416,21 @@ const scenarios = [
       await fixture.waitForConnected("A");
       const page = pageFor(fixture, "A");
 
-      await fixture.openSidebar("A", "#more");
-      const sidebar = page.locator("#meeting-sidebar");
+      const toolbarControls = await page.locator(".meeting-toolbar .control-button:visible").evaluateAll((buttons) =>
+        buttons.map((button) => ({ id: button.id, label: button.getAttribute("aria-label")?.trim() || "" })));
+      assert.ok(toolbarControls.length > 0, "meeting toolbar should expose visible controls");
+      for (const { id, label } of toolbarControls) {
+        assert.ok(label, `${id || "toolbar control"} should have an accessible name`);
+        const namedButton = page.getByRole("button", { name: label, exact: true });
+        assert.equal(await namedButton.count(), 1, `${id} should be discoverable by its accessible name: ${label}`);
+        assert.equal(await namedButton.getAttribute("id"), id,
+          `${id} accessible name should identify the same toolbar control`);
+      }
+
+      const moreButton = page.getByRole("button", { name: "Open more meeting controls", exact: true });
+      await moreButton.focus();
+      await page.keyboard.press("Enter");
+      const sidebar = page.getByRole("dialog", { name: "Meeting controls", exact: true });
       await sidebar.waitFor({ state: "visible" });
       const focusOrder = await sidebar.evaluate((element) => [...element.querySelectorAll(
         "button, select, input, summary, textarea, [tabindex]"
@@ -441,7 +454,8 @@ const scenarios = [
       assert.equal(await page.evaluate(() => document.activeElement?.id), "more");
 
       await page.keyboard.press("c");
-      await page.locator("#chat-rail").waitFor({ state: "visible" });
+      const chat = page.getByRole("dialog", { name: "Meeting chat", exact: true });
+      await chat.waitFor({ state: "visible" });
       await page.waitForFunction(() => document.activeElement?.id === "chat-input", null, { timeout: 3000 });
       assert.equal(await page.evaluate(() => document.activeElement?.id), "chat-input");
       await page.keyboard.press("Escape");

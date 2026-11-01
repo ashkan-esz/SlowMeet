@@ -281,8 +281,18 @@ endedExportConnectionHistory?.addEventListener("click", exportRecordedConnection
 
 function updateControlLabel(button, label) {
   if (!button) return;
-  button.setAttribute("aria-label", label);
+  const visibleLabel = button.querySelector("[data-control-label]")?.textContent.trim();
+  const count = button.id === "participants-button"
+    ? button.querySelector(".count-badge")?.textContent.trim() : undefined;
+  const namePrefix = count ? `${count}${visibleLabel}` : visibleLabel;
+  const accessibleLabel = namePrefix && !` ${label.toLowerCase()} `.includes(` ${namePrefix.toLowerCase()} `)
+    ? `${namePrefix}: ${label}` : label;
+  button.setAttribute("aria-label", accessibleLabel);
   button.setAttribute("title", label);
+}
+
+for (const button of [mic, document.querySelector("#participants-button")]) {
+  if (button) updateControlLabel(button, button.getAttribute("aria-label"));
 }
 
 function setCameraPending(pending) {
@@ -303,15 +313,7 @@ function mediaAccessMessage(kind, error) {
     : "Camera unavailable; continuing audio-only.";
 }
 
-function hashName(value) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
-  return Math.abs(hash);
-}
-
-function initialsFor(name) {
-  return name.trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?";
-}
+const { hashName, initialsFor } = window.SlowMeetParticipantIdentity;
 
 const pipPositions = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const participantPageSize = 9;
@@ -676,7 +678,11 @@ function updateParticipantCount() {
   updateParticipantPagination();
   if (pinsChanged) renderMeetingLayout();
   if (participantCount) participantCount.textContent = `${count} participant${count === 1 ? "" : "s"}`;
-  if (participantCountBadge) participantCountBadge.textContent = String(count);
+  if (participantCountBadge) {
+    participantCountBadge.textContent = String(count);
+    updateControlLabel(participantsButton, meetingSidebar.getAttribute("aria-hidden") === "false"
+      ? "Close meeting controls" : "Open participants");
+  }
   renderPeopleList();
 }
 
@@ -1919,13 +1925,25 @@ let simulcastEnabled = false;
 const connectionMethodOptions = new Map();
 let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
 let iceConfigRequest;
-async function refreshICEConfig() {
-  if (iceConfigRequest) return iceConfigRequest;
-  iceConfigRequest = (async () => {
+let iceCredentialRequest;
+let iceCredentialRequestToken;
+let iceConfigRequestVersion = 0;
+async function refreshICEConfig(sessionToken) {
+  if (!sessionToken && iceConfigRequest) return iceConfigRequest;
+  if (sessionToken && iceCredentialRequest && iceCredentialRequestToken === sessionToken) {
+    return iceCredentialRequest;
+  }
+  const requestVersion = ++iceConfigRequestVersion;
+  const endpoint = sessionToken ? "/ice-config/credentials" : "/ice-config";
+  const headers = sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {};
+  const request = (async () => {
     try {
-      const response = await fetch("/ice-config", { cache: "no-store" });
+      const response = await fetch(endpoint, { cache: "no-store", headers });
       if (!response.ok) throw new Error("ICE configuration unavailable");
       const config = await response.json();
+      // A delayed public discovery request must not overwrite credentials from
+      // the admitted-session response.
+      if (requestVersion !== iceConfigRequestVersion) return false;
       if (config.ice_transport_policy === "relay" || config.ice_transport_policy === "all") {
         iceTransportPolicy = config.ice_transport_policy;
       }
@@ -1954,19 +1972,32 @@ async function refreshICEConfig() {
       refreshConnectionMethodSelectors();
       return true;
     } catch (_) {
-      if (connectionMethodOptions.size === 0) {
+      if (requestVersion === iceConfigRequestVersion && connectionMethodOptions.size === 0) {
         connectionMethodOptions.set("auto", {id: "auto", label: "Automatic", enabled: true});
         iceServers = [];
         refreshConnectionMethodSelectors();
       }
       return false;
-    } finally {
-      iceConfigRequest = undefined;
     }
   })();
-  return iceConfigRequest;
+  if (!sessionToken) {
+    iceConfigRequest = request;
+    request.finally(() => {
+      if (iceConfigRequest === request) iceConfigRequest = undefined;
+    });
+  } else {
+    iceCredentialRequest = request;
+    iceCredentialRequestToken = sessionToken;
+    request.finally(() => {
+      if (iceCredentialRequest === request) {
+        iceCredentialRequest = undefined;
+        iceCredentialRequestToken = undefined;
+      }
+    });
+  }
+  return request;
 }
-const iceConfigReady = refreshICEConfig();
+const iceConfigReady = refreshICEConfig(undefined);
 
 function refreshConnectionMethodSelectors() {
   [joinConnectionMethod, settingsConnectionMethod].forEach((select) => {
@@ -2505,6 +2536,11 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
     await applyProfile(profile.value, currentPeer, stream);
     if (peer !== currentPeer) throw new Error("media connection changed");
   }
+  // Screen sharing pauses the established camera encoding while detaching its
+  // track. Replacing the track alone preserves that inactive encoding.
+  if (!await setSenderEncodingActive(cameraSender, track.enabled && cameraRequested)) {
+    throw new Error("camera sender could not be resumed");
+  }
   if (!cameraSenderNegotiated && negotiate) {
     await renegotiateLocalMedia();
     if (peer !== currentPeer) throw new Error("media connection changed");
@@ -2663,13 +2699,6 @@ function remoteParticipantID(streams, track) {
   return track.id?.split("|")[0] || "";
 }
 
-function remoteMediaRole(streams, track) {
-  const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
-  if (/-screen$/.test(streamID) || /\|screen$/.test(track?.id || "")) return "screen";
-  if (/-camera$/.test(streamID) || /\|camera(?:\|(low|medium|high))?$/.test(track?.id || "")) return "camera";
-  return track?.kind === "audio" ? "audio" : "camera";
-}
-
 function bindRemoteScreenTrackForParticipant(participantID, element, track) {
   let stream;
   stream = bindRemoteScreenTrack(element.screenVideo, track, () => {
@@ -2680,11 +2709,6 @@ function bindRemoteScreenTrackForParticipant(participantID, element, track) {
   });
   remoteScreenTracks.set(participantID, { track, stream });
   return stream;
-}
-
-function remoteCameraLayer(track) {
-  const match = /\|camera\|(low|medium|high)$/.exec(track?.id || "");
-  return match?.[1] || "";
 }
 
 function showSelectedRemoteCamera(element) {
@@ -3202,7 +3226,8 @@ document.addEventListener("visibilitychange", () => {
     return;
   }
   const activeMethod = connectionMethod;
-  refreshICEConfig().then((refreshed) => {
+  const sessionToken = meeting.hidden ? undefined : reconnectToken;
+  refreshICEConfig(sessionToken).then((refreshed) => {
     if (!refreshed) return;
     if (!meeting.hidden && !connectionMethodOptions.get(activeMethod)?.enabled) {
       connectionMethod = activeMethod;
@@ -3218,7 +3243,7 @@ form.addEventListener("submit", async (event) => {
   if (joinButton.disabled) return;
   const requestedMethod = joinConnectionMethod?.value || "auto";
   joinButton.disabled = true;
-  if (!(await refreshICEConfig())) {
+  if (!(await refreshICEConfig(undefined))) {
     status.textContent = "Connection settings could not be refreshed. Please try again.";
     joinButton.disabled = false;
     return;
@@ -3588,12 +3613,24 @@ function resetMediaConnection() {
 async function startWebRTC() {
   const generation = socketGeneration;
   const currentSocket = socket;
+  const currentReconnectToken = reconnectToken;
   const debugMode = typeof parseDebugMode === "function" ? parseDebugMode(window.location.search) : 0;
   if ((debugMode === 5 || debugMode === 6) && selectedCameraQuality !== "off") {
     cameraRequested = true;
   }
-  await iceConfigReady;
-  if (generation !== socketGeneration || socket !== currentSocket) return;
+  if (!currentReconnectToken) {
+    showStatus("The meeting session could not be authenticated. Reconnecting...");
+    currentSocket?.close();
+    return;
+  }
+  const credentialsReady = await refreshICEConfig(currentReconnectToken);
+  if (generation !== socketGeneration || socket !== currentSocket ||
+      currentSocket?.readyState !== WebSocket.OPEN) return;
+  if (!credentialsReady) {
+    showStatus("Connection settings could not be refreshed. Reconnecting...");
+    currentSocket?.close();
+    return;
+  }
   clearTimeout(iceDisconnectRestartTimer);
   iceDisconnectRestartTimer = undefined;
   renegotiationQueue?.close(new Error("WebRTC connection replaced"));
@@ -4681,7 +4718,6 @@ function addParticipant(participant) {
   const item = document.createElement("li");
   item.className = "participant-tile";
   item.tabIndex = 0;
-  item.setAttribute("role", "group");
   if (participant.id === localParticipantID) item.classList.add("is-local");
   item.dataset.participantId = participant.id;
   item.dataset.connection = "connected";

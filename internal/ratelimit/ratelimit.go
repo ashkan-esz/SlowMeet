@@ -1,8 +1,7 @@
 // Package ratelimit provides a compact in-process token bucket used to slow
 // down online password guessing on the meeting, roster-preview, and admin
-// surfaces. Tokens are consumed by reported failures only, so legitimate
-// traffic is never throttled, and a key over its budget means the caller
-// should reject further attempts from that client.
+// surfaces. Callers reserve a token before checking credentials and refund it
+// after successful authentication, so failed guesses consume the budget.
 package ratelimit
 
 import (
@@ -34,26 +33,36 @@ type Limiter struct {
 // New creates a limiter that allows burst failures per key and refills
 // continuously at failuresPerMinute.
 func New(failuresPerMinute, burst int) *Limiter {
+	return NewWithClock(failuresPerMinute, burst, time.Now)
+}
+
+// NewWithClock creates a limiter using now for token refill and idle sweeps.
+// It is intended for deterministic tests and should normally receive time.Now.
+func NewWithClock(failuresPerMinute, burst int, now func() time.Time) *Limiter {
 	if failuresPerMinute <= 0 {
 		failuresPerMinute = 1
 	}
 	if burst <= 0 {
 		burst = 1
 	}
+	if now == nil {
+		now = time.Now
+	}
+	current := now()
 	return &Limiter{
 		buckets:   make(map[string]*bucket),
 		rate:      float64(failuresPerMinute) / 60,
 		burst:     float64(burst),
-		now:       time.Now,
-		lastSweep: time.Now(),
+		now:       now,
+		lastSweep: current,
 	}
 }
 
-// ReportFailure consumes one attempt of budget for key and reports whether
-// the caller may continue issuing password attempts for it.
-func (l *Limiter) ReportFailure(key string) bool {
+// AllowAttempt reserves one token before credential verification. A denied
+// reservation must not be followed by a password check.
+func (l *Limiter) AllowAttempt(key string) bool {
 	if key == "" {
-		return true
+		return false
 	}
 	now := l.now()
 	l.mu.Lock()
@@ -78,6 +87,32 @@ func (l *Limiter) ReportFailure(key string) bool {
 	return true
 }
 
+// RefundAttempt returns a reserved token after successful authentication.
+func (l *Limiter) RefundAttempt(key string) {
+	if key == "" {
+		return
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.buckets[key]
+	if b == nil {
+		return
+	}
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		b.tokens = min(b.tokens+elapsed*l.rate, l.burst)
+	}
+	b.last = now
+	b.tokens = min(b.tokens+1, l.burst)
+}
+
+// ReportFailure retains the original failure-only accounting API for callers
+// that cannot reserve before checking. New authentication paths should use
+// AllowAttempt and RefundAttempt so verification itself is rate limited.
+func (l *Limiter) ReportFailure(key string) bool {
+	return l.AllowAttempt(key)
+}
+
 // sweepLocked drops buckets that have had enough idle time to refill fully,
 // keeping the map bounded without a background goroutine.
 func (l *Limiter) sweepLocked(now time.Time) {
@@ -93,13 +128,80 @@ func (l *Limiter) sweepLocked(now time.Time) {
 	}
 }
 
-// ClientIP extracts the best-effort client identity from a request. Trusting
-// RemoteAddr (not proxy headers) keeps the limiter spoof-resistant behind the
-// supported single-reverse-proxy deployments.
+// ClientIP returns the socket peer address without trusting proxy headers.
 func ClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err != nil {
-		return strings.TrimSpace(r.RemoteAddr)
+	return ClientIPWithTrustedProxyCIDRs(r, nil)
+}
+
+// ClientIPWithTrustedProxyCIDRs resolves an X-Forwarded-For chain only when
+// the immediate socket peer matches one of trustedProxyCIDRs. It walks from
+// the nearest hop toward the client, stopping at the first untrusted address.
+// Invalid proxy CIDRs or forwarded values are ignored safely.
+func ClientIPWithTrustedProxyCIDRs(r *http.Request, trustedProxyCIDRs []string) string {
+	peer := socketPeerIP(r.RemoteAddr)
+	if peer == nil {
+		return socketPeerKey(r.RemoteAddr)
 	}
-	return host
+	trusted := parseTrustedProxyCIDRs(trustedProxyCIDRs)
+	if !isTrusted(peer, trusted) {
+		return peer.String()
+	}
+
+	forwarded := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+	if len(forwarded) == 0 || len(forwarded) > 8192 {
+		return peer.String()
+	}
+	parts := strings.Split(forwarded, ",")
+	chain := make([]net.IP, 0, len(parts))
+	for _, part := range parts {
+		ip := net.ParseIP(strings.TrimSpace(part))
+		if ip == nil {
+			return peer.String()
+		}
+		chain = append(chain, ip)
+	}
+
+	client := peer
+	for i := len(chain) - 1; i >= 0 && isTrusted(client, trusted); i-- {
+		client = chain[i]
+	}
+	return client.String()
+}
+
+func socketPeerIP(remoteAddr string) net.IP {
+	host := strings.TrimSpace(remoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return net.ParseIP(host)
+}
+
+func socketPeerKey(remoteAddr string) string {
+	if ip := socketPeerIP(remoteAddr); ip != nil {
+		return ip.String()
+	}
+	if remoteAddr = strings.TrimSpace(remoteAddr); remoteAddr != "" {
+		return remoteAddr
+	}
+	return "unknown"
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
+	trusted := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err == nil {
+			trusted = append(trusted, network)
+		}
+	}
+	return trusted
+}
+
+func isTrusted(ip net.IP, trusted []*net.IPNet) bool {
+	for _, network := range trusted {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

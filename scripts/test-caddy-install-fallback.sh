@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Extracted installer functions consume and assign these fixture globals.
+# ShellCheck cannot follow the dynamically extracted source below.
+# shellcheck disable=SC1090,SC2034,SC2154
 set -Eeuo pipefail
 
 readonly INSTALLER=deploy/install.sh
@@ -8,7 +11,11 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/apt-get" <<'APT'
 #!/usr/bin/env bash
-[[ "$1" == update ]] || exit 90
+printf 'apt-get %s\n' "$*" >> "$COMMAND_TRACE"
+[[ "$1" == update ]] || [[ "$1" == install ]] || exit 90
+if [[ "$1" == install ]]; then
+    exit 0
+fi
 count=0
 [[ ! -f "$APT_CALL_COUNT" ]] || count=$(<"$APT_CALL_COUNT")
 ((count += 1))
@@ -53,21 +60,90 @@ elif [[ "$*" == 'show -p MainPID --value nginx' ]]; then
     printf '%s\n' "$NGINX_MAIN_PID"
 fi
 SYSTEMCTL
+cat > "$TEST_DIR/bin/install" <<'INSTALL'
+#!/usr/bin/env bash
+printf 'install %s\n' "$*" >> "$COMMAND_TRACE"
+INSTALL
+cat > "$TEST_DIR/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+if [[ " $* " == *' -o '* ]]; then
+    destination=${*: -1}
+    printf 'curl source %s\n' "$destination" >> "$COMMAND_TRACE"
+    printf '%s\n' 'deb https://dl.cloudsmith.io/public/caddy/stable/ubuntu any-version main' > "$destination"
+else
+    printf 'curl key\n' >> "$COMMAND_TRACE"
+    printf '%s\n' 'test signing key'
+fi
+CURL
+cat > "$TEST_DIR/bin/gpg" <<'GPG'
+#!/usr/bin/env bash
+printf 'gpg %s\n' "$*" >> "$COMMAND_TRACE"
+cat >/dev/null
+GPG
+cat > "$TEST_DIR/bin/chmod" <<'CHMOD'
+#!/usr/bin/env bash
+printf 'chmod %s\n' "$*" >> "$COMMAND_TRACE"
+CHMOD
 chmod +x "$TEST_DIR/bin/apt-get"
 chmod +x "$TEST_DIR/bin/ss" "$TEST_DIR/bin/systemctl"
+chmod +x "$TEST_DIR/bin/install" "$TEST_DIR/bin/curl" "$TEST_DIR/bin/gpg" "$TEST_DIR/bin/chmod"
 export PATH="$TEST_DIR/bin:$PATH"
 
 source <(sed -n '/^apt_failure_is_caddy_only() {/,/^read_env_value() {/p' "$INSTALLER" | sed '$d')
 source <(sed -n '/^read_install_state() {/,/^apt_failure_is_caddy_only() {/p' "$INSTALLER" | sed '$d')
 source <(sed -n '/^caddy_https_port_conflicts() {/,/^detect_proxy_mode() {/p' "$INSTALLER" | sed '$d')
+source <(sed -n '/^prepare_install_apt_sources() {/,/^ipv6_stack_available() {/p' "$INSTALLER" | sed '$d')
 
 fail() {
     printf 'Caddy fallback test failed: %s\n' "$*" >&2
     exit 1
 }
 
+assert_before() {
+    local earlier=$1 later=$2 earlier_line later_line
+    earlier_line=$(awk -v event="$earlier" '$0 == event {print NR; exit}' "$COMMAND_TRACE")
+    later_line=$(awk -v event="$later" '$0 == event {print NR; exit}' "$COMMAND_TRACE")
+    [[ -n "$earlier_line" && -n "$later_line" && "$earlier_line" -lt "$later_line" ]] \
+        || fail "Expected '$earlier' before '$later'; trace: $(<"$COMMAND_TRACE")"
+}
+
 log() { :; }
 write_install_state() { :; }
+detect_caddy_tls_mode() { printf '%s\n' 'tls-preflight' >> "$COMMAND_TRACE"; }
+
+COMMAND_TRACE="$TEST_DIR/command-trace"
+APT_CALL_COUNT="$TEST_DIR/preflight-apt-calls"
+APT_SCENARIO=normal
+export COMMAND_TRACE APT_CALL_COUNT APT_SCENARIO
+CADDY_APT_SOURCE_FILE="$TEST_DIR/preflight-caddy.list"
+ID=ubuntu
+VERSION_CODENAME=noble
+container_engine=podman
+proxy_mode=caddy
+caddy_install_method=apt
+
+https_required=yes
+: > "$COMMAND_TRACE"
+prepare_install_apt_sources
+assert_before 'apt-get install -y ca-certificates curl git gnupg iproute2 jq openssl ufw certbot' 'tls-preflight'
+assert_before 'tls-preflight' "install -m 0755 -d /usr/share/keyrings"
+[[ -f "$CADDY_APT_SOURCE_FILE" ]] || fail 'HTTPS preflight did not continue to create the Caddy APT source'
+
+https_required=no
+COMMAND_TRACE="$TEST_DIR/command-trace-http-only"
+export COMMAND_TRACE
+CADDY_APT_SOURCE_FILE="$TEST_DIR/http-only-caddy.list"
+: > "$COMMAND_TRACE"
+prepare_install_apt_sources
+[[ "$caddy_tls_mode" == http-only ]] || fail 'Disabling HTTPS did not select HTTP-only mode'
+[[ "$https_reason" == 'HTTPS and TCP port 443 were disabled by user choice.' ]] || fail 'Disabling HTTPS did not retain its reason'
+if awk '$0 == "tls-preflight" { found=1 } END { exit !found }' "$COMMAND_TRACE"; then
+    fail 'HTTP-only preparation ran the HTTPS port preflight'
+fi
+if awk '$0 ~ /^apt-get install / && $0 ~ / certbot([[:space:]]|$)/ { found=1 } END { exit !found }' "$COMMAND_TRACE"; then
+    fail 'HTTP-only preparation installed certbot'
+fi
+[[ -f "$CADDY_APT_SOURCE_FILE" ]] || fail 'HTTP-only preparation did not create the Caddy APT source'
 
 SS_SCENARIO=empty
 CADDY_MAIN_PID=0
@@ -105,12 +181,6 @@ xray_https_port_443_is_active || fail 'The active Xray listener was not detected
 
 SS_SCENARIO=nginx
 [[ -z "$(caddy_https_port_conflicts nginx)" ]] || fail 'The active Nginx HTTPS listener was reported as a conflict'
-
-prerequisite_line=$(awk '/^apt-get install -y ca-certificates/{print NR; exit}' "$INSTALLER")
-preflight_line=$(awk '$0 == "detect_caddy_tls_mode" {print NR; exit}' "$INSTALLER")
-caddy_source_line=$(awk '$0 == "        -o \"$CADDY_APT_SOURCE_FILE\"" {print NR; exit}' "$INSTALLER")
-(( prerequisite_line < preflight_line && preflight_line < caddy_source_line )) \
-    || fail 'The Caddy port preflight is not before Caddy repository setup'
 
 STATE_FILE="$TEST_DIR/state"
 cat > "$STATE_FILE" <<'STATE'

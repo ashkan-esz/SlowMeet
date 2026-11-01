@@ -546,3 +546,134 @@ func TestCameraLayerFromRID(t *testing.T) {
 		}
 	}
 }
+
+func newVideoKeyFrameRetryPublication(t *testing.T, receiverIDs ...string) (*Router, *publication) {
+	t.Helper()
+
+	source, err := webrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create source peer: %v", err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+
+	const key = "publisher/camera"
+	pub := &publication{
+		key:      key,
+		sourceID: "publisher",
+		role:     SourceRoleCamera,
+		source:   source,
+		remote:   &pion.TrackRemote{},
+		senders:  make(map[string]*pion.RTPSender, len(receiverIDs)),
+	}
+	for _, receiverID := range receiverIDs {
+		pub.senders[receiverID] = &pion.RTPSender{}
+	}
+
+	router := NewRouter()
+	router.pubs[key] = pub
+	t.Cleanup(func() {
+		router.mu.Lock()
+		for _, request := range router.videoKeyFrameRetries {
+			request.timer.Stop()
+		}
+		router.mu.Unlock()
+	})
+	return router, pub
+}
+
+func onlyVideoKeyFrameRetry(t *testing.T, router *Router) (videoKeyFrameRequestKey, *videoKeyFrameRetry) {
+	t.Helper()
+	router.mu.RLock()
+	defer router.mu.RUnlock()
+	if len(router.videoKeyFrameRetries) != 1 {
+		t.Fatalf("scheduled video keyframe retries = %d, want 1", len(router.videoKeyFrameRetries))
+	}
+	for key, request := range router.videoKeyFrameRetries {
+		return key, request
+	}
+	panic("unreachable")
+}
+
+func stopVideoKeyFrameRetry(router *Router, key videoKeyFrameRequestKey) {
+	router.mu.Lock()
+	if request := router.videoKeyFrameRetries[key]; request != nil {
+		request.timer.Stop()
+	}
+	router.mu.Unlock()
+}
+
+func TestPublisherKeyFrameRetrySurvivesSubscriberRemoval(t *testing.T) {
+	router, _ := newVideoKeyFrameRetryPublication(t, "selected", "remaining")
+	router.RequestVideoKeyFrameForPublisher("publisher")
+
+	key, request := onlyVideoKeyFrameRetry(t, router)
+	if key.receiverID != "" {
+		t.Fatalf("publisher-wide retry is scoped to receiver %q, want publication scope", key.receiverID)
+	}
+	stopVideoKeyFrameRetry(router, key)
+	router.Unregister("selected")
+	router.retryVideoKeyFrame(key, request)
+
+	router.mu.RLock()
+	continued := router.videoKeyFrameRetries[key] == request
+	remaining := request.remaining
+	router.mu.RUnlock()
+	if !continued {
+		t.Fatal("publisher retry stopped after one receiver was removed while another remained")
+	}
+	if remaining != videoKeyFrameRequestCount-2 {
+		t.Fatalf("remaining retry count = %d, want %d", remaining, videoKeyFrameRequestCount-2)
+	}
+	stopVideoKeyFrameRetry(router, key)
+}
+
+func TestPublisherKeyFrameRetryStopsWithoutSubscribers(t *testing.T) {
+	router, _ := newVideoKeyFrameRetryPublication(t, "first", "second")
+	router.RequestVideoKeyFrameForPublisher("publisher")
+
+	key, request := onlyVideoKeyFrameRetry(t, router)
+	if key.receiverID != "" {
+		t.Fatalf("publisher-wide retry is scoped to receiver %q, want publication scope", key.receiverID)
+	}
+	router.Unregister("first")
+	router.mu.RLock()
+	continuedAfterOneRemoval := router.videoKeyFrameRetries[key] == request
+	router.mu.RUnlock()
+	if !continuedAfterOneRemoval {
+		t.Fatal("publisher retry stopped while a subscriber remained")
+	}
+	router.Unregister("second")
+
+	router.mu.RLock()
+	_, continued := router.videoKeyFrameRetries[key]
+	router.mu.RUnlock()
+	if continued {
+		stopVideoKeyFrameRetry(router, key)
+		t.Fatal("publisher retry continued after its last subscriber was removed")
+	}
+}
+
+func TestPublisherKeyFrameRetryIsCancelledByPublicationReplacement(t *testing.T) {
+	router, pub := newVideoKeyFrameRetryPublication(t, "receiver")
+	router.RequestVideoKeyFrameForPublisher("publisher")
+
+	key, _ := onlyVideoKeyFrameRetry(t, router)
+	if key.receiverID != "" {
+		t.Fatalf("publisher-wide retry is scoped to receiver %q, want publication scope", key.receiverID)
+	}
+	stopVideoKeyFrameRetry(router, key)
+	replacement := &publication{key: pub.key, sourceID: pub.sourceID, role: pub.role}
+	pub.remote = nil // The zero-value TrackRemote is only a fixture for the scheduled retry.
+	router.Unpublish("publisher", SourceRoleCamera)
+	router.mu.Lock()
+	router.pubs[pub.key] = replacement
+	router.mu.Unlock()
+
+	router.mu.RLock()
+	_, continued := router.videoKeyFrameRetries[key]
+	router.mu.RUnlock()
+	if continued {
+		stopVideoKeyFrameRetry(router, key)
+		t.Fatal("old publication retry remained active after replacement")
+	}
+}

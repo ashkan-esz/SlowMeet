@@ -1752,17 +1752,17 @@ html:has(.meeting-shell:not([hidden])) #root {
 .control-button:hover { color: var(--lm-text); background: var(--lm-surface-hover); border-color: var(--lm-border); }
 .control-button[aria-pressed="true"] { color: var(--lm-accent); background: var(--lm-accent-soft); border-color: rgba(133, 173, 255, .28); }
 .control-button[aria-pressed="false"] { color: var(--lm-text-muted); background: transparent; border-color: transparent; }
-.control-button[aria-pressed="false"]#mic { color: var(--lm-danger); background: rgba(239, 101, 109, .12); border-color: rgba(239, 101, 109, .24); }
+.control-button[aria-pressed="false"]#mic { color: var(--lm-danger-hover); background: rgba(239, 101, 109, .12); border-color: rgba(239, 101, 109, .24); }
 .control-button[aria-pressed="false"]#receive-video { color: var(--lm-warning); background: rgba(242, 198, 109, .1); border-color: rgba(242, 198, 109, .22); }
 #chat.has-unread { color: var(--lm-accent); background: var(--lm-accent-soft); border-color: rgba(133, 173, 255, .28); }
 .control-button--quiet { width: auto; min-width: 44px; margin-inline-start: 0; padding-inline: 12px; }
 .control-icon { position: relative; display: grid; width: 22px; height: 22px; place-items: center; }
 .control-icon svg { width: 19px; height: 19px; }
 .control-state-dot { position: absolute; inset-block-start: -3px; inset-inline-end: -4px; width: 7px; height: 7px; background: var(--lm-warning); border: 2px solid var(--lm-header); border-radius: 50%; }
-.control-button[aria-pressed="false"]#camera { color: var(--lm-danger); background: rgba(239, 101, 109, .12); border-color: rgba(239, 101, 109, .24); }
+.control-button[aria-pressed="false"]#camera { color: var(--lm-danger-hover); background: rgba(239, 101, 109, .12); border-color: rgba(239, 101, 109, .24); }
 .count-badge { color: var(--lm-bg); background: var(--lm-accent); }
-.control-button--danger { width: 72px; color: #fff !important; background: var(--lm-danger); border-color: var(--lm-danger); }
-.control-button--danger:hover { color: #fff !important; background: var(--lm-danger-hover); border-color: var(--lm-danger-hover); }
+.control-button--danger { width: 72px; color: var(--lm-on-danger) !important; background: var(--lm-danger); border-color: var(--lm-danger); }
+.control-button--danger:hover { color: var(--lm-on-danger) !important; background: var(--lm-danger-hover); border-color: var(--lm-danger-hover); }
 button.control-button:disabled { color: var(--lm-text-subtle); background: transparent; border-color: transparent; }
 
 [data-tooltip] { position: relative; }
@@ -2305,7 +2305,7 @@ body { overflow-x: hidden; }
   border: 1px solid transparent;
   border-radius: 12px;
   text-align: start;
-  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 .connection [data-network-label] { display: inline; overflow: visible; text-overflow: clip; }
 .network-chip__icon { display: inline-flex; width: 16px; height: 16px; flex: 0 0 16px; align-items: center; justify-content: center; }

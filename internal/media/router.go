@@ -193,6 +193,7 @@ func (r *Router) Unregister(id string) {
 		}
 		delete(pub.tracks, id)
 		delete(pub.senders, id)
+		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
 	}
 	r.mu.Unlock()
 	for _, offer := range offers {
@@ -344,6 +345,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 		}
 		delete(pub.tracks, receiverID)
 		delete(pub.senders, receiverID)
+		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
 		changed = true
 	}
 	if changed {
@@ -462,11 +464,11 @@ func (r *Router) RequestVideoKeyFrameForPublisher(sourceID string, onError ...fu
 			pub.source == nil || pub.remote == nil || pub.paused.Load() {
 			continue
 		}
-		for receiverID := range pub.senders {
-			if request := r.scheduleVideoKeyFrameRetryLocked(pub, receiverID, reportError); request != nil {
-				requests = append(requests, request)
-			}
-			break
+		if !hasVideoKeyFrameSubscriber(pub) {
+			continue
+		}
+		if request := r.scheduleVideoKeyFrameRetryLocked(pub, "", reportError); request != nil {
+			requests = append(requests, request)
 		}
 	}
 	r.mu.Unlock()
@@ -524,8 +526,11 @@ func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoK
 		r.mu.Unlock()
 		return
 	}
-	if r.pubs[request.publication.key] != request.publication ||
-		request.publication.senders[key.receiverID] == nil {
+	hasSubscriber := request.publication.senders[key.receiverID] != nil
+	if key.receiverID == "" {
+		hasSubscriber = hasVideoKeyFrameSubscriber(request.publication)
+	}
+	if r.pubs[request.publication.key] != request.publication || !hasSubscriber {
 		delete(r.videoKeyFrameRetries, key)
 		r.mu.Unlock()
 		return
@@ -570,6 +575,26 @@ func (r *Router) cancelVideoKeyFrameRetriesForPublicationLocked(pub *publication
 		request.timer.Stop()
 		delete(r.videoKeyFrameRetries, key)
 	}
+}
+
+func (r *Router) cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub *publication) {
+	if hasVideoKeyFrameSubscriber(pub) {
+		return
+	}
+	key := videoKeyFrameRequestKey{publicationKey: pub.key}
+	if request := r.videoKeyFrameRetries[key]; request != nil {
+		request.timer.Stop()
+		delete(r.videoKeyFrameRetries, key)
+	}
+}
+
+func hasVideoKeyFrameSubscriber(pub *publication) bool {
+	for _, sender := range pub.senders {
+		if sender != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) currentLimits() Limits {

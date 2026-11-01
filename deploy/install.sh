@@ -237,7 +237,8 @@ repair_docker_lxc_runtime() (
     temporary_directory=$(mktemp -d)
     original_package=
 
-    # shellcheck disable=SC2317
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2317,SC2329
     finish_runtime_repair() {
         local status=$? rollback_failed=no
         trap - EXIT
@@ -2001,6 +2002,46 @@ detect_caddy_tls_mode() {
     fi
 }
 
+prepare_install_apt_sources() {
+    local -a prerequisite_packages=(ca-certificates curl git gnupg iproute2 jq openssl ufw)
+
+    log "Installing prerequisites on ${PRETTY_NAME:-$ID}."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    if [[ "$https_required" == yes ]]; then
+        prerequisite_packages+=(certbot)
+    fi
+    apt-get install -y "${prerequisite_packages[@]}"
+
+    if [[ "$https_required" == yes ]]; then
+        detect_caddy_tls_mode
+    else
+        caddy_tls_mode=http-only
+        https_reason='HTTPS and TCP port 443 were disabled by user choice.'
+    fi
+    write_install_state incomplete
+
+    if [[ "$container_engine" == docker ]]; then
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+            "$(dpkg --print-architecture)" "$ID" "$VERSION_CODENAME" \
+            > /etc/apt/sources.list.d/docker.list
+    fi
+
+    if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
+        install -m 0755 -d /usr/share/keyrings
+        curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+            | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        chmod a+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        local caddy_repo_id=debian
+        [[ "$ID" == ubuntu ]] && caddy_repo_id=ubuntu
+        curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/$caddy_repo_id.deb.txt" \
+            -o "$CADDY_APT_SOURCE_FILE"
+    fi
+}
+
 ipv6_stack_available() {
     [[ -r /proc/net/if_inet6 && -s /proc/net/if_inet6 ]]
 }
@@ -2371,42 +2412,8 @@ if [[ "$install_mode" == fresh ]]; then
     write_install_state incomplete
 fi
 
-log "Installing prerequisites on ${PRETTY_NAME:-$ID}."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-prerequisite_packages=(ca-certificates curl git gnupg iproute2 jq openssl ufw)
-if [[ "$https_required" == yes ]]; then
-    prerequisite_packages+=(certbot)
-fi
-apt-get install -y "${prerequisite_packages[@]}"
-if [[ "$https_required" == yes ]]; then
-    detect_caddy_tls_mode
-else
-    caddy_tls_mode=http-only
-    https_reason='HTTPS and TCP port 443 were disabled by user choice.'
-fi
-write_install_state incomplete
+prepare_install_apt_sources
 private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)
-
-if [[ "$container_engine" == docker ]]; then
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
-        "$(dpkg --print-architecture)" "$ID" "$VERSION_CODENAME" \
-        > /etc/apt/sources.list.d/docker.list
-fi
-
-if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
-    install -m 0755 -d /usr/share/keyrings
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    chmod a+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    caddy_repo_id=debian
-    [[ "$ID" == ubuntu ]] && caddy_repo_id=ubuntu
-    curl -fsSL "https://dl.cloudsmith.io/public/caddy/stable/$caddy_repo_id.deb.txt" \
-        -o "$CADDY_APT_SOURCE_FILE"
-fi
 
 apt_update_with_caddy_fallback
 runtime_packages=()

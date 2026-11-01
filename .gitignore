@@ -13,7 +13,7 @@ slowmeet
 .github/prompts
 .playwright-mcp
 .serena
-.github
 .codex
 
 node_modules
+coverage.out

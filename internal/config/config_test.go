@@ -26,6 +26,7 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("TURN_CREDENTIAL_TTL_SECONDS", "")
 	t.Setenv("ICE_IPV4_ONLY", "")
 	t.Setenv("ICE_PUBLIC_IP", "")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "")
 	t.Setenv("ICE_TRANSPORT_POLICY", "")
 	t.Setenv("SIMULCAST_ENABLED", "")
 	t.Setenv("ICE_UDP_PORT_MIN", "")
@@ -65,6 +66,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	}
 	if cfg.ICEPublicIP != "" {
 		t.Fatalf("expected no public ICE IP by default, got %q", cfg.ICEPublicIP)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("trusted proxies should be opt-in by default, got %#v", cfg.TrustedProxyCIDRs)
 	}
 	if cfg.ICETransportPolicy != "all" || cfg.SimulcastEnabled {
 		t.Fatalf("unexpected ICE and simulcast defaults: policy=%q simulcast=%t", cfg.ICETransportPolicy, cfg.SimulcastEnabled)
@@ -122,6 +126,24 @@ func TestLoadFromEnvRejectsInvalidICEPublicIP(t *testing.T) {
 	t.Setenv("ICE_PUBLIC_IP", "not-an-ip")
 	if _, err := LoadFromEnv(); err == nil {
 		t.Fatal("expected invalid ICE public IP to fail")
+	}
+}
+
+func TestLoadFromEnvReadsTrustedProxyCIDRs(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32, 2001:db8:1::/48")
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyCIDRs[0] != "127.0.0.1/32" || cfg.TrustedProxyCIDRs[1] != "2001:db8:1::/48" {
+		t.Fatalf("TrustedProxyCIDRs = %#v", cfg.TrustedProxyCIDRs)
+	}
+}
+
+func TestLoadFromEnvRejectsInvalidTrustedProxyCIDRs(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1,not-a-cidr")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("expected malformed trusted proxy CIDR to fail")
 	}
 }
 

@@ -116,7 +116,7 @@ async function assertVideoSenderIDs(fixture, expected, label) {
 
 async function assertRemoteScreenPixelsChange(page, senderName, label) {
   const fingerprints = await page.evaluate(async ({ senderName }) => {
-    const participant = [...document.querySelectorAll("#participants li[data-participant-id]")]
+    const participant = [...document.querySelectorAll("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]")]
       .find((item) => !item.classList.contains("is-local") && item.textContent.includes(senderName));
     const video = participant?.querySelector("video[data-media-role='screen']");
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
@@ -1101,6 +1101,8 @@ const scenarios = [
       await stopShare("A generated screen share stopped");
       await startShare("A generated screen share restart");
       await stopShare("A restarted generated screen share stopped");
+      // Return to the meeting after foregrounding the captured content page.
+      await fixture.pageA.bringToFront();
       await fixture.setPressed("A", "#camera", true);
       await fixture.waitForRemoteState("B", participants.A, "camera", "on");
       await fixture.assertRemoteVideoMoves("A", "B", "camera manually re-enabled after screen sharing", "camera");

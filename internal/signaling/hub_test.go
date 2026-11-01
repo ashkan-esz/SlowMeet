@@ -1787,6 +1787,8 @@ func TestHubBroadcastDoesNotBlockOnStalledClient(t *testing.T) {
 	hub.mu.Lock()
 	hub.clients[healthy] = struct{}{}
 	hub.clients[stalled] = struct{}{}
+	hub.roomMembers[healthy] = struct{}{}
+	hub.roomMembers[stalled] = struct{}{}
 	hub.mu.Unlock()
 
 	bulky := Message{Version: ProtocolVersion, Type: TypeOffer, SDP: strings.Repeat("a", 256*1024)}

@@ -114,19 +114,23 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			return
 		}
 
-		if !store.Snapshot().CheckMeetingPassword(request.Password) {
-			if request.Password != "" && !roomPreviewLimiter.ReportFailure(ratelimit.ClientIP(r)) {
-				writeAPIJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too_many_attempts"})
+		cfg := store.Snapshot()
+		clientIP := ratelimit.ClientIPWithTrustedProxyCIDRs(r, cfg.TrustedProxyCIDRs)
+		passwordRequired := cfg.MeetingPassword != ""
+		if passwordRequired && !roomPreviewLimiter.AllowAttempt(clientIP) {
+			writeAPIJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too_many_attempts"})
+			return
+		}
+		if !cfg.CheckMeetingPassword(request.Password) {
+			if request.Password != "" {
+				writeAPIJSON(w, http.StatusForbidden, map[string]string{"error": "invalid_password"})
 				return
 			}
-			status := http.StatusUnauthorized
-			errorCode := "password_required"
-			if request.Password != "" {
-				status = http.StatusForbidden
-				errorCode = "invalid_password"
-			}
-			writeAPIJSON(w, status, map[string]string{"error": errorCode})
+			writeAPIJSON(w, http.StatusUnauthorized, map[string]string{"error": "password_required"})
 			return
+		}
+		if passwordRequired {
+			roomPreviewLimiter.RefundAttempt(clientIP)
 		}
 
 		active := meetingState.List()
@@ -154,19 +158,26 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			return
 		}
 		cfg := store.Snapshot()
-		iceTransportPolicy := cfg.ICETransportPolicy
-		if iceTransportPolicy == "" {
-			iceTransportPolicy = "all"
-		}
-		iceServers := browserICEServers(cfg, time.Now())
+		writeICEConfig(w, cfg, browserICEServers(cfg, time.Now(), false))
+	})
+	mux.HandleFunc("/ice-config/credentials", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ice_servers":          iceServers,
-			"ice_transport_policy": iceTransportPolicy,
-			"simulcast_enabled":    cfg.SimulcastEnabled,
-			"connection_methods":   browserConnectionMethods(cfg, iceServers),
-		})
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		const bearerPrefix = "Bearer "
+		authorization := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authorization, bearerPrefix) || strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix)) == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(authorization, bearerPrefix)
+		if strings.TrimSpace(token) != token || !hub.ValidateActiveReconnectToken(token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		cfg := store.Snapshot()
+		writeICEConfig(w, cfg, browserICEServers(cfg, time.Now(), true))
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -210,14 +221,16 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		clientIP := ratelimit.ClientIPWithTrustedProxyCIDRs(r, cfg.TrustedProxyCIDRs)
+		if !adminLimiter.AllowAttempt(clientIP) {
+			http.Error(w, "too many attempts", http.StatusTooManyRequests)
+			return
+		}
 		if !store.CheckAdminPassword(r.Header.Get("X-Admin-Password")) {
-			if !adminLimiter.ReportFailure(ratelimit.ClientIP(r)) {
-				http.Error(w, "too many attempts", http.StatusTooManyRequests)
-				return
-			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		adminLimiter.RefundAttempt(clientIP)
 		switch r.Method {
 		case http.MethodGet:
 			writePublicConfig(w, store.Snapshot())
@@ -450,7 +463,7 @@ type browserICEServer struct {
 	Credential string   `json:"credential,omitempty"`
 }
 
-func browserICEServers(cfg config.Config, now time.Time) []browserICEServer {
+func browserICEServers(cfg config.Config, now time.Time, includeCredentials bool) []browserICEServer {
 	servers := make([]browserICEServer, 0, len(cfg.STUNServers)+1)
 	for _, server := range cfg.STUNServers {
 		servers = append(servers, browserICEServer{URLs: []string{server}})
@@ -463,10 +476,26 @@ func browserICEServers(cfg config.Config, now time.Time) []browserICEServer {
 	if !ok {
 		return servers
 	}
-	return append(servers, browserICEServer{
-		URLs:       turnURLs,
-		Username:   username,
-		Credential: credential,
+	turnServer := browserICEServer{URLs: turnURLs}
+	if includeCredentials {
+		turnServer.Username = username
+		turnServer.Credential = credential
+	}
+	return append(servers, turnServer)
+}
+
+func writeICEConfig(w http.ResponseWriter, cfg config.Config, iceServers []browserICEServer) {
+	iceTransportPolicy := cfg.ICETransportPolicy
+	if iceTransportPolicy == "" {
+		iceTransportPolicy = "all"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ice_servers":          iceServers,
+		"ice_transport_policy": iceTransportPolicy,
+		"simulcast_enabled":    cfg.SimulcastEnabled,
+		"connection_methods":   browserConnectionMethods(cfg, iceServers),
 	})
 }
 

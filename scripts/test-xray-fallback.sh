@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly ROOT_DIR
 readonly INSTALLER="$ROOT_DIR/deploy/install.sh"
-readonly TEST_DIR=$(mktemp -d)
+TEST_DIR=$(mktemp -d)
+readonly TEST_DIR
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 
 mkdir -p "$TEST_DIR/bin"
@@ -104,6 +106,8 @@ fi
 unset XRAY_RESTART_FAIL_ON
 cmp -s "$rollback" "$TEST_DIR/rollback.before" || fail 'Failed Xray restart did not restore the original config'
 [[ $(<"$XRAY_RESTART_COUNT") == 4 ]] || fail 'Xray rollback did not recover the service'
+# Assigned by the installer function extracted into this test.
+# shellcheck disable=SC2154
 [[ "$https_reason" == 'Xray rejected the fallback restart; the original configuration was restored and Xray restarted.' ]] \
     || fail 'A safely rolled back Xray restart failure did not provide an HTTPS warning reason'
 

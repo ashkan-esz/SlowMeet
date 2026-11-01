@@ -735,7 +735,7 @@ func negotiateIntegrationPeers(t *testing.T, offerer, answerer *pion.PeerConnect
 	if err := offerer.SetLocalDescription(offer); err != nil {
 		t.Fatalf("set local offer: %v", err)
 	}
-	<-pion.GatheringCompletePromise(offerer)
+	waitIntegrationGatheringComplete(t, offerer, "offerer")
 
 	localOffer := offerer.LocalDescription()
 	if localOffer == nil {
@@ -752,7 +752,7 @@ func negotiateIntegrationPeers(t *testing.T, offerer, answerer *pion.PeerConnect
 	if err := answerer.SetLocalDescription(answer); err != nil {
 		t.Fatalf("set local answer: %v", err)
 	}
-	<-pion.GatheringCompletePromise(answerer)
+	waitIntegrationGatheringComplete(t, answerer, "answerer")
 
 	localAnswer := answerer.LocalDescription()
 	if localAnswer == nil {
@@ -760,6 +760,15 @@ func negotiateIntegrationPeers(t *testing.T, offerer, answerer *pion.PeerConnect
 	}
 	if err := offerer.SetRemoteDescription(*localAnswer); err != nil {
 		t.Fatalf("set remote answer: %v", err)
+	}
+}
+
+func waitIntegrationGatheringComplete(t *testing.T, peer *pion.PeerConnection, name string) {
+	t.Helper()
+	select {
+	case <-pion.GatheringCompletePromise(peer):
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatalf("timed out waiting for %s ICE gathering to complete", name)
 	}
 }
 

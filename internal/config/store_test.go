@@ -3,9 +3,65 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestStoreSnapshotIsolatesConfigSlices(t *testing.T) {
+	constructors := []struct {
+		name string
+		new  func(Config) (*Store, error)
+	}{
+		{name: "NewStore", new: func(cfg Config) (*Store, error) { return NewStore(cfg), nil }},
+		{name: "LoadStore", new: LoadStore},
+	}
+
+	for _, constructor := range constructors {
+		t.Run(constructor.name, func(t *testing.T) {
+			cfg := Config{
+				STUNServers:              []string{"stun:one"},
+				TURNURLs:                 []string{"turn:one"},
+				EnabledConnectionMethods: []string{"direct"},
+				TrustedProxyCIDRs:        []string{"10.0.0.0/8"},
+			}
+			store, err := constructor.new(cfg)
+			if err != nil {
+				t.Fatalf("create store: %v", err)
+			}
+
+			cfg.STUNServers[0] = "stun:mutated"
+			cfg.TURNURLs[0] = "turn:mutated"
+			cfg.EnabledConnectionMethods[0] = "mutated"
+			cfg.TrustedProxyCIDRs[0] = "192.0.2.0/24"
+
+			want := Config{
+				STUNServers:              []string{"stun:one"},
+				TURNURLs:                 []string{"turn:one"},
+				EnabledConnectionMethods: []string{"direct"},
+				TrustedProxyCIDRs:        []string{"10.0.0.0/8"},
+			}
+			snapshot := store.Snapshot()
+			if !reflect.DeepEqual(snapshot.STUNServers, want.STUNServers) ||
+				!reflect.DeepEqual(snapshot.TURNURLs, want.TURNURLs) ||
+				!reflect.DeepEqual(snapshot.EnabledConnectionMethods, want.EnabledConnectionMethods) ||
+				!reflect.DeepEqual(snapshot.TrustedProxyCIDRs, want.TrustedProxyCIDRs) {
+				t.Fatalf("store retained caller-owned slices: got %+v", snapshot)
+			}
+
+			snapshot.STUNServers[0] = "stun:snapshot-mutated"
+			snapshot.TURNURLs[0] = "turn:snapshot-mutated"
+			snapshot.EnabledConnectionMethods[0] = "snapshot-mutated"
+			snapshot.TrustedProxyCIDRs[0] = "198.51.100.0/24"
+			if got := store.Snapshot(); !reflect.DeepEqual(got.STUNServers, want.STUNServers) ||
+				!reflect.DeepEqual(got.TURNURLs, want.TURNURLs) ||
+				!reflect.DeepEqual(got.EnabledConnectionMethods, want.EnabledConnectionMethods) ||
+				!reflect.DeepEqual(got.TrustedProxyCIDRs, want.TrustedProxyCIDRs) {
+				t.Fatalf("snapshot mutation changed store config: got %+v", got)
+			}
+		})
+	}
+}
 
 func TestStoreUpdateValidatesAndHidesAdminPassword(t *testing.T) {
 	cfg := Config{AdminPassword: "admin", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,

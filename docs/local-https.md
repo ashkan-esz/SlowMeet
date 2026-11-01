@@ -29,7 +29,13 @@ hostname with a publicly trusted certificate.
 For production, put Caddy, Nginx, or another TLS reverse proxy in front of
 SlowMeet. Examples are in `deploy/caddy/Caddyfile` and
 `deploy/nginx/slowmeet.conf`. Preserve WebSocket upgrade headers and allow
-long-lived connections. Configure DNS and certificates for the actual
+long-lived connections. To apply password-attempt limits per visitor, set
+`TRUSTED_PROXY_CIDRS` to the proxy's source CIDR or CIDRs, such as
+`127.0.0.1/32,::1/128` for a local proxy. SlowMeet ignores
+`X-Forwarded-For` unless the socket peer matches one of these ranges, then
+walks the chain from the nearest proxy toward the client. Configure the proxy
+to replace or append that header correctly; an empty setting keeps direct
+socket-address limiting. Configure DNS and certificates for the actual
 hostname. The `deploy/systemd/slowmeet.service` file is a least-privilege
 service template for non-container installs.
 

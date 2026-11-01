@@ -2,7 +2,19 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const bindRemoteCameraTrack = require("../web/js/remote-camera-video.js");
+const { remoteMediaRole, remoteCameraLayer } = require("../web/js/remote-media-identity.js");
 
+for (const [streams, track, role, layer] of [
+  [[{ id: "participant-2-screen" }], { kind: "video" }, "screen", ""],
+  [[], { id: "participant|2|screen", kind: "video" }, "screen", ""],
+  [[], { id: "participant|2|camera|medium", kind: "video" }, "camera", "medium"],
+  [[], { streamId: "participant-2-camera", kind: "video" }, "camera", ""],
+  [[], { kind: "audio" }, "audio", ""],
+  [undefined, undefined, "camera", ""],
+]) {
+  assert.equal(remoteMediaRole(streams, track), role);
+  assert.equal(remoteCameraLayer(track), layer);
+}
 function createEventTarget() {
   const listeners = new Map();
   return {

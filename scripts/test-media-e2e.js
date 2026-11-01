@@ -287,13 +287,16 @@ async function diagnostics(page) {
   return page.evaluate(async () => {
     const peer = window.__slowMeetTest?.peerConnections.at(-1);
     if (!peer) return { peer: "missing" };
+    const activeTileSelector = "#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]";
+    const activeVideoSelector = "#participants video[data-media-role], #pinned-main video[data-media-role], #pinned-filmstrip video[data-media-role]";
+    const activeAudioSelector = "#participants li[data-participant-id] audio, #pinned-main li[data-participant-id] audio, #pinned-filmstrip li[data-participant-id] audio";
     const report = await peer.getStats();
     const stats = [...report.values()];
     const sum = (type, kind, field) => stats
       .filter((item) => item.type === type && (item.kind || item.mediaType) === kind)
       .reduce((total, item) => total + (Number(item[field]) || 0), 0);
     const receivers = peer.getReceivers();
-    const remoteVideos = await Promise.all([...document.querySelectorAll("#participants video[data-media-role]")]
+    const remoteVideos = await Promise.all([...document.querySelectorAll(activeVideoSelector)]
       .map(async (video) => {
         const item = video.closest("li");
         const videoTracks = video.srcObject?.getVideoTracks?.() || [];
@@ -336,7 +339,7 @@ async function diagnostics(page) {
           inboundVideoStats
         };
       }));
-    const remoteParticipants = [...document.querySelectorAll("#participants li[data-participant-id]")]
+    const remoteParticipants = [...document.querySelectorAll(activeTileSelector)]
       .map((item) => ({
         participantID: item.dataset.participantId,
         name: item.textContent?.trim() || "",
@@ -346,7 +349,7 @@ async function diagnostics(page) {
         receiveVideo: item.dataset.receiveVideo,
         sharing: item.dataset.sharing
       }));
-    const remoteAudios = [...document.querySelectorAll("#participants li[data-participant-id] audio")]
+    const remoteAudios = [...document.querySelectorAll(activeAudioSelector)]
       .map((audio) => ({
         participantID: audio.closest("li")?.dataset.participantId || "",
         participant: audio.closest("li")?.textContent?.trim() || "",
@@ -507,7 +510,8 @@ async function diagnostics(page) {
           !document.querySelector("#meeting-alert").hidden),
         warning: document.querySelector("#meeting-alert")?.textContent || ""
       },
-      participantTiles: [...document.querySelectorAll("#participants li[data-participant-id]")].map((item) => ({
+      meetingLayoutMode: document.querySelector("#meeting-layout-host")?.dataset.layoutMode || "unknown",
+      participantTiles: [...document.querySelectorAll(activeTileSelector)].map((item) => ({
         name: item.querySelector(".participant-name")?.textContent?.trim() || item.textContent.trim(),
         local: item.classList.contains("is-local"),
         quality: item.dataset.quality || "unknown",
@@ -587,6 +591,7 @@ async function diagnostics(page) {
       replaceTrackEvents: window.__slowMeetTest?.replaceTrackEvents || [],
       connectionEvents: window.__slowMeetTest?.connectionEvents.slice(-80) || [],
       signalingMessages: window.__slowMeetTest?.signalingMessages.slice(-20) || [],
+      roomMessages: window.__slowMeetTest?.roomMessages.slice(-100) || [],
       cameraButton: document.querySelector("#camera")?.getAttribute("aria-pressed"),
       micButton: document.querySelector("#mic")?.getAttribute("aria-pressed"),
       incomingVideoButton: document.querySelector("#receive-video")?.getAttribute("aria-pressed"),
@@ -819,6 +824,7 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
       iceCandidateErrors: [],
       acceptedRemoteCandidates: [],
       signalingMessages: [],
+      roomMessages: [],
       deviceSelectionRequests: [],
       capturedTracks: [],
       audioEchoCancellationRequested: null,
@@ -1048,6 +1054,17 @@ async function joinMeeting(context, name, baseURL, installDeviceFixtures = false
         socket.addEventListener("message", (event) => {
           try {
             const message = JSON.parse(event.data);
+            if (["participant", "participant_joined", "participant_left", "media_state", "screen_share_state", "room_full", "error"].includes(message.type)) {
+              window.__slowMeetTest.roomMessages.push({
+                direction: "in",
+                type: message.type,
+                participantID: message.participant_id || message.participant?.id,
+                participantName: message.participant?.name,
+                videoEnabled: message.video_enabled,
+                audioEnabled: message.audio_enabled,
+                timestamp: Date.now()
+              });
+            }
             const sdp = message.sdp || "";
             const passwords = [...sdp.matchAll(/^a=ice-pwd:(.+)$/gm)].map((match) => match[1]);
             window.__slowMeetTest.signalingMessages.push({
@@ -1248,7 +1265,7 @@ async function createScenarioFixture({
         assert.deepEqual(unhealthy, [],
           `${label}: healthy audio must not trigger connection warnings or degraded tiles: ${JSON.stringify(samples)}`);
         const renderedTiles = await pageForRole(fixture, receiverRole).evaluate(() =>
-          [...document.querySelectorAll("#participants li[data-participant-id]")].map((tile) => {
+          [...document.querySelectorAll("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]")].map((tile) => {
             const badge = tile.querySelector(".participant-quality");
             return {
               local: tile.classList.contains("is-local"),
@@ -1406,10 +1423,10 @@ async function createScenarioFixture({
     },
     async assertNoDuplicateParticipants() {
       for (const role of joined) {
-        const summary = await pageForRole(fixture, role).locator("#participants li[data-participant-id]")
+        const summary = await pageForRole(fixture, role).locator("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]")
           .evaluateAll((items) => {
             const ids = items.map((item) => item.dataset.participantId);
-            const videoKeys = [...document.querySelectorAll("#participants video[data-media-role]")]
+            const videoKeys = [...document.querySelectorAll("#participants video[data-media-role], #pinned-main video[data-media-role], #pinned-filmstrip video[data-media-role]")]
               .map((video) => `${video.closest("li")?.dataset.participantId || "unknown"}:${video.dataset.mediaRole}`);
             return {
               participantIDs: ids,
@@ -1446,7 +1463,7 @@ async function createScenarioFixture({
       const senderName = fixture.names[senderRole];
       const findRemoteAudios = (state) => state.remoteAudios.filter((audio) => audio.participant.includes(senderName));
       await receiverPage.waitForFunction((name) => [...document.querySelectorAll(
-        "#participants li[data-participant-id] audio")].some((audio) =>
+        "#participants li[data-participant-id] audio, #pinned-main li[data-participant-id] audio, #pinned-filmstrip li[data-participant-id] audio")].some((audio) =>
         audio.closest("li")?.textContent?.includes(name) &&
         !audio.paused && !audio.muted && audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         audio.srcObject?.getAudioTracks?.().some((track) => track.readyState === "live")),
@@ -1475,7 +1492,7 @@ async function createScenarioFixture({
         window.__slowMeetTest?.timeCodedAudio?.scheduleMarker());
       assert.ok(Number.isFinite(markerAt), `${label}: could not schedule a source audio marker`);
       const delayMs = await receiverPage.evaluate(async ({ senderName, markerAt }) => {
-        const audio = [...document.querySelectorAll("#participants li[data-participant-id] audio")]
+        const audio = [...document.querySelectorAll("#participants li[data-participant-id] audio, #pinned-main li[data-participant-id] audio, #pinned-filmstrip li[data-participant-id] audio")]
           .find((element) => element.closest("li")?.textContent?.includes(senderName));
         if (!audio?.srcObject) throw new Error("remote audio element has no stream");
         const context = new AudioContext();
@@ -1621,14 +1638,14 @@ async function leaveMeetingBeforeClose(page) {
 
 async function waitForRemoteCamera(page, senderName) {
   await page.waitForFunction((name) => {
-    return [...document.querySelectorAll("#participants video[data-media-role='camera']")]
+    return [...document.querySelectorAll("#participants video[data-media-role='camera'], #pinned-main video[data-media-role='camera'], #pinned-filmstrip video[data-media-role='camera']")]
       .some((video) => video.closest("li")?.textContent?.includes(name) &&
         video.videoWidth > 0 && video.videoHeight > 0);
   }, senderName, { timeout: 30000 });
 }
 
 async function waitForRemoteParticipantState(page, senderName, datasetKey, expectedValue) {
-  await page.waitForFunction(({ name, key, value }) => [...document.querySelectorAll("#participants li[data-participant-id]")]
+  await page.waitForFunction(({ name, key, value }) => [...document.querySelectorAll("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]")]
     .some((item) => !item.classList.contains("is-local") && item.textContent.includes(name) && item.dataset[key] === value),
   { name: senderName, key: datasetKey, value: expectedValue }, { timeout: 15000 });
 }
@@ -1872,7 +1889,7 @@ async function testParticipantLeaveAndRejoin(leavingPage, remainingPage, senderN
 
   await leavingPage.locator("#leave").click();
   await leavingPage.locator("#meeting").waitFor({ state: "hidden", timeout: 15000 });
-  await remainingPage.waitForFunction((name) => ![...document.querySelectorAll("#participants li[data-participant-id]")]
+  await remainingPage.waitForFunction((name) => ![...document.querySelectorAll("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id]")]
     .some((item) => !item.classList.contains("is-local") && item.textContent.includes(name)),
   senderName, { timeout: 15000 });
   await waitForPeerStability([remainingPage], 1000, 10000);
@@ -1994,7 +2011,7 @@ async function monitorCamera(label, senderName, receivingPage, peers, expectedPe
 
 async function assertRemoteVideoMoves(page, role, label) {
   try {
-    await page.waitForFunction((mediaRole) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
+    await page.waitForFunction((mediaRole) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}'], #pinned-main video[data-media-role='${mediaRole}'], #pinned-filmstrip video[data-media-role='${mediaRole}']`)]
       .some((video) => video.videoWidth > 0 && video.videoHeight > 0 && !video.paused), role, { timeout: 30000 });
   } catch (error) {
     let state = {};
@@ -2012,19 +2029,19 @@ async function assertRemoteVideoMoves(page, role, label) {
     }
     throw new Error(`${label}: remote ${role} video did not become active; ${JSON.stringify(state)}`, { cause: error });
   }
-  const startTime = await page.evaluate((mediaRole) => Math.max(0, ...[...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
+  const startTime = await page.evaluate((mediaRole) => Math.max(0, ...[...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}'], #pinned-main video[data-media-role='${mediaRole}'], #pinned-filmstrip video[data-media-role='${mediaRole}']`)]
     .map((video) => video.currentTime)), role);
   const before = await diagnostics(page);
   const beforeFrames = before.remoteVideos.filter((video) => video.role === role)
     .flatMap((video) => video.inboundVideoStats)
     .reduce((total, stat) => total + (Number(stat.framesDecoded) || 0), 0);
-  await page.waitForFunction(({ mediaRole, previousTime }) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)]
+  await page.waitForFunction(({ mediaRole, previousTime }) => [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}'], #pinned-main video[data-media-role='${mediaRole}'], #pinned-filmstrip video[data-media-role='${mediaRole}']`)]
     .some((video) => video.videoWidth > 0 && video.videoHeight > 0 && video.currentTime > previousTime + 0.5),
   { mediaRole: role, previousTime: startTime }, { timeout: 15000 });
   await page.waitForFunction(async ({ mediaRole, previousFrames }) => {
     const peer = window.__slowMeetTest?.peerConnections.at(-1);
     if (!peer) return false;
-    const videos = [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}']`)];
+    const videos = [...document.querySelectorAll(`#participants video[data-media-role='${mediaRole}'], #pinned-main video[data-media-role='${mediaRole}'], #pinned-filmstrip video[data-media-role='${mediaRole}']`)];
     let decodedFrames = 0;
     for (const video of videos) {
       for (const track of video.srcObject?.getVideoTracks?.() || []) {

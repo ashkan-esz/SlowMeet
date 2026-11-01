@@ -35,6 +35,7 @@ type Config struct {
 	ICEUDPPortMin            int
 	ICEUDPPortMax            int
 	ICEPublicIP              string
+	TrustedProxyCIDRs        []string
 	MaxParticipants          int
 	DefaultVideoQuality      string
 	MaxVideoQuality          string
@@ -47,6 +48,23 @@ type Config struct {
 	RetainChatHistory        bool
 	ReconnectTimeout         time.Duration
 	LogLevel                 string
+}
+
+func cloneConfig(cfg Config) Config {
+	cfg.STUNServers = cloneStrings(cfg.STUNServers)
+	cfg.TURNURLs = cloneStrings(cfg.TURNURLs)
+	cfg.EnabledConnectionMethods = cloneStrings(cfg.EnabledConnectionMethods)
+	cfg.TrustedProxyCIDRs = cloneStrings(cfg.TrustedProxyCIDRs)
+	return cfg
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
 }
 
 const MaxAllowedParticipants = 100
@@ -101,6 +119,7 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	icePublicIP := os.Getenv("ICE_PUBLIC_IP")
+	trustedProxyCIDRs := splitCSV(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	iceTransportPolicy := envString("ICE_TRANSPORT_POLICY", "all")
 	simulcastEnabled, err := envBool("SIMULCAST_ENABLED", false)
 	if err != nil {
@@ -126,6 +145,7 @@ func LoadFromEnv() (Config, error) {
 		ICEUDPPortMin:       iceUDPPortMin,
 		ICEUDPPortMax:       iceUDPPortMax,
 		ICEPublicIP:         icePublicIP,
+		TrustedProxyCIDRs:   trustedProxyCIDRs,
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
 		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
@@ -150,6 +170,11 @@ func (c Config) Validate() error {
 	}
 	if c.ICEPublicIP != "" && net.ParseIP(c.ICEPublicIP) == nil {
 		return fmt.Errorf("ICE_PUBLIC_IP must be a valid IP address")
+	}
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			return fmt.Errorf("TRUSTED_PROXY_CIDRS entry %q must be a valid CIDR", cidr)
+		}
 	}
 	if c.ICETransportPolicy != "" && c.ICETransportPolicy != "all" && c.ICETransportPolicy != "relay" {
 		return fmt.Errorf("ICE_TRANSPORT_POLICY must be all or relay")

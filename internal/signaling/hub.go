@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +63,7 @@ type client struct {
 	joined                    bool
 	intentionalLeave          bool
 	joinAttempts              int
+	admissionExpired          bool // guarded by Hub.mu
 	peer                      *webrtc.Peer
 	negotiationMu             sync.Mutex
 	negotiationReady          bool
@@ -109,17 +109,20 @@ type Hub struct {
 	// passwordLimiter throttles failed meeting-password attempts per client IP.
 	passwordLimiter *ratelimit.Limiter
 
-	mu           sync.RWMutex
-	clients      map[*client]struct{}
-	roomMembers  map[*client]struct{}
-	router       *media.Router
-	pending      map[string]*pendingReconnect
-	activeTokens map[string]*client
-	mediaStates  map[string]Message
-	metrics      *metrics.Metrics
-	screenSharer *client
-	chatHistory  map[string]*roomChatHistory
-	closed       bool
+	mu                    sync.RWMutex
+	clients               map[*client]struct{}
+	roomMembers           map[*client]struct{}
+	router                *media.Router
+	pending               map[string]*pendingReconnect
+	activeTokens          map[string]*client
+	mediaStates           map[string]Message
+	metrics               *metrics.Metrics
+	screenSharer          *client
+	chatHistory           map[string]*roomChatHistory
+	closed                bool
+	pendingConnections    int
+	maxPendingConnections int
+	joinTimeout           time.Duration
 }
 
 func videoMediaStateBecameActive(previous, current Message) bool {
@@ -216,15 +219,17 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 	snapshot := cfg.Snapshot()
 	return &Hub{
 		Meeting: m, Config: cfg, Logger: logger,
-		passwordLimiter: ratelimit.New(joinPasswordFailuresPerMinute, joinPasswordFailureBurst),
-		Upgrader:        websocket.Upgrader{CheckOrigin: sameOrigin},
-		clients:         make(map[*client]struct{}),
-		roomMembers:     make(map[*client]struct{}),
-		pending:         make(map[string]*pendingReconnect),
-		activeTokens:    make(map[string]*client),
-		mediaStates:     make(map[string]Message),
-		chatHistory:     make(map[string]*roomChatHistory),
-		metrics:         &metrics.Metrics{},
+		maxPendingConnections: 128,
+		joinTimeout:           15 * time.Second,
+		passwordLimiter:       ratelimit.New(joinPasswordFailuresPerMinute, joinPasswordFailureBurst),
+		Upgrader:              websocket.Upgrader{CheckOrigin: sameOrigin},
+		clients:               make(map[*client]struct{}),
+		roomMembers:           make(map[*client]struct{}),
+		pending:               make(map[string]*pendingReconnect),
+		activeTokens:          make(map[string]*client),
+		mediaStates:           make(map[string]Message),
+		chatHistory:           make(map[string]*roomChatHistory),
+		metrics:               &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
@@ -353,8 +358,8 @@ func (h *Hub) disconnect(c *client) {
 		client:      c,
 	}
 	h.pending[c.reconnectToken] = pending
-	clients := make([]*client, 0, len(h.clients))
-	for client := range h.clients {
+	clients := make([]*client, 0, len(h.roomMembers))
+	for client := range h.roomMembers {
 		if client.participant.ID != "" && client.participant.ID != c.participant.ID {
 			clients = append(clients, client)
 		}
@@ -550,6 +555,24 @@ func sameOrigin(r *http.Request) bool {
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Reserve before upgrading so unauthenticated sockets have their own bound.
+	h.mu.Lock()
+	if h.closed || h.pendingConnections >= h.maxPendingConnections {
+		h.mu.Unlock()
+		http.Error(w, "too many pending connections", http.StatusServiceUnavailable)
+		return
+	}
+	h.pendingConnections++
+	h.mu.Unlock()
+	var releaseOnce sync.Once
+	releasePending := func() {
+		releaseOnce.Do(func() {
+			h.mu.Lock()
+			h.pendingConnections--
+			h.mu.Unlock()
+		})
+	}
+	defer releasePending()
 	conn, err := h.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -564,13 +587,24 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		finished:   make(chan struct{}),
 		outbound:   make(chan Message, outboundQueueSize),
 		writerDone: make(chan struct{}),
-		remoteIP:   ratelimit.ClientIP(r),
+		remoteIP:   ratelimit.ClientIPWithTrustedProxyCIDRs(r, h.Config.Snapshot().TrustedProxyCIDRs),
 	}
 	done := make(chan struct{})
 	c.startWriter(done)
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		close(done)
+		_ = conn.Close()
+		<-c.writerDone
+		return
+	}
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
+	admissionTimer := time.AfterFunc(h.joinTimeout, func() {
+		h.expireAdmission(c)
+	})
+	defer admissionTimer.Stop()
 	defer func() {
 		close(done)
 		conn.Close()
@@ -632,7 +666,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if msg.Type == TypeMediaState {
-				msg.ParticipantID = c.participant.ID
+				msg = roomMessage(c, msg)
 				h.mu.Lock()
 				previousState, hadPreviousState := h.mediaStates[c.participant.ID]
 				h.mediaStates[c.participant.ID] = msg
@@ -688,9 +722,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if msg.Type == TypeChat {
-				msg.ParticipantID = c.participant.ID
-				msg.Name = c.participant.Name
-				msg.ChatText = strings.TrimSpace(msg.ChatText)
+				msg = roomMessage(c, msg)
 				if h.Config.Snapshot().RetainChatHistory {
 					h.recordChatMessage(chatRoomID, ChatHistoryEntry{
 						ID: uuid.NewString(), ParticipantID: c.participant.ID, Author: c.participant.Name,
@@ -704,8 +736,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if !c.allowReaction() {
 					continue
 				}
-				msg.ParticipantID = c.participant.ID
-				msg.Name = c.participant.Name
+				msg = roomMessage(c, msg)
 				h.broadcast(msg)
 				continue
 			}
@@ -717,13 +748,16 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cfg := h.Config.Snapshot()
+		if cfg.MeetingPassword != "" && !h.passwordLimiter.AllowAttempt(c.remoteIP) {
+			c.writeAndFlush(Message{Version: ProtocolVersion, Type: TypeError, Error: "too many password attempts"})
+			return
+		}
 		if !cfg.CheckMeetingPassword(msg.Password) {
-			if !h.passwordLimiter.ReportFailure(c.remoteIP) {
-				c.writeAndFlush(Message{Version: ProtocolVersion, Type: TypeError, Error: "too many password attempts"})
-				return
-			}
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "invalid meeting password"})
 			continue
+		}
+		if cfg.MeetingPassword != "" {
+			h.passwordLimiter.RefundAttempt(c.remoteIP)
 		}
 		participant, resumed, activeTakeover := h.reclaim(c, msg.ReconnectToken)
 		var err error
@@ -797,13 +831,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})
-		if err := c.write(Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
-			ReconnectToken: c.reconnectToken, ChatHistory: h.chatHistorySnapshot(chatRoomID)}); err != nil {
+		history := h.chatHistorySnapshot(chatRoomID)
+		if err := h.admit(c, Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
+			ReconnectToken: c.reconnectToken, ChatHistory: history}); err != nil {
 			return
 		}
-		h.mu.Lock()
-		h.roomMembers[c] = struct{}{}
-		h.mu.Unlock()
+		admissionTimer.Stop()
+		releasePending()
 		for _, existing := range h.Meeting.List() {
 			if existing.ID != participant.ID && !h.isPendingParticipant(existing.ID) {
 				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})
@@ -1147,21 +1181,13 @@ func (c *client) flushPendingLocalCandidates() error {
 }
 
 func (h *Hub) broadcast(msg Message) {
-	h.mu.RLock()
-	clients := make([]*client, 0, len(h.clients))
-	for c := range h.clients {
-		clients = append(clients, c)
-	}
-	h.mu.RUnlock()
-	for _, c := range clients {
-		_ = c.write(msg)
-	}
+	h.broadcastToRoom(msg)
 }
 
 func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 	h.mu.RLock()
-	clients := make([]*client, 0, len(h.clients))
-	for c := range h.clients {
+	clients := make([]*client, 0, len(h.roomMembers))
+	for c := range h.roomMembers {
 		if c != excluded {
 			clients = append(clients, c)
 		}

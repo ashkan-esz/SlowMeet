@@ -137,7 +137,7 @@ func TestStaticAssetWithNonMatchingETagReturnsContent(t *testing.T) {
 	}
 }
 
-func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
+func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.STUNServers = []string{"stun:stun.example.com:3478"}
 	cfg.TURNURLs = []string{
@@ -206,16 +206,248 @@ func TestICEConfigReturnsTransientTURNCredentials(t *testing.T) {
 		t.Fatalf("unexpected STUN server: %#v", values.ICEServers[0])
 	}
 	turn := values.ICEServers[1]
-	if len(turn.URLs) != 2 || turn.Username == "" || turn.Credential == "" {
+	if len(turn.URLs) != 2 || turn.Username != "" || turn.Credential != "" {
 		t.Fatalf("unexpected TURN server: %#v", turn)
 	}
-	if strings.Contains(response.Body.String(), "shared-secret") ||
-		strings.Contains(response.Body.String(), "legacy-user") ||
-		strings.Contains(response.Body.String(), "legacy-password") {
-		t.Fatal("TURN credentials were exposed")
+	for _, secret := range []string{"shared-secret", "legacy-user", "legacy-password"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("public ICE config exposed TURN secret %q", secret)
+		}
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("ICE config Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestPublicMeetingAdmittedSessionCanRequestTURNCredentials(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TURNURLs = []string{"turn:turn.example.com:3478?transport=udp"}
+	cfg.TURNSharedSecret = "shared-secret"
+	cfg.TURNCredentialTTL = time.Hour
+	app := New(cfg, NewLogger("error"))
+	server := httptest.NewServer(app)
+	defer server.Close()
+	defer app.Close()
+
+	socketURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatalf("dial public meeting: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion,
+		Type:    signaling.TypeJoin,
+		Name:    "Public member",
+	}); err != nil {
+		t.Fatalf("join public meeting: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var joined signaling.Message
+	if err := conn.ReadJSON(&joined); err != nil {
+		t.Fatalf("read public meeting admission: %v", err)
+	}
+	if joined.Type != signaling.TypeParticipant || joined.ReconnectToken == "" {
+		t.Fatalf("public meeting admission response = %+v", joined)
+	}
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/ice-config/credentials", nil)
+	if err != nil {
+		t.Fatalf("create public meeting credential request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+joined.ReconnectToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request public meeting TURN credentials: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("public meeting credential status = %d", response.StatusCode)
+	}
+	var values struct {
+		ICEServers []struct {
+			Username   string `json:"username"`
+			Credential string `json:"credential"`
+		} `json:"ice_servers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode public meeting TURN credentials: %v", err)
+	}
+	if len(values.ICEServers) != 1 || values.ICEServers[0].Username == "" || values.ICEServers[0].Credential == "" {
+		t.Fatalf("public meeting did not receive TURN credentials: %#v", values.ICEServers)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public meeting credentials Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestICECredentialsRequireActiveAdmittedSession(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TURNURLs = []string{"turn:turn.example.com:3478?transport=udp"}
+	cfg.TURNSharedSecret = "shared-secret"
+	cfg.TURNUsername = "legacy-user"
+	cfg.TURNPassword = "legacy-password"
+	cfg.TURNCredentialTTL = time.Hour
+	cfg.MeetingPassword = "room-secret"
+	cfg.MaxParticipants = 1
+	app := New(cfg, NewLogger("error"))
+	server := httptest.NewServer(app)
+	defer server.Close()
+	defer app.Close()
+
+	getCredentials := func(token string) *http.Response {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/ice-config/credentials", nil)
+		if err != nil {
+			t.Fatalf("create credential request: %v", err)
+		}
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("get ICE credentials: %v", err)
+		}
+		return response
+	}
+	for _, token := range []string{"", "not-a-session-token"} {
+		response := getCredentials(token)
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("credentials with token %q status = %d, want 401", token, response.StatusCode)
+		}
+		if got := response.Header.Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("unauthorized credentials Cache-Control = %q, want no-store", got)
+		}
+	}
+
+	socketURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	wrongPassword, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatalf("dial wrong-password participant: %v", err)
+	}
+	if err := wrongPassword.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Denied", Password: "wrong",
+	}); err != nil {
+		wrongPassword.Close()
+		t.Fatalf("join with wrong password: %v", err)
+	}
+	var denied signaling.Message
+	if err := wrongPassword.ReadJSON(&denied); err != nil {
+		wrongPassword.Close()
+		t.Fatalf("read wrong-password response: %v", err)
+	}
+	wrongPassword.Close()
+	if denied.Type != signaling.TypeError || denied.ReconnectToken != "" {
+		t.Fatalf("wrong-password join response = %+v", denied)
+	}
+
+	admitted, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatalf("dial admitted participant: %v", err)
+	}
+	defer admitted.Close()
+	if err := admitted.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Admitted", Password: "room-secret",
+	}); err != nil {
+		t.Fatalf("join protected meeting: %v", err)
+	}
+	_ = admitted.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var joined signaling.Message
+	if err := admitted.ReadJSON(&joined); err != nil {
+		t.Fatalf("read admitted participant response: %v", err)
+	}
+	if joined.Type != signaling.TypeParticipant || joined.ReconnectToken == "" {
+		t.Fatalf("admitted join response = %+v", joined)
+	}
+
+	credentialResponse := getCredentials(joined.ReconnectToken)
+	defer credentialResponse.Body.Close()
+	if credentialResponse.StatusCode != http.StatusOK {
+		t.Fatalf("admitted credentials status = %d, body = %s", credentialResponse.StatusCode, "")
+	}
+	var credentialValues struct {
+		ICEServers []struct {
+			URLs       []string `json:"urls"`
+			Username   string   `json:"username"`
+			Credential string   `json:"credential"`
+		} `json:"ice_servers"`
+	}
+	if err := json.NewDecoder(credentialResponse.Body).Decode(&credentialValues); err != nil {
+		t.Fatalf("decode admitted ICE credentials: %v", err)
+	}
+	if len(credentialValues.ICEServers) != 1 || credentialValues.ICEServers[0].Username == "" ||
+		credentialValues.ICEServers[0].Credential == "" ||
+		!strings.Contains(credentialValues.ICEServers[0].Username, ":browser") ||
+		credentialValues.ICEServers[0].Username == "legacy-user" ||
+		credentialValues.ICEServers[0].Credential == "legacy-password" {
+		t.Fatalf("unexpected admitted TURN credentials: %#v", credentialValues.ICEServers)
+	}
+	if got := credentialResponse.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("credential response Cache-Control = %q, want no-store", got)
+	}
+
+	full, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatalf("dial capacity-rejected participant: %v", err)
+	}
+	if err := full.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Full", Password: "room-secret",
+	}); err != nil {
+		full.Close()
+		t.Fatalf("join full meeting: %v", err)
+	}
+	_ = full.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var capacityDenied signaling.Message
+	if err := full.ReadJSON(&capacityDenied); err != nil {
+		full.Close()
+		t.Fatalf("read capacity response: %v", err)
+	}
+	full.Close()
+	if capacityDenied.Type != signaling.TypeError || capacityDenied.ReconnectToken != "" {
+		t.Fatalf("capacity-rejected join response = %+v", capacityDenied)
+	}
+
+	if err := admitted.Close(); err != nil {
+		t.Fatalf("close admitted session: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		response := getCredentials(joined.ReconnectToken)
+		status := response.StatusCode
+		response.Body.Close()
+		if status == http.StatusUnauthorized {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("disconnected session token still issued credentials: status %d", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fresh, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatalf("dial fresh participant after disconnect: %v", err)
+	}
+	defer fresh.Close()
+	if err := fresh.WriteJSON(signaling.Message{
+		Version: signaling.ProtocolVersion, Type: signaling.TypeJoin, Name: "Fresh", Password: "room-secret",
+	}); err != nil {
+		t.Fatalf("join after disconnected session: %v", err)
+	}
+	_ = fresh.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var freshJoined signaling.Message
+	if err := fresh.ReadJSON(&freshJoined); err != nil {
+		t.Fatalf("read fresh participant response: %v", err)
+	}
+	if freshJoined.Type != signaling.TypeParticipant || freshJoined.ReconnectToken == "" ||
+		freshJoined.ReconnectToken == joined.ReconnectToken {
+		t.Fatalf("fresh join response = %+v", freshJoined)
+	}
+	freshCredentials := getCredentials(freshJoined.ReconnectToken)
+	defer freshCredentials.Body.Close()
+	if freshCredentials.StatusCode != http.StatusOK {
+		t.Fatalf("fresh session credentials status = %d", freshCredentials.StatusCode)
 	}
 }
 
@@ -335,6 +567,12 @@ func TestPasswordSurfacesRateLimitFailedAttempts(t *testing.T) {
 	cfg.MeetingPassword = "room-secret"
 	handler := New(cfg, NewLogger("error"))
 
+	previewSuccess := httptest.NewRecorder()
+	handler.ServeHTTP(previewSuccess, httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"room-secret"}`)))
+	if previewSuccess.Code != http.StatusOK {
+		t.Fatalf("correct preview password status = %d, want 200", previewSuccess.Code)
+	}
+
 	// Roster preview: failures beyond the burst are throttled per client IP.
 	for attempt := 0; attempt < passwordFailureBurst; attempt++ {
 		request := httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"wrong"}`))
@@ -349,9 +587,21 @@ func TestPasswordSurfacesRateLimitFailedAttempts(t *testing.T) {
 	if throttled.Code != http.StatusTooManyRequests {
 		t.Fatalf("throttled preview status = %d, want 429", throttled.Code)
 	}
+	correctPreviewAfterThrottle := httptest.NewRecorder()
+	handler.ServeHTTP(correctPreviewAfterThrottle, httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"room-secret"}`)))
+	if correctPreviewAfterThrottle.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct preview password after exhaustion = %d, want 429", correctPreviewAfterThrottle.Code)
+	}
 
 	// The admin endpoint has its own budget: wrong passwords are throttled
-	// the same way, while a correct password still succeeds.
+	// before verification, even when a new request carries the correct password.
+	adminSuccessRequest := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+	adminSuccessRequest.Header.Set("X-Admin-Password", "admin-secret")
+	adminSuccessResponse := httptest.NewRecorder()
+	handler.ServeHTTP(adminSuccessResponse, adminSuccessRequest)
+	if adminSuccessResponse.Code != http.StatusOK {
+		t.Fatalf("correct admin password status = %d, want 200", adminSuccessResponse.Code)
+	}
 	for attempt := 0; attempt < passwordFailureBurst; attempt++ {
 		request := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
 		request.Header.Set("X-Admin-Password", "wrong")
@@ -373,8 +623,44 @@ func TestPasswordSurfacesRateLimitFailedAttempts(t *testing.T) {
 	adminRequest.Header.Set("X-Admin-Password", "admin-secret")
 	adminResponse := httptest.NewRecorder()
 	handler.ServeHTTP(adminResponse, adminRequest)
-	if adminResponse.Code != http.StatusOK {
-		t.Fatalf("correct admin password after throttled wrong attempts = %d, want 200", adminResponse.Code)
+	if adminResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct admin password after throttled wrong attempts = %d, want 429", adminResponse.Code)
+	}
+}
+
+func TestPasswordLimitUsesOnlyTrustedForwardedClientAddresses(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MeetingPassword = "room-secret"
+	cfg.TrustedProxyCIDRs = []string{"10.0.0.0/8"}
+	handler := New(cfg, NewLogger("error"))
+	request := func(remoteAddr, forwarded string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/room/participants", strings.NewReader(`{"password":"wrong"}`))
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Forwarded-For", forwarded)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+
+	for _, clientIP := range []string{"198.51.100.1", "198.51.100.2"} {
+		for attempt := 0; attempt < passwordFailureBurst; attempt++ {
+			if response := request("10.0.0.2:443", clientIP); response.Code != http.StatusForbidden {
+				t.Fatalf("trusted client %s attempt %d status = %d, want 403", clientIP, attempt+1, response.Code)
+			}
+		}
+		if response := request("10.0.0.2:443", clientIP); response.Code != http.StatusTooManyRequests {
+			t.Fatalf("trusted client %s attempt beyond burst status = %d, want 429", clientIP, response.Code)
+		}
+	}
+
+	// An untrusted socket peer cannot rotate X-Forwarded-For to evade its key.
+	for attempt := 0; attempt < passwordFailureBurst; attempt++ {
+		if response := request("203.0.113.9:443", "198.51.100."+fmt.Sprint(attempt+1)); response.Code != http.StatusForbidden {
+			t.Fatalf("untrusted peer attempt %d status = %d, want 403", attempt+1, response.Code)
+		}
+	}
+	if response := request("203.0.113.9:443", "198.51.100.99"); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("untrusted peer spoofed header bypass status = %d, want 429", response.Code)
 	}
 }
 
@@ -511,7 +797,7 @@ func TestAdminConfigRejectsUnknownAndTrailingJSON(t *testing.T) {
 
 func TestReadOnlyEndpointsRejectNonGETRequests(t *testing.T) {
 	handler := New(testConfig(t), NewLogger("error"))
-	for _, path := range []string{"/health", "/ready", "/config", "/ice-config", "/metrics"} {
+	for _, path := range []string{"/health", "/ready", "/config", "/ice-config", "/ice-config/credentials", "/metrics"} {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		response := httptest.NewRecorder()
 

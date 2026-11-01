@@ -19,11 +19,11 @@ type Store struct {
 }
 
 func NewStore(cfg Config) *Store {
-	return &Store{cfg: cfg, path: cfg.ConfigFile}
+	return &Store{cfg: cloneConfig(cfg), path: cfg.ConfigFile}
 }
 
 func LoadStore(cfg Config) (*Store, error) {
-	store := &Store{cfg: cfg, path: cfg.ConfigFile}
+	store := &Store{cfg: cloneConfig(cfg), path: cfg.ConfigFile}
 	if store.path == "" {
 		return store, nil
 	}
@@ -87,7 +87,7 @@ func unknownJSONKeys(data []byte) []string {
 func (s *Store) Snapshot() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cfg
+	return cloneConfig(s.cfg)
 }
 
 func (s *Store) CheckAdminPassword(candidate string) bool {
@@ -139,7 +139,7 @@ func (s *Store) apply(update AdminUpdate) error {
 }
 
 func updatedConfig(current Config, update AdminUpdate) (Config, error) {
-	next := current
+	next := cloneConfig(current)
 	if update.MaxParticipants != nil {
 		next.MaxParticipants = *update.MaxParticipants
 	}
