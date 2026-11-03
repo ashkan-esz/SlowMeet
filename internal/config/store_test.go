@@ -14,7 +14,7 @@ func TestStoreSnapshotIsolatesConfigSlices(t *testing.T) {
 		new  func(Config) (*Store, error)
 	}{
 		{name: "NewStore", new: func(cfg Config) (*Store, error) { return NewStore(cfg), nil }},
-		{name: "LoadStore", new: LoadStore},
+		{name: "LoadStore", new: func(cfg Config) (*Store, error) { return LoadStore(cfg, nil) }},
 	}
 
 	for _, constructor := range constructors {
@@ -106,7 +106,7 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 		MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
 		DefaultVideoQuality: "low", HTTPAddr: ":8080"}
-	store, err := LoadStore(cfg)
+	store, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("LoadStore() error = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestStorePersistsAdminUpdate(t *testing.T) {
 		RetainChatHistory: &retainChatHistory}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	reloaded, err := LoadStore(cfg)
+	reloaded, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("reload error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLoadStoreToleratesUnknownKeysWithWarning(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"max_paticipants":3,"max_participants":4}`), 0600); err != nil {
 		t.Fatalf("write config fixture: %v", err)
 	}
-	store, err := LoadStore(cfg)
+	store, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("LoadStore() error = %v", err)
 	}
@@ -179,7 +179,7 @@ func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg.ConfigFile = path
-	store, err := LoadStore(cfg)
+	store, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("LoadStore() error = %v", err)
 	}
@@ -187,7 +187,7 @@ func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
 	if err := store.Update(AdminUpdate{EnabledConnectionMethods: &enabled}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	reloaded, err := LoadStore(cfg)
+	reloaded, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("reload error = %v", err)
 	}
@@ -198,7 +198,7 @@ func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
 	if err := reloaded.Update(AdminUpdate{EnabledConnectionMethods: &disabled}); err != nil {
 		t.Fatalf("disable all connection methods: %v", err)
 	}
-	fullyDisabled, err := LoadStore(cfg)
+	fullyDisabled, err := LoadStore(cfg, nil)
 	if err != nil {
 		t.Fatalf("reload disabled methods: %v", err)
 	}

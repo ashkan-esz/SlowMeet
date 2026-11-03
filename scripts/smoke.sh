@@ -4,6 +4,7 @@ set -eu
 port="${SLOWMEET_SMOKE_PORT:-18080}"
 config_dir="$(mktemp -d)"
 server_pid=""
+binary="${config_dir}/slowmeet-smoke"
 
 cleanup() {
   if [ -n "$server_pid" ]; then
@@ -14,15 +15,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Build and run a real binary: `go run` does not forward signals to the child,
+# so a killed smoke run could leave the server holding the port.
+GOCACHE="${GOCACHE:-/tmp/slowmeet-gocache}" go build -o "$binary" .
+
 HTTP_ADDR="127.0.0.1:${port}" \
 CONFIG_FILE="${config_dir}/config.json" \
 ADMIN_PASSWORD= \
-GOCACHE="${GOCACHE:-/tmp/slowmeet-gocache}" \
-go run . >/tmp/slowmeet-smoke.log 2>&1 &
+"$binary" >/tmp/slowmeet-smoke.log 2>&1 &
 server_pid=$!
 
 ready=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 50); do
   if curl -fsS "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
     ready=1
     break

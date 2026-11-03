@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"cmp"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,7 +52,7 @@ type participantPreviewResponse struct {
 }
 
 func New(cfg config.Config, logger *slog.Logger) *Server {
-	store, err := config.LoadStore(cfg)
+	store, err := config.LoadStore(cfg, logger)
 	if err != nil {
 		logger.Warn("config_persistence_unavailable", "error", err)
 		store = config.NewStore(cfg)
@@ -263,7 +265,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
 	mux.Handle("/", newStaticFileHandler(cfg.AppName))
-	app.handler = withSecurityHeaders(mux)
+	app.handler = withSecurityHeaders(withGzip(mux))
 	app.ready.Store(true)
 	return app
 }
@@ -500,7 +502,9 @@ func writeICEConfig(w http.ResponseWriter, cfg config.Config, iceServers []brows
 }
 
 func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
-	if r.Method == method {
+	// HEAD is allowed wherever GET is: monitors probe the health endpoints
+	// with it, and net/http strips the body automatically.
+	if r.Method == method || (method == http.MethodGet && r.Method == http.MethodHead) {
 		return true
 	}
 	w.Header().Set("Allow", method)
@@ -533,6 +537,111 @@ func withSecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// gzipWriterPool keeps the per-response compression buffers reusable; page
+// load traffic bursts heavily and every asset request would otherwise
+// allocate one.
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		writer, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
+		return writer
+	},
+}
+
+// withGzip compresses compressible responses for clients that accept it. The
+// embedded assets are several hundred kilobytes of JavaScript and CSS;
+// shipping them uncompressed dominates a cold page load. WebSocket upgrades
+// are skipped (the connection is hijacked after the handshake), as are range
+// requests, where a re-encoded body would break byte semantics.
+func withGzip(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !acceptsGzip(r) || r.Header.Get("Range") != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gz := gzipWriterPool.Get().(*gzip.Writer)
+		defer gzipWriterPool.Put(gz)
+		gz.Reset(w)
+		defer gz.Close()
+		wrapped := &gzipResponseWriter{ResponseWriter: w, gz: gz}
+		next.ServeHTTP(wrapped, r)
+	})
+}
+
+func acceptsGzip(r *http.Request) bool {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Upgrade")), "websocket") {
+		return false
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
+}
+
+func compressibleContentType(contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	if before, _, found := strings.Cut(contentType, ";"); found {
+		contentType = strings.TrimSpace(before)
+	}
+	if strings.HasPrefix(contentType, "text/") {
+		return true
+	}
+	switch contentType {
+	case "application/javascript", "application/json", "image/svg+xml":
+		return true
+	default:
+		return false
+	}
+}
+
+// gzipResponseWriter decides at WriteHeader time whether the response body is
+// worth compressing, based on the handler's Content-Type.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz          *gzip.Writer
+	enabled     bool
+	wroteHeader bool
+}
+
+func (g *gzipResponseWriter) WriteHeader(status int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	if compressibleContentType(g.Header().Get("Content-Type")) {
+		g.enabled = true
+		g.Header().Del("Content-Length")
+		g.Header().Set("Content-Encoding", "gzip")
+		g.Header().Add("Vary", "Accept-Encoding")
+	} else {
+		g.enabled = false
+	}
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipResponseWriter) Write(payload []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.enabled {
+		return g.gz.Write(payload)
+	}
+	return g.ResponseWriter.Write(payload)
+}
+
+// Flush pushes compressed bytes through so streamed responses are not
+// buffered by the compressor.
+func (g *gzipResponseWriter) Flush() {
+	if g.enabled {
+		_ = g.gz.Flush()
+	}
+	if flusher, ok := g.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer for
+// handlers that need deadline or hijack control.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter {
+	return g.ResponseWriter
 }
 
 func NewLogger(level string) *slog.Logger {

@@ -822,9 +822,10 @@ func TestServerOfferIsWrittenBeforeGatheredCandidates(t *testing.T) {
 }
 
 type restartSignalingPeer struct {
-	remoteAnswer  string
-	candidates    []string
-	onCreateOffer func()
+	remoteAnswer   string
+	candidates     []string
+	onCreateOffer  func()
+	failCandidates map[string]bool
 }
 
 func (p *restartSignalingPeer) CreateOffer(iceRestart bool) (string, error) {
@@ -845,6 +846,9 @@ func (p *restartSignalingPeer) SetRemoteAnswer(sdp string) error {
 func (p *restartSignalingPeer) AddICECandidate(candidate string, _ *string, _ *uint16) error {
 	if p.remoteAnswer == "" {
 		return errors.New("candidate arrived before remote answer")
+	}
+	if p.failCandidates[candidate] {
+		return fmt.Errorf("candidate %q is unusable", candidate)
 	}
 	p.candidates = append(p.candidates, candidate)
 	return nil
@@ -1933,5 +1937,280 @@ func TestHubAnswerWithoutOfferReturnsError(t *testing.T) {
 	readTestMessage(t, browserConn, &response)
 	if response.Type != TypeError || response.Error != "no offer in flight" {
 		t.Fatalf("stray answer response = %+v, want no-offer error", response)
+	}
+}
+
+func TestHubChatRecordedDuringJoinIsDeliveredExactlyOnce(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:          ":8080",
+		MaxParticipants:   4,
+		RetainChatHistory: true,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	// Chats recorded while the second client is being admitted must reach it
+	// exactly once: through the admission replay or the live broadcast. The
+	// old snapshot-before-admit ordering could drop them entirely.
+	const concurrentChats = 40
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writes := make(chan struct{})
+	go func() {
+		defer close(writes)
+		for i := 0; i < concurrentChats; i++ {
+			writeTestMessage(t, first, Message{
+				Version: ProtocolVersion, Type: TypeChat,
+				ParticipantID: firstJoined.Participant.ID, ChatText: fmt.Sprintf("burst %d", i),
+			})
+		}
+	}()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	<-writes
+
+	seen := make(map[string]int)
+	collect := func(entry ChatHistoryEntry) {
+		seen[entry.ID]++
+	}
+	var joined Message
+	readTestMessage(t, second, &joined)
+	if joined.Type != TypeParticipant {
+		t.Fatalf("second join response = %+v", joined)
+	}
+	for _, entry := range joined.ChatHistory {
+		collect(entry)
+	}
+	for len(seen) < concurrentChats {
+		var broadcast Message
+		readTestMessage(t, second, &broadcast)
+		if broadcast.Type != TypeChat {
+			continue
+		}
+		collect(ChatHistoryEntry{ID: broadcast.ChatText})
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("chat %q reached the joiner %d times, want exactly once", id, count)
+		}
+	}
+}
+
+func TestDisconnectBeforeAnnouncementDoesNotBroadcastLeft(t *testing.T) {
+	hub := NewHub(meeting.New(4), config.NewStore(config.Config{MaxParticipants: 4}), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	observer := dialTestSocket(t, socketURL)
+	defer observer.Close()
+	writeTestMessage(t, observer, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Observer"})
+	var observerJoined Message
+	readTestMessage(t, observer, &observerJoined)
+	if observerJoined.Type != TypeParticipant {
+		t.Fatalf("observer join response = %+v", observerJoined)
+	}
+
+	// The join failed after Meeting.Join reserved the slot but before the room
+	// was told about the participant: no phantom left event may be broadcast.
+	participant, err := hub.Meeting.Join("Ashkan")
+	if err != nil {
+		t.Fatalf("join meeting: %v", err)
+	}
+	hub.disconnect(&client{participant: participant, participantID: participant.ID})
+	if got := hub.Meeting.Count(); got != 1 {
+		t.Fatalf("meeting participants after failed join = %d, want only the observer", got)
+	}
+	// A deadline read leaves a Gorilla connection in a broken state, so this
+	// observer is consumed by the negative check and never read again.
+	assertNoTestMessage(t, observer)
+
+	// An announced departure still broadcasts its left event. A fresh observer
+	// receives it because the timed-out read above retired the first one.
+	announced, err := hub.Meeting.Join("Ali")
+	if err != nil {
+		t.Fatalf("join meeting: %v", err)
+	}
+	receiver := dialTestSocket(t, socketURL)
+	defer receiver.Close()
+	writeTestMessage(t, receiver, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Receiver"})
+	var receiverJoined Message
+	readTestMessage(t, receiver, &receiverJoined)
+	if receiverJoined.Type != TypeParticipant {
+		t.Fatalf("receiver join response = %+v", receiverJoined)
+	}
+	hub.disconnect(&client{participant: announced, participantID: announced.ID, announced: true})
+	var left Message
+	for {
+		readTestMessage(t, receiver, &left)
+		if left.Type == TypeLeft {
+			break
+		}
+	}
+	if left.Participant == nil || left.Participant.ID != announced.ID {
+		t.Fatalf("announced departure broadcast = %+v", left)
+	}
+}
+
+func TestAddOrQueueCandidateCapsPendingQueue(t *testing.T) {
+	c := &client{}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	peer := &restartSignalingPeer{}
+
+	for i := 0; i < maxPendingCandidates; i++ {
+		if err := addOrQueueCandidate(c, peer, Message{Version: ProtocolVersion, Type: TypeCandidate, Candidate: "candidate:queued"}); err != nil {
+			t.Fatalf("queue candidate %d: %v", i, err)
+		}
+	}
+	if err := addOrQueueCandidate(c, peer, Message{Version: ProtocolVersion, Type: TypeCandidate, Candidate: "candidate:overflow"}); err == nil {
+		t.Fatal("candidate queue overflow was accepted")
+	}
+	if got := len(c.pendingCandidates); got != maxPendingCandidates {
+		t.Fatalf("pending candidates = %d, want %d", got, maxPendingCandidates)
+	}
+}
+
+func TestICEFailureTeardownClosesConnectionAndCanBeCancelled(t *testing.T) {
+	oldDelay := iceFailureTeardownDelay
+	iceFailureTeardownDelay = 20 * time.Millisecond
+	t.Cleanup(func() { iceFailureTeardownDelay = oldDelay })
+
+	hub := NewHub(meeting.New(2), config.NewStore(config.Config{}), slog.Default())
+
+	serverConnections := make(chan *websocket.Conn, 2)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+	dial := func(t *testing.T) (*websocket.Conn, *websocket.Conn) {
+		t.Helper()
+		browserConn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+		if err != nil {
+			t.Fatalf("dial websocket test peer: %v", err)
+		}
+		t.Cleanup(func() { _ = browserConn.Close() })
+		return browserConn, <-serverConnections
+	}
+
+	// A cancelled teardown must leave the connection open.
+	cancelBrowser, cancelServer := dial(t)
+	c := &client{conn: cancelServer, finished: make(chan struct{})}
+	hub.scheduleICEFailureTeardown(c)
+	hub.cancelICEFailureTeardown(c)
+	if err := cancelBrowser.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, _, err := cancelBrowser.ReadMessage(); err == nil {
+		t.Fatal("cancelled ICE failure teardown still closed the connection")
+	}
+
+	// An armed teardown closes the connection after the grace period. Each
+	// scenario uses a fresh connection because a timed-out read leaves a
+	// Gorilla connection in a broken state.
+	fireBrowser, fireServer := dial(t)
+	hub.scheduleICEFailureTeardown(&client{conn: fireServer, finished: make(chan struct{})})
+	if err := fireBrowser.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	// The teardown closes the raw connection without a close frame, so any
+	// non-timeout read error proves the connection was torn down.
+	for {
+		if _, _, err := fireBrowser.ReadMessage(); err != nil {
+			if strings.Contains(err.Error(), "timeout") {
+				t.Fatal("ICE failure teardown did not close the connection")
+			}
+			break
+		}
+	}
+}
+
+func TestHubScreenShareStateCorrectedAfterActiveTakeover(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:          ":8080",
+		MaxParticipants:   4,
+		EnableScreenShare: true,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+	token := firstJoined.ReconnectToken
+	if token == "" {
+		t.Fatal("join response did not include a reconnect token")
+	}
+
+	screenShareActive := true
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeScreenShare,
+		ParticipantID: firstJoined.Participant.ID, ScreenShareActive: &screenShareActive,
+	})
+	var shareState Message
+	readTestMessage(t, first, &shareState)
+	if shareState.Type != TypeScreenState || shareState.ScreenShareActive == nil || !*shareState.ScreenShareActive {
+		t.Fatalf("screen share start state = %+v", shareState)
+	}
+
+	// A second connection reclaims the still-connected participant. The
+	// superseded connection's cleanup releases the screen share before the
+	// resumed client can receive broadcasts, so the join path must send the
+	// (now inactive) state explicitly.
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", ReconnectToken: token,
+	})
+	var resumed Message
+	readTestMessage(t, second, &resumed)
+	if resumed.Type != TypeParticipant || resumed.Participant == nil || resumed.Participant.ID != firstJoined.Participant.ID {
+		t.Fatalf("resumed join response = %+v", resumed)
+	}
+	var corrected Message
+	readTestMessage(t, second, &corrected)
+	if corrected.Type != TypeScreenState || corrected.ScreenShareActive == nil || *corrected.ScreenShareActive {
+		t.Fatalf("resumed client screen share state = %+v, want inactive correction", corrected)
+	}
+}
+
+func TestApplyPendingCandidatesRequeuesRemainderOnError(t *testing.T) {
+	c := &client{}
+	c.outbound = make(chan Message, outboundQueueSize)
+	c.writerDone = make(chan struct{})
+	peer := &restartSignalingPeer{}
+
+	first := Message{Version: ProtocolVersion, Type: TypeCandidate, Candidate: "candidate:first"}
+	broken := Message{Version: ProtocolVersion, Type: TypeCandidate, Candidate: "candidate:broken"}
+	third := Message{Version: ProtocolVersion, Type: TypeCandidate, Candidate: "candidate:third"}
+	c.pendingCandidates = []Message{first, broken, third}
+	peer.remoteAnswer = "restart answer"
+
+	peer.failCandidates = map[string]bool{"candidate:broken": true}
+	err := applyPendingCandidates(c, peer)
+	if err == nil {
+		t.Fatal("the failing candidate error was not surfaced")
+	}
+	if len(peer.candidates) != 1 || peer.candidates[0] != first.Candidate {
+		t.Fatalf("applied candidates = %v, want only the first", peer.candidates)
+	}
+	if len(c.pendingCandidates) != 1 || c.pendingCandidates[0].Candidate != third.Candidate {
+		t.Fatalf("queued candidates = %v, want the third preserved for retry", c.pendingCandidates)
 	}
 }

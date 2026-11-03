@@ -267,21 +267,22 @@
       <div class="connection-history__table-wrap"><table class="connection-history__table"><caption>Recorded quality samples</caption><thead><tr><th scope="col">Time</th><th scope="col">RTT</th><th scope="col">Jitter</th><th scope="col">Packet loss</th><th scope="col">Video in / out</th><th scope="col">Audio in / out</th></tr></thead><tbody id="connection-history-samples"></tbody></table></div>
     </section>
   </main>
-  <script src="/js/adaptation-policy.js"></script>
-  <script src="/js/meeting-layout.js"></script>
-  <script src="/js/renegotiation-queue.js"></script>
-  <script src="/js/protocol.js"></script>
-  <script src="/js/chat-history.js"></script>
-  <script src="/js/meeting-status.js"></script>
-  <script src="/js/remote-media-identity.js"></script>
-  <script src="/js/remote-screen-video.js"></script>
-  <script src="/js/remote-camera-video.js"></script>
-  <script src="/js/screen-share-adaptation.js"></script>
-  <script src="/js/camera-readiness.js"></script>
-  <script src="/js/muted-speech-warning.js"></script>
-  <script src="/js/connection-methods.js"></script>
-  <script src="/js/connection-history.js"></script>
-<script src="/js/participant-identity.js"></script>
-  <script src="/js/app.js"></script>
+  <!-- defer keeps the load order (each module may depend on earlier ones)
+       while letting the browser parse the document without blocking. -->
+  <script defer src="/js/adaptation-policy.js"></script>
+  <script defer src="/js/meeting-layout.js"></script>
+  <script defer src="/js/renegotiation-queue.js"></script>
+  <script defer src="/js/protocol.js"></script>
+  <script defer src="/js/chat-history.js"></script>
+  <script defer src="/js/meeting-status.js"></script>
+  <script defer src="/js/remote-media-identity.js"></script>
+  <script defer src="/js/remote-screen-video.js"></script>
+  <script defer src="/js/remote-camera-video.js"></script>
+  <script defer src="/js/screen-share-adaptation.js"></script>
+  <script defer src="/js/muted-speech-warning.js"></script>
+  <script defer src="/js/connection-methods.js"></script>
+  <script defer src="/js/connection-history.js"></script>
+  <script defer src="/js/participant-identity.js"></script>
+  <script defer src="/js/app.js"></script>
 </body>
 </html>

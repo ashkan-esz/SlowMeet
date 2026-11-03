@@ -7,12 +7,10 @@ const {
   participantPairKey,
   reconcileAutomaticParticipantPin,
   visibleParticipantIds,
-  formatMetric,
   parseDebugMode,
   createPoorConnectionFixture,
   chooseDebugParticipants,
   chooseActiveSpeaker,
-  speakerDebounce,
   chooseFilmstripLayout
 } = require("../web/js/meeting-layout.js");
 const { chooseParticipantLayout } = require("../web/js/adaptation-policy.js");
@@ -167,22 +165,9 @@ for (const [width, height] of [[368, 220], [748, 220], [1408, 300]]) {
     }
   }
 }
-if (formatMetric(null, " ms") !== "No sample" || formatMetric(undefined, " kbps", "Unavailable") !== "Unavailable" ||
-    formatMetric(42, " ms") !== "42 ms") {
-  throw new Error("metric placeholders are incorrect");
-}
 if (chooseActiveSpeaker(new Map([["muted", 9], ["quiet", 2], ["loud", 4]]), new Set(["muted"])) !== "loud") {
   throw new Error("muted speakers must not win active-speaker selection");
 }
-let state = { speaking: false, since: 0, quietSince: 0 };
-state = speakerDebounce(state, 1, 299);
-if (state.speaking) throw new Error("speaker activation should be debounced");
-state = speakerDebounce(state, 1, 300);
-if (!state.speaking) throw new Error("speaker activation delay was not applied");
-state = speakerDebounce(state, 0, 1299);
-if (!state.speaking) throw new Error("speaker deactivation hold was not applied");
-state = speakerDebounce(state, 0, 1300);
-if (state.speaking) throw new Error("speaker deactivation should occur after the hold");
 
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");

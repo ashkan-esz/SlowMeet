@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -68,6 +69,36 @@ func cloneStrings(values []string) []string {
 }
 
 const MaxAllowedParticipants = 100
+
+// Bitrate caps keep a mistyped admin update from promising gigabit streams to
+// every client. They sit far above any profile the app negotiates.
+const (
+	maxVideoBitrateCap = 20_000_000
+	maxAudioBitrateCap = 512_000
+)
+
+// validICEServerURL checks that an ICE server entry carries one of the
+// accepted schemes; browsers silently drop malformed URLs, which reads as
+// "not configured on this server" in the UI. ICE server URLs use the
+// scheme:opaque form (no "//"), so the address lands in Opaque.
+func validICEServerURL(server string, schemes []string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(server))
+	if err != nil || parsed.Scheme == "" {
+		return false
+	}
+	if parsed.Host == "" && parsed.Opaque == "" {
+		return false
+	}
+	if strings.ContainsAny(parsed.Host+parsed.Opaque, " \t\r\n") {
+		return false
+	}
+	for _, scheme := range schemes {
+		if parsed.Scheme == scheme {
+			return true
+		}
+	}
+	return false
+}
 
 func LoadFromEnv() (Config, error) {
 	maxParticipants, err := envInt("MAX_PARTICIPANTS", 5)
@@ -207,11 +238,25 @@ func (c Config) Validate() error {
 	if c.MaxVideoFPS < c.DefaultVideoFPS || c.MaxVideoFPS > 60 {
 		return fmt.Errorf("MAX_VIDEO_FPS must be between DEFAULT_VIDEO_FPS and 60")
 	}
-	if c.DefaultAudioBitrate < 1 || c.MaxAudioBitrate < c.DefaultAudioBitrate {
-		return fmt.Errorf("audio bitrate configuration is invalid")
+	if c.DefaultAudioBitrate < 1 || c.MaxAudioBitrate < c.DefaultAudioBitrate ||
+		c.MaxAudioBitrate > maxAudioBitrateCap {
+		return fmt.Errorf("audio bitrates must be between 1 and %d bps with default <= max", maxAudioBitrateCap)
 	}
-	if c.MaxVideoBitrate < 1 {
-		return fmt.Errorf("MAX_VIDEO_BITRATE must be positive")
+	if c.MaxVideoBitrate < 1 || c.MaxVideoBitrate > maxVideoBitrateCap {
+		return fmt.Errorf("MAX_VIDEO_BITRATE must be between 1 and %d bps", maxVideoBitrateCap)
+	}
+	for _, server := range c.STUNServers {
+		if !validICEServerURL(server, []string{"stun"}) {
+			return fmt.Errorf("STUN_SERVERS entries must be stun: URLs, got %q", server)
+		}
+	}
+	for _, server := range append(append([]string(nil), c.TURNURLs...), c.TURNURL) {
+		if server == "" {
+			continue
+		}
+		if !validICEServerURL(server, []string{"turn", "turns"}) {
+			return fmt.Errorf("TURN URLs must be turn: or turns: URLs, got %q", server)
+		}
 	}
 	if c.ReconnectTimeout < 0 || c.ReconnectTimeout > 10*time.Minute {
 		return fmt.Errorf("RECONNECT_TIMEOUT_SECONDS must be between 0 and 600")

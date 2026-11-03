@@ -70,8 +70,8 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 
 	targetOffer := make(chan struct{}, 1)
 	secondTargetOffer := make(chan struct{}, 1)
-	router.SetVideoSubscriptions("target", []string{"source"})
-	router.SetVideoSubscriptions("second-target", nil)
+	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
+	router.SetVideoSubscriptionsWithLayer("second-target", nil, "medium")
 	router.Register("source", sourceIngress, nil)
 	router.Register("target", targetEgress, func() error {
 		select {
@@ -402,7 +402,7 @@ func TestRouterRegistersLateReceiverForActiveCamera(t *testing.T) {
 		}
 		return nil
 	})
-	router.SetVideoSubscriptions("target", []string{"source"})
+	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
 	waitIntegrationSignal(t, targetOffer, "late receiver camera offer")
 	negotiateIntegrationPeers(t, targetClient, targetEgress.Connection())
 	waitIntegrationPeerConnected(t, targetClient, "late camera receiver")
@@ -451,8 +451,8 @@ func TestRouterForwardsSimultaneousCamerasBothWays(t *testing.T) {
 	})
 	offersA := make(chan struct{}, 2)
 	offersB := make(chan struct{}, 2)
-	router.SetVideoSubscriptions("participant-a", []string{"participant-b"})
-	router.SetVideoSubscriptions("participant-b", []string{"participant-a"})
+	router.SetVideoSubscriptionsWithLayer("participant-a", []string{"participant-b"}, "medium")
+	router.SetVideoSubscriptionsWithLayer("participant-b", []string{"participant-a"}, "medium")
 	router.Register("participant-a", peerA, func() error {
 		offersA <- struct{}{}
 		return nil
@@ -545,7 +545,7 @@ func TestRouterForwardsLateSecondCameraContinuously(t *testing.T) {
 	// Prefer high before the publisher's medium layer arrives. The router must
 	// keep the best active layer flowing until the preferred layer is available.
 	router.SetVideoSubscriptionsWithLayer("participant-a", []string{"participant-b"}, "high")
-	router.SetVideoSubscriptions("participant-b", []string{"participant-a"})
+	router.SetVideoSubscriptionsWithLayer("participant-b", []string{"participant-a"}, "medium")
 	router.Register("participant-a", peerA, func() error { offersA <- struct{}{}; return nil })
 	router.Register("participant-b", peerB, func() error { offersB <- struct{}{}; return nil })
 	peerA.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
@@ -633,7 +633,7 @@ func TestRouterRemovesEndedCameraBeforeRepublish(t *testing.T) {
 		targetTracks <- track
 	})
 	targetOffer := make(chan struct{}, 4)
-	router.SetVideoSubscriptions("target", []string{"source"})
+	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
 	router.Register("source", sourceIngress, nil)
 	router.Register("target", targetEgress, func() error {
 		select {
@@ -697,6 +697,163 @@ func TestRouterRemovesEndedCameraBeforeRepublish(t *testing.T) {
 	if !readIntegrationRTP(ctx, secondTargetTrack) {
 		t.Fatal("receiver did not get a packet from the replacement camera")
 	}
+}
+
+func TestRouterReplacesPublicationWhenPublisherReFiresTrack(t *testing.T) {
+	router := NewRouter()
+	sourceClient := newIntegrationPeer(t)
+	sourceIngress := newIntegrationWrapperPeer(t)
+	targetEgress := newIntegrationWrapperPeer(t)
+	targetClient := newIntegrationPeer(t)
+
+	t.Cleanup(func() {
+		router.Unregister("source")
+		router.Unregister("target")
+		for _, peer := range []*pion.PeerConnection{sourceClient, targetClient} {
+			_ = peer.Close()
+		}
+		for _, peer := range []*internalwebrtc.Peer{sourceIngress, targetEgress} {
+			_ = peer.Close()
+		}
+	})
+
+	if _, err := targetClient.AddTransceiverFromKind(
+		pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
+	); err != nil {
+		t.Fatalf("add camera receive transceiver: %v", err)
+	}
+	targetTracks := make(chan *pion.TrackRemote, 2)
+	targetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		targetTracks <- track
+	})
+	targetOffer := make(chan struct{}, 4)
+	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
+	router.Register("source", sourceIngress, nil)
+	router.Register("target", targetEgress, func() error {
+		select {
+		case targetOffer <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	sourceIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("source", SourceRoleCamera, sourceIngress, track)
+	})
+
+	firstSourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+	}, "browser-camera-first")
+	if _, err := sourceClient.AddTrack(firstSourceTrack); err != nil {
+		t.Fatalf("add first source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPeerConnected(t, sourceClient, "camera source client")
+	sendIntegrationPacket(t, firstSourceTrack, pion.RTPCodecTypeVideo, 90_000, 1)
+	waitIntegrationPublicationCount(t, router, 1)
+	waitIntegrationSignal(t, targetOffer, "first camera offer")
+	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	sendIntegrationRTP(t, firstSourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	firstTargetTrack := waitIntegrationTrack(t, ctx, targetTracks, "first camera track")
+	if !readIntegrationRTP(ctx, firstTargetTrack) {
+		t.Fatal("receiver did not get the first camera packet")
+	}
+
+	router.mu.RLock()
+	firstPublication := router.pubs[publicationKey("source", SourceRoleCamera, "")]
+	router.mu.RUnlock()
+	if firstPublication == nil {
+		t.Fatal("first camera publication missing")
+	}
+
+	// A replacement camera track arrives while the first publication is still
+	// registered (a device swap produces a fresh SSRC without removing the
+	// old track): the router must replace the stale publication instead of
+	// silently dropping the fresh track.
+	secondSourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+	}, "browser-camera-second")
+	if _, err := sourceClient.AddTrack(secondSourceTrack); err != nil {
+		t.Fatalf("add replacement source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	sendIntegrationPacket(t, secondSourceTrack, pion.RTPCodecTypeVideo, 90_000, 3)
+	waitForPublicationReplacement(t, router, firstPublication)
+	select {
+	case <-firstPublication.stopped:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("replaced publication was not stopped")
+	}
+	select {
+	case <-firstPublication.forwardDone:
+	case <-time.After(routerIntegrationTimeout):
+		t.Fatal("replaced publication forwarding goroutine did not exit")
+	}
+
+	// The swap reuses the receiver's negotiated sender with ReplaceTrack, so
+	// no renegotiation may fire and no orphaned transceiver may accumulate.
+	select {
+	case <-targetOffer:
+		t.Fatal("publication swap triggered an unnecessary renegotiation offer")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if got := len(targetEgress.Connection().GetTransceivers()); got != 1 {
+		t.Fatalf("receiver transceivers after swap = %d, want the original 1 (m-line leak)", got)
+	}
+	sendIntegrationRTP(t, secondSourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	if !readIntegrationRTP(ctx, firstTargetTrack) {
+		t.Fatal("receiver did not get packets from the replacement camera on the reused m-line")
+	}
+
+	// A second consecutive swap must behave identically: the leak previously
+	// compounded per swap over a long session.
+	thirdSourceTrack := newIntegrationTrack(pion.RTPCodecCapability{
+		MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+	}, "browser-camera-third")
+	if _, err := sourceClient.AddTrack(thirdSourceTrack); err != nil {
+		t.Fatalf("add third source camera: %v", err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	sendIntegrationPacket(t, thirdSourceTrack, pion.RTPCodecTypeVideo, 90_000, 5)
+	waitForPublicationReplacement(t, router, router.currentPublication(publicationKey("source", SourceRoleCamera, "")))
+	select {
+	case <-targetOffer:
+		t.Fatal("second swap triggered an unnecessary renegotiation offer")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if got := len(targetEgress.Connection().GetTransceivers()); got != 1 {
+		t.Fatalf("receiver transceivers after second swap = %d, want the original 1", got)
+	}
+	sendIntegrationRTP(t, thirdSourceTrack, pion.RTPCodecTypeVideo, 90_000)
+	if !readIntegrationRTP(ctx, firstTargetTrack) {
+		t.Fatal("receiver did not get packets from the third camera on the reused m-line")
+	}
+}
+
+func waitForPublicationReplacement(t *testing.T, router *Router, old *publication) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	for {
+		router.mu.RLock()
+		current := router.pubs[old.key]
+		router.mu.RUnlock()
+		if current != nil && current != old {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("stale publication was not replaced by the re-fired track")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (r *Router) currentPublication(key string) *publication {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.pubs[key]
 }
 
 func newIntegrationPeer(t *testing.T) *pion.PeerConnection {

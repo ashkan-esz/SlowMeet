@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test cover vet fmt fmt-check tidy \
-	test-js test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+	test-js test-js-syntax test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -58,7 +58,14 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-camera-readiness test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity
+	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
+
+test-js-syntax: ## Syntax-check every browser JavaScript file
+	@status=0; \
+	for file in web/js/*.js; do \
+		$(NODE) --check "$$file" || status=1; \
+	done; \
+	exit $$status
 
 test-admin: ## Test the admin dashboard
 	$(NODE) scripts/test-admin.js
@@ -80,9 +87,6 @@ test-remote-camera-video: ## Test remote camera playback binding and recovery
 
 test-camera-quality: ## Test camera quality acceptance rules
 	$(NODE) scripts/test-camera-quality.js
-
-test-camera-readiness: ## Test advancing camera frame readiness checks
-	$(NODE) scripts/test-camera-readiness.js
 
 test-layout: ## Test responsive meeting layout behavior
 	$(NODE) scripts/test-meeting-layout.js
@@ -108,8 +112,18 @@ test-remote-screen-video: ## Test remote screen video binding and cleanup
 test-participant-identity: ## Test participant initials and avatar hashing
 	$(NODE) scripts/test-participant-identity.js
 
+test-connection-history: ## Test the connection history model
+	$(NODE) scripts/test-connection-history.js
+
+test-media-fixes: ## Test media lifecycle and performance fix wiring
+	$(NODE) scripts/test-media-fixes.js
+
 test-media-e2e: ## Run the complete deterministic two-participant Chromium suite
 	$(NODE) scripts/test-media-e2e.js
+
+.PHONY: test-media-e2e-four
+test-media-e2e-four: ## Run the opt-in four-person generated-media mixed-browser suite
+	$(NODE) scripts/test-four-person-e2e.js
 
 test-connection-methods-e2e: ## Verify live connection method switching and admin policy refresh
 	MEDIA_E2E_SCENARIO="connection method switch and admin policy refresh" $(NODE) scripts/test-media-e2e.js

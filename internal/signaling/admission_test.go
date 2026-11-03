@@ -160,6 +160,39 @@ func TestPendingConnectionCapAndFixedJoinDeadline(t *testing.T) {
 	defer next.Close()
 }
 
+func TestHubBoundsSignalingMessageSize(t *testing.T) {
+	h := NewHub(meeting.New(2), config.NewStore(config.Config{}), slog.Default())
+	defer h.Close()
+	s := httptest.NewServer(h)
+	defer s.Close()
+	u := "ws" + strings.TrimPrefix(s.URL, "http")
+	c := dialTestSocket(t, u)
+	defer c.Close()
+
+	// Four-person screen-share renegotiation produced a 20,450-byte browser
+	// offer, which exceeded the old 16 KiB websocket read limit.
+	writeTestMessage(t, c, Message{
+		Version: ProtocolVersion,
+		Type:    TypeOffer,
+		SDP:     strings.Repeat("x", 20*1024),
+	})
+
+	var response Message
+	readTestMessage(t, c, &response)
+	if response.Type != TypeError {
+		t.Fatalf("unjoined offer response = %+v, want an admission error after decoding the full message", response)
+	}
+
+	writeTestMessage(t, c, Message{
+		Version: ProtocolVersion,
+		Type:    TypeOffer,
+		SDP:     strings.Repeat("x", maxSignalingMessageSize),
+	})
+	if _, _, err := c.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+		t.Fatalf("oversized signaling message error = %v, want websocket close code %d", err, websocket.CloseMessageTooBig)
+	}
+}
+
 func TestActiveAdmissionTokenLifecycle(t *testing.T) {
 	h := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
 	defer h.Close()
@@ -199,7 +232,7 @@ func TestExpiredAdmissionCannotCommitAfterPeerSetup(t *testing.T) {
 	h.activeTokens["token"] = c
 	// The deadline wins while the handler is preparing the participant/peer.
 	h.expireAdmission(c)
-	if err := h.admit(c, Message{Type: TypeParticipant, ReconnectToken: "token"}); err == nil {
+	if err := h.admit(c, meeting.Participant{}, Message{Type: TypeParticipant, ReconnectToken: "token"}, false); err == nil {
 		t.Fatal("expired admission committed")
 	}
 	if len(c.outbound) != 0 || h.ValidateActiveReconnectToken("token") {

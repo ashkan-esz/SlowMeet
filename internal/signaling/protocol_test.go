@@ -260,6 +260,17 @@ func TestValidateRejectsEmptySDPAndCandidate(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsEndOfCandidates(t *testing.T) {
+	mline := uint16(0)
+	message := Message{
+		Version: ProtocolVersion, Type: TypeCandidate,
+		SDPMLineIndex: &mline,
+	}
+	if err := message.Validate(); err != nil {
+		t.Fatalf("valid end-of-candidates message rejected: %v", err)
+	}
+}
+
 func TestReadMessageRejectsUnknownAndTrailingJSON(t *testing.T) {
 	cases := []string{
 		`{"version":1,"type":"join","name":"Ashkan","unexpected":true}`,

@@ -17,7 +17,10 @@ func TestSnapshotAggregatesNetworkObservations(t *testing.T) {
 	if snapshot.PeerConnections != 1 || snapshot.Reconnects != 1 || snapshot.ConnectionFailures != 1 {
 		t.Fatalf("unexpected counters: %+v", snapshot)
 	}
-	if snapshot.NetworkSamples != 2 || !snapshot.HasNetworkSample || snapshot.LastNetworkSample <= 0 || snapshot.AverageRTTMs != 150 {
+	// The RTT average is an EWMA: the first sample seeds it, the second is
+	// folded in with alpha 0.1 (120*0.9 + 180*0.1 = 126), so a long-lived
+	// process tracks recent conditions instead of a lifetime mean.
+	if snapshot.NetworkSamples != 2 || !snapshot.HasNetworkSample || snapshot.LastNetworkSample <= 0 || snapshot.AverageRTTMs != 126 {
 		t.Fatalf("unexpected network aggregate: %+v", snapshot)
 	}
 	if snapshot.LastRTTMs != 180 || snapshot.LastPacketLoss10 != 25 ||

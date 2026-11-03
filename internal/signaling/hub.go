@@ -26,16 +26,27 @@ import (
 )
 
 const (
+	// Browser SDP offers grow with media sections and ICE candidates. Keep a
+	// bounded limit that accommodates renegotiation for screen sharing.
+	maxSignalingMessageSize = 64 * 1024
+
 	websocketPongWait   = 60 * time.Second
 	websocketPingPeriod = (websocketPongWait * 9) / 10
 	websocketWriteWait  = 10 * time.Second
-	outboundQueueSize   = 256
+	// outboundQueueSize must hold the worst-case join replay (at the 100
+	// participant cap: ack + chat history + roster + media states + screen
+	// state ≈ 202 messages) with headroom for concurrent room chatter.
+	outboundQueueSize   = 512
 	maxJoinAttempts     = 5
 	chatRoomID          = "default"
 	chatHistoryLimit    = 100
 	chatHistoryTTL      = 30 * time.Minute
 	reactionBurstLimit  = 6
 	reactionBurstWindow = 3 * time.Second
+
+	// maxPendingCandidates bounds the ICE candidates queued before a remote
+	// description exists, so a misbehaving client cannot queue without bound.
+	maxPendingCandidates = 512
 
 	// Failed meeting-password attempts are throttled per client IP to slow
 	// down online guessing of the room password.
@@ -45,22 +56,31 @@ const (
 
 var chatHistoryExpiry = chatHistoryTTL
 
+// iceFailureTeardownDelay gives a failed ICE connection a short grace period
+// to recover (for example through a client-driven restart) before the
+// signaling connection is torn down. A variable so tests can shorten it.
+var iceFailureTeardownDelay = 5 * time.Second
+
 type roomChatHistory struct {
 	messages []ChatHistoryEntry
 	expiry   *time.Timer
 }
 
 type client struct {
-	conn                      *websocket.Conn
-	finished                  chan struct{}
-	outbound                  chan Message
-	writerDone                chan struct{}
-	remoteIP                  string
-	participant               meeting.Participant
-	participantID             string
-	reconnectToken            string
-	resumed                   bool
-	joined                    bool
+	conn           *websocket.Conn
+	finished       chan struct{}
+	outbound       chan Message
+	writerDone     chan struct{}
+	remoteIP       string
+	participant    meeting.Participant
+	participantID  string
+	reconnectToken string
+	resumed        bool
+	joined         bool
+	// announced records whether this participant's join was broadcast to the
+	// room; only announced departures broadcast a left event. Written by the
+	// connection's read loop and read by its cleanup path (same goroutine).
+	announced                 bool
 	intentionalLeave          bool
 	joinAttempts              int
 	admissionExpired          bool // guarded by Hub.mu
@@ -68,6 +88,7 @@ type client struct {
 	negotiationMu             sync.Mutex
 	negotiationReady          bool
 	remoteDescription         bool
+	iceFailureTimer           *time.Timer // guarded by negotiationMu
 	pendingCandidates         []Message
 	pendingLocalCandidates    []Message
 	offerInFlight             bool
@@ -264,6 +285,12 @@ func (h *Hub) chatHistorySnapshot(roomID string) []ChatHistoryEntry {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.chatHistorySnapshotLocked(roomID)
+}
+
+// chatHistorySnapshotLocked copies the room chat history. The caller must
+// hold h.mu (at least for reading).
+func (h *Hub) chatHistorySnapshotLocked(roomID string) []ChatHistoryEntry {
 	history := h.chatHistory[roomID]
 	if history == nil || len(history.messages) == 0 {
 		return nil
@@ -276,7 +303,13 @@ func (h *Hub) recordChatMessage(roomID string, entry ChatHistoryEntry) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.recordChatMessageLocked(roomID, entry)
+	h.mu.Unlock()
+}
+
+// recordChatMessageLocked appends the entry to the room history. The caller
+// must hold h.mu and is responsible for the RetainChatHistory check.
+func (h *Hub) recordChatMessageLocked(roomID string, entry ChatHistoryEntry) {
 	history := h.chatHistory[roomID]
 	if history == nil {
 		history = &roomChatHistory{}
@@ -290,6 +323,24 @@ func (h *Hub) recordChatMessage(roomID string, entry ChatHistoryEntry) {
 	if len(history.messages) > chatHistoryLimit {
 		history.messages = history.messages[len(history.messages)-chatHistoryLimit:]
 	}
+}
+
+// recordAndBroadcastChat records a chat message and fans it out as one atomic
+// step. Admission snapshots the chat replay under the same lock, so a client
+// admitted concurrently sees a given message either in its replay or as a
+// live broadcast — never neither and never both.
+func (h *Hub) recordAndBroadcastChat(c *client, msg Message, entry *ChatHistoryEntry) {
+	msg.prepare()
+	h.mu.Lock()
+	if entry != nil {
+		h.recordChatMessageLocked(chatRoomID, *entry)
+	}
+	for member := range h.roomMembers {
+		if member != c {
+			_ = member.write(msg)
+		}
+	}
+	h.mu.Unlock()
 }
 
 func (h *Hub) scheduleChatHistoryExpiry(roomID string) {
@@ -338,7 +389,7 @@ func (h *Hub) disconnect(c *client) {
 	}
 	if c.intentionalLeave || h.closed || c.reconnectToken == "" || (!c.joined && !c.resumed) {
 		h.mu.Unlock()
-		h.removeParticipant(c.participant)
+		h.removeClientParticipant(c)
 		return
 	}
 
@@ -348,7 +399,7 @@ func (h *Hub) disconnect(c *client) {
 		// participant leaves the meeting immediately instead of waiting for a
 		// reconnect.
 		h.mu.Unlock()
-		h.removeParticipant(c.participant)
+		h.removeClientParticipant(c)
 		h.Logger.Info("participant_disconnected", "participant_id", c.participant.ID, "name", c.participant.Name)
 		return
 	}
@@ -366,8 +417,10 @@ func (h *Hub) disconnect(c *client) {
 	}
 	h.mu.Unlock()
 
+	left := Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant}
+	left.prepare()
 	for _, client := range clients {
-		_ = client.write(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant})
+		_ = client.write(left)
 	}
 	h.mu.Lock()
 	if h.pending[c.reconnectToken] == pending {
@@ -412,6 +465,10 @@ func (h *Hub) requestScreenShare(c *client, active bool, mediaIDs ...string) err
 		return fmt.Errorf("screen sharing is disabled")
 	}
 	h.mu.Lock()
+	previousOwner := ""
+	if h.screenSharer != nil {
+		previousOwner = h.screenSharer.participant.ID
+	}
 	if active {
 		if h.screenSharer != nil && h.screenSharer != c {
 			h.mu.Unlock()
@@ -434,7 +491,11 @@ func (h *Hub) requestScreenShare(c *client, active bool, mediaIDs ...string) err
 	// its sender/transceiver across stop and re-share, so Pion does not emit a
 	// second OnTrack event for the same remote track.
 	h.router.SetPublicationActive(c.participant.ID, media.SourceRoleScreen, active)
-	h.broadcast(h.screenShareMessage(owner != "", owner))
+	// Re-asserting an unchanged state (a duplicate start, or a stop from a
+	// non-sharer) must not re-fan-out the same broadcast.
+	if owner != previousOwner {
+		h.broadcast(h.screenShareMessage(owner != "", owner))
+	}
 	return nil
 }
 
@@ -519,17 +580,6 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 	return c.participant, true, activeTakeover
 }
 
-func (h *Hub) isPendingParticipant(id string) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, pending := range h.pending {
-		if pending.participant.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
 func (h *Hub) removeParticipant(participant meeting.Participant) {
 	h.forgetMediaState(participant.ID)
 	if h.Meeting.Leave(participant.ID) {
@@ -537,6 +587,18 @@ func (h *Hub) removeParticipant(participant meeting.Participant) {
 		h.scheduleChatHistoryExpiry(chatRoomID)
 		h.Logger.Info("participant_left", "participant_id", participant.ID, "name", participant.Name)
 	}
+}
+
+// removeClientParticipant releases a disconnected client's meeting slot. A
+// client whose join failed before the room was told about it never produced a
+// join event, so its departure must not broadcast a phantom left event either.
+func (h *Hub) removeClientParticipant(c *client) {
+	if !c.announced {
+		h.forgetMediaState(c.participant.ID)
+		_ = h.Meeting.Leave(c.participant.ID)
+		return
+	}
+	h.removeParticipant(c.participant)
 }
 
 func (h *Hub) forgetMediaState(participantID string) {
@@ -552,6 +614,63 @@ func sameOrigin(r *http.Request) bool {
 	}
 	parsed, err := url.Parse(origin)
 	return err == nil && parsed.Host == r.Host
+}
+
+// scheduleICEFailureTeardown closes the signaling connection after a short
+// grace period when ICE fails terminally. Without this, a failed peer
+// connection keeps its participant, publications, and receiver subscriptions
+// until the WebSocket heartbeat notices, leaving black tiles for up to a
+// minute. Closing the connection routes the participant through the ordinary
+// reconnect flow.
+func (h *Hub) scheduleICEFailureTeardown(c *client) {
+	c.negotiationMu.Lock()
+	defer c.negotiationMu.Unlock()
+	if c.iceFailureTimer != nil {
+		return
+	}
+	c.iceFailureTimer = time.AfterFunc(iceFailureTeardownDelay, func() {
+		c.negotiationMu.Lock()
+		c.iceFailureTimer = nil
+		participantID := c.participantID
+		conn := c.conn
+		c.negotiationMu.Unlock()
+		// timer.Stop loses the race against an already-running callback, so
+		// re-check the live ICE state: a connection that recovered at the same
+		// moment the deadline fired must not be torn down.
+		if conn == nil || h.iceConnectionRecovered(c) {
+			return
+		}
+		h.Logger.Info("ice_failure_teardown", "participant_id", participantID)
+		_ = conn.Close()
+	})
+}
+
+// iceConnectionRecovered reports whether the peer connection has returned to
+// a progressing ICE state since the failure timer was armed.
+func (h *Hub) iceConnectionRecovered(c *client) bool {
+	c.negotiationMu.Lock()
+	peer := c.peer
+	c.negotiationMu.Unlock()
+	if peer == nil || peer.Connection() == nil {
+		return false
+	}
+	switch peer.Connection().ICEConnectionState() {
+	case pion.ICEConnectionStateChecking, pion.ICEConnectionStateConnected, pion.ICEConnectionStateCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// cancelICEFailureTeardown stops a pending ICE failure teardown, for example
+// because negotiation is progressing again.
+func (h *Hub) cancelICEFailureTeardown(c *client) {
+	c.negotiationMu.Lock()
+	defer c.negotiationMu.Unlock()
+	if c.iceFailureTimer != nil {
+		c.iceFailureTimer.Stop()
+		c.iceFailureTimer = nil
+	}
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -577,7 +696,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetReadLimit(16 * 1024)
+	conn.SetReadLimit(maxSignalingMessageSize)
 	conn.SetReadDeadline(time.Now().Add(websocketPongWait))
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
@@ -609,6 +728,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		close(done)
 		conn.Close()
 		<-c.writerDone
+		h.cancelICEFailureTeardown(c)
 		h.mu.Lock()
 		delete(h.clients, c)
 		delete(h.roomMembers, c)
@@ -638,6 +758,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := readMessage(conn, &msg); err != nil {
 			return
 		}
+		// A live client keeps exchanging data frames even when its pong
+		// control frames are swallowed by an intermediary; every successful
+		// read is proof of liveness.
+		_ = conn.SetReadDeadline(time.Now().Add(websocketPongWait))
 		if msg.Type == TypeJoin && c.participant.ID == "" {
 			c.joinAttempts++
 			if c.joinAttempts > maxJoinAttempts {
@@ -723,13 +847,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.Type == TypeChat {
 				msg = roomMessage(c, msg)
+				var entry *ChatHistoryEntry
 				if h.Config.Snapshot().RetainChatHistory {
-					h.recordChatMessage(chatRoomID, ChatHistoryEntry{
+					entry = &ChatHistoryEntry{
 						ID: uuid.NewString(), ParticipantID: c.participant.ID, Author: c.participant.Name,
 						Text: msg.ChatText, Timestamp: time.Now().UTC(),
-					})
+					}
 				}
-				h.broadcastExcept(c, msg)
+				h.recordAndBroadcastChat(c, msg, entry)
 				continue
 			}
 			if msg.Type == TypeReaction {
@@ -804,11 +929,15 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			switch state {
 			case pion.ICEConnectionStateConnected, pion.ICEConnectionStateCompleted:
 				event = "webrtc_connected"
+				h.cancelICEFailureTeardown(c)
+			case pion.ICEConnectionStateChecking:
+				h.cancelICEFailureTeardown(c)
 			case pion.ICEConnectionStateDisconnected:
 				event = "network_degraded"
 			case pion.ICEConnectionStateFailed:
 				event = "webrtc_failed"
 				h.metrics.ConnectionFailed()
+				h.scheduleICEFailureTeardown(c)
 			}
 			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
 		})
@@ -826,42 +955,27 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if role == media.SourceRoleCamera {
 				layer = media.CameraLayerFromRID(track.RID())
 			}
-			h.router.Publish(c.participant.ID, role, c.peer, track, layer)
+			// Read the participant ID from the join-flow local instead of
+			// c.participant: OnTrack runs on a Pion goroutine that does not
+			// hold h.mu, so touching c.participant here would race the hand
+			// state handler that rewrites it.
+			h.router.Publish(participant.ID, role, c.peer, track, layer)
 		})
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})
-		history := h.chatHistorySnapshot(chatRoomID)
-		if err := h.admit(c, Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
-			ReconnectToken: c.reconnectToken, ChatHistory: history}); err != nil {
+		if err := h.admit(c, participant, Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
+			ReconnectToken: c.reconnectToken}, activeTakeover); err != nil {
 			return
 		}
 		admissionTimer.Stop()
 		releasePending()
-		for _, existing := range h.Meeting.List() {
-			if existing.ID != participant.ID && !h.isPendingParticipant(existing.ID) {
-				_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})
-			}
-		}
-		h.mu.RLock()
-		for _, state := range h.mediaStates {
-			_ = c.write(state)
-		}
-		h.mu.RUnlock()
-		h.mu.RLock()
-		screenOwner := ""
-		if h.screenSharer != nil {
-			screenOwner = h.screenSharer.participant.ID
-		}
-		h.mu.RUnlock()
-		if screenOwner != "" {
-			_ = c.write(h.screenShareMessage(true, screenOwner))
-		}
 		if !activeTakeover {
 			h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
 		}
 		h.Logger.Info("participant_joined", "participant_id", participant.ID, "name", participant.Name)
 		c.joined = true
+		c.announced = true
 		h.metrics.PeerJoined()
 		if resumed {
 			h.metrics.Reconnected()
@@ -1015,6 +1129,9 @@ func applyRemoteAnswer(c *client, peer answerCandidatePeer, sdp string) error {
 
 func addOrQueueCandidate(c *client, peer candidatePeer, candidate Message) error {
 	if !c.remoteDescription {
+		if len(c.pendingCandidates) >= maxPendingCandidates {
+			return fmt.Errorf("too many queued ICE candidates")
+		}
 		c.pendingCandidates = append(c.pendingCandidates, candidate)
 		return nil
 	}
@@ -1024,8 +1141,11 @@ func addOrQueueCandidate(c *client, peer candidatePeer, candidate Message) error
 func applyPendingCandidates(c *client, peer candidatePeer) error {
 	pending := c.pendingCandidates
 	c.pendingCandidates = nil
-	for _, candidate := range pending {
+	for index, candidate := range pending {
 		if err := peer.AddICECandidate(candidate.Candidate, candidate.SDPMid, candidate.SDPMLineIndex); err != nil {
+			// Keep the not-yet-applied candidates queued so one malformed
+			// candidate does not discard the valid ones behind it.
+			c.pendingCandidates = append(append([]Message(nil), pending[index+1:]...), c.pendingCandidates...)
 			return err
 		}
 	}
@@ -1106,7 +1226,15 @@ func (c *client) writeFrame(msg Message) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteWait)); err != nil {
 		return err
 	}
-	if err := c.conn.WriteJSON(msg); err != nil {
+	var err error
+	if msg.raw != nil {
+		// Broadcasts serialize once and share the encoded bytes; WriteMessage
+		// copies the payload onto the wire before returning.
+		err = c.conn.WriteMessage(websocket.TextMessage, msg.raw)
+	} else {
+		err = c.conn.WriteJSON(msg)
+	}
+	if err != nil {
 		return err
 	}
 	return c.conn.SetWriteDeadline(time.Time{})
@@ -1185,6 +1313,7 @@ func (h *Hub) broadcast(msg Message) {
 }
 
 func (h *Hub) broadcastExcept(excluded *client, msg Message) {
+	msg.prepare()
 	h.mu.RLock()
 	clients := make([]*client, 0, len(h.roomMembers))
 	for c := range h.roomMembers {
@@ -1199,6 +1328,7 @@ func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 }
 
 func (h *Hub) broadcastToRoom(msg Message) {
+	msg.prepare()
 	h.mu.RLock()
 	clients := slices.Collect(maps.Keys(h.roomMembers))
 	h.mu.RUnlock()

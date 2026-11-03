@@ -2602,7 +2602,9 @@ async function testUnavailableMicrophone(browser, baseURL, contexts, traceContex
     const page = await joinMeeting(context, "No microphone", baseURL);
     await waitForPeerConnection(page);
     await page.waitForFunction(() => document.querySelector("#mic")?.disabled === true);
-    assert.equal(await page.locator("#mic").getAttribute("aria-label"), "Microphone unavailable");
+    // The accessible label composes the visible "Mic" prefix with the status.
+    assert.ok((await page.locator("#mic").getAttribute("aria-label")).includes("Microphone unavailable"),
+      "the microphone control should report its unavailability");
     console.log("[pass] unavailable microphone: meeting joined and microphone control is disabled");
     passed = true;
   } finally {
@@ -2623,7 +2625,11 @@ async function testUnavailableCamera(browser, baseURL, contexts, traceContexts) 
     const page = await joinMeeting(context, "No camera", baseURL);
     await waitForPeerConnection(page);
     await page.locator("#camera").click();
-    await page.waitForFunction(() => document.querySelector("#status")?.textContent.includes("Camera unavailable"),
+    // In-meeting statuses route to the dedicated banner, not the join form's
+    // status line.
+    await page.waitForFunction(
+      () => ["#status", "#meeting-status"].some((selector) =>
+        document.querySelector(selector)?.textContent.includes("Camera unavailable")),
       null, { timeout: 15000 });
     assert.equal(await page.locator("#camera").getAttribute("aria-pressed"), "false");
     assert.equal(await page.locator("#camera").getAttribute("aria-busy"), null,

@@ -654,21 +654,20 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .pagination-button { min-width: 44px; min-height: 36px; padding: 0 8px; color: var(--lm-text); background: transparent; border: 0; border-radius: 999px; font-size: 11px; }
 .pagination-button:hover:not(:disabled), .pagination-button:focus-visible { background: var(--lm-surface-2); }
 .pagination-button:disabled { cursor: not-allowed; color: var(--lm-text-dim); opacity: .45; }
-.participant-grid { display: grid; grid-area: 1 / 1; align-self: stretch; justify-self: stretch; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); place-content: center; gap: var(--lm-gap); min-width: 0; min-height: 0; margin: 0; padding: 0; list-style: none; }
+.participant-grid { display: grid; grid-area: 1 / 1; align-self: stretch; justify-self: stretch; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); place-content: center; gap: var(--lm-gap); min-width: 0; min-height: 0; margin: 0; padding: 0; list-style: none; contain: layout; }
 .participant-grid[data-count="1"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 .participant-grid[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); }
 .participant-grid[data-count="3"], .participant-grid[data-count="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .participant-grid[data-count="5"], .participant-grid[data-count="6"] { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .participant-grid[data-count="7"], .participant-grid[data-count="8"], .participant-grid[data-count="9"] { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
-.participant-grid.has-remote .participant-tile.is-local { position: absolute; inset-inline-end: var(--pip-inset, 16px); inset-block-end: var(--pip-inset, 16px); z-index: 3; width: 160px; height: 90px; min-height: 0; cursor: grab; touch-action: none; user-select: none; }
-.participant-grid.has-remote .participant-tile.is-local.is-dragging { cursor: grabbing; transition: none; }
+.participant-grid.has-remote .participant-tile.is-local { position: absolute; inset-inline-end: var(--pip-inset, 16px); inset-block-end: var(--pip-inset, 16px); z-index: 3; width: 160px; height: 90px; min-height: 0; }
 .participant-grid.has-remote .participant-tile.is-local[data-pip-position="top-left"] { inset-inline-start: var(--pip-inset, 16px); inset-inline-end: auto; inset-block-start: var(--pip-inset, 16px); inset-block-end: auto; }
 .participant-grid.has-remote .participant-tile.is-local[data-pip-position="top-right"] { inset-inline-start: auto; inset-inline-end: var(--pip-inset, 16px); inset-block-start: var(--pip-inset, 16px); inset-block-end: auto; }
 .participant-grid.has-remote .participant-tile.is-local[data-pip-position="bottom-left"] { inset-inline-start: var(--pip-inset, 16px); inset-inline-end: auto; inset-block-start: auto; inset-block-end: var(--pip-inset, 16px); }
 .participant-grid.has-remote .participant-tile.is-local[data-pip-position="bottom-right"] { inset-inline-start: auto; inset-inline-end: var(--pip-inset, 16px); inset-block-start: auto; inset-block-end: var(--pip-inset, 16px); }
 .participant-grid.has-remote .participant-tile.is-local .participant-video { aspect-ratio: 16 / 9; }
 .participant-grid.has-remote .participant-tile.is-local .participant-name { font-size: 10px; }
-.participant-tile { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; min-height: 0; aspect-ratio: 16 / 9; padding: 0; overflow: hidden; background: #111318; border: 0; border-radius: var(--lm-r-md); box-shadow: none; isolation: isolate; }
+.participant-tile { position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; min-height: 0; aspect-ratio: 16 / 9; padding: 0; overflow: hidden; background: #111318; border: 0; border-radius: var(--lm-r-md); box-shadow: none; isolation: isolate; contain: layout paint; }
 .participant-tile[hidden] { display: none !important; }
 .participant-tile.is-speaking { box-shadow: inset 0 0 0 2px var(--lm-accent); }
 .participant-tile.is-focused { z-index: 4; box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 4px var(--lm-accent); }
@@ -684,7 +683,7 @@ html:has(.meeting-shell:not([hidden])) #root { height: 100%; overflow: hidden; }
 .participant-mic[hidden] { display: none; }
 .participant-mic.is-off { color: #fff; background: var(--lm-danger); }
 .participant-mic svg { width: 16px; height: 16px; }
-.participant-meta { position: absolute; left: 12px; bottom: 12px; z-index: 3; display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); min-width: 0; padding: 8px; color: #fff; background: rgba(0,0,0,.6); backdrop-filter: blur(8px); border-radius: 6px; }
+.participant-meta { position: absolute; left: 12px; bottom: 12px; z-index: 3; display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); min-width: 0; padding: 8px; color: #fff; background: rgba(0,0,0,.6); border-radius: 6px; }
 .participant-name { min-width: 0; overflow: hidden; color: #fff; font-size: 14px; font-weight: 500; line-height: 1.2; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0,0,0,.45); white-space: nowrap; }
 .participant-video-paused { position: absolute; inset-block-start: 8px; inset-inline-start: 50%; z-index: 4; display: inline-flex; align-items: center; gap: 5px; padding: 6px; color: #1c1608; background: rgba(251,191,36,.9); border-radius: 6px; font-size: 10px; font-weight: 750; line-height: 1; transform: translateX(-50%); white-space: nowrap; }
 .participant-video-paused[hidden] { display: none; }
@@ -1071,7 +1070,6 @@ html:has(.meeting-shell:not([hidden])) #root {
   background: rgba(13, 16, 20, .72);
   border: 1px solid rgba(255, 255, 255, .08);
   border-radius: var(--lm-r-sm);
-  backdrop-filter: blur(8px);
 }
 .participant-name { color: var(--lm-text); font-size: 13px; }
 .participant-state {

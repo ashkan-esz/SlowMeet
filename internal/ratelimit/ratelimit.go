@@ -7,6 +7,7 @@ package ratelimit
 import (
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -186,15 +187,33 @@ func socketPeerKey(remoteAddr string) string {
 	return "unknown"
 }
 
+// trustedProxyCache memoizes the last parsed CIDR list: the trusted-proxy
+// configuration changes at admin pace, but parsing runs on every HTTP request
+// and WebSocket connection.
+var trustedProxyCache = struct {
+	mu     sync.Mutex
+	raw    []string
+	parsed []*net.IPNet
+}{}
+
+// parseTrustedProxyCIDRs converts the configured CIDR strings to networks.
+// The returned slice is shared between callers and must only be read.
 func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
-	trusted := make([]*net.IPNet, 0, len(cidrs))
+	trustedProxyCache.mu.Lock()
+	defer trustedProxyCache.mu.Unlock()
+	if slices.Equal(trustedProxyCache.raw, cidrs) {
+		return trustedProxyCache.parsed
+	}
+	parsed := make([]*net.IPNet, 0, len(cidrs))
 	for _, cidr := range cidrs {
 		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err == nil {
-			trusted = append(trusted, network)
+			parsed = append(parsed, network)
 		}
 	}
-	return trusted
+	trustedProxyCache.raw = append([]string(nil), cidrs...)
+	trustedProxyCache.parsed = parsed
+	return parsed
 }
 
 func isTrusted(ip net.IP, trusted []*net.IPNet) bool {

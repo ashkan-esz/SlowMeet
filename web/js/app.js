@@ -303,13 +303,28 @@ function setCameraPending(pending) {
 
 function mediaAccessMessage(kind, error) {
   const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
-  if (kind === "audio") {
-    return denied
+  const deviceLabel = kind === "audio" ? "Microphone" : "Camera";
+  const continueLabel = kind === "audio"
+    ? "You can still join without audio."
+    : "You can still join audio-only.";
+  if (denied) {
+    return kind === "audio"
       ? "Microphone access was denied. Check your browser permissions or join muted."
-      : "Microphone unavailable; continuing without audio.";
+      : "Camera access was denied. You can still join without video.";
   }
-  return denied
-    ? "Camera access was denied. You can still join without video."
+  // Device-level failures are not the same as "no device": give each cause
+  // its own message instead of masking it as plain unavailability.
+  if (error?.name === "NotReadableError" || error?.name === "TrackStartError") {
+    return `${deviceLabel} is busy or reported a hardware error. Close other apps using it and try again.`;
+  }
+  if (error?.name === "OverconstrainedError") {
+    return `${deviceLabel} does not support the requested quality settings. ${continueLabel}`;
+  }
+  if (error?.name === "AbortError") {
+    return `${deviceLabel} could not be started. Try again in a moment.`;
+  }
+  return kind === "audio"
+    ? "Microphone unavailable; continuing without audio."
     : "Camera unavailable; continuing audio-only.";
 }
 
@@ -319,7 +334,6 @@ const pipPositions = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const participantPageSize = 9;
 let participantPage = 0;
 let focusedParticipantID;
-let pipDragState;
 let pinnedParticipantIDs = [];
 let automaticPinnedParticipantID = null;
 let automaticPinDismissedPairKey = null;
@@ -422,7 +436,10 @@ function renderMeetingLayout() {
     if (!container || !element) return;
     element.item.classList.toggle("is-layout-main", className === "main");
     element.item.classList.toggle("is-screen-main", className === "screen-main" || element.item.dataset.sharing === "true");
-    container.append(element.item);
+    // Re-appending a node that is already the container's last child is a
+    // DOM move that invalidates layout; skip it. This render fires on every
+    // speaker change, and each moved tile costs a layout pass.
+    if (container.lastElementChild !== element.item) container.append(element.item);
     updateParticipantVideoVisibility(element);
   };
   if (mode === "grid") {
@@ -462,7 +479,7 @@ function updateParticipantLayout() {
     ? [...filmstripContainer.querySelectorAll(":scope > .participant-tile")].filter((item) => !item.hidden)
     : [];
 
-  if (filmstripContainer && typeof chooseFilmstripLayout === "function") {
+  if (filmstripContainer && typeof chooseParticipantLayout === "function") {
     const filmstripBounds = filmstripContainer.getBoundingClientRect();
     const isMobilePinned = mode === "pinned" && window.matchMedia?.("(max-width: 720px)").matches;
     if (mode === "pinned" && typeof chooseParticipantLayout === "function") {
@@ -627,8 +644,31 @@ function updateParticipantTileState(element) {
   element.state.hidden = !label;
 }
 
+let peopleListSignature = "";
+
 function renderPeopleList() {
   if (!peopleList) return;
+  // The list rebuilds from hot paths (media state, connection state, hands);
+  // skip the DOM rebuild when nothing it renders has changed.
+  const signatureParts = [];
+  participantElements.forEach((element, participantID) => {
+    signatureParts.push([
+      participantID,
+      element.name.textContent,
+      participantID === localParticipantID ? 1 : 0,
+      element.item.dataset.connection || "",
+      element.item.dataset.mic || "",
+      element.item.dataset.camera || "",
+      element.item.dataset.quality || "",
+      element.item.dataset.handRaised || "",
+      element.item.dataset.handOrder || "",
+      receiveVideoEnabled ? 1 : 0,
+      hiddenParticipantIDs.has(participantID) ? 1 : 0
+    ].join(":"));
+  });
+  const signature = signatureParts.join("|");
+  if (signature === peopleListSignature) return;
+  peopleListSignature = signature;
   peopleList.replaceChildren();
   participantElements.forEach((element, participantID) => {
     const row = document.createElement("li");
@@ -717,7 +757,9 @@ function updateParticipantAriaLabel(element) {
   const qualityState = participantQualityLabels[element.item.dataset.quality] || "unknown";
   const pinnedState = element.item.classList.contains("is-pinned") ? " Pinned." : "";
   const localState = element.item.classList.contains("is-local") ? " (You)" : "";
-  const selfView = element.item.classList.contains("is-local") && participants.classList.contains("is-pip-mode")
+  // The local tile becomes a corner self-view whenever a remote tile shares
+  // the grid; the arrow-key hint is only true in that state.
+  const selfView = element.item.classList.contains("is-local") && participants.classList.contains("has-remote")
     ? " Self-view. Use arrow keys to move it between corners."
     : "";
   const raisedHand = element.item.dataset.handRaised === "true";
@@ -744,10 +786,14 @@ function updateParticipantVideoVisibility(element) {
   element.avatar.hidden = visible || hasScreen;
   element.cameraVideo.hidden = !visible || screenMain;
   element.screenVideo.hidden = !hasScreen;
-  if (visible && !screenMain) element.cameraVideo.play().catch(() => {});
-  else element.cameraVideo.pause();
-  if (hasScreen) element.screenVideo.play().catch(() => {});
-  else element.screenVideo.pause();
+  // play()/pause() churn runs several times per second per tile during
+  // active conversation; only touch the elements when the state changed.
+  if (visible && !screenMain) {
+    if (element.cameraVideo.paused) element.cameraVideo.play().catch(() => {});
+  } else if (!element.cameraVideo.paused) element.cameraVideo.pause();
+  if (hasScreen) {
+    if (element.screenVideo.paused) element.screenVideo.play().catch(() => {});
+  } else if (!element.screenVideo.paused) element.screenVideo.pause();
   updateParticipantTileState(element);
 }
 
@@ -839,15 +885,6 @@ function markLocalParticipant(participantID) {
   setPipPosition(element.item, readStoredValue("meeting.pipPosition") || "bottom-right", false);
   updateParticipantCount();
   updateRaisedHandsUI();
-}
-
-function pipPositionForPoint(clientX, clientY) {
-  const stage = participants?.closest(".stage-panel");
-  const bounds = stage?.getBoundingClientRect();
-  if (!bounds) return "bottom-right";
-  const left = clientX < bounds.left + bounds.width / 2;
-  const top = clientY < bounds.top + bounds.height / 2;
-  return `${top ? "top" : "bottom"}-${left ? "left" : "right"}`;
 }
 
 function pipPositionForKey(position, key) {
@@ -986,53 +1023,6 @@ function openParticipantMenu(participantID, trigger) {
   });
 }
 
-function pipTileFromEvent(event) {
-  const tile = event.target.closest?.(".participant-tile.is-local");
-  return tile && participants?.contains(tile) && participants.classList.contains("has-remote") &&
-    participants.classList.contains("is-pip-mode") ? tile : undefined;
-}
-
-function finishPipDrag() {
-  if (!pipDragState) return;
-  const { item, pointerId } = pipDragState;
-  if (item.hasPointerCapture?.(pointerId)) item.releasePointerCapture(pointerId);
-  item.classList.remove("is-dragging");
-  item.style.removeProperty("transform");
-  pipDragState = undefined;
-}
-
-participants.addEventListener("pointerdown", (event) => {
-  const item = pipTileFromEvent(event);
-  if (!item || event.button !== 0) return;
-  event.preventDefault();
-  pipDragState = {
-    item,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    moved: false
-  };
-  item.classList.add("is-dragging");
-  item.setPointerCapture?.(event.pointerId);
-});
-
-participants.addEventListener("pointermove", (event) => {
-  if (!pipDragState || event.pointerId !== pipDragState.pointerId) return;
-  const deltaX = event.clientX - pipDragState.startX;
-  const deltaY = event.clientY - pipDragState.startY;
-  if (!pipDragState.moved && Math.hypot(deltaX, deltaY) < 6) return;
-  pipDragState.moved = true;
-  pipDragState.item.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
-});
-
-participants.addEventListener("pointerup", (event) => {
-  if (!pipDragState || event.pointerId !== pipDragState.pointerId) return;
-  const { item, moved } = pipDragState;
-  if (moved) setPipPosition(item, pipPositionForPoint(event.clientX, event.clientY));
-  finishPipDrag();
-});
-
-participants.addEventListener("pointercancel", finishPipDrag);
 participants.addEventListener("keydown", (event) => {
   const item = event.target.closest?.(".participant-tile");
   if (!item) return;
@@ -1156,7 +1146,7 @@ const supportsMeetingFullscreen = Boolean(
 
 function syncFullscreenControls() {
   const isFullscreen = document.fullscreenElement === meeting;
-  const label = isFullscreen ? "Full screen" : "Full screen";
+  const label = isFullscreen ? "Exit full screen" : "Full screen";
   fullscreenControls.forEach((button) => {
     button.setAttribute("aria-pressed", String(isFullscreen));
     button.setAttribute("aria-label", label);
@@ -1436,6 +1426,9 @@ function addChatMessage(author, body, system = false, own = false, timestampValu
   content.textContent = body;
   message.append(meta, content);
   chatMessages.append(message);
+  // Long meetings replay history and accumulate live messages; drop the
+  // oldest nodes so the rail cannot grow without bound.
+  while (chatMessages.children.length > 300) chatMessages.firstElementChild.remove();
   const chatClosed = chatRail?.hidden === true;
   if (!system && chatClosed) {
     unreadMessages += 1;
@@ -1701,7 +1694,10 @@ document.addEventListener("keydown", (event) => {
   else if (key === "v") camera.click();
   else if (key === "c") chatToggle?.click();
   else if (key === "s") screen.click();
-  else if (event.key === " " && !event.repeat && mic.getAttribute("aria-pressed") === "false") {
+  else if (event.key === " " && !event.repeat && mic.getAttribute("aria-pressed") === "false" &&
+      !event.target.closest("button, [role='button'], a, summary")) {
+    // Space also activates a focused button; keep push-to-talk from firing
+    // both actions when something like the leave button has focus.
     event.preventDefault();
     mic.click();
     pushToTalkActive = true;
@@ -1802,6 +1798,7 @@ let socket;
 let socketGeneration = 0;
 let peer;
 let videoTransceiver;
+let audioTransceiver;
 let renegotiationChain = Promise.resolve();
 let renegotiationQueue;
 let localStream;
@@ -1841,6 +1838,7 @@ let iceRestartAttempts = 0;
 let iceDisconnectRestartTimer;
 const maxIceRestartAttempts = 3;
 let reconnectAttempts = 0;
+let wasReconnectResume = false;
 const maxReconnectAttempts = 5;
 let statsTimer;
 let previousStats;
@@ -2237,6 +2235,18 @@ async function replaceLocalDevice(kind, deviceID) {
     if (kind === "video") {
       cameraTrack = nextTrack;
       if (sender && !screenStream) await sender.replaceTrack(nextTrack);
+      // The device switch produced a fresh capture: retarget the camera
+      // capture handles at the new stream so turning the camera off stops the
+      // live device instead of the replaced one, and re-enabling publishes
+      // the capture that already exists.
+      const previousCameraStream = localCameraStream;
+      localCameraStream = stream;
+      localCameraTrack = nextTrack;
+      if (previousCameraStream && previousCameraStream !== stream) {
+        for (const captureTrack of previousCameraStream.getTracks()) {
+          if (captureTrack !== previousTrack) captureTrack.stop();
+        }
+      }
     }
     if (previousTrack) {
       localStream.removeTrack(previousTrack);
@@ -2247,6 +2257,16 @@ async function replaceLocalDevice(kind, deviceID) {
       ? localStream.getAudioTracks()[0] === nextTrack && previousTrack?.enabled !== false
       : cameraRequested && !videoSuspended && !audioOnly?.checked;
     if (kind === "audio") {
+      if (!sender && audioTransceiver && peer?.getTransceivers().includes(audioTransceiver) &&
+          !audioTransceiver.sender.track) {
+        // The join-time microphone capture failed, so no audio sender exists.
+        // Adopt the reserved recvonly audio m-line and renegotiate; otherwise
+        // the track stays local-only while every participant sees "mic on".
+        audioTransceiver.direction = "sendrecv";
+        await audioTransceiver.sender.replaceTrack(nextTrack);
+        audioTransceiver.sender.setStreams?.(localStream);
+        await renegotiateLocalMedia();
+      }
       removeSpeakerAnalyzer(localParticipantID);
       attachLocalMicrophoneAnalyzer();
     } else {
@@ -2424,27 +2444,45 @@ async function enableCamera() {
 }
 
 async function enableCameraOnce({ negotiate = true, markRequested = true } = {}) {
-  if (localCameraTrack || !navigator.mediaDevices?.getUserMedia || !peer) return;
+  if (!navigator.mediaDevices?.getUserMedia || !peer) return;
   const currentPeer = peer;
-  const stream = await getUserMediaWithDeviceFallback(
-    "video",
-    selectedDeviceIDs.video,
-    {
-      video: {
-        ...cameraConstraints,
-        ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
-      }
-    },
-    { video: { ...cameraConstraints } }
-  );
-  const track = stream.getVideoTracks()[0];
-  if (!track) {
-    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
-    throw new Error("camera is unavailable");
-  }
-  if (peer !== currentPeer) {
-    stream.getTracks().forEach((streamTrack) => streamTrack.stop());
-    throw new Error("media connection changed");
+  let stream;
+  let track;
+  const reusedCapture = Boolean(localCameraTrack && localCameraStream &&
+    localCameraTrack.readyState === "live" && localCameraStream.active);
+  if (reusedCapture) {
+    // A device switch with the camera off parked a fresh capture: publish it
+    // instead of acquiring a second device handle and dropping the first.
+    stream = localCameraStream;
+    track = localCameraTrack;
+  } else {
+    if (localCameraTrack || localCameraStream) {
+      // The parked capture died (device unplugged or permission revoked).
+      // Discard it so the fresh-capture path below acquires a live one and
+      // the usual NotFoundError retry logic applies.
+      localCameraTrack = undefined;
+      localCameraStream = undefined;
+    }
+    stream = await getUserMediaWithDeviceFallback(
+      "video",
+      selectedDeviceIDs.video,
+      {
+        video: {
+          ...cameraConstraints,
+          ...(selectedDeviceIDs.video ? { deviceId: { exact: selectedDeviceIDs.video } } : {})
+        }
+      },
+      { video: { ...cameraConstraints } }
+    );
+    track = stream.getVideoTracks()[0];
+    if (!track) {
+      stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+      throw new Error("camera is unavailable");
+    }
+    if (peer !== currentPeer) {
+      stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+      throw new Error("media connection changed");
+    }
   }
   const captureProfileName = profile.value;
   const captureProfile = resolveVideoProfile(captureProfileName, stream);
@@ -2462,7 +2500,7 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
   localCameraTrack = track;
   cameraTrack = track;
   track.enabled = !videoSuspended && !audioOnly?.checked;
-  localStream?.addTrack(track);
+  if (!reusedCapture) localStream?.addTrack(track);
   const local = participantElements.get(localParticipantID);
   if (local) local.cameraVideo.srcObject = stream;
   if (markRequested) {
@@ -2748,7 +2786,10 @@ function rememberRemoteTrack(participantID, track, receiver) {
 }
 
 function forgetRemoteTracks(element, participantID) {
-  for (const trackID of element?.trackIDs || []) remoteTrackOwners.delete(trackID);
+  for (const trackID of element?.trackIDs || []) {
+    remoteTrackOwners.delete(trackID);
+    remoteTrackRoles.delete(trackID);
+  }
   for (const [receiverID, owner] of remoteReceiverOwners) {
     if (owner === participantID) remoteReceiverOwners.delete(receiverID);
   }
@@ -2875,8 +2916,25 @@ function setParticipantConnectionState(state) {
   renderPeopleList();
 }
 
+// Sampling every animation frame costs an FFT-window read per participant at
+// 60Hz; 15Hz is plenty for speaking detection, with the smoothing time
+// constant (about 75ms) preserved across the lower sample rate.
+const speakerDetectionIntervalMs = 66;
+const speakerLevelTimeConstantMs = 75;
+let lastSpeakerDetectionAt = 0;
+
 function runSpeakerDetection(timestamp) {
   const now = typeof timestamp === "number" ? timestamp : performance.now();
+  if (lastSpeakerDetectionAt && now - lastSpeakerDetectionAt < speakerDetectionIntervalMs) {
+    speakerAnimationFrame = speakerAnalyzers.size > 0
+      ? requestAnimationFrame(runSpeakerDetection) : undefined;
+    return;
+  }
+  const sampleInterval = lastSpeakerDetectionAt
+    ? Math.min(Math.max(now - lastSpeakerDetectionAt, 1), 250)
+    : speakerDetectionIntervalMs;
+  lastSpeakerDetectionAt = now;
+  const levelAlpha = 1 - Math.exp(-sampleInterval / speakerLevelTimeConstantMs);
   speakerAnalyzers.forEach((entry, participantID) => {
     entry.analyser.getByteTimeDomainData(entry.data);
     let total = 0;
@@ -2885,7 +2943,7 @@ function runSpeakerDetection(timestamp) {
       total += normalized * normalized;
     }
     const rms = Math.sqrt(total / entry.data.length);
-    entry.level = entry.level * 0.78 + rms * 0.22;
+    entry.level = entry.level * (1 - levelAlpha) + rms * levelAlpha;
     speakerLevels.set(participantID, entry.level);
     const levelDb = 20 * Math.log10(Math.max(entry.level, 0.000001));
     if (participantID === localParticipantID && micLevelMeter) {
@@ -2932,6 +2990,13 @@ function runSpeakerDetection(timestamp) {
     ? requestAnimationFrame(runSpeakerDetection) : undefined;
 }
 
+// MediaElementAudioSourceNodes are single-wrap: wrapping the same element
+// again throws InvalidStateError, and an element that was ever wrapped routes
+// its output only through the WebAudio graph. Keep one node per element so a
+// participant who rejoins onto the same tile element reconnects the existing
+// node instead of going silent.
+const audioElementSourceNodes = new WeakMap();
+
 function attachSpeakerAnalyzer(participantID, source, preserveOutput = false) {
   const context = ensureAudioContext();
   if (!context || !source || speakerAnalyzers.has(participantID)) return;
@@ -2939,9 +3004,16 @@ function attachSpeakerAnalyzer(participantID, source, preserveOutput = false) {
     const analyser = context.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.75;
-    const sourceNode = source instanceof MediaStream
-      ? context.createMediaStreamSource(source)
-      : context.createMediaElementSource(source);
+    let sourceNode;
+    if (source instanceof MediaStream) {
+      sourceNode = context.createMediaStreamSource(source);
+    } else {
+      sourceNode = audioElementSourceNodes.get(source);
+      if (!sourceNode) {
+        sourceNode = context.createMediaElementSource(source);
+        audioElementSourceNodes.set(source, sourceNode);
+      }
+    }
     sourceNode.connect(analyser);
     if (preserveOutput) analyser.connect(context.destination);
     speakerAnalyzers.set(participantID, {
@@ -3004,6 +3076,7 @@ function resetSpeakerDetection() {
   speakerAnimationFrame = undefined;
   speakerUpdateTimer = undefined;
   lastSpeakerUpdateAt = 0;
+  lastSpeakerDetectionAt = 0;
   pendingSpeakerStates.clear();
   for (const entry of speakerAnalyzers.values()) {
     try {
@@ -3079,7 +3152,7 @@ fetch("/config").then((response) => response.json()).then((config) => {
       config.default_video_quality === "low" ? "slow" : "very-slow";
     serverDefaultProfile = true;
   }
-  if (peer) applyProfile(profile.value);
+  if (peer) applyProfile(profile.value, peer, screenStream || localStream);
 }).catch(() => {});
 if (storedProfile && [...profile.options].some((option) => option.value === storedProfile)) {
   profile.value = storedProfile;
@@ -3284,6 +3357,9 @@ function connectSocket(name, password) {
     if (generation !== socketGeneration) return;
     clearTimeout(reconnectTimer);
     reconnectAttempts = 0;
+    // A non-empty reconnect token means this connection resumes a dropped
+    // session; the participant response then counts a successful reconnect.
+    wasReconnectResume = Boolean(reconnectToken);
     try {
       currentSocket.send(JSON.stringify({
         version: 1, type: "join", name, password, reconnect_token: reconnectToken
@@ -3386,7 +3462,7 @@ function connectSocket(name, password) {
         screenShareEnabled = true;
       }
       updateScreenShareUI();
-      applyProfile(profile.value);
+      applyProfile(profile.value, peer, screenStream || localStream);
       return;
     }
     if (message.type === "error") {
@@ -3418,6 +3494,10 @@ function connectSocket(name, password) {
           markLocalParticipant(participant.id);
           updateParticipantPagination();
           reconnectToken = message.reconnect_token;
+          if (wasReconnectResume) {
+            wasReconnectResume = false;
+            connectionMetrics.reconnects += 1;
+          }
           brandBar.hidden = true;
         welcomeGrid.hidden = true;
         stopRoomRoster();
@@ -3546,6 +3626,9 @@ function resetMediaConnection() {
   remoteTrackOwners.clear();
   remoteTrackRoles.clear();
   remoteReceiverOwners.clear();
+  // Quality streaks from the previous session must not degrade a freshly
+  // resumed participant's tile.
+  participantQualitySamples.clear();
   // Screen and camera-layer bindings point at the previous peer connection's
   // tracks; the reconnect rebinds them from fresh signaling state.
   remoteScreenTracks.clear();
@@ -3568,6 +3651,7 @@ function resetMediaConnection() {
   peer?.close();
   peer = undefined;
   videoTransceiver = undefined;
+  audioTransceiver = undefined;
   clearInterval(statsTimer);
   statsTimer = undefined;
   localStream?.getTracks().forEach((track) => track.stop());
@@ -3695,7 +3779,10 @@ async function startWebRTC() {
     recordConnectionStateTransition("connection", currentPeer.connectionState);
     updatePeerConnectionUI(currentPeer, currentSocket, generation);
   };
-  currentPeer.addTransceiver("audio", { direction: "recvonly" });
+  // Keep the audio transceiver reference: a microphone enabled after a failed
+  // join-time capture must adopt it (the join loop only attaches tracks that
+  // existed at join time).
+  audioTransceiver = currentPeer.addTransceiver("audio", { direction: "recvonly" });
   videoTransceiver = currentPeer.addTransceiver("video", {
     direction: receiveVideoEnabled ? "sendrecv" : "sendonly"
   });
@@ -3798,7 +3885,10 @@ async function startWebRTC() {
         audioCaptureConstraints()
       );
       audioStream.getAudioTracks().forEach((track) => {
-        track.enabled = false;
+        // Joining starts muted, but a reconnect must not silently mute a user
+        // who was talking; restore the pre-drop mic state, mirroring the
+        // camera restore below.
+        track.enabled = mic.getAttribute("aria-pressed") === "true";
         setupStream.addTrack(track);
       });
       if (abortIfStale()) return;
@@ -3867,7 +3957,7 @@ async function startWebRTC() {
 }
 
 function syncConnectionPopoverStats() {
-  if (!connectionPopover) return;
+  if (!connectionPopover || connectionPopover.hidden) return;
   const statMap = {
     "stat-rtt": "popover-stat-rtt",
     "stat-jitter": "popover-stat-jitter",
@@ -4170,6 +4260,9 @@ async function updateDiagnostics() {
   // The interval can fire again while an update is still awaiting stats or
   // applying a profile; overlapping runs would double-send network_state.
   if (diagnosticsUpdateRunning) return;
+  // A hidden tab throttles timers anyway; skip the getStats walk entirely so
+  // the one-second loop costs nothing while the meeting is backgrounded.
+  if (document.hidden) return;
   diagnosticsUpdateRunning = true;
   try {
     await runDiagnosticsUpdate();
@@ -4574,7 +4667,12 @@ async function runDiagnosticsUpdate() {
     connectionDiagnosticHistory.splice(0,
       connectionDiagnosticHistory.length - maxConnectionDiagnosticSamples);
   }
-  diagnostics.textContent = JSON.stringify(values, null, 2);
+  // The pretty-printed diagnostics dump is only consumed by the settings
+  // panel; skip the serialization when it cannot be seen. The network_state
+  // report below always runs because adaptation depends on it.
+  if (!diagnostics.hidden && !diagnostics.closest("[hidden]")) {
+    diagnostics.textContent = JSON.stringify(values, null, 2);
+  }
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
     socket.send(JSON.stringify({
       version: 1,
@@ -4671,7 +4769,7 @@ profile.addEventListener("change", async () => {
     poorSamples = 0;
     goodSamples = 0;
   }
-  await applyProfile(profile.value);
+  await applyProfile(profile.value, peer, screenStream || localStream);
 });
 
 cameraQuality?.addEventListener("change", async () => {
@@ -5087,6 +5185,10 @@ async function toggleScreenShare() {
 async function startScreenShare() {
   const sharePeer = peer;
   const generation = socketGeneration;
+  // Sharing disables the camera first; remember that state so a failure after
+  // the picker resolved can put the camera back the way the user had it.
+  const cameraWasRequested = cameraRequested;
+  const cameraCaptureWasLive = Boolean(localCameraTrack?.readyState === "live");
   try {
     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
     localScreenStream = screenStream;
@@ -5169,6 +5271,12 @@ async function startScreenShare() {
     if (local) local.screenVideo.srcObject = null;
     setLocalVideoMirror(true);
     updateScreenShareUI();
+    // The camera was disabled to make room for the share; a failed start must
+    // not leave it off when the user had it on.
+    if (cameraWasRequested && cameraCaptureWasLive && !cameraRequested &&
+        !screenStream && error.name !== "NotAllowedError") {
+      await requestCameraState(true).catch(() => {});
+    }
     if (error.name !== "NotAllowedError") showStatus(`Screen share unavailable: ${error.message}`);
   }
 }
@@ -5258,7 +5366,13 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
       await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
-      await Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
+      // One unusable queued candidate must not abort the whole flush: a
+      // rejection here used to prevent the answer from ever being sent and
+      // starve negotiation until the renegotiation watchdog reset the socket.
+      await Promise.allSettled(pendingCandidates.splice(0).map((candidate) =>
+        currentPeer.addIceCandidate(candidate).catch((error) => {
+          console.warn("Dropping unusable queued ICE candidate", error);
+        })));
       const answer = await currentPeer.createAnswer();
       await currentPeer.setLocalDescription(answer);
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
@@ -5298,7 +5412,10 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
       await currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
-      await Promise.all(pendingCandidates.splice(0).map((candidate) => currentPeer.addIceCandidate(candidate)));
+      await Promise.allSettled(pendingCandidates.splice(0).map((candidate) =>
+        currentPeer.addIceCandidate(candidate).catch((error) => {
+          console.warn("Dropping unusable queued ICE candidate", error);
+        })));
       renegotiationQueue?.answer();
     }).catch((error) => {
       renegotiationQueue?.fail(error);
@@ -5411,6 +5528,7 @@ leave.addEventListener("click", () => {
   cameraTrack = undefined;
   peer = undefined;
   videoTransceiver = undefined;
+  audioTransceiver = undefined;
   localParticipantID = undefined;
   pendingHandState = undefined;
   updateRaisedHandsUI();
@@ -5442,6 +5560,18 @@ leave.addEventListener("click", () => {
   audioOnly.checked = audioOnlyPreference;
   cameraBeforeAudioOnly = false;
   pendingCandidates.splice(0);
+  // The next meeting replays its own chat history; start from an empty rail
+  // and badge instead of carrying the previous meeting's leftovers.
+  chatMessages?.replaceChildren();
+  chatPinnedToBottom = true;
+  chatHistoryTracker?.reset();
+  unreadMessages = 0;
+  if (chatBadge) {
+    chatBadge.hidden = true;
+    chatBadge.textContent = "";
+  }
+  chatToggle?.classList.remove("has-unread");
+  if (newMessages) newMessages.hidden = true;
   updateControlLabel(mic, "Unmute microphone");
   mic.setAttribute("aria-pressed", "false");
   updateControlLabel(camera, "Turn camera on");
@@ -5488,5 +5618,12 @@ rejoin?.addEventListener("click", () => {
   welcomeGrid.hidden = false;
   form.hidden = false;
   joinButton.disabled = false;
+  // Leftover in-meeting statuses (e.g. "Restarting media...") must not
+  // poison the join form.
+  status.textContent = "";
+  statusRouter?.clear();
   nameInput.focus();
+  // Leaving disabled the roster preview; re-arm it now that the welcome
+  // screen is visible again.
+  queueRoomRosterRefresh();
 });

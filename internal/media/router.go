@@ -3,7 +3,6 @@ package media
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,11 +41,20 @@ type publication struct {
 	codec        pion.RTPCodecCapability
 	remote       *pion.TrackRemote
 	source       *webrtc.Peer
-	tracks       map[string]*pion.TrackLocalStaticRTP
+	tracks       map[string]*publicationTarget
 	senders      map[string]*pion.RTPSender
 	limiter      *bitrateLimiter
 	lastPacketAt atomic.Int64
 	paused       atomic.Bool
+
+	// layerKeys caches the publication key of every camera simulcast quality
+	// for this source so the per-packet layer selection never builds strings.
+	// It is only populated for camera publications.
+	layerKeys [len(cameraLayersByQuality)]string
+	// targetScratch reuses a single fan-out buffer per publication;
+	// forwardPacket for a publication always runs on its single forwarding
+	// goroutine (the read loop for audio, the pacer for video).
+	targetScratch []*publicationTarget
 
 	// stopped is closed when the publication is torn down while its publisher
 	// stays connected; forwardDone is closed by the forwarding goroutine when
@@ -54,6 +62,110 @@ type publication struct {
 	stopped     chan struct{}
 	stopOnce    sync.Once
 	forwardDone chan struct{}
+}
+
+// publicationTarget is one receiver's negotiated egress track for a
+// publication. Forwarded packets are handed to the target's writer goroutine
+// through a depth-bounded mailbox, so a slow receiver's egress can never
+// block the publisher's read loop or delay the other receivers; overflowing
+// drops the packet and the receiver recovers via RTCP feedback.
+type publicationTarget struct {
+	track   *pion.TrackLocalStaticRTP
+	pending chan *rtp.Packet
+	done    chan struct{}
+	// lastSentLayer tracks the camera layer most recently forwarded to this
+	// receiver by the owning publication, so a receiver that starts receiving
+	// the layer mid-GOP triggers a keyframe request. Written only by the
+	// publication's single forwarding goroutine.
+	lastSentLayer string
+	stopOnce      sync.Once
+}
+
+const (
+	targetAudioQueueDepth = 4  // ~80ms of 20ms Opus frames
+	targetVideoQueueDepth = 24 // absorbs multi-packet frame bursts
+)
+
+func targetQueueDepth(remote *pion.TrackRemote) int {
+	if remote != nil && remote.Kind() == pion.RTPCodecTypeAudio {
+		return targetAudioQueueDepth
+	}
+	return targetVideoQueueDepth
+}
+
+func newPublicationTarget(track *pion.TrackLocalStaticRTP, queueDepth int) *publicationTarget {
+	return &publicationTarget{
+		track:   track,
+		pending: make(chan *rtp.Packet, queueDepth),
+		done:    make(chan struct{}),
+	}
+}
+
+// enqueue hands a packet to the target's writer without ever blocking. The
+// packet is shared between all target writers on purpose: pion v4
+// (track_local_static.go WriteRTP) copies the whole packet into pooled
+// storage before rewriting its SSRC and payload type, so concurrent writers
+// never mutate the caller's packet. If the pinned pion version is upgraded,
+// re-verify that behavior before removing the copy-once note below.
+func (t *publicationTarget) enqueue(packet *rtp.Packet) {
+	if len(t.pending) >= cap(t.pending) {
+		// The receiver's mailbox is full because its egress is slow; drop the
+		// packet. RTP receivers recover loss through NACK and PLI feedback.
+		return
+	}
+	select {
+	case t.pending <- packet:
+	default:
+	}
+}
+
+func (t *publicationTarget) stop() {
+	t.stopOnce.Do(func() {
+		if t.done == nil {
+			t.done = make(chan struct{})
+		}
+		close(t.done)
+	})
+}
+
+// writePackets drains the mailbox until the target or its publication is
+// removed. WriteRTP failures (receiver left, track removed) are dropped.
+func (t *publicationTarget) writePackets(stopped <-chan struct{}) {
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-stopped:
+			return
+		case packet := <-t.pending:
+			_ = t.track.WriteRTP(packet)
+		}
+	}
+}
+
+// stoppedChannel returns the publication's stop channel for target writers.
+// Publications built outside Publish (tests) may have none, in which case
+// target.stop remains the only exit path.
+func (pub *publication) stoppedChannel() <-chan struct{} {
+	if pub.stopped == nil {
+		return nil
+	}
+	return pub.stopped
+}
+
+// removeTargetLocked deletes one receiver's sender and egress target and
+// stops its writer goroutine. The caller must hold r.mu.
+func (r *Router) removeTargetLocked(pub *publication, targetID string) {
+	target := pub.tracks[targetID]
+	sender := pub.senders[targetID]
+	delete(pub.tracks, targetID)
+	delete(pub.senders, targetID)
+	if sender != nil {
+		delete(r.senderSourceSSRC, sender)
+	}
+	if target != nil {
+		target.stop()
+	}
 }
 
 // stop tears down a publication that is being removed. Setting a read
@@ -91,6 +203,9 @@ const (
 	maxVideoFrameBufferBytes  = 16 << 20
 	maxQueuedVideoFrames      = 4
 	cameraLayerActivityWindow = 3 * time.Second
+	// maxFramePackets bounds a buffered frame well above any real codec frame
+	// size, which keeps the per-frame dedupe scan and insertion sort trivial.
+	maxFramePackets = 128
 )
 
 type Router struct {
@@ -102,7 +217,12 @@ type Router struct {
 	videoSubscriptionsSet map[string]bool
 	cameraLayers          map[string]string
 	videoKeyFrameRetries  map[videoKeyFrameRequestKey]*videoKeyFrameRetry
-	limits                Limits
+	// senderSourceSSRC keeps the publisher ingress SSRC each relay goroutine
+	// rewrites RTCP feedback with. Publication swaps reuse the receiver's
+	// sender and update the holder in place, so the long-lived relay goroutine
+	// always targets the current source track.
+	senderSourceSSRC map[*pion.RTPSender]*atomic.Uint32
+	limits           Limits
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -118,6 +238,7 @@ func NewRouter(config ...Limits) *Router {
 		videoSubscriptionsSet: make(map[string]bool),
 		cameraLayers:          make(map[string]string),
 		videoKeyFrameRetries:  make(map[videoKeyFrameRequestKey]*videoKeyFrameRetry),
+		senderSourceSSRC:      make(map[*pion.RTPSender]*atomic.Uint32),
 		limits:                limits,
 	}
 }
@@ -178,21 +299,11 @@ func (r *Router) Unregister(id string) {
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
-			pub.stop()
-			r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
-			for targetID, sender := range pub.senders {
-				if peer := r.peers[targetID]; peer != nil && sender != nil {
-					_ = peer.RemoveTrack(sender)
-					if offerer := r.offerers[targetID]; offerer != nil {
-						offers[targetID] = offerer
-					}
-				}
-			}
+			r.removePublicationLocked(pub, offers)
 			delete(r.pubs, key)
 			continue
 		}
-		delete(pub.tracks, id)
-		delete(pub.senders, id)
+		r.removeTargetLocked(pub, id)
 		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
 	}
 	r.mu.Unlock()
@@ -258,7 +369,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		codec:       remote.Codec().RTPCodecCapability,
 		remote:      remote,
 		source:      source,
-		tracks:      make(map[string]*pion.TrackLocalStaticRTP),
+		tracks:      make(map[string]*publicationTarget),
 		senders:     make(map[string]*pion.RTPSender),
 		limiter:     newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
 		stopped:     make(chan struct{}),
@@ -266,28 +377,45 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 	limits := r.currentLimits()
 	pub.limiter.setFPS(limits.MaxVideoFPS)
-
-	var offers []Offerer
-	r.mu.Lock()
-	if existing, exists := r.pubs[key]; exists {
-		if existing.remote != remote {
-			slog.Default().Warn("media_publication_duplicate_track",
-				"source_id", sourceID,
-				"role", role,
-				"layer", layer,
-				"track_id", trackID,
-				"existing_ssrc", existing.remote.SSRC(),
-				"new_ssrc", remote.SSRC(),
-			)
+	if role == SourceRoleCamera {
+		for rank, layer := range cameraLayersByQuality {
+			pub.layerKeys[rank] = publicationKey(sourceID, SourceRoleCamera, layer)
 		}
-		r.mu.Unlock()
-		return
+	}
+
+	offers := make(map[string]Offerer)
+	r.mu.Lock()
+	if existing, exists := r.pubs[key]; exists && existing != pub {
+		if existing.remote == remote {
+			// The identical track re-fired; there is nothing to replace.
+			r.mu.Unlock()
+			return
+		}
+		// A fresh track arrived for an existing publication key (device swap,
+		// screen re-share, or pion re-firing onTrack for a new SSRC). Replace
+		// the stale publication so receivers stay on live media instead of a
+		// track that may never produce packets again.
+		slog.Default().Warn("media_publication_replaced_track",
+			"source_id", sourceID,
+			"role", role,
+			"layer", layer,
+			"track_id", trackID,
+			"existing_ssrc", existing.remote.SSRC(),
+			"new_ssrc", remote.SSRC(),
+		)
+		if sameCodecCapability(existing.codec, pub.codec) {
+			// Reuse each receiver's already-negotiated sender with ReplaceTrack:
+			// removing and re-adding tracks would leak one orphaned transceiver
+			// per receiver per swap and force a full renegotiation each time.
+			r.migrateTargetsLocked(existing, pub)
+		}
+		r.removePublicationLocked(existing, offers)
 	}
 	r.pubs[key] = pub
 	for id := range r.peers {
 		if r.shouldSubscribeLocked(pub, id) && r.addSubscriptionLocked(pub, id) {
 			if offerer := r.offerers[id]; offerer != nil {
-				offers = append(offers, offerer)
+				offers[id] = offerer
 			}
 		}
 	}
@@ -297,13 +425,6 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 
 	go r.forward(pub)
-}
-
-// SetVideoSubscriptions replaces the camera sources a receiver wants. Audio
-// and screen publications remain subscribed for every receiver. Receivers
-// that have not sent this message retain the legacy all-camera behavior.
-func (r *Router) SetVideoSubscriptions(receiverID string, cameraParticipantIDs []string) {
-	r.SetVideoSubscriptionsWithLayer(receiverID, cameraParticipantIDs, "medium")
 }
 
 // SetVideoSubscriptionsWithLayer replaces the visible camera sources and the
@@ -343,8 +464,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 		if peer := r.peers[receiverID]; peer != nil {
 			_ = peer.RemoveTrack(pub.senders[receiverID])
 		}
-		delete(pub.tracks, receiverID)
-		delete(pub.senders, receiverID)
+		r.removeTargetLocked(pub, receiverID)
 		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
 		changed = true
 	}
@@ -404,13 +524,13 @@ func roleForKind(kind pion.RTPCodecType) SourceRole {
 }
 
 func (r *Router) Unpublish(sourceID string, role SourceRole) {
-	var offers []Offerer
+	offers := make(map[string]Offerer)
 	r.mu.Lock()
 	for key, pub := range r.pubs {
 		if pub.sourceID != sourceID || pub.role != role {
 			continue
 		}
-		offers = append(offers, r.removePublicationLocked(pub)...)
+		r.removePublicationLocked(pub, offers)
 		delete(r.pubs, key)
 	}
 	r.mu.Unlock()
@@ -618,6 +738,48 @@ func rateForKind(kind pion.RTPCodecType, limits Limits) int {
 	return bytesPerSecond
 }
 
+// sameCodecCapability reports whether a publication swap can reuse the
+// existing senders: ReplaceTrack across different codecs would leave the
+// receiver's negotiated m-line inconsistent.
+func sameCodecCapability(a, b pion.RTPCodecCapability) bool {
+	return a.MimeType == b.MimeType && a.ClockRate == b.ClockRate &&
+		a.Channels == b.Channels && a.SDPFmtpLine == b.SDPFmtpLine
+}
+
+// migrateTargetsLocked moves an existing publication's receiver senders onto
+// its replacement, retargeting every sender with ReplaceTrack so the already
+// negotiated m-lines keep working without renegotiation. Senders whose
+// ReplaceTrack fails stay behind for removePublicationLocked, which falls
+// back to the remove-and-add path for them. The caller must hold r.mu.
+func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
+	for targetID, oldTarget := range existing.tracks {
+		sender := existing.senders[targetID]
+		if sender == nil || replacement.remote == nil {
+			continue
+		}
+		local, err := pion.NewTrackLocalStaticRTP(
+			replacement.codec, replacement.trackID, replacement.streamID)
+		if err != nil {
+			continue
+		}
+		if err := sender.ReplaceTrack(local); err != nil {
+			continue
+		}
+		target := newPublicationTarget(local, targetQueueDepth(replacement.remote))
+		replacement.tracks[targetID] = target
+		replacement.senders[targetID] = sender
+		if holder := r.senderSourceSSRC[sender]; holder != nil {
+			holder.Store(uint32(replacement.remote.SSRC()))
+		}
+		go target.writePackets(replacement.stoppedChannel())
+		// The old target's writer exits through stop; any packets still in its
+		// mailbox belong to the retired track and are dropped with it.
+		oldTarget.stop()
+		delete(existing.tracks, targetID)
+		delete(existing.senders, targetID)
+	}
+}
+
 func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 	if _, exists := pub.tracks[targetID]; exists {
 		return false
@@ -634,21 +796,30 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 	if err != nil {
 		return false
 	}
-	pub.tracks[targetID] = local
+	target := newPublicationTarget(local, targetQueueDepth(pub.remote))
+	pub.tracks[targetID] = target
 	pub.senders[targetID] = sender
+	go target.writePackets(pub.stoppedChannel())
 	if pub.source != nil {
-		go relayRTCP(sender, pub.source, uint32(pub.remote.SSRC()))
+		sourceSSRC := &atomic.Uint32{}
+		sourceSSRC.Store(uint32(pub.remote.SSRC()))
+		r.senderSourceSSRC[sender] = sourceSSRC
+		go relayRTCP(sender, pub.source, sourceSSRC)
 	}
 	return true
 }
 
-func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC uint32) {
+// relayRTCP forwards receiver feedback to the publication's source. The SSRC
+// holder is read per batch so a publication swap that reuses this sender
+// retargets the feedback to the new source track without restarting the
+// goroutine (the sender keeps one RTCP reader for its whole lifetime).
+func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.Uint32) {
 	for {
 		packets, _, err := sender.ReadRTCP()
 		if err != nil {
 			return
 		}
-		if err := source.WriteRTCP(routeRTCPFeedback(packets, sourceSSRC)); err != nil {
+		if err := source.WriteRTCP(routeRTCPFeedback(packets, sourceSSRC.Load())); err != nil {
 			return
 		}
 	}
@@ -728,7 +899,7 @@ func (r *Router) forward(pub *publication) {
 		if !pub.limiter.allow(packet.MarshalSize()) {
 			continue
 		}
-		r.forwardPacket(pub, packet)
+		r.forwardAudioPacket(pub, packet)
 	}
 }
 
@@ -738,6 +909,12 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 		case <-stop:
 			return
 		case frame := <-frames:
+			// The camera-layer selection can only change per frame, not per
+			// packet; resolve the target list and any layer transitions once.
+			targets, layerStarts := r.resolveFrameTargets(pub)
+			if len(targets) == 0 {
+				continue
+			}
 			for _, packet := range frame.packets {
 				if pub.paused.Load() {
 					break
@@ -750,7 +927,15 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 				if !pub.limiter.waitForBytes(packet.MarshalSize(), stop) {
 					return
 				}
-				r.forwardPacket(pub, packet)
+				for _, target := range targets {
+					target.enqueue(packet)
+				}
+			}
+			// A receiver just started receiving this publication's layer
+			// mid-GOP; ask its publisher for a keyframe so the tile recovers
+			// immediately instead of waiting for the next natural keyframe.
+			for _, receiverID := range layerStarts {
+				r.requestVideoKeyFrameForPublication(pub, receiverID)
 			}
 		}
 	}
@@ -765,25 +950,77 @@ func enqueueVideoFrame(queue chan<- videoFrame, frame videoFrame) bool {
 	}
 }
 
-func (r *Router) forwardPacket(pub *publication, packet *rtp.Packet) {
+// forwardAudioPacket fans one audio packet out to every subscriber. Audio
+// publications carry no simulcast layer, so no per-receiver selection applies.
+func (r *Router) forwardAudioPacket(pub *publication, packet *rtp.Packet) {
 	r.mu.RLock()
-	if pub.paused.Load() {
+	if pub.paused.Load() || len(pub.tracks) == 0 {
 		r.mu.RUnlock()
 		return
 	}
-	targetTracks := make(map[string]*pion.TrackLocalStaticRTP, len(pub.tracks))
-	for targetID, track := range pub.tracks {
-		if pub.layer == "" || r.selectedCameraLayerLocked(pub.sourceID, targetID, time.Now()) == pub.layer {
-			targetTracks[targetID] = track
-		}
+	targets := pub.targetScratch[:0]
+	for _, target := range pub.tracks {
+		targets = append(targets, target)
 	}
+	pub.targetScratch = targets
 	r.mu.RUnlock()
-	for _, track := range targetTracks {
-		_ = track.WriteRTP(packet)
+	for _, target := range targets {
+		target.enqueue(packet)
 	}
 }
 
-func (r *Router) selectedCameraLayerLocked(sourceID, receiverID string, now time.Time) string {
+// resolveFrameTargets selects the receivers that should currently receive the
+// publication's layer and reports the receivers whose layer just changed, so
+// their publisher can be asked for a keyframe. The caller is the
+// publication's single video pacer goroutine.
+func (r *Router) resolveFrameTargets(pub *publication) ([]*publicationTarget, []string) {
+	var layerStarts []string
+	r.mu.RLock()
+	if pub.paused.Load() || len(pub.tracks) == 0 {
+		r.mu.RUnlock()
+		return nil, nil
+	}
+	targets := pub.targetScratch[:0]
+	if pub.layer == "" {
+		for _, target := range pub.tracks {
+			targets = append(targets, target)
+		}
+	} else {
+		now := time.Now()
+		for targetID, target := range pub.tracks {
+			if r.selectedCameraLayerLocked(pub, targetID, now) != pub.layer {
+				// The receiver is receiving another layer right now; clear the
+				// marker so returning to this layer requests a fresh keyframe.
+				if target.lastSentLayer == pub.layer {
+					target.lastSentLayer = ""
+				}
+				continue
+			}
+			if target.lastSentLayer != pub.layer {
+				target.lastSentLayer = pub.layer
+				layerStarts = append(layerStarts, targetID)
+			}
+			targets = append(targets, target)
+		}
+	}
+	pub.targetScratch = targets
+	r.mu.RUnlock()
+	return targets, layerStarts
+}
+
+// requestVideoKeyFrameForPublication asks one publication's publisher for a
+// fresh keyframe for one receiver, with bounded retries.
+func (r *Router) requestVideoKeyFrameForPublication(pub *publication, receiverID string) {
+	r.mu.Lock()
+	request := r.scheduleVideoKeyFrameRetryLocked(pub, receiverID, nil)
+	r.mu.Unlock()
+	if request == nil || pub.source == nil || pub.remote == nil {
+		return
+	}
+	r.writeVideoKeyFrame(pub, nil)
+}
+
+func (r *Router) selectedCameraLayerLocked(pub *publication, receiverID string, now time.Time) string {
 	preferred := r.cameraLayers[receiverID]
 	if !validCameraLayer(preferred) {
 		preferred = "medium"
@@ -792,12 +1029,11 @@ func (r *Router) selectedCameraLayerLocked(sourceID, receiverID string, now time
 	selected := ""
 	selectedDistance := len(cameraLayersByQuality)
 	selectedRank := len(cameraLayersByQuality)
-	for _, layer := range cameraLayersByQuality {
-		pub := r.pubs[publicationKey(sourceID, SourceRoleCamera, layer)]
-		if pub == nil || pub.tracks[receiverID] == nil || !pub.hasRecentPacket(now) {
+	for rank, layer := range cameraLayersByQuality {
+		candidate := r.pubs[pub.layerKeys[rank]]
+		if candidate == nil || candidate.tracks[receiverID] == nil || !candidate.hasRecentPacket(now) {
 			continue
 		}
-		rank := cameraLayerRank(layer)
 		distance := rank - preferredRank
 		if distance < 0 {
 			distance = -distance
@@ -831,7 +1067,6 @@ type videoFrameBuffer struct {
 	timestamp        uint32
 	lastTimestamp    uint32
 	packets          []*rtp.Packet
-	seenSequences    map[uint16]struct{}
 	bytes            int
 	active           bool
 	dropping         bool
@@ -858,16 +1093,15 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	}
 
 	if !f.dropping {
-		if _, duplicate := f.seenSequences[packet.SequenceNumber]; duplicate {
+		if framePacketDuplicate(f.packets, packet.SequenceNumber) {
 			return nil, 0, false
 		}
 		packetBytes := packet.MarshalSize()
-		if packetBytes > maxVideoFrameBufferBytes-f.bytes {
+		if packetBytes > maxVideoFrameBufferBytes-f.bytes || len(f.packets) >= maxFramePackets {
 			f.packets = nil
 			f.bytes = 0
 			f.dropping = true
 		} else {
-			f.seenSequences[packet.SequenceNumber] = struct{}{}
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
 		}
@@ -884,11 +1118,35 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 		return nil, 0, false
 	}
 	if len(packets) > 1 {
-		sort.Slice(packets, func(i, j int) bool {
-			return int16(packets[i].SequenceNumber-packets[j].SequenceNumber) < 0
-		})
+		sortFramePackets(packets)
 	}
 	return packets, frameBytes, true
+}
+
+// framePacketDuplicate reports whether the sequence was already buffered for
+// the current frame (a retransmission). Frames are capped at maxFramePackets
+// packets, so the linear scan stays trivially cheap.
+func framePacketDuplicate(packets []*rtp.Packet, sequence uint16) bool {
+	for _, packet := range packets {
+		if packet.SequenceNumber == sequence {
+			return true
+		}
+	}
+	return false
+}
+
+// sortFramePackets orders a frame's packets by sequence number with wraparound
+// using an insertion sort; frames are bounded to maxFramePackets packets.
+func sortFramePackets(packets []*rtp.Packet) {
+	for i := 1; i < len(packets); i++ {
+		packet := packets[i]
+		j := i - 1
+		for j >= 0 && int16(packets[j].SequenceNumber-packet.SequenceNumber) > 0 {
+			packets[j+1] = packets[j]
+			j--
+		}
+		packets[j+1] = packet
+	}
 }
 
 func (f *videoFrameBuffer) start(timestamp uint32) {
@@ -896,7 +1154,6 @@ func (f *videoFrameBuffer) start(timestamp uint32) {
 	*f = videoFrameBuffer{
 		timestamp:        timestamp,
 		lastTimestamp:    lastTimestamp,
-		seenSequences:    make(map[uint16]struct{}),
 		active:           true,
 		hasLastTimestamp: hasLastTimestamp,
 	}
@@ -1077,10 +1334,10 @@ func (l *bitrateLimiter) refillLocked() {
 }
 
 func (r *Router) removePublication(pub *publication) {
-	var offers []Offerer
+	offers := make(map[string]Offerer)
 	r.mu.Lock()
 	if current, exists := r.pubs[pub.key]; exists && current == pub {
-		offers = r.removePublicationLocked(pub)
+		r.removePublicationLocked(pub, offers)
 		delete(r.pubs, pub.key)
 	}
 	r.mu.Unlock()
@@ -1090,20 +1347,18 @@ func (r *Router) removePublication(pub *publication) {
 }
 
 // removePublicationLocked detaches a publication's outgoing tracks. The
-// caller must hold r.mu; returned offers must run after the lock is released.
-func (r *Router) removePublicationLocked(pub *publication) []Offerer {
+// caller must hold r.mu; offers are collected keyed by receiver so a
+// replace-and-resubscribe sequence produces one renegotiation per receiver.
+func (r *Router) removePublicationLocked(pub *publication, offers map[string]Offerer) {
 	pub.stop()
 	r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
-	var offers []Offerer
 	for targetID, sender := range pub.senders {
 		if peer := r.peers[targetID]; peer != nil {
 			_ = peer.RemoveTrack(sender)
 			if offerer := r.offerers[targetID]; offerer != nil {
-				offers = append(offers, offerer)
+				offers[targetID] = offerer
 			}
 		}
-		delete(pub.tracks, targetID)
-		delete(pub.senders, targetID)
+		r.removeTargetLocked(pub, targetID)
 	}
-	return offers
 }

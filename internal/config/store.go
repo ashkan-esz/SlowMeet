@@ -10,20 +10,35 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
+// Store publishes the active configuration through an atomic pointer so the
+// hot read path (every join, chat message, and HTTP request) never waits on
+// the update path, which serializes admin changes and disk persistence.
 type Store struct {
-	mu   sync.RWMutex
-	cfg  Config
-	path string
+	updateMu sync.Mutex
+	cfg      atomic.Pointer[Config]
+	path     string
 }
 
 func NewStore(cfg Config) *Store {
-	return &Store{cfg: cloneConfig(cfg), path: cfg.ConfigFile}
+	store := &Store{path: cfg.ConfigFile}
+	initial := cloneConfig(cfg)
+	store.cfg.Store(&initial)
+	return store
 }
 
-func LoadStore(cfg Config) (*Store, error) {
-	store := &Store{cfg: cloneConfig(cfg), path: cfg.ConfigFile}
+// LoadStore reads the persisted admin settings on top of the env-backed
+// configuration. The logger is injected so the unknown-key warning follows
+// the application's JSON handler instead of the slog default.
+func LoadStore(cfg Config, logger *slog.Logger) (*Store, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	store := &Store{path: cfg.ConfigFile}
+	initial := cloneConfig(cfg)
+	store.cfg.Store(&initial)
 	if store.path == "" {
 		return store, nil
 	}
@@ -44,7 +59,7 @@ func LoadStore(cfg Config) (*Store, error) {
 		}
 		// A typo'd key would otherwise be silently dropped by the next admin
 		// update that persists the file. Load the known subset, but say so.
-		slog.Default().Warn("config_persistence_unknown_keys",
+		logger.Warn("config_persistence_unknown_keys",
 			"file", store.path,
 			"unknown_keys", unknownJSONKeys(data),
 			"decode_error", err.Error())
@@ -85,9 +100,7 @@ func unknownJSONKeys(data []byte) []string {
 }
 
 func (s *Store) Snapshot() Config {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return cloneConfig(s.cfg)
+	return cloneConfig(*s.cfg.Load())
 }
 
 func (s *Store) CheckAdminPassword(candidate string) bool {
@@ -115,26 +128,30 @@ type AdminUpdate struct {
 	EnabledConnectionMethods *[]string `json:"enabled_connection_methods"`
 }
 
+// Update applies an admin change. The configuration is computed and persisted
+// before the atomic publish, so a failed persist leaves the old settings
+// active; concurrent updates serialize without blocking Snapshot readers on
+// disk I/O.
 func (s *Store) Update(update AdminUpdate) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next, err := updatedConfig(s.cfg, update)
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	next, err := updatedConfig(*s.cfg.Load(), update)
 	if err != nil {
 		return err
 	}
 	if err := persist(next, s.path); err != nil {
 		return err
 	}
-	s.cfg = next
+	s.cfg.Store(&next)
 	return nil
 }
 
 func (s *Store) apply(update AdminUpdate) error {
-	next, err := updatedConfig(s.cfg, update)
+	next, err := updatedConfig(*s.cfg.Load(), update)
 	if err != nil {
 		return err
 	}
-	s.cfg = next
+	s.cfg.Store(&next)
 	return nil
 }
 
@@ -209,10 +226,23 @@ func persist(cfg Config, path string) error {
 		_ = temp.Close()
 		return err
 	}
+	// Flush the file (and best-effort the directory) so a crash cannot leave
+	// the persisted settings empty or absent after a successful rename.
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, path)
+	if err := os.Rename(tempName, path); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func intPointer(value int) *int { return &value }

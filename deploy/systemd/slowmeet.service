@@ -12,6 +12,7 @@ EnvironmentFile=/opt/slowmeet/.env
 ExecStart=/opt/slowmeet/slowmeet
 Restart=on-failure
 RestartSec=5s
+LimitNOFILE=16384
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

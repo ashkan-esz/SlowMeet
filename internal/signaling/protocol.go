@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -90,6 +91,21 @@ type Message struct {
 	// goroutine closes it after every queued message before it has been
 	// written, so senders can wait for the outbound queue to drain.
 	flush chan struct{}
+
+	// raw caches a pre-serialized form of the message so a broadcast to many
+	// clients encodes it once instead of once per writer goroutine. It is
+	// never serialized (unexported) and safe to share between writers because
+	// WriteMessage copies the payload onto the wire before returning.
+	raw []byte
+}
+
+// prepare serializes the message once so fan-out to many clients shares the
+// encoded bytes instead of each writer goroutine re-marshaling the full
+// struct. Safe to call on every broadcast: the second call is a no-op.
+func (m *Message) prepare() {
+	if m.raw == nil {
+		m.raw, _ = json.Marshal(m)
+	}
 }
 
 func (m Message) Validate() error {
@@ -119,7 +135,10 @@ func (m Message) Validate() error {
 			return fmt.Errorf("sdp is required")
 		}
 	case TypeCandidate:
-		if m.Candidate == "" {
+		// Browsers signal end-of-candidates with an empty candidate string and
+		// the associated media section. Keep rejecting messages with neither a
+		// candidate nor an m-line selector.
+		if m.Candidate == "" && m.SDPMid == nil && m.SDPMLineIndex == nil {
 			return fmt.Errorf("candidate is required")
 		}
 	case TypeICERestart:

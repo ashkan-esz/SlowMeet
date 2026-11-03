@@ -1,6 +1,7 @@
 package media
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -244,13 +245,150 @@ func TestBitrateLimiterPacesOversizedPacketAndChargesDebt(t *testing.T) {
 	}
 }
 
+func newTestPublicationTarget(track *pion.TrackLocalStaticRTP) *publicationTarget {
+	return &publicationTarget{track: track, pending: make(chan *rtp.Packet, 2), done: make(chan struct{})}
+}
+
 func TestRouterSetLimitsUpdatesExistingPublication(t *testing.T) {
 	router := NewRouter(Limits{MaxAudioBitrate: 64_000, MaxVideoBitrate: 500_000, MaxVideoFPS: 30})
+	pub := &publication{
+		key:      "source/audio",
+		sourceID: "source",
+		role:     SourceRoleAudio,
+		remote:   &pion.TrackRemote{},
+		limiter:  newBitrateLimiter(8_000),
+	}
+	router.pubs[pub.key] = pub
+
 	router.SetLimits(Limits{MaxAudioBitrate: 32_000, MaxVideoBitrate: 180_000, MaxVideoFPS: 10})
 
 	if router.limits != (Limits{MaxAudioBitrate: 32_000, MaxVideoBitrate: 180_000, MaxVideoFPS: 10}) {
 		t.Fatalf("router limits = %+v, want audio=32000 video=180000 fps=10", router.limits)
 	}
+	// The fixture's zero-value TrackRemote reports an unknown kind, which the
+	// router maps onto the video budget.
+	if pub.limiter.rate != 180_000/8 {
+		t.Fatalf("existing publication byte rate = %d, want %d", int(pub.limiter.rate), 180_000/8)
+	}
+}
+
+func TestPublicationTargetMailboxDropsInsteadOfBlocking(t *testing.T) {
+	track, err := pion.NewTrackLocalStaticRTP(
+		pion.RTPCodecCapability{MimeType: pion.MimeTypeOpus, ClockRate: 48000},
+		"source|audio", "slowmeet-source-audio",
+	)
+	if err != nil {
+		t.Fatalf("create egress track: %v", err)
+	}
+	target := newTestPublicationTarget(track)
+
+	// Without a writer running the mailbox fills to its depth, and further
+	// enqueues must drop instead of blocking the publisher's read loop.
+	packet := &rtp.Packet{Header: rtp.Header{SSRC: 111}, Payload: []byte{1}}
+	for i := 0; i < 10; i++ {
+		target.enqueue(packet)
+	}
+	if got := len(target.pending); got != cap(target.pending) {
+		t.Fatalf("mailbox held %d packets, want depth %d with excess dropped", got, cap(target.pending))
+	}
+
+	// Mailbox entries share the caller's packet on purpose: pion v4 WriteRTP
+	// copies the whole packet into pooled storage before rewriting its header,
+	// so concurrent target writers never mutate the shared packet. Pin the
+	// contract so a pion upgrade that changes this is caught.
+	first := <-target.pending
+	if first != packet {
+		t.Fatal("mailbox no longer shares the caller's packet pointer; re-verify the pinned pion WriteRTP copy semantics and the enqueue comment")
+	}
+
+	target.stop()
+	select {
+	case <-target.done:
+	case <-time.After(time.Second):
+		t.Fatal("target stop did not close its done channel")
+	}
+}
+
+func newTestLayerPublication(t *testing.T, router *Router, layer string) *publication {
+	t.Helper()
+	track, err := pion.NewTrackLocalStaticRTP(
+		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+		"publisher|camera|"+layer, "slowmeet-publisher-camera",
+	)
+	if err != nil {
+		t.Fatalf("create %s layer track: %v", layer, err)
+	}
+	key := publicationKey("publisher", SourceRoleCamera, layer)
+	pub := &publication{
+		key: key, sourceID: "publisher", role: SourceRoleCamera, layer: layer,
+		trackID: "publisher|camera|" + layer, streamID: "slowmeet-publisher-camera",
+		tracks: map[string]*publicationTarget{"receiver": newTestPublicationTarget(track)},
+	}
+	for rank, quality := range cameraLayersByQuality {
+		pub.layerKeys[rank] = publicationKey("publisher", SourceRoleCamera, quality)
+	}
+	router.pubs[key] = pub
+	t.Cleanup(func() {
+		router.mu.Lock()
+		for _, request := range router.videoKeyFrameRetries {
+			request.timer.Stop()
+		}
+		router.mu.Unlock()
+	})
+	return pub
+}
+
+func forwardTestFrame(t *testing.T, router *Router, pub *publication, packets ...*rtp.Packet) {
+	t.Helper()
+	targets, layerStarts := router.resolveFrameTargets(pub)
+	for _, packet := range packets {
+		for _, target := range targets {
+			target.enqueue(packet)
+		}
+	}
+	for _, receiverID := range layerStarts {
+		router.requestVideoKeyFrameForPublication(pub, receiverID)
+	}
+}
+
+func TestForwardPacketSelectsActiveLayerAndRequestsKeyframeOnTransition(t *testing.T) {
+	router := NewRouter()
+	router.videoSubscriptionsSet["receiver"] = true
+	router.videoSubscriptions["receiver"] = map[string]struct{}{"publisher": {}}
+	router.cameraLayers["receiver"] = "medium"
+
+	now := time.Now()
+	medium := newTestLayerPublication(t, router, "medium")
+	low := newTestLayerPublication(t, router, "low")
+	medium.lastPacketAt.Store(now.UnixNano())
+	low.lastPacketAt.Store(now.UnixNano())
+
+	// The first frame forwarded to a receiver inside a layer marks the layer
+	// start and schedules a bounded keyframe request for its publisher.
+	forwardTestFrame(t, router, medium, &rtp.Packet{Header: rtp.Header{Timestamp: 100, Marker: true}})
+	if len(medium.tracks["receiver"].pending) != 1 {
+		t.Fatal("selected layer packet was not enqueued for the receiver")
+	}
+	key, request := onlyVideoKeyFrameRetry(t, router)
+	if key.receiverID != "receiver" || key.publicationKey != medium.key || request.publication != medium {
+		t.Fatalf("layer entry keyframe request key = %+v, want a receiver-scoped retry on the medium publication", key)
+	}
+
+	// The receiver's preference moves to low: medium stops forwarding, clears
+	// its marker, and low takes over with its own keyframe request.
+	router.cameraLayers["receiver"] = "low"
+	forwardTestFrame(t, router, medium, &rtp.Packet{Header: rtp.Header{Timestamp: 101, Marker: true}})
+	if len(medium.tracks["receiver"].pending) != 1 {
+		t.Fatal("receiver still received packets from a non-selected layer")
+	}
+	if medium.tracks["receiver"].lastSentLayer != "" {
+		t.Fatal("medium layer marker was not cleared after the receiver moved away")
+	}
+	forwardTestFrame(t, router, low, &rtp.Packet{Header: rtp.Header{Timestamp: 102, Marker: true}})
+	if len(low.tracks["receiver"].pending) != 1 {
+		t.Fatal("receiver did not receive packets from the newly selected layer")
+	}
+	stopVideoKeyFrameRetry(router, key)
 }
 
 func TestSetPublicationActivePausesAndResumesMatchingRole(t *testing.T) {
@@ -284,13 +422,13 @@ func TestUnregisterRemovesSourcePublicationsAndSubscriptions(t *testing.T) {
 	router.offerers["target"] = func() error { return nil }
 	router.pubs["source/audio"] = &publication{
 		sourceID: "source",
-		tracks:   map[string]*pion.TrackLocalStaticRTP{"target": nil},
+		tracks:   map[string]*publicationTarget{"target": nil},
 	}
 	router.pubs["other/audio"] = &publication{
 		sourceID: "other",
-		tracks:   map[string]*pion.TrackLocalStaticRTP{"source": nil, "target": nil},
+		tracks:   map[string]*publicationTarget{"source": nil, "target": nil},
 	}
-	router.SetVideoSubscriptions("source", []string{"other"})
+	router.SetVideoSubscriptionsWithLayer("source", []string{"other"}, "medium")
 
 	router.Unregister("source")
 
@@ -340,7 +478,7 @@ func TestUnregisterRemovesPublisherLayerSendersFromReceivers(t *testing.T) {
 	key := publicationKey("publisher", SourceRoleCamera, "low")
 	router.pubs[key] = &publication{
 		key: key, sourceID: "publisher", role: SourceRoleCamera, layer: "low",
-		tracks:  map[string]*pion.TrackLocalStaticRTP{"receiver": track},
+		tracks:  map[string]*publicationTarget{"receiver": newTestPublicationTarget(track)},
 		senders: map[string]*pion.RTPSender{"receiver": sender},
 	}
 
@@ -367,7 +505,7 @@ func TestVideoSubscriptionPolicyPreservesLegacyAudioAndScreen(t *testing.T) {
 	if !router.shouldSubscribeLocked(hiddenCamera, "receiver") {
 		t.Fatal("receivers without preferences should keep legacy all-camera behavior")
 	}
-	router.SetVideoSubscriptions("receiver", []string{"visible"})
+	router.SetVideoSubscriptionsWithLayer("receiver", []string{"visible"}, "medium")
 	if !router.shouldSubscribeLocked(visibleCamera, "receiver") {
 		t.Fatal("visible camera was not allowed")
 	}
@@ -380,7 +518,7 @@ func TestVideoSubscriptionPolicyPreservesLegacyAudioAndScreen(t *testing.T) {
 	if !router.shouldSubscribeLocked(screen, "receiver") {
 		t.Fatal("screen share subscription must remain unconditional")
 	}
-	router.SetVideoSubscriptions("receiver", nil)
+	router.SetVideoSubscriptionsWithLayer("receiver", nil, "medium")
 	if router.shouldSubscribeLocked(visibleCamera, "receiver") {
 		t.Fatal("an empty subscription list should disable all camera tracks")
 	}
@@ -402,16 +540,16 @@ func TestSetVideoSubscriptionsAddsAndRemovesCameraTracks(t *testing.T) {
 		key: "camera/camera", sourceID: "camera", role: SourceRoleCamera,
 		trackID: "camera|camera", streamID: "slowmeet-camera-camera",
 		codec:   pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
-		tracks:  make(map[string]*pion.TrackLocalStaticRTP),
+		tracks:  make(map[string]*publicationTarget),
 		senders: make(map[string]*pion.RTPSender),
 	}
 	router.pubs[publication.key] = publication
 
-	router.SetVideoSubscriptions("receiver", []string{"camera"})
+	router.SetVideoSubscriptionsWithLayer("receiver", []string{"camera"}, "medium")
 	if publication.tracks["receiver"] == nil || offers != 1 {
 		t.Fatalf("camera was not added and renegotiated: tracks=%v offers=%d", publication.tracks, offers)
 	}
-	router.SetVideoSubscriptions("receiver", nil)
+	router.SetVideoSubscriptionsWithLayer("receiver", nil, "medium")
 	if _, exists := publication.tracks["receiver"]; exists || offers != 2 {
 		t.Fatalf("camera was not removed and renegotiated: tracks=%v offers=%d", publication.tracks, offers)
 	}
@@ -435,7 +573,7 @@ func TestSetVideoSubscriptionsLayerSwitchDoesNotRenegotiate(t *testing.T) {
 			key: key, sourceID: "camera", role: SourceRoleCamera, layer: layer,
 			trackID: "camera|camera|" + layer, streamID: "slowmeet-camera-camera",
 			codec:  pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
-			tracks: make(map[string]*pion.TrackLocalStaticRTP), senders: make(map[string]*pion.RTPSender),
+			tracks: make(map[string]*publicationTarget), senders: make(map[string]*pion.RTPSender),
 		}
 	}
 
@@ -675,5 +813,71 @@ func TestPublisherKeyFrameRetryIsCancelledByPublicationReplacement(t *testing.T)
 	if continued {
 		stopVideoKeyFrameRetry(router, key)
 		t.Fatal("old publication retry remained active after replacement")
+	}
+}
+
+func BenchmarkRouterForwardPacket(b *testing.B) {
+	benchmarks := []struct {
+		name      string
+		receivers int
+		layered   bool
+	}{
+		{name: "1 receiver", receivers: 1},
+		{name: "8 receivers", receivers: 8},
+		{name: "8 receivers layer selection", receivers: 8, layered: true},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			router := NewRouter()
+			var pub *publication
+			var writers []chan struct{}
+			for _, layer := range []string{"low", "medium", "high"} {
+				key := publicationKey("publisher", SourceRoleCamera, layer)
+				pub = &publication{
+					key: key, sourceID: "publisher", role: SourceRoleCamera, layer: layer,
+					trackID: "publisher|camera|" + layer, streamID: "slowmeet-publisher-camera",
+					tracks:  make(map[string]*publicationTarget, benchmark.receivers),
+					senders: make(map[string]*pion.RTPSender, benchmark.receivers),
+					stopped: make(chan struct{}),
+				}
+				for rank, quality := range cameraLayersByQuality {
+					pub.layerKeys[rank] = publicationKey("publisher", SourceRoleCamera, quality)
+				}
+				track, err := pion.NewTrackLocalStaticRTP(
+					pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+					pub.trackID, pub.streamID,
+				)
+				if err != nil {
+					b.Fatalf("create layer track: %v", err)
+				}
+				for receiver := 0; receiver < benchmark.receivers; receiver++ {
+					receiverID := fmt.Sprintf("receiver-%d", receiver)
+					target := newTestPublicationTarget(track)
+					pub.tracks[receiverID] = target
+					router.cameraLayers[receiverID] = "medium"
+					go target.writePackets(pub.stoppedChannel())
+				}
+				writers = append(writers, pub.stopped)
+				pub.lastPacketAt.Store(time.Now().UnixNano())
+				router.pubs[key] = pub
+			}
+			b.Cleanup(func() {
+				for _, stopped := range writers {
+					close(stopped)
+				}
+			})
+
+			packet := &rtp.Packet{
+				Header:  rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 1, Timestamp: 1000, SSRC: 5},
+				Payload: make([]byte, 1200),
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				targets, _ := router.resolveFrameTargets(pub)
+				for _, target := range targets {
+					target.enqueue(packet)
+				}
+			}
+		})
 	}
 }

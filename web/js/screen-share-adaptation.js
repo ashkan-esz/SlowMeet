@@ -28,6 +28,10 @@
       await sender.setParameters(parameters).catch(() => {});
     }
 
+    function ensureSampling() {
+      if (!timer) timer = root.setInterval(sample, sampleIntervalMs);
+    }
+
     async function sample() {
       if (stopped || sampleInProgress || !sender?.getStats || maxBitrate <= 0) return;
       sampleInProgress = true;
@@ -81,15 +85,26 @@
       async update(bitrate, fps) {
         if (stopped) return;
         generation++;
-        maxBitrate = Math.max(1, Math.floor(bitrate));
-        maxFrameRate = Math.max(1, Math.floor(fps));
+        const nextBitrate = Math.max(1, Math.floor(bitrate));
+        const nextFrameRate = Math.max(1, Math.floor(fps));
+        if (nextBitrate === maxBitrate && nextFrameRate === maxFrameRate) {
+          // The same budget (a profile or config refresh): keep the adaptation
+          // the sampler has already learned for this sender.
+          previousBytes = undefined;
+          previousTimestamp = undefined;
+          await applyParameters();
+          ensureSampling();
+          return;
+        }
+        maxBitrate = nextBitrate;
+        maxFrameRate = nextFrameRate;
         frameRate = maxFrameRate;
         resolutionScale = 1;
         previousBytes = undefined;
         previousTimestamp = undefined;
         overLimitSamples = 0;
         await applyParameters();
-        if (!timer) timer = root.setInterval(sample, sampleIntervalMs);
+        ensureSampling();
       },
       sample,
       stop() {

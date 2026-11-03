@@ -3,6 +3,7 @@ package httpserver
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -942,3 +943,68 @@ func TestCloseMarksServerNotReady(t *testing.T) {
 		t.Fatalf("ready after close = %d, want 503", after.Code)
 	}
 }
+
+func TestHealthAllowsHeadRequests(t *testing.T) {
+	server := httptest.NewServer(New(testConfig(t), NewLogger("error")))
+	defer server.Close()
+
+	response, err := http.Head(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("HEAD /health: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /health status = %d, want 200", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read HEAD body: %v", err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("HEAD /health body = %q, want empty", body)
+	}
+}
+
+func TestGzipCompressesStaticAssetsAndSkipsUpgrades(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+
+	compressed := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/js/app.js", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	handler.ServeHTTP(compressed, request)
+	if compressed.Code != http.StatusOK {
+		t.Fatalf("asset status = %d, want 200", compressed.Code)
+	}
+	if got := compressed.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if compressed.Header().Get("Content-Length") != "" {
+		t.Fatal("a compressed response must not carry the pre-compression length")
+	}
+	if compressed.Body.Len() >= len(appJSUncompressedSizeProbe) {
+		t.Fatalf("compressed body = %d bytes, want smaller than the plain asset", compressed.Body.Len())
+	}
+	if vary := compressed.Header().Get("Vary"); !strings.Contains(vary, "Accept-Encoding") {
+		t.Fatalf("Vary = %q, want Accept-Encoding", vary)
+	}
+
+	plain := httptest.NewRecorder()
+	handler.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/js/app.js", nil))
+	if got := plain.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("plain client Content-Encoding = %q, want none", got)
+	}
+
+	upgrade := httptest.NewRecorder()
+	upgradeRequest := httptest.NewRequest(http.MethodGet, "/health", nil)
+	upgradeRequest.Header.Set("Accept-Encoding", "gzip")
+	upgradeRequest.Header.Set("Upgrade", "websocket")
+	upgradeRequest.Header.Set("Connection", "Upgrade")
+	handler.ServeHTTP(upgrade, upgradeRequest)
+	if got := upgrade.Header().Get("Content-Encoding"); got == "gzip" {
+		t.Fatal("an upgrade request must not be gzipped")
+	}
+}
+
+// appJSUncompressedSizeProbe mirrors the rough size of the plain app.js asset
+// so the gzip test can prove compression without re-reading the embed.
+var appJSUncompressedSizeProbe = make([]byte, 200_000)

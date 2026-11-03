@@ -672,8 +672,7 @@ for (const behavior of [
   "participantPagePrevious",
   "dataset.remoteCount",
   "setPipPosition",
-  "pipPositionForPoint",
-  "pointerdown",
+  "pipPositionForKey",
   "ArrowUp",
   "meeting.pipPosition"
 ]) {
@@ -805,8 +804,6 @@ for (const style of [
   ".participant-grid.has-remote .participant-tile.is-local",
   "width: 160px",
   "height: 90px",
-  "cursor: grab",
-  "touch-action: none",
   "data-pip-position=\"top-left\"",
   "data-pip-position=\"bottom-right\""
 ]) {

@@ -197,13 +197,13 @@ assert.match(appSource, /bindRemoteScreenTrackForParticipant\(\s*screenShareOwne
 assert.match(appSource, /screenSender\.setStreams\(screenStream\);\s*await screenSender\.replaceTrack\(localScreenTrack\)/);
 assert.match(appSource, /sender\.replaceTrack\(null\)/);
 assert.doesNotMatch(appSource, /recoverRemoteScreenVideo|screenRecoveryChain|remoteScreenRecoveryGuard/);
-assert.match(pageSource, /<script src="\/js\/remote-screen-video\.js"><\/script>\s*<script src="\/js\/remote-camera-video\.js"><\/script>\s*<script src="\/js\/screen-share-adaptation\.js"><\/script>/);
+assert.match(pageSource, /<script defer src="\/js\/remote-screen-video\.js"><\/script>\s*<script defer src="\/js\/remote-camera-video\.js"><\/script>\s*<script defer src="\/js\/screen-share-adaptation\.js"><\/script>/);
 assert.ok(
   pageSource.indexOf("/js/screen-share-adaptation.js") < pageSource.indexOf("/js/app.js"),
   "screen share helpers must load before app.js"
 );
 assert.ok(
-  pageSource.lastIndexOf("/js/app.js") > pageSource.lastIndexOf("<script src="),
+  pageSource.lastIndexOf("/js/app.js") > pageSource.lastIndexOf("<script defer src="),
   "app.js must be the last loaded script"
 );
 console.log("remote screen video tests passed");

@@ -45,7 +45,10 @@ esac
 cleanup() {
   tc qdisc del dev "$interface" root 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+# A trapped INT/TERM must also stop the script: without the exit, a TERM
+# during the "changing" scenario resumes mid-loop and keeps the qdisc churn.
+trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
 
 apply_profile() {
   rate="$1"

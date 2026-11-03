@@ -2430,7 +2430,21 @@ else
     if [[ "$container_engine" == docker ]] && containerd_is_held; then
         fail 'Docker runtime packages could not be installed while containerd.io is held. The hold was preserved; review APT dependency errors before intentionally changing the hold.'
     fi
-    fail 'Could not install the selected container runtime packages.'
+    if [[ "$proxy_mode" == caddy && "$caddy_install_method" == apt ]]; then
+        # The Cloudsmith repository can be unreachable at install time even
+        # when the earlier update succeeded; fall back to the verified binary.
+        retry_packages=()
+        for package in "${runtime_packages[@]}"; do
+            [[ "$package" == caddy ]] || retry_packages+=("$package")
+        done
+        if apt-get install -y "${retry_packages[@]}"; then
+            install_verified_caddy_binary
+        else
+            fail 'Could not install the selected container runtime packages.'
+        fi
+    else
+        fail 'Could not install the selected container runtime packages.'
+    fi
 fi
 enable_container_engine
 
@@ -2448,7 +2462,7 @@ if [[ "$enable_turn" == yes ]]; then
     fi
     [[ "$turn_secret" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not generate a secure TURN secret.'
 fi
-private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}') || true
 
 if [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
     fail "$INSTALL_DIR exists and is not a SlowMeet checkout; move it before installing."

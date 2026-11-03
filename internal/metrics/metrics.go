@@ -1,9 +1,14 @@
 package metrics
 
 import (
+	"math"
 	"sync/atomic"
 	"time"
 )
+
+// rttEwmaAlpha weights each new reported RTT into the windowed average; a
+// lifetime mean becomes meaningless after days of uptime.
+const rttEwmaAlpha = 0.1
 
 type Metrics struct {
 	peerConnections    atomic.Int64
@@ -11,18 +16,20 @@ type Metrics struct {
 	reconnects         atomic.Uint64
 	networkSamples     atomic.Uint64
 	rttSamples         atomic.Uint64
-	rttTotalMs         atomic.Uint64
-	lastRTTMs          atomic.Int64
-	lastPacketLoss10   atomic.Int64
-	lastJitterMs       atomic.Int64
-	lastVideoKbps      atomic.Int64
-	lastAudioKbps      atomic.Int64
-	lastNetworkSample  atomic.Int64
-	hasRTT             atomic.Bool
-	hasPacketLoss      atomic.Bool
-	hasJitter          atomic.Bool
-	hasVideo           atomic.Bool
-	hasAudio           atomic.Bool
+	// rttEwmaMilli holds math.Float64bits of the windowed RTT average; a
+	// plain atomic float would lose updates under concurrent reporters.
+	rttEwmaMilli      atomic.Uint64
+	lastRTTMs         atomic.Int64
+	lastPacketLoss10  atomic.Int64
+	lastJitterMs      atomic.Int64
+	lastVideoKbps     atomic.Int64
+	lastAudioKbps     atomic.Int64
+	lastNetworkSample atomic.Int64
+	hasRTT            atomic.Bool
+	hasPacketLoss     atomic.Bool
+	hasJitter         atomic.Bool
+	hasVideo          atomic.Bool
+	hasAudio          atomic.Bool
 }
 
 type Snapshot struct {
@@ -37,12 +44,14 @@ type Snapshot struct {
 	HasVideo           bool
 	HasAudio           bool
 	LastNetworkSample  int64
-	AverageRTTMs       float64
-	LastRTTMs          int64
-	LastPacketLoss10   int64
-	LastJitterMs       int64
-	LastVideoKbps      int64
-	LastAudioKbps      int64
+	// AverageRTTMs is an exponentially weighted window over reported RTT
+	// samples, not a lifetime mean.
+	AverageRTTMs     float64
+	LastRTTMs        int64
+	LastPacketLoss10 int64
+	LastJitterMs     int64
+	LastVideoKbps    int64
+	LastAudioKbps    int64
 }
 
 func (m *Metrics) PeerJoined() {
@@ -64,7 +73,7 @@ func (m *Metrics) Reconnected() {
 func (m *Metrics) ObserveNetwork(rttMs, packetLoss10, jitterMs, videoKbps, audioKbps int) {
 	observed := false
 	if rttMs >= 0 {
-		m.rttTotalMs.Add(uint64(rttMs))
+		m.recordRTT(float64(rttMs))
 		m.lastRTTMs.Store(int64(rttMs))
 		m.rttSamples.Add(1)
 		m.hasRTT.Store(true)
@@ -96,6 +105,20 @@ func (m *Metrics) ObserveNetwork(rttMs, packetLoss10, jitterMs, videoKbps, audio
 	}
 }
 
+// recordRTT folds one reported RTT into the exponentially weighted window.
+func (m *Metrics) recordRTT(rttMs float64) {
+	for {
+		previous := m.rttEwmaMilli.Load()
+		next := rttMs
+		if previous != 0 {
+			next = math.Float64frombits(previous)*(1-rttEwmaAlpha) + rttMs*rttEwmaAlpha
+		}
+		if m.rttEwmaMilli.CompareAndSwap(previous, math.Float64bits(next)) {
+			return
+		}
+	}
+}
+
 func (m *Metrics) Snapshot() Snapshot {
 	snapshot := Snapshot{
 		PeerConnections:    m.peerConnections.Load(),
@@ -115,8 +138,8 @@ func (m *Metrics) Snapshot() Snapshot {
 		HasAudio:           m.hasAudio.Load(),
 	}
 	snapshot.HasNetworkSample = snapshot.NetworkSamples > 0
-	if samples := m.rttSamples.Load(); samples > 0 {
-		snapshot.AverageRTTMs = float64(m.rttTotalMs.Load()) / float64(samples)
+	if bits := m.rttEwmaMilli.Load(); bits != 0 {
+		snapshot.AverageRTTMs = math.Float64frombits(bits)
 	}
 	return snapshot
 }

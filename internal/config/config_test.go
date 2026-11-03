@@ -260,3 +260,55 @@ func TestValidateRejectsUnknownQualityAndLogLevel(t *testing.T) {
 		t.Fatal("unknown log level was accepted")
 	}
 }
+
+func TestValidateRejectsUnboundedBitratesAndMalformedICEServers(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{
+			name:   "video bitrate over the cap",
+			mutate: func(cfg *Config) { cfg.MaxVideoBitrate = 1_000_000_000 },
+		},
+		{
+			name:   "audio bitrate over the cap",
+			mutate: func(cfg *Config) { cfg.MaxAudioBitrate = 1_000_000 },
+		},
+		{
+			name:   "stun server without a stun scheme",
+			mutate: func(cfg *Config) { cfg.STUNServers = []string{"turn:stun.example.com:3478"} },
+		},
+		{
+			name:   "stun server without an address",
+			mutate: func(cfg *Config) { cfg.STUNServers = []string{"stun:"} },
+		},
+		{
+			name:   "turn server with a bare hostname",
+			mutate: func(cfg *Config) { cfg.TURNURL = "turn.example.com:3478" },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{
+				HTTPAddr:            ":8080",
+				MaxParticipants:     5,
+				DefaultVideoQuality: "low",
+				MaxVideoQuality:     "ultra",
+				DefaultVideoFPS:     15,
+				MaxVideoFPS:         30,
+				DefaultAudioBitrate: 32000,
+				MaxVideoBitrate:     500000,
+				MaxAudioBitrate:     64000,
+				STUNServers:         []string{"stun:stun.example.com:3478"},
+				TURNURLs:            []string{"turn:turn.example.com:3478?transport=udp"},
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("baseline configuration rejected: %v", err)
+			}
+			test.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("%s was accepted", test.name)
+			}
+		})
+	}
+}

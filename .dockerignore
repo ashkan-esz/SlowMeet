@@ -13,6 +13,10 @@ tmp
 .playwright-mcp
 .serena
 .codex
+.idea
+.zcode
+artifacts
+slowmeet
 debug*.png
 *.tmp
 *.swp
