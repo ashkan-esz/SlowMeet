@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 	"sync"
 	"time"
 
@@ -61,6 +59,11 @@ var chatHistoryExpiry = chatHistoryTTL
 // signaling connection is torn down. A variable so tests can shorten it.
 var iceFailureTeardownDelay = 5 * time.Second
 
+// supersededPeerCloseDelay frees a superseded session's peer connection long
+// after its reclaim, once any re-publish swap has settled. Closing earlier
+// would error forward loops of publications the resume re-binds.
+const supersededPeerCloseDelay = 10 * time.Second
+
 type roomChatHistory struct {
 	messages []ChatHistoryEntry
 	expiry   *time.Timer
@@ -69,7 +72,7 @@ type roomChatHistory struct {
 type client struct {
 	conn           *websocket.Conn
 	finished       chan struct{}
-	outbound       chan Message
+	outbound       chan *Message
 	writerDone     chan struct{}
 	remoteIP       string
 	participant    meeting.Participant
@@ -370,30 +373,47 @@ func (h *Hub) disconnect(c *client) {
 	if c.participant.ID == "" {
 		return
 	}
-	h.router.Unregister(c.participant.ID)
-	if c.peer != nil {
-		_ = c.peer.Close()
+
+	h.mu.Lock()
+	superseded := c.reconnectToken != "" && h.activeTokens[c.reconnectToken] != c
+	if c.reconnectToken != "" && !superseded {
+		delete(h.activeTokens, c.reconnectToken)
 	}
+	timeout := h.Config.Snapshot().ReconnectTimeout
+	// The reconnect grace window defers media teardown: publications and the
+	// peer connection stay alive so a resumed client re-binds its streams
+	// through publication swap — no renegotiation for the rest of the room —
+	// instead of every network blip costing an unsubscribe, republish, and
+	// renegotiation cycle on weak connections.
+	graceEligible := !superseded && !c.intentionalLeave && !h.closed &&
+		c.reconnectToken != "" && (c.joined || c.resumed) && timeout > 0
+	clients := make([]*client, 0, len(h.roomMembers))
+	for client := range h.roomMembers {
+		if client.participant.ID != "" && client.participant.ID != c.participant.ID {
+			clients = append(clients, client)
+		}
+	}
+	h.mu.Unlock()
+
+	if !graceEligible {
+		h.teardownClientMedia(c)
+	}
+
 	if c.joined {
 		h.metrics.PeerLeft()
 	}
 	h.releaseScreenShare(c)
 
 	h.mu.Lock()
-	if c.reconnectToken != "" && h.activeTokens[c.reconnectToken] != c {
+	if superseded {
 		h.mu.Unlock()
 		return
-	}
-	if c.reconnectToken != "" {
-		delete(h.activeTokens, c.reconnectToken)
 	}
 	if c.intentionalLeave || h.closed || c.reconnectToken == "" || (!c.joined && !c.resumed) {
 		h.mu.Unlock()
 		h.removeClientParticipant(c)
 		return
 	}
-
-	timeout := h.Config.Snapshot().ReconnectTimeout
 	if timeout == 0 {
 		// An explicitly zero reconnect timeout means no grace period: the
 		// participant leaves the meeting immediately instead of waiting for a
@@ -409,12 +429,6 @@ func (h *Hub) disconnect(c *client) {
 		client:      c,
 	}
 	h.pending[c.reconnectToken] = pending
-	clients := make([]*client, 0, len(h.roomMembers))
-	for client := range h.roomMembers {
-		if client.participant.ID != "" && client.participant.ID != c.participant.ID {
-			clients = append(clients, client)
-		}
-	}
 	h.mu.Unlock()
 
 	left := Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant}
@@ -432,6 +446,9 @@ func (h *Hub) disconnect(c *client) {
 			}
 			h.mu.Unlock()
 			if exists && current == pending {
+				// The grace window lapsed without a resume: release the media
+				// that was kept alive for it, then free the meeting slot.
+				h.teardownClientMedia(c)
 				_ = h.Meeting.Leave(c.participant.ID)
 				h.forgetMediaState(c.participant.ID)
 				h.scheduleChatHistoryExpiry(chatRoomID)
@@ -441,6 +458,16 @@ func (h *Hub) disconnect(c *client) {
 	}
 	h.mu.Unlock()
 	h.Logger.Info("participant_disconnected", "participant_id", c.participant.ID, "name", c.participant.Name)
+}
+
+// teardownClientMedia releases a client's media plane: publications and
+// receivers' subscriptions, then the peer connection. On the reconnect-grace
+// path it runs when the window expires instead of at drop time.
+func (h *Hub) teardownClientMedia(c *client) {
+	h.router.Unregister(c.participant.ID)
+	if c.peer != nil {
+		_ = c.peer.Close()
+	}
 }
 
 func (h *Hub) screenShareMessage(active bool, owner string) Message {
@@ -573,6 +600,16 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 		if previous.conn != nil {
 			_ = previous.conn.Close()
 		}
+		if previous.peer != nil {
+			// Closing the superseded peer right away would error the forward
+			// loops of the publications this resume is about to re-bind via
+			// swap, tearing down media and dragging the room through a full
+			// renegotiation. Free it once the resume has settled instead; if
+			// the client never re-publishes, the dead publications are
+			// cleaned up by that close.
+			previousPeer := previous.peer
+			time.AfterFunc(supersededPeerCloseDelay, func() { _ = previousPeer.Close() })
+		}
 		if previous.finished != nil {
 			<-previous.finished
 		}
@@ -704,7 +741,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c := &client{
 		conn:       conn,
 		finished:   make(chan struct{}),
-		outbound:   make(chan Message, outboundQueueSize),
+		outbound:   make(chan *Message, outboundQueueSize),
 		writerDone: make(chan struct{}),
 		remoteIP:   ratelimit.ClientIPWithTrustedProxyCIDRs(r, h.Config.Snapshot().TrustedProxyCIDRs),
 	}
@@ -1205,7 +1242,7 @@ func (c *client) write(msg Message) error {
 		return errors.New("client connection is not initialized")
 	}
 	select {
-	case c.outbound <- msg:
+	case c.outbound <- &msg:
 		return nil
 	default:
 		_ = c.conn.Close()
@@ -1216,7 +1253,7 @@ func (c *client) write(msg Message) error {
 // writeFrame serializes one message onto the connection. Called only from the
 // writer goroutine, so no additional locking is required alongside the
 // concurrent WriteControl pings.
-func (c *client) writeFrame(msg Message) error {
+func (c *client) writeFrame(msg *Message) error {
 	if msg.flush != nil {
 		// A bare flush sentinel carries no payload and must not reach the
 		// wire; it only signals that everything queued before it was written.
@@ -1247,7 +1284,7 @@ func (c *client) flushOutbound() {
 	if c.conn == nil || c.outbound == nil {
 		return
 	}
-	sentinel := Message{flush: make(chan struct{})}
+	sentinel := &Message{flush: make(chan struct{})}
 	select {
 	case c.outbound <- sentinel:
 		select {
@@ -1314,25 +1351,23 @@ func (h *Hub) broadcast(msg Message) {
 
 func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 	msg.prepare()
+	// Fan out directly under the read lock: client.write never blocks (a full
+	// queue closes the connection), so collecting a slice first would only
+	// allocate per broadcast.
 	h.mu.RLock()
-	clients := make([]*client, 0, len(h.roomMembers))
 	for c := range h.roomMembers {
 		if c != excluded {
-			clients = append(clients, c)
+			_ = c.write(msg)
 		}
 	}
 	h.mu.RUnlock()
-	for _, c := range clients {
-		_ = c.write(msg)
-	}
 }
 
 func (h *Hub) broadcastToRoom(msg Message) {
 	msg.prepare()
 	h.mu.RLock()
-	clients := slices.Collect(maps.Keys(h.roomMembers))
-	h.mu.RUnlock()
-	for _, c := range clients {
+	for c := range h.roomMembers {
 		_ = c.write(msg)
 	}
+	h.mu.RUnlock()
 }

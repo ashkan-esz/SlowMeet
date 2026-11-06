@@ -380,7 +380,7 @@ for (const behavior of [
   'String(Math.max(1, filmstripItems.length))',
   'pinnedLayout.dataset.unpinnedCount',
   'const screenMain = hasScreen;',
-  'filmstripContainer.style.setProperty("--filmstrip-columns"',
+  'setStylePropertyIfChanged(filmstripContainer, "--filmstrip-columns"',
   'filmstripContainer.dataset.overflow = "false"',
   'maxColumns: 0'
 ]) {

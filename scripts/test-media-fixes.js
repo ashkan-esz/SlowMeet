@@ -170,4 +170,12 @@ assert.match(appSource, /wasReconnectResume = Boolean\(reconnectToken\);/,
 assert.match(appSource, /if \(wasReconnectResume\) \{[\s\S]*?connectionMetrics\.reconnects \+= 1;/,
   "a resumed session must count a reconnect");
 
-console.log("Media fix checks passed (pass 2)");
+// Checking "Protect audio" must refresh the share control's disabled state;
+// the guard inside toggleScreenShare alone leaves the button looking usable
+// and silently ignoring clicks.
+const audioOnlyHandler = slice(appSource, 'audioOnly?.addEventListener("change", () => {',
+  "\nfunction setSelfViewVisibility(");
+assert.match(audioOnlyHandler, /updateScreenShareUI\(\);/,
+  "the audio-only change handler must refresh the screen-share control state");
+
+console.log("Media fix checks passed");

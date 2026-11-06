@@ -274,6 +274,11 @@ func newStaticFileHandler(appName string) http.Handler {
 	appName = cmp.Or(appName, "SlowMeet")
 	etags := make(map[string]string)
 	brandedHTML := make(map[string][]byte)
+	// precompressed holds level-9 gzip variants built once at startup: cold
+	// page loads get the smallest representation without per-request CPU, and
+	// the bytes can never drift from the asset they were built from.
+	precompressed := make(map[string][]byte)
+	compressedEtags := make(map[string]string)
 	err := fs.WalkDir(webassets.Files, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -297,6 +302,15 @@ func newStaticFileHandler(appName string) http.Handler {
 		if name == "index.html" {
 			etags["/"] = etag
 		}
+		if compressed, ok := gzipBytes(contents); ok {
+			key := "/" + name
+			precompressed[key] = compressed
+			compressedEtags[key] = fmt.Sprintf("\"%x-gz\"", sha256.Sum256(compressed))
+			if name == "index.html" {
+				precompressed["/"] = compressed
+				compressedEtags["/"] = compressedEtags[key]
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -304,9 +318,42 @@ func newStaticFileHandler(appName string) http.Handler {
 	}
 	staticFiles := http.FileServer(http.FS(webassets.Files))
 
+	// servePrecompressed writes the gzip variant for a compressible asset.
+	// The ETag identifies the compressed representation, so identity and gzip
+	// caches never mix. Range requests fall back to the identity path, where
+	// byte semantics are simplest.
+	servePrecompressed := func(w http.ResponseWriter, r *http.Request, key, cacheControl string) bool {
+		compressed, ok := precompressed[key]
+		if !ok || r.Header.Get("Range") != "" || !acceptsGzip(r) {
+			return false
+		}
+		etag := compressedEtags[key]
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Add("Vary", "Accept-Encoding")
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", cacheControl)
+		if matchesETag(r.Header.Get("If-None-Match"), etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+		// ServeContent derives the Content-Type from the asset name; the root
+		// path has no extension to read, and an empty name makes it sniff the
+		// gzip body as "application/x-gzip" — which nosniff turns into a
+		// browser download instead of a rendered page.
+		name := strings.TrimPrefix(key, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(compressed))
+		return true
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if contents, ok := brandedHTML[r.URL.Path]; ok {
+		if _, ok := brandedHTML[r.URL.Path]; ok {
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if servePrecompressed(w, r, r.URL.Path, "no-cache") {
+					return
+				}
 				etag := etags[r.URL.Path]
 				w.Header().Set("ETag", etag)
 				w.Header().Set("Cache-Control", "no-cache")
@@ -319,18 +366,21 @@ func newStaticFileHandler(appName string) http.Handler {
 			if name == "" {
 				name = "index.html"
 			}
-			http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(contents))
+			http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(brandedHTML[r.URL.Path]))
 			return
 		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			if etag, ok := etags[r.URL.Path]; ok {
-				w.Header().Set("ETag", etag)
+			if _, ok := etags[r.URL.Path]; ok {
+				cacheControl := "public, max-age=0, must-revalidate"
 				if strings.HasSuffix(r.URL.Path, ".html") || r.URL.Path == "/" {
-					w.Header().Set("Cache-Control", "no-cache")
-				} else {
-					w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+					cacheControl = "no-cache"
 				}
-				if matchesETag(r.Header.Get("If-None-Match"), etag) {
+				if servePrecompressed(w, r, r.URL.Path, cacheControl) {
+					return
+				}
+				w.Header().Set("ETag", etags[r.URL.Path])
+				w.Header().Set("Cache-Control", cacheControl)
+				if matchesETag(r.Header.Get("If-None-Match"), etags[r.URL.Path]) {
 					w.WriteHeader(http.StatusNotModified)
 					return
 				}
@@ -338,6 +388,26 @@ func newStaticFileHandler(appName string) http.Handler {
 		}
 		staticFiles.ServeHTTP(w, r)
 	})
+}
+
+// gzipBytes returns the level-9 gzip encoding of data when it is actually
+// smaller; tiny assets (like the 189-byte SVG favicon) are served identity.
+func gzipBytes(data []byte) ([]byte, bool) {
+	var buf bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := writer.Write(data); err != nil {
+		return nil, false
+	}
+	if err := writer.Close(); err != nil {
+		return nil, false
+	}
+	if buf.Len() < len(data) {
+		return buf.Bytes(), true
+	}
+	return nil, false
 }
 
 func matchesETag(header, etag string) bool {
@@ -606,7 +676,9 @@ func (g *gzipResponseWriter) WriteHeader(status int) {
 		return
 	}
 	g.wroteHeader = true
-	if compressibleContentType(g.Header().Get("Content-Type")) {
+	// A handler that already chose an encoding (the precompressed static
+	// assets) must not be compressed a second time.
+	if g.Header().Get("Content-Encoding") == "" && compressibleContentType(g.Header().Get("Content-Type")) {
 		g.enabled = true
 		g.Header().Del("Content-Length")
 		g.Header().Set("Content-Encoding", "gzip")

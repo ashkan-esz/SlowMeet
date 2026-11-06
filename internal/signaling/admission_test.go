@@ -228,7 +228,7 @@ func TestActiveAdmissionTokenLifecycle(t *testing.T) {
 func TestExpiredAdmissionCannotCommitAfterPeerSetup(t *testing.T) {
 	h := NewHub(meeting.New(1), config.NewStore(config.Config{}), slog.Default())
 	defer h.Close()
-	c := &client{outbound: make(chan Message, 1)}
+	c := &client{outbound: make(chan *Message, 1)}
 	h.activeTokens["token"] = c
 	// The deadline wins while the handler is preparing the participant/peer.
 	h.expireAdmission(c)

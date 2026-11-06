@@ -51,6 +51,10 @@ type publication struct {
 	// for this source so the per-packet layer selection never builds strings.
 	// It is only populated for camera publications.
 	layerKeys [len(cameraLayersByQuality)]string
+	// readBuf is the ingress read buffer reused by the publication's single
+	// forwarding goroutine; packets must copy their payload out of it before
+	// escaping the read loop.
+	readBuf []byte
 	// targetScratch reuses a single fan-out buffer per publication;
 	// forwardPacket for a publication always runs on its single forwarding
 	// goroutine (the read loop for audio, the pacer for video).
@@ -84,6 +88,9 @@ type publicationTarget struct {
 const (
 	targetAudioQueueDepth = 4  // ~80ms of 20ms Opus frames
 	targetVideoQueueDepth = 24 // absorbs multi-packet frame bursts
+	// receiveMTU matches pion's default receive MTU; every ingress packet is
+	// read into a per-publication buffer of this size.
+	receiveMTU = 1500
 )
 
 func targetQueueDepth(remote *pion.TrackRemote) int {
@@ -269,24 +276,37 @@ func (r *Router) SetLimits(limits Limits) {
 	}
 }
 
+// pendingTrackOp is one pion egress operation decided under the router lock
+// and applied after it is released: AddTrack allocates transceivers and takes
+// pion-internal locks, and running it under r.mu stalls every media forward
+// on the server for the duration of a join or leave.
+type pendingTrackOp struct {
+	subscribe bool
+	pub       *publication
+	targetID  string
+	peer      *webrtc.Peer
+	sender    *pion.RTPSender
+}
+
 func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
-	var offers []Offerer
+	var ops []pendingTrackOp
+	offers := make(map[string]Offerer)
 	r.mu.Lock()
 	r.peers[id] = peer
 	r.offerers[id] = offerer
 	for _, pub := range r.pubs {
-		if r.shouldSubscribeLocked(pub, id) && r.addSubscriptionLocked(pub, id) && offerer != nil {
-			offers = append(offers, offerer)
+		if r.queueSubscriptionLocked(pub, id, &ops) && offerer != nil {
+			offers[id] = offerer
 		}
 	}
 	r.mu.Unlock()
-	for _, offer := range offers {
-		_ = offer()
-	}
+	r.applyTrackOps(ops)
+	dispatchOffers(offers)
 }
 
 func (r *Router) Unregister(id string) {
 	offers := make(map[string]Offerer)
+	var ops []pendingTrackOp
 	r.mu.Lock()
 	r.cancelVideoKeyFrameRetriesForReceiverLocked(id)
 	delete(r.peers, id)
@@ -299,7 +319,7 @@ func (r *Router) Unregister(id string) {
 	}
 	for key, pub := range r.pubs {
 		if pub.sourceID == id {
-			r.removePublicationLocked(pub, offers)
+			r.removePublicationLocked(pub, offers, &ops)
 			delete(r.pubs, key)
 			continue
 		}
@@ -307,9 +327,8 @@ func (r *Router) Unregister(id string) {
 		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
 	}
 	r.mu.Unlock()
-	for _, offer := range offers {
-		_ = offer()
-	}
+	r.applyTrackOps(ops)
+	dispatchOffers(offers)
 }
 
 // Publish accepts the role-aware form (sourceID, role, source, remote[, layer]).
@@ -371,6 +390,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		source:      source,
 		tracks:      make(map[string]*publicationTarget),
 		senders:     make(map[string]*pion.RTPSender),
+		readBuf:     make([]byte, receiveMTU),
 		limiter:     newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
 		stopped:     make(chan struct{}),
 		forwardDone: make(chan struct{}),
@@ -384,6 +404,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 
 	offers := make(map[string]Offerer)
+	var ops []pendingTrackOp
 	r.mu.Lock()
 	if existing, exists := r.pubs[key]; exists && existing != pub {
 		if existing.remote == remote {
@@ -409,20 +430,19 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 			// per receiver per swap and force a full renegotiation each time.
 			r.migrateTargetsLocked(existing, pub)
 		}
-		r.removePublicationLocked(existing, offers)
+		r.removePublicationLocked(existing, offers, &ops)
 	}
 	r.pubs[key] = pub
 	for id := range r.peers {
-		if r.shouldSubscribeLocked(pub, id) && r.addSubscriptionLocked(pub, id) {
+		if r.queueSubscriptionLocked(pub, id, &ops) {
 			if offerer := r.offerers[id]; offerer != nil {
 				offers[id] = offerer
 			}
 		}
 	}
 	r.mu.Unlock()
-	for _, offer := range offers {
-		_ = offer()
-	}
+	r.applyTrackOps(ops)
+	dispatchOffers(offers)
 
 	go r.forward(pub)
 }
@@ -439,6 +459,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 	}
 
 	var offer Offerer
+	var ops []pendingTrackOp
 	changed := false
 	r.mu.Lock()
 	if !validCameraLayer(cameraLayer) {
@@ -453,7 +474,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 		}
 		_, subscribed := pub.tracks[receiverID]
 		if r.shouldSubscribeLocked(pub, receiverID) {
-			if r.addSubscriptionLocked(pub, receiverID) {
+			if r.queueSubscriptionLocked(pub, receiverID, &ops) {
 				changed = true
 			}
 			continue
@@ -461,8 +482,10 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 		if !subscribed {
 			continue
 		}
-		if peer := r.peers[receiverID]; peer != nil {
-			_ = peer.RemoveTrack(pub.senders[receiverID])
+		if sender := pub.senders[receiverID]; sender != nil {
+			if peer := r.peers[receiverID]; peer != nil {
+				ops = append(ops, pendingTrackOp{peer: peer, sender: sender})
+			}
 		}
 		r.removeTargetLocked(pub, receiverID)
 		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
@@ -472,6 +495,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 		offer = r.offerers[receiverID]
 	}
 	r.mu.Unlock()
+	r.applyTrackOps(ops)
 	if offer != nil {
 		_ = offer()
 	}
@@ -525,18 +549,18 @@ func roleForKind(kind pion.RTPCodecType) SourceRole {
 
 func (r *Router) Unpublish(sourceID string, role SourceRole) {
 	offers := make(map[string]Offerer)
+	var ops []pendingTrackOp
 	r.mu.Lock()
 	for key, pub := range r.pubs {
 		if pub.sourceID != sourceID || pub.role != role {
 			continue
 		}
-		r.removePublicationLocked(pub, offers)
+		r.removePublicationLocked(pub, offers, &ops)
 		delete(r.pubs, key)
 	}
 	r.mu.Unlock()
-	for _, offer := range offers {
-		_ = offer()
-	}
+	r.applyTrackOps(ops)
+	dispatchOffers(offers)
 }
 
 // SetPublicationActive pauses or resumes forwarding for an existing source
@@ -750,7 +774,9 @@ func sameCodecCapability(a, b pion.RTPCodecCapability) bool {
 // its replacement, retargeting every sender with ReplaceTrack so the already
 // negotiated m-lines keep working without renegotiation. Senders whose
 // ReplaceTrack fails stay behind for removePublicationLocked, which falls
-// back to the remove-and-add path for them. The caller must hold r.mu.
+// back to the remove-and-add path for them. The caller must hold r.mu. This
+// path stays under the lock: swaps are rare (device changes), unlike the
+// bulk join/leave subscription flows.
 func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 	for targetID, oldTarget := range existing.tracks {
 		sender := existing.senders[targetID]
@@ -780,7 +806,11 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 	}
 }
 
-func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
+// queueSubscriptionLocked records a subscription decision for application
+// after the router lock is released. It reports whether the subscription was
+// queued, so callers can count it as a renegotiation trigger. The caller
+// must hold r.mu and pass its own operation slice.
+func (r *Router) queueSubscriptionLocked(pub *publication, targetID string, ops *[]pendingTrackOp) bool {
 	if _, exists := pub.tracks[targetID]; exists {
 		return false
 	}
@@ -788,25 +818,78 @@ func (r *Router) addSubscriptionLocked(pub *publication, targetID string) bool {
 	if peer == nil {
 		return false
 	}
-	local, err := pion.NewTrackLocalStaticRTP(pub.codec, pub.trackID, pub.streamID)
-	if err != nil {
-		return false
-	}
-	sender, err := peer.AddTrack(local)
-	if err != nil {
-		return false
-	}
-	target := newPublicationTarget(local, targetQueueDepth(pub.remote))
-	pub.tracks[targetID] = target
-	pub.senders[targetID] = sender
-	go target.writePackets(pub.stoppedChannel())
-	if pub.source != nil {
-		sourceSSRC := &atomic.Uint32{}
-		sourceSSRC.Store(uint32(pub.remote.SSRC()))
-		r.senderSourceSSRC[sender] = sourceSSRC
-		go relayRTCP(sender, pub.source, sourceSSRC)
-	}
+	*ops = append(*ops, pendingTrackOp{
+		subscribe: true, pub: pub, targetID: targetID, peer: peer,
+	})
 	return true
+}
+
+// applyTrackOps performs the queued pion operations in decision order. Each
+// subscription revalidates its decision against the current router state
+// before installing: a mutation that ran while the pion call was in flight
+// (the lock was released) may have superseded it, and the just-added sender
+// is removed again instead of being left subscribed.
+func (r *Router) applyTrackOps(ops []pendingTrackOp) {
+	for _, op := range ops {
+		if !op.subscribe {
+			_ = op.peer.RemoveTrack(op.sender)
+			continue
+		}
+		local, err := pion.NewTrackLocalStaticRTP(op.pub.codec, op.pub.trackID, op.pub.streamID)
+		if err != nil {
+			continue
+		}
+		sender, err := op.peer.AddTrack(local)
+		if err != nil {
+			continue
+		}
+		r.mu.Lock()
+		valid := r.pubs[op.pub.key] == op.pub &&
+			r.peers[op.targetID] == op.peer &&
+			op.pub.tracks[op.targetID] == nil &&
+			r.shouldSubscribeLocked(op.pub, op.targetID)
+		if valid {
+			target := newPublicationTarget(local, targetQueueDepth(op.pub.remote))
+			op.pub.tracks[op.targetID] = target
+			op.pub.senders[op.targetID] = sender
+			if op.pub.source != nil && op.pub.remote != nil {
+				sourceSSRC := &atomic.Uint32{}
+				sourceSSRC.Store(uint32(op.pub.remote.SSRC()))
+				r.senderSourceSSRC[sender] = sourceSSRC
+				go target.writePackets(op.pub.stoppedChannel())
+				go relayRTCP(sender, op.pub.source, sourceSSRC)
+			}
+		}
+		r.mu.Unlock()
+		if !valid {
+			_ = op.peer.RemoveTrack(sender)
+		}
+	}
+}
+
+// dispatchOffers runs renegotiation callbacks concurrently: each offer
+// generates SDP for a different peer under that peer's own negotiation lock,
+// so a large room's join or leave fan-out takes as long as the slowest single
+// offer instead of the sum of all of them.
+func dispatchOffers(offers map[string]Offerer) {
+	if len(offers) <= 1 {
+		for _, offer := range offers {
+			_ = offer()
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, offer := range offers {
+		wg.Add(1)
+		go func(offer Offerer) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			_ = offer()
+		}(offer)
+	}
+	wg.Wait()
 }
 
 // relayRTCP forwards receiver feedback to the publication's source. The SSRC
@@ -854,46 +937,52 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 }
 
 func (r *Router) forward(pub *publication) {
+	// Audio publications never enter the pacer path; spawning its goroutine
+	// and channel for them would park both forever.
+	defer close(pub.forwardDone)
+	if pub.remote.Kind() == pion.RTPCodecTypeVideo {
+		r.forwardVideo(pub)
+		return
+	}
+	r.forwardAudio(pub)
+}
+
+func (r *Router) forwardVideo(pub *publication) {
 	var frame videoFrameBuffer
 	frames := make(chan videoFrame, maxQueuedVideoFrames)
 	stopPacer := make(chan struct{})
 	go r.forwardVideoFrames(pub, frames, stopPacer)
-	defer func() {
-		close(stopPacer)
-		close(pub.forwardDone)
-	}()
+	defer close(stopPacer)
 	for {
-		packet, _, err := pub.remote.ReadRTP()
+		packet, err := readIngressPacket(pub)
 		if err != nil {
-			r.mu.RLock()
-			stillRegistered := r.pubs[pub.key] == pub
-			r.mu.RUnlock()
-			if stillRegistered {
-				slog.Default().Warn("media_publication_read_stopped",
-					"source_id", pub.sourceID,
-					"role", pub.role,
-					"layer", pub.layer,
-					"track_id", pub.trackID,
-					"ssrc", pub.remote.SSRC(),
-					"error", err,
-				)
-			}
-			r.removePublication(pub)
+			r.reportPublicationReadStop(pub, err)
 			return
 		}
 		pub.lastPacketAt.Store(time.Now().UnixNano())
 		if pub.paused.Load() {
 			continue
 		}
-		if pub.remote.Kind() == pion.RTPCodecTypeVideo {
-			packets, _, complete := frame.add(packet)
-			if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
-				continue
-			}
-			if !enqueueVideoFrame(frames, videoFrame{packets: packets}) {
-				// Keep the publisher read loop moving when a receiver cannot
-				// drain its bounded pacing queue; never forward a partial frame.
-			}
+		packets, _, complete := frame.add(packet)
+		if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
+			continue
+		}
+		if !enqueueVideoFrame(frames, videoFrame{packets: packets}) {
+			// Keep the publisher read loop moving when a receiver cannot
+			// drain its bounded pacing queue; never forward a partial frame.
+		}
+	}
+}
+
+func (r *Router) forwardAudio(pub *publication) {
+	for {
+		packet, err := readIngressPacket(pub)
+		if err != nil {
+			r.reportPublicationReadStop(pub, err)
+			return
+		}
+		pub.lastPacketAt.Store(time.Now().UnixNano())
+		if pub.paused.Load() {
 			continue
 		}
 		if !pub.limiter.allow(packet.MarshalSize()) {
@@ -901,6 +990,45 @@ func (r *Router) forward(pub *publication) {
 		}
 		r.forwardAudioPacket(pub, packet)
 	}
+}
+
+// readIngressPacket reads one RTP packet into the publication's reusable
+// buffer instead of the fresh 1500-byte allocation pion's ReadRTP makes per
+// packet — at meeting scale that buffer is the single largest source of GC
+// churn. The payload is copied out because Unmarshal aliases the read buffer,
+// which the next read overwrites while the frame buffer and mailboxes hold
+// packets asynchronously. An unparseable packet is fatal for the publication,
+// matching ReadRTP's behavior exactly.
+func readIngressPacket(pub *publication) (*rtp.Packet, error) {
+	n, _, err := pub.remote.Read(pub.readBuf)
+	if err != nil {
+		return nil, err
+	}
+	packet := &rtp.Packet{}
+	if err := packet.Unmarshal(pub.readBuf[:n]); err != nil {
+		return nil, err
+	}
+	payload := make([]byte, len(packet.Payload))
+	copy(payload, packet.Payload)
+	packet.Payload = payload
+	return packet, nil
+}
+
+func (r *Router) reportPublicationReadStop(pub *publication, err error) {
+	r.mu.RLock()
+	stillRegistered := r.pubs[pub.key] == pub
+	r.mu.RUnlock()
+	if stillRegistered {
+		slog.Default().Warn("media_publication_read_stopped",
+			"source_id", pub.sourceID,
+			"role", pub.role,
+			"layer", pub.layer,
+			"track_id", pub.trackID,
+			"ssrc", pub.remote.SSRC(),
+			"error", err,
+		)
+	}
+	r.removePublication(pub)
 }
 
 func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, stop <-chan struct{}) {
@@ -1165,11 +1293,14 @@ func rtpTimestampAfter(timestamp, previous uint32) bool {
 
 // bitrateLimiter meters bytes per second with a short burst allowance.
 type bitrateLimiter struct {
-	mu                  sync.Mutex
-	rate                float64
-	tokens              float64
-	last                time.Time
-	now                 func() time.Time
+	mu     sync.Mutex
+	rate   float64
+	tokens float64
+	last   time.Time
+	now    func() time.Time
+	// pacerTimer is owned by the publication's single pacer goroutine and
+	// reused across waitForBytes calls instead of allocating one per packet.
+	pacerTimer          *time.Timer
 	maxFPS              int
 	haveFrame           bool
 	lastFrameTimestamp  uint32
@@ -1228,6 +1359,10 @@ func (l *bitrateLimiter) allow(bytes int) bool {
 }
 
 // waitForBytes paces a packet until the configured byte budget can admit it.
+// The timer is reused across waits: it belongs to the publication's single
+// pacer goroutine (setRate/setFPS touch no timer state), so a fresh
+// time.NewTimer per paced packet — tens of thousands per second under load —
+// is pure garbage.
 func (l *bitrateLimiter) waitForBytes(bytes int, stop <-chan struct{}) bool {
 	if bytes <= 0 {
 		return true
@@ -1258,17 +1393,21 @@ func (l *bitrateLimiter) waitForBytes(bytes int, stop <-chan struct{}) bool {
 		}
 		l.mu.Unlock()
 
-		timer := time.NewTimer(wait)
+		if l.pacerTimer == nil {
+			l.pacerTimer = time.NewTimer(wait)
+		} else {
+			l.pacerTimer.Reset(wait)
+		}
 		select {
 		case <-stop:
-			if !timer.Stop() {
+			if !l.pacerTimer.Stop() {
 				select {
-				case <-timer.C:
+				case <-l.pacerTimer.C:
 				default:
 				}
 			}
 			return false
-		case <-timer.C:
+		case <-l.pacerTimer.C:
 		}
 		if oversizedPacket {
 			l.mu.Lock()
@@ -1335,30 +1474,67 @@ func (l *bitrateLimiter) refillLocked() {
 
 func (r *Router) removePublication(pub *publication) {
 	offers := make(map[string]Offerer)
+	var ops []pendingTrackOp
 	r.mu.Lock()
 	if current, exists := r.pubs[pub.key]; exists && current == pub {
-		r.removePublicationLocked(pub, offers)
+		r.removePublicationLocked(pub, offers, &ops)
 		delete(r.pubs, pub.key)
 	}
 	r.mu.Unlock()
-	for _, offer := range offers {
-		_ = offer()
-	}
+	r.applyTrackOps(ops)
+	dispatchOffers(offers)
 }
 
 // removePublicationLocked detaches a publication's outgoing tracks. The
 // caller must hold r.mu; offers are collected keyed by receiver so a
-// replace-and-resubscribe sequence produces one renegotiation per receiver.
-func (r *Router) removePublicationLocked(pub *publication, offers map[string]Offerer) {
+// replace-and-resubscribe sequence produces one renegotiation per receiver,
+// and RemoveTrack operations are queued for application after the lock is
+// released. Callers must apply the queued ops via applyTrackOps.
+func (r *Router) removePublicationLocked(pub *publication, offers map[string]Offerer, ops *[]pendingTrackOp) {
 	pub.stop()
 	r.cancelVideoKeyFrameRetriesForPublicationLocked(pub)
 	for targetID, sender := range pub.senders {
 		if peer := r.peers[targetID]; peer != nil {
-			_ = peer.RemoveTrack(sender)
+			if sender != nil {
+				*ops = append(*ops, pendingTrackOp{peer: peer, sender: sender})
+			}
 			if offerer := r.offerers[targetID]; offerer != nil {
 				offers[targetID] = offerer
 			}
 		}
 		r.removeTargetLocked(pub, targetID)
 	}
+}
+
+// AddPublicationFixture registers an empty publication for a source and role
+// without a live media path. It forwards nothing and is removed by the
+// ordinary teardown paths; it exists so other packages can test teardown
+// behavior end to end.
+func (r *Router) AddPublicationFixture(sourceID string, role SourceRole) {
+	key := publicationKey(sourceID, role, "")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.pubs[key]; exists {
+		return
+	}
+	r.pubs[key] = &publication{
+		key:      key,
+		sourceID: sourceID,
+		role:     role,
+		tracks:   make(map[string]*publicationTarget),
+		senders:  make(map[string]*pion.RTPSender),
+	}
+}
+
+// HasPublication reports whether any publication is registered for the
+// source and role.
+func (r *Router) HasPublication(sourceID string, role SourceRole) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pub := range r.pubs {
+		if pub.sourceID == sourceID && pub.role == role {
+			return true
+		}
+	}
+	return false
 }

@@ -145,6 +145,43 @@ The native-picker gate requires a person to choose a source and stop sharing
 from Chromium's browser indicator. These headed runs remain separate from the
 deterministic default profile.
 
+## Four-person room suite
+
+`make test-media-e2e-four` runs the opt-in four-participant suite: four
+independent browser instances (two Chromium, two Firefox by default) join one
+room and exercise join/roster convergence, camera and microphone state
+fan-out, chat (sequential, simultaneous, unread badge, 500-character messages,
+emoji picker, and retained-history replay after a reconnect), reactions,
+raised-hand FIFO ordering, screen share (start/stop, lease race, sharer
+departure), incoming video, Protect-audio, camera quality presets, tile
+hiding, stage focus, pinning, keyboard shortcuts, and push-to-talk,
+responsive layout, departures (single, simultaneous, abrupt browser kill),
+signaling reconnect within the grace window, admin `config_update` broadcast,
+and fifth-participant capacity rejection.
+
+Run a subset while debugging a single scenario:
+
+```sh
+make test-media-e2e-four-scenario MEDIA_E2E_FOUR_SCENARIO="screen-share,reconnect"
+```
+
+Scenario names match exactly or by substring, case-insensitively;
+`make test-media-e2e-four-list` prints every scenario with its description.
+
+Knobs:
+
+- `MEDIA_E2E_FOUR_SCENARIO` — comma-separated scenario filter (default: all).
+- `MEDIA_E2E_FOUR_ENGINES` — `mixed` (default, 2 Chromium + 2 Firefox) or
+  `chromium` to run every participant on Chromium.
+- `MEDIA_E2E_FOUR_RECONNECT_GRACE` — server reconnect grace seconds for the
+  run (default 5, which exercises true token resume; a 1s grace forces the
+  reconnect-after-expiry full-rejoin path).
+- `MEDIA_E2E_HEADED`, `MEDIA_E2E_ARTIFACT_DIR` — shared with the two-person
+  runner.
+
+Failures append to `docs/four-person-e2e-findings.md` with per-participant
+screenshots, socket-event traces, and Playwright trace zips.
+
 Exercise bandwidth, delay, and packet loss through the isolated namespace
 profile:
 

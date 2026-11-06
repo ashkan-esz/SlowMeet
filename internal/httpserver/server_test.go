@@ -1008,3 +1008,75 @@ func TestGzipCompressesStaticAssetsAndSkipsUpgrades(t *testing.T) {
 // appJSUncompressedSizeProbe mirrors the rough size of the plain app.js asset
 // so the gzip test can prove compression without re-reading the embed.
 var appJSUncompressedSizeProbe = make([]byte, 200_000)
+
+func TestPrecompressedAssetServingAndRepresentationEtags(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+
+	compressed := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/js/app.js", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	handler.ServeHTTP(compressed, request)
+	if compressed.Code != http.StatusOK {
+		t.Fatalf("compressed asset status = %d, want 200", compressed.Code)
+	}
+	etag := compressed.Header().Get("ETag")
+	if !strings.HasSuffix(etag, `-gz"`) {
+		t.Fatalf("compressed representation ETag = %q, want the -gz variant", etag)
+	}
+	if compressed.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatal("compressed asset was not served precompressed")
+	}
+
+	revalidate := httptest.NewRecorder()
+	revalidateRequest := httptest.NewRequest(http.MethodGet, "/js/app.js", nil)
+	revalidateRequest.Header.Set("Accept-Encoding", "gzip")
+	revalidateRequest.Header.Set("If-None-Match", etag)
+	handler.ServeHTTP(revalidate, revalidateRequest)
+	if revalidate.Code != http.StatusNotModified {
+		t.Fatalf("compressed revalidation status = %d, want 304", revalidate.Code)
+	}
+
+	identity := httptest.NewRecorder()
+	handler.ServeHTTP(identity, httptest.NewRequest(http.MethodGet, "/js/app.js", nil))
+	if identity.Header().Get("Content-Encoding") != "" {
+		t.Fatal("identity client received an encoded body")
+	}
+	if identity.Header().Get("ETag") == etag {
+		t.Fatal("identity and gzip representations must carry distinct ETags")
+	}
+}
+
+// The precompressed root page must keep the HTML content type: ServeContent
+// derives the type from the asset name, and the root path carries no
+// extension — an empty name sniffs the gzip body as "application/x-gzip",
+// which nosniff turns into a browser download instead of a rendered page.
+func TestPrecompressedRootPageKeepsHTMLContentType(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+
+	for _, path := range []string{"/", "/index.html"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Accept-Encoding", "gzip")
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, recorder.Code)
+		}
+		if got := recorder.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+			t.Fatalf("%s Content-Type = %q, want text/html; charset=utf-8", path, got)
+		}
+		if recorder.Header().Get("Content-Encoding") != "gzip" {
+			t.Fatalf("%s was not served precompressed", path)
+		}
+	}
+
+	head := httptest.NewRecorder()
+	headRequest := httptest.NewRequest(http.MethodHead, "/", nil)
+	headRequest.Header.Set("Accept-Encoding", "gzip")
+	handler.ServeHTTP(head, headRequest)
+	if head.Code != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want 200", head.Code)
+	}
+	if head.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("HEAD Content-Type = %q, want text/html; charset=utf-8", head.Header().Get("Content-Type"))
+	}
+}

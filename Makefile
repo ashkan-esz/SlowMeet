@@ -125,6 +125,14 @@ test-media-e2e: ## Run the complete deterministic two-participant Chromium suite
 test-media-e2e-four: ## Run the opt-in four-person generated-media mixed-browser suite
 	$(NODE) scripts/test-four-person-e2e.js
 
+.PHONY: test-media-e2e-four-scenario
+test-media-e2e-four-scenario: ## Run a subset of the four-person suite: MEDIA_E2E_FOUR_SCENARIO="screen-share,reconnect"
+	MEDIA_E2E_FOUR_SCENARIO="$(MEDIA_E2E_FOUR_SCENARIO)" $(NODE) scripts/test-four-person-e2e.js
+
+.PHONY: test-media-e2e-four-list
+test-media-e2e-four-list: ## List the four-person suite scenarios
+	MEDIA_E2E_FOUR_LIST=1 $(NODE) scripts/test-four-person-e2e.js
+
 test-connection-methods-e2e: ## Verify live connection method switching and admin policy refresh
 	MEDIA_E2E_SCENARIO="connection method switch and admin policy refresh" $(NODE) scripts/test-media-e2e.js
 

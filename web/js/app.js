@@ -468,6 +468,14 @@ function requestParticipantLayout() {
   });
 }
 
+// setStylePropertyIfChanged avoids restyling the grid when a layout pass
+// computes the same values; the write-then-measure cycle was forcing a full
+// relayout on every speaker change.
+function setStylePropertyIfChanged(element, name, value) {
+  if (element.style.getPropertyValue(name) === value) return;
+  element.style.setProperty(name, value);
+}
+
 function updateParticipantLayout() {
   if (!participants) return;
   const mode = currentMeetingLayoutMode();
@@ -492,15 +500,15 @@ function updateParticipantLayout() {
         minTileHeight: isMobilePinned ? 58 : 74,
         maxTileWidth: 420
       });
-      filmstripContainer.style.setProperty("--filmstrip-columns", String(Math.max(1, gridLayout.columns)));
-      filmstripContainer.style.setProperty("--filmstrip-rows", String(Math.max(1, gridLayout.rows)));
-      filmstripContainer.style.setProperty("--filmstrip-tile-width", `${Math.floor(gridLayout.tileWidth)}px`);
-      filmstripContainer.style.setProperty("--filmstrip-tile-height", `${Math.floor(gridLayout.tileHeight)}px`);
+      setStylePropertyIfChanged(filmstripContainer, "--filmstrip-columns", String(Math.max(1, gridLayout.columns)));
+      setStylePropertyIfChanged(filmstripContainer, "--filmstrip-rows", String(Math.max(1, gridLayout.rows)));
+      setStylePropertyIfChanged(filmstripContainer, "--filmstrip-tile-width", `${Math.floor(gridLayout.tileWidth)}px`);
+      setStylePropertyIfChanged(filmstripContainer, "--filmstrip-tile-height", `${Math.floor(gridLayout.tileHeight)}px`);
       const isDebugThreeOnePinnedDesktop = meetingLayoutHost?.dataset.debugMode === "3" &&
         pinnedLayout?.dataset.pinnedCount === "1" && !isMobilePinned;
       if (isDebugThreeOnePinnedDesktop) {
-        filmstripContainer.style.setProperty("--filmstrip-columns", String(Math.max(1, filmstripItems.length)));
-        filmstripContainer.style.setProperty("--filmstrip-rows", "1");
+        setStylePropertyIfChanged(filmstripContainer, "--filmstrip-columns", String(Math.max(1, filmstripItems.length)));
+        setStylePropertyIfChanged(filmstripContainer, "--filmstrip-rows", "1");
       }
       filmstripContainer.dataset.overflow = "false";
     }
@@ -528,12 +536,14 @@ function updateParticipantLayout() {
     maxTileWidth: window.innerWidth > 1400 ? 1000 : 720
   });
   preferredLayoutColumns = layout.columns;
-  layoutContainer.style.setProperty("--tile-width", `${Math.floor(layout.tileWidth)}px`);
-  layoutContainer.style.setProperty("--tile-height", `${Math.floor(layout.tileHeight)}px`);
-  layoutContainer.style.setProperty("--layout-columns", String(layout.columns));
-  layoutContainer.style.setProperty("--layout-rows", String(layout.rows));
-  participants.dataset.columns = String(layout.columns);
-  participants.dataset.rows = String(layout.rows);
+  setStylePropertyIfChanged(layoutContainer, "--tile-width", `${Math.floor(layout.tileWidth)}px`);
+  setStylePropertyIfChanged(layoutContainer, "--tile-height", `${Math.floor(layout.tileHeight)}px`);
+  setStylePropertyIfChanged(layoutContainer, "--layout-columns", String(layout.columns));
+  setStylePropertyIfChanged(layoutContainer, "--layout-rows", String(layout.rows));
+  if (participants.dataset.columns !== String(layout.columns)) {
+    participants.dataset.columns = String(layout.columns);
+    participants.dataset.rows = String(layout.rows);
+  }
   positionParticipantMenu();
 }
 
@@ -1263,10 +1273,20 @@ function announceReaction(name, emoji) {
   }, 1200);
 }
 
+// matchMedia allocates and re-registers a MediaQueryList per reaction; cache
+// it once and track changes instead.
+const reducedMotionQuery = typeof window.matchMedia === "function"
+  ? window.matchMedia("(prefers-reduced-motion: reduce)") : undefined;
+if (reducedMotionQuery && typeof reducedMotionQuery.addEventListener === "function") {
+  reducedMotionQuery.addEventListener("change", () => {});
+}
+
 function renderReaction(message) {
   if (!reactionOverlay || !reactionEmojiSet.has(message?.emoji)) return;
   const participantID = message.participant_id || message.name || "unknown";
   const senderTile = participantElements.get(participantID)?.item;
+  // Batch the geometry reads before any write in this function so a dirty
+  // style tree cannot force a synchronous layout between them.
   const tileRect = senderTile?.getBoundingClientRect();
   const overlayRect = reactionOverlay.getBoundingClientRect();
   const tileIntersectsViewport = tileRect && tileRect.right > 0 && tileRect.left < window.innerWidth &&
@@ -1276,7 +1296,7 @@ function renderReaction(message) {
     tileIntersectsViewport &&
     tileRect.right > overlayRect.left && tileRect.left < overlayRect.right &&
     tileRect.bottom > overlayRect.top && tileRect.top < overlayRect.bottom;
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reducedMotion = Boolean(reducedMotionQuery?.matches);
   let reaction = reactionElements.get(participantID);
   if (!reaction) {
     reaction = document.createElement("span");
@@ -1622,6 +1642,9 @@ audioOnly?.addEventListener("change", () => {
     cameraRequested = cameraBeforeAudioOnly && selectedCameraQuality !== "off";
     setVideoSending(cameraRequested).catch(() => {});
   }
+  // The share control's disabled state depends on audio-only; refresh it so
+  // the button reflects the guard instead of silently ignoring clicks.
+  updateScreenShareUI();
   updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
 });
 
@@ -2848,6 +2871,13 @@ function applySpeakerState(participantID, speaking) {
   element.item.dataset.speaking = String(speaking);
   if (speaking) activeSpeakers.add(participantID);
   else activeSpeakers.delete(participantID);
+}
+
+// refreshPrimarySpeaker recomputes the primary speaker from the active set and
+// refreshes the layout once. Speaker flushes can batch several start/stop
+// flips in one frame; each flip must update state only, with exactly one
+// layout pass afterwards.
+function refreshPrimarySpeaker() {
   const eligible = new Map([...speakerLevels].filter(([id]) => {
     const item = participantElements.get(id)?.item;
     return activeSpeakers.has(id) && item?.dataset.mic !== "off";
@@ -2864,16 +2894,19 @@ function applySpeakerState(participantID, speaking) {
 function flushSpeakerStates() {
   speakerUpdateTimer = undefined;
   lastSpeakerUpdateAt = performance.now();
+  const hadPending = pendingSpeakerStates.size > 0;
   for (const [participantID, speaking] of pendingSpeakerStates) {
     applySpeakerState(participantID, speaking);
   }
   pendingSpeakerStates.clear();
+  if (hadPending) refreshPrimarySpeaker();
 }
 
 function setSpeakerState(participantID, speaking, immediate = false) {
   if (immediate) {
     pendingSpeakerStates.delete(participantID);
     applySpeakerState(participantID, speaking);
+    refreshPrimarySpeaker();
     return;
   }
   pendingSpeakerStates.set(participantID, speaking);

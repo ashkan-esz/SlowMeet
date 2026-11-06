@@ -441,7 +441,7 @@ func TestRouterOfferWaitsUntilBrowserAnswerIsWritten(t *testing.T) {
 	c := &client{
 		conn:             serverConn,
 		finished:         make(chan struct{}),
-		outbound:         make(chan Message, outboundQueueSize),
+		outbound:         make(chan *Message, outboundQueueSize),
 		writerDone:       make(chan struct{}),
 		peer:             serverPeer,
 		negotiationReady: true,
@@ -623,7 +623,7 @@ func TestCompletedNegotiationsRequestCameraKeyFrames(t *testing.T) {
 		participant:      meeting.Participant{ID: "receiver"},
 		negotiationReady: true,
 	}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	startTestWriter(t, c)
 	hub.handleWebRTCMessage(c, Message{
@@ -705,7 +705,7 @@ func TestICERestartBuffersCandidatesUntilAnswer(t *testing.T) {
 		negotiationReady:  true,
 		remoteDescription: true,
 	}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	startTestWriter(t, c)
 	peer := &restartSignalingPeer{}
@@ -781,7 +781,7 @@ func TestServerOfferIsWrittenBeforeGatheredCandidates(t *testing.T) {
 	defer serverConn.Close()
 
 	c := &client{conn: serverConn, negotiationReady: true, remoteDescription: true}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	startTestWriter(t, c)
 	candidate := Message{
@@ -1769,7 +1769,7 @@ func TestHubBroadcastDoesNotBlockOnStalledClient(t *testing.T) {
 	healthy := &client{
 		conn:       <-serverConnections,
 		finished:   make(chan struct{}),
-		outbound:   make(chan Message, outboundQueueSize),
+		outbound:   make(chan *Message, outboundQueueSize),
 		writerDone: make(chan struct{}),
 	}
 	defer healthy.conn.Close()
@@ -1782,7 +1782,7 @@ func TestHubBroadcastDoesNotBlockOnStalledClient(t *testing.T) {
 	stalled := &client{
 		conn:       <-serverConnections,
 		finished:   make(chan struct{}),
-		outbound:   make(chan Message, outboundQueueSize),
+		outbound:   make(chan *Message, outboundQueueSize),
 		writerDone: make(chan struct{}),
 	}
 	defer stalled.conn.Close()
@@ -1928,7 +1928,7 @@ func TestHubAnswerWithoutOfferReturnsError(t *testing.T) {
 	defer serverConn.Close()
 
 	c := &client{conn: serverConn, finished: make(chan struct{})}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	startTestWriter(t, c)
 
@@ -2061,7 +2061,7 @@ func TestDisconnectBeforeAnnouncementDoesNotBroadcastLeft(t *testing.T) {
 
 func TestAddOrQueueCandidateCapsPendingQueue(t *testing.T) {
 	c := &client{}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	peer := &restartSignalingPeer{}
 
@@ -2192,7 +2192,7 @@ func TestHubScreenShareStateCorrectedAfterActiveTakeover(t *testing.T) {
 
 func TestApplyPendingCandidatesRequeuesRemainderOnError(t *testing.T) {
 	c := &client{}
-	c.outbound = make(chan Message, outboundQueueSize)
+	c.outbound = make(chan *Message, outboundQueueSize)
 	c.writerDone = make(chan struct{})
 	peer := &restartSignalingPeer{}
 
@@ -2213,4 +2213,140 @@ func TestApplyPendingCandidatesRequeuesRemainderOnError(t *testing.T) {
 	if len(c.pendingCandidates) != 1 || c.pendingCandidates[0].Candidate != third.Candidate {
 		t.Fatalf("queued candidates = %v, want the third preserved for retry", c.pendingCandidates)
 	}
+}
+
+// seedPublicationFor installs a minimal fixture publication for a participant
+// so teardown behavior is observable without a live media path.
+func seedPublicationFor(t *testing.T, hub *Hub, participantID string) {
+	t.Helper()
+	hub.router.AddPublicationFixture(participantID, media.SourceRoleCamera)
+}
+
+func publicationRegistered(hub *Hub, participantID string) bool {
+	return hub.router.HasPublication(participantID, media.SourceRoleCamera)
+}
+
+func waitForHubCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s within 2s", description)
+}
+
+func TestDisconnectWithinGraceKeepsPublicationsRegistered(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 30 * time.Second,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	defer hub.Close()
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	conn := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	if joined.Type != TypeParticipant || joined.Participant == nil {
+		t.Fatalf("join response = %+v", joined)
+	}
+	participantID := joined.Participant.ID
+	seedPublicationFor(t, hub, participantID)
+
+	// An abrupt socket drop inside the grace window must keep the
+	// participant's publications registered so the resume can re-bind its
+	// streams without an unsubscribe/republish renegotiation cycle.
+	conn.Close()
+	waitForHubCondition(t, "disconnect did not enter the reconnect grace window", func() bool {
+		hub.mu.RLock()
+		defer hub.mu.RUnlock()
+		return len(hub.pending) == 1
+	})
+	if !publicationRegistered(hub, participantID) {
+		t.Fatal("publications were torn down during the reconnect grace window")
+	}
+	if hub.ActiveParticipants() != 1 {
+		t.Fatalf("meeting participants during grace = %d, want the slot kept", hub.ActiveParticipants())
+	}
+
+	// The resumed connection reclaims the slot and (with the publication
+	// swap) re-binds the streams without renegotiation.
+	resumed := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	defer resumed.Close()
+	writeTestMessage(t, resumed, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", ReconnectToken: joined.ReconnectToken,
+	})
+	var resumedResponse Message
+	readTestMessage(t, resumed, &resumedResponse)
+	if resumedResponse.Type != TypeParticipant || resumedResponse.Participant == nil ||
+		resumedResponse.Participant.ID != participantID {
+		t.Fatalf("resume response = %+v, want the same participant identity", resumedResponse)
+	}
+	if !publicationRegistered(hub, participantID) {
+		t.Fatal("resume tore down the publications that the swap was going to re-bind")
+	}
+}
+
+func TestGraceExpiryTearsDownDeferredMedia(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 150 * time.Millisecond,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	defer hub.Close()
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	conn := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	participantID := joined.Participant.ID
+	seedPublicationFor(t, hub, participantID)
+
+	conn.Close()
+	waitForHubCondition(t, "disconnect did not enter the reconnect grace window", func() bool {
+		hub.mu.RLock()
+		defer hub.mu.RUnlock()
+		return len(hub.pending) == 1
+	})
+	waitForHubCondition(t, "grace expiry did not tear down the deferred media and slot", func() bool {
+		return !publicationRegistered(hub, participantID) && hub.ActiveParticipants() == 0
+	})
+}
+
+func TestIntentionalLeaveTearsDownMediaImmediately(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 30 * time.Second,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	defer hub.Close()
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	conn := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	participantID := joined.Participant.ID
+	seedPublicationFor(t, hub, participantID)
+
+	writeTestMessage(t, conn, Message{
+		Version: ProtocolVersion, Type: TypeLeave, ParticipantID: participantID,
+	})
+	waitForHubCondition(t, "intentional leave did not tear down media and the slot immediately", func() bool {
+		return !publicationRegistered(hub, participantID) && hub.ActiveParticipants() == 0
+	})
 }

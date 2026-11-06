@@ -68,8 +68,8 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 		t.Fatalf("add screen receive transceiver: %v", err)
 	}
 
-	targetOffer := make(chan struct{}, 1)
-	secondTargetOffer := make(chan struct{}, 1)
+	targetOffer := make(chan struct{}, 4)
+	secondTargetOffer := make(chan struct{}, 4)
 	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
 	router.SetVideoSubscriptionsWithLayer("second-target", nil, "medium")
 	router.Register("source", sourceIngress, nil)
@@ -132,7 +132,7 @@ func TestRouterForwardsRTPBetweenRealPeerConnections(t *testing.T) {
 	sendIntegrationPacket(t, screenTrack, pion.RTPCodecTypeVideo, 90_000, 0)
 	waitIntegrationSignal(t, targetOffer, "router target offer")
 	waitIntegrationSignal(t, secondTargetOffer, "router second target offer")
-	waitIntegrationPublicationCount(t, router, 3)
+	waitIntegrationPublicationTargets(t, router, 3, 5)
 	negotiateIntegrationPeers(t, targetEgress.Connection(), targetClient)
 	negotiateIntegrationPeers(t, secondTargetEgress.Connection(), secondTargetClient)
 
@@ -826,7 +826,11 @@ func TestRouterReplacesPublicationWhenPublisherReFiresTrack(t *testing.T) {
 		t.Fatalf("receiver transceivers after second swap = %d, want the original 1", got)
 	}
 	sendIntegrationRTP(t, thirdSourceTrack, pion.RTPCodecTypeVideo, 90_000)
-	if !readIntegrationRTP(ctx, firstTargetTrack) {
+	// A fresh deadline: the shared ctx is close to spent after two swap
+	// cycles, and the read must not inherit that budget.
+	readCtx, readCancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer readCancel()
+	if !readIntegrationRTP(readCtx, firstTargetTrack) {
 		t.Fatal("receiver did not get packets from the third camera on the reused m-line")
 	}
 }
@@ -1042,6 +1046,34 @@ func waitIntegrationPublicationCount(t *testing.T, router *Router, want int) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("router publications = %d, want at least %d", got, want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// waitIntegrationPublicationTargets waits until every registered publication
+// has its egress subscriptions applied. Subscription application runs after
+// the router lock is released, so the publication count alone no longer
+// implies the receivers' m-lines exist — which negotiation depends on.
+func waitIntegrationPublicationTargets(t *testing.T, router *Router, wantPubs, wantTotalTargets int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	for {
+		router.mu.RLock()
+		got := len(router.pubs)
+		totalTargets := 0
+		for _, pub := range router.pubs {
+			totalTargets += len(pub.tracks)
+		}
+		router.mu.RUnlock()
+		if got >= wantPubs && totalTargets >= wantTotalTargets {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("router publications = %d with %d egress targets, want %d publications with %d targets total",
+				got, totalTargets, wantPubs, wantTotalTargets)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
