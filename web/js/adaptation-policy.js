@@ -229,7 +229,15 @@ function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingK
     (jitterKnown && jitterMs > 120);
   const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
     (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
-  return { poor, critical, good };
+  // While video is suspended almost nothing is sent, so the bandwidth
+  // estimate starves below every capacity bar and can no longer distinguish
+  // congestion from idleness. Recovery from an automatic pause must therefore
+  // also be able to key on transport health alone (RTT/loss/jitter in the
+  // good band), ignoring the starved capacity estimate. At least one transport
+  // metric must be measured — capacity alone cannot vouch for health.
+  const transportHealthy = (rttKnown || lossKnown || jitterKnown) && !critical &&
+    (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) && (!jitterKnown || jitterMs < 30);
+  return { poor, critical, good, transportHealthy };
 }
 
 function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, threshold = 3) {

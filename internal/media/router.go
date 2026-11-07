@@ -295,7 +295,7 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 	r.peers[id] = peer
 	r.offerers[id] = offerer
 	for _, pub := range r.pubs {
-		if r.queueSubscriptionLocked(pub, id, &ops) && offerer != nil {
+		if r.shouldSubscribeLocked(pub, id) && r.queueSubscriptionLocked(pub, id, &ops) && offerer != nil {
 			offers[id] = offerer
 		}
 	}
@@ -434,7 +434,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 	}
 	r.pubs[key] = pub
 	for id := range r.peers {
-		if r.queueSubscriptionLocked(pub, id, &ops) {
+		if r.shouldSubscribeLocked(pub, id) && r.queueSubscriptionLocked(pub, id, &ops) {
 			if offerer := r.offerers[id]; offerer != nil {
 				offers[id] = offerer
 			}
@@ -825,13 +825,18 @@ func (r *Router) queueSubscriptionLocked(pub *publication, targetID string, ops 
 }
 
 // applyTrackOps performs the queued pion operations in decision order. Each
-// subscription revalidates its decision against the current router state
-// before installing: a mutation that ran while the pion call was in flight
-// (the lock was released) may have superseded it, and the just-added sender
-// is removed again instead of being left subscribed.
+// operation revalidates its decision against the current router state before
+// touching pion: a mutation that ran while the lock was released may have
+// superseded it. A superseded subscription removes the just-added sender; a
+// superseded removal skips the RemoveTrack when a publication swap migrated
+// that sender into a live replacement publication — removing it there would
+// silently kill the receiver's media.
 func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 	for _, op := range ops {
 		if !op.subscribe {
+			if r.senderMigrated(op) {
+				continue
+			}
 			_ = op.peer.RemoveTrack(op.sender)
 			continue
 		}
@@ -865,6 +870,22 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 			_ = op.peer.RemoveTrack(sender)
 		}
 	}
+}
+
+// senderMigrated reports whether a queued RemoveTrack became stale because a
+// publication swap migrated the sender into a different registered
+// publication. The decide phase deletes the sender from its publication's
+// maps before the lock is released, so the only case where a registered
+// publication still holds it is a migration.
+func (r *Router) senderMigrated(op pendingTrackOp) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pub := range r.pubs {
+		if pub.senders[op.targetID] == op.sender {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatchOffers runs renegotiation callbacks concurrently: each offer
@@ -995,23 +1016,32 @@ func (r *Router) forwardAudio(pub *publication) {
 // readIngressPacket reads one RTP packet into the publication's reusable
 // buffer instead of the fresh 1500-byte allocation pion's ReadRTP makes per
 // packet — at meeting scale that buffer is the single largest source of GC
-// churn. The payload is copied out because Unmarshal aliases the read buffer,
-// which the next read overwrites while the frame buffer and mailboxes hold
-// packets asynchronously. An unparseable packet is fatal for the publication,
-// matching ReadRTP's behavior exactly.
+// churn. Unmarshal aliases the reused buffer for both the payload and the
+// header extension payloads (pion rtp's Header.Unmarshal slices extension
+// payloads straight out of the input), and the next read overwrites them
+// while the frame buffer and mailboxes hold packets asynchronously — so the
+// packet is deep-copied via Packet.Clone (verified to clone extensions and
+// payload in the pinned rtp version) before it escapes the read loop. An
+// unparseable packet is fatal for the publication, matching ReadRTP's
+// behavior exactly.
 func readIngressPacket(pub *publication) (*rtp.Packet, error) {
 	n, _, err := pub.remote.Read(pub.readBuf)
 	if err != nil {
 		return nil, err
 	}
+	return decodeIngressPacket(pub.readBuf[:n])
+}
+
+// decodeIngressPacket deep-copies a wire packet out of a reused buffer: both
+// the payload and the header extension payloads alias the input after
+// Unmarshal, and Packet.Clone is what makes the returned packet safe to hold
+// while the next read overwrites the buffer.
+func decodeIngressPacket(wire []byte) (*rtp.Packet, error) {
 	packet := &rtp.Packet{}
-	if err := packet.Unmarshal(pub.readBuf[:n]); err != nil {
+	if err := packet.Unmarshal(wire); err != nil {
 		return nil, err
 	}
-	payload := make([]byte, len(packet.Payload))
-	copy(payload, packet.Payload)
-	packet.Payload = payload
-	return packet, nil
+	return packet.Clone(), nil
 }
 
 func (r *Router) reportPublicationReadStop(pub *publication, err error) {

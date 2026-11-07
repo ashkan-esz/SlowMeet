@@ -881,3 +881,146 @@ func BenchmarkRouterForwardPacket(b *testing.B) {
 		})
 	}
 }
+
+// TestDecodeIngressPacketClonesAliasedBytes pins the ingress contract:
+// Unmarshal aliases the reused read buffer for the payload AND the header
+// extension payloads, so the returned packet must be a deep copy — the next
+// read overwrites the buffer while frame buffers and mailboxes hold packets.
+func TestDecodeIngressPacketClonesAliasedBytes(t *testing.T) {
+	// Hand-crafted wire bytes: RTP header with the extension bit set, a
+	// 0xBEDE one-byte-header extension (id 1, payload 0xAB), and a payload.
+	wire := []byte{
+		0x90, 0xEF, // version 2, extension bit, marker, PT 111
+		0x00, 0x07, // sequence 7
+		0x00, 0x00, 0x23, 0x28, // timestamp 9000
+		0x00, 0x00, 0x00, 0x2A, // SSRC 42
+		0xBE, 0xDE, 0x00, 0x01, // extension profile, one 32-bit word
+		0x10, 0xAB, 0x00, 0x00, // extension id 1, payload 0xAB, padding
+		0xAA, 0xBB, 0xCC, // payload
+	}
+
+	held, err := decodeIngressPacket(wire)
+	if err != nil {
+		t.Fatalf("decodeIngressPacket: %v", err)
+	}
+
+	// Overwrite the source buffer the way the next ingress read would.
+	for index := range wire {
+		wire[index] = 0x55
+	}
+
+	if held.Payload[0] != 0xAA || held.Payload[1] != 0xBB || held.Payload[2] != 0xCC {
+		t.Fatalf("held packet payload was corrupted by the next read: %v", held.Payload)
+	}
+	if held.SequenceNumber != 7 || held.Timestamp != 9000 || !held.Marker {
+		t.Fatalf("held packet header was corrupted: %+v", held.Header)
+	}
+	// Header extensions are unexported in pion rtp; re-Marshal the held
+	// packet and verify the extension bytes survived the buffer overwrite.
+	remarshaled, err := held.Marshal()
+	if err != nil {
+		t.Fatalf("re-marshal held packet: %v", err)
+	}
+	if len(remarshaled) < 18 || remarshaled[12] != 0xBE || remarshaled[13] != 0xDE {
+		t.Fatalf("held packet lost its extension header: %v", remarshaled)
+	}
+	if remarshaled[16] != 0x10 || remarshaled[17] != 0xAB {
+		t.Fatalf("held packet's extension payload was corrupted by the next read: %v", remarshaled[12:20])
+	}
+}
+
+func TestQueueSubscriptionSkipsSelfAndUnsubscribedPeers(t *testing.T) {
+	router := NewRouter()
+	sourcePeer := &webrtc.Peer{}
+	receiverPeer, peerErr := webrtc.NewPeer(nil)
+	if peerErr != nil {
+		t.Fatalf("create receiver peer: %v", peerErr)
+	}
+	t.Cleanup(func() { _ = receiverPeer.Close() })
+	outsiderPeer := &webrtc.Peer{}
+	router.peers["source"] = sourcePeer
+	router.peers["receiver"] = receiverPeer
+	router.peers["outsider"] = outsiderPeer
+	router.offerers["source"] = func() error { return nil }
+	router.offerers["receiver"] = func() error { return nil }
+	router.offerers["outsider"] = func() error { return nil }
+	camera := &publication{
+		key: "source/camera", sourceID: "source", role: SourceRoleCamera,
+		tracks:  make(map[string]*publicationTarget),
+		senders: make(map[string]*pion.RTPSender),
+	}
+	router.pubs[camera.key] = camera
+
+	// The source must never be queued as its own subscriber, and peers whose
+	// videoSubscriptions exclude the source must not be queued either.
+	router.SetVideoSubscriptionsWithLayer("outsider", nil, "medium")
+	router.mu.Lock()
+	router.videoSubscriptions["receiver"] = map[string]struct{}{"source": {}}
+	router.videoSubscriptionsSet["receiver"] = true
+	router.mu.Unlock()
+
+	var ops []pendingTrackOp
+	router.mu.Lock()
+	// Model the Register/Publish decide phase: the shouldSubscribeLocked
+	// filter gates every queue decision.
+	queuedSource := router.shouldSubscribeLocked(camera, "source") &&
+		router.queueSubscriptionLocked(camera, "source", &ops)
+	queuedOutsider := router.shouldSubscribeLocked(camera, "outsider") &&
+		router.queueSubscriptionLocked(camera, "outsider", &ops)
+	queuedReceiver := router.shouldSubscribeLocked(camera, "receiver") &&
+		router.queueSubscriptionLocked(camera, "receiver", &ops)
+	router.mu.Unlock()
+
+	if queuedSource {
+		t.Fatal("the publisher was queued as its own subscriber")
+	}
+	if queuedOutsider {
+		t.Fatal("an opted-out receiver was queued for the camera publication")
+	}
+	if !queuedReceiver {
+		t.Fatal("a subscribed receiver was not queued")
+	}
+	if len(ops) != 1 || ops[0].targetID != "receiver" {
+		t.Fatalf("queued ops = %+v, want exactly the receiver subscription", ops)
+	}
+}
+
+func TestApplyTrackOpsSkipsRemoveForMigratedSender(t *testing.T) {
+	router := NewRouter()
+	receiver, err := webrtc.NewPeer(nil)
+	if err != nil {
+		t.Fatalf("create receiver peer: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	track, err := pion.NewTrackLocalStaticRTP(
+		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90000},
+		"publisher|camera", "slowmeet-publisher-camera",
+	)
+	if err != nil {
+		t.Fatalf("create track: %v", err)
+	}
+	sender, err := receiver.AddTrack(track)
+	if err != nil {
+		t.Fatalf("add track: %v", err)
+	}
+	replacement := &publication{
+		key: "publisher/camera", sourceID: "publisher", role: SourceRoleCamera,
+		tracks:  map[string]*publicationTarget{"receiver": newTestPublicationTarget(track)},
+		senders: map[string]*pion.RTPSender{"receiver": sender},
+	}
+	router.pubs[replacement.key] = replacement
+
+	// A removal op queued before a swap migrated the sender: the registered
+	// publication still owns the sender, so the RemoveTrack must be skipped.
+	router.applyTrackOps([]pendingTrackOp{{peer: receiver, targetID: "receiver", sender: sender}})
+	if got := len(receiver.Connection().GetSenders()); got != 1 {
+		t.Fatalf("receiver senders after skipped removal = %d, want 1 (sender was migrated)", got)
+	}
+
+	// Once no registered publication owns the sender, the removal applies.
+	replacement.senders = map[string]*pion.RTPSender{}
+	router.applyTrackOps([]pendingTrackOp{{peer: receiver, targetID: "receiver", sender: sender}})
+	if got := len(receiver.Connection().GetSenders()); got != 0 {
+		t.Fatalf("receiver senders after removal = %d, want 0", got)
+	}
+}

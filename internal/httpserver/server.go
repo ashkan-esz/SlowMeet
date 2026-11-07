@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -350,17 +351,20 @@ func newStaticFileHandler(appName string) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := brandedHTML[r.URL.Path]; ok {
-			if r.Method == http.MethodGet || r.Method == http.MethodHead {
-				if servePrecompressed(w, r, r.URL.Path, "no-cache") {
-					return
-				}
-				etag := etags[r.URL.Path]
-				w.Header().Set("ETag", etag)
-				w.Header().Set("Cache-Control", "no-cache")
-				if matchesETag(r.Header.Get("If-None-Match"), etag) {
-					w.WriteHeader(http.StatusNotModified)
-					return
-				}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if servePrecompressed(w, r, r.URL.Path, "no-cache") {
+				return
+			}
+			etag := etags[r.URL.Path]
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Cache-Control", "no-cache")
+			if matchesETag(r.Header.Get("If-None-Match"), etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
 			}
 			name := strings.TrimPrefix(r.URL.Path, "/")
 			if name == "" {
@@ -643,7 +647,25 @@ func acceptsGzip(r *http.Request) bool {
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Upgrade")), "websocket") {
 		return false
 	}
-	return strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
+	for _, candidate := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		encoding, params, _ := strings.Cut(strings.TrimSpace(strings.ToLower(candidate)), ";")
+		if strings.TrimSpace(encoding) != "gzip" {
+			continue
+		}
+		if q, found := strings.CutPrefix(strings.TrimSpace(params), "q="); found {
+			return parseFloatSafe(q) > 0
+		}
+		return true
+	}
+	return false
+}
+
+func parseFloatSafe(value string) float64 {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 1
+	}
+	return parsed
 }
 
 func compressibleContentType(contentType string) bool {

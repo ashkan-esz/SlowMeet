@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,6 +190,12 @@ func (h *Hub) Close() {
 		if reconnect.timer != nil {
 			reconnect.timer.Stop()
 		}
+		// The grace window deferred this client's media teardown; shutdown
+		// must release it, or the peer connections and forward goroutines
+		// outlive the hub.
+		if reconnect.client != nil {
+			h.teardownClientMedia(reconnect.client)
+		}
 		_ = h.Meeting.Leave(reconnect.participant.ID)
 	}
 	h.mu.RLock()
@@ -361,6 +368,17 @@ func (h *Hub) scheduleChatHistoryExpiry(roomID string) {
 	}
 	history.expiry = time.AfterFunc(chatHistoryExpiry, func() {
 		if h.Meeting.Count() != 0 {
+			// Someone rejoined before the expiry fired; re-arm so the history
+			// is still cleaned when the room empties again.
+			h.mu.Lock()
+			if current := h.chatHistory[roomID]; current == history {
+				current.expiry = time.AfterFunc(chatHistoryExpiry, func() {
+					h.mu.Lock()
+					delete(h.chatHistory, roomID)
+					h.mu.Unlock()
+				})
+			}
+			h.mu.Unlock()
 			return
 		}
 		h.mu.Lock()
@@ -951,6 +969,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy, cfg.ICEPublicIP,
 		)
 		if err != nil {
+			// The reclaim already reserved the resumed slot; a hard failure
+			// here must not hold that slot (plus a dead media reservation)
+			// for the whole reconnect grace window. Drop the resume intent so
+			// the disconnect treats this as a fresh, announced departure.
+			c.resumed = false
 			c.writeAndFlush(Message{Version: ProtocolVersion, Type: TypeError, Error: "unable to initialize WebRTC"})
 			return
 		}
@@ -1003,6 +1026,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		if err := h.admit(c, participant, Message{Version: ProtocolVersion, Type: TypeParticipant, Participant: &participant,
 			ReconnectToken: c.reconnectToken}, activeTakeover); err != nil {
+			// Admission failed after reclaim (deadline or shutdown): the
+			// resumed slot must not linger in a grace window with media
+			// registered against a peer that will never produce tracks.
+			c.resumed = false
 			return
 		}
 		admissionTimer.Stop()
@@ -1119,6 +1146,12 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		err := applyRemoteAnswer(c, c.peer, msg.SDP)
+		h.Logger.Debug("sdp_answer_received",
+			"participant_id", c.participantID,
+			"bytes", len(msg.SDP),
+			"media_sections", strings.Count(msg.SDP, "\nm="),
+			"error", err,
+		)
 		completedICERestart := c.offerICERestart
 		c.offerICERestart = false
 		shouldOffer := c.offerInFlight && c.pendingOffer
@@ -1223,6 +1256,17 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 		c.negotiationMu.Unlock()
 		return err
 	}
+	// SDP size telemetry: offer bytes grow with m-line count, and when they
+	// approach maxSignalingMessageSize the connection is torn down on read —
+	// this line is the early warning that feeds the renegotiation-slimming
+	// work (single-sender simulcast). sendOfferWithPeer is package-level (no
+	// hub logger), so the default logger carries the debug line.
+	slog.Default().Debug("sdp_offer_sent",
+		"participant_id", c.participantID,
+		"bytes", len(offer),
+		"media_sections", strings.Count(offer, "\nm="),
+		"ice_restart", iceRestart,
+	)
 	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
 	if err != nil {
 		c.offerInFlight = false

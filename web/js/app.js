@@ -1593,6 +1593,8 @@ connectionPopoverRetry?.addEventListener("click", () => {
   if (socket?.readyState === WebSocket.OPEN && peer) {
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
+    clearTimeout(exhaustedReconnectTimer);
+    exhaustedReconnectTimer = undefined;
     iceRestartAttempts = 0;
     restartRequested = false;
     showStatus("Restarting media...");
@@ -1859,6 +1861,12 @@ let intentionalClose = false;
 let restartRequested = false;
 let iceRestartAttempts = 0;
 let iceDisconnectRestartTimer;
+// After ICE-restart attempts are exhausted, one delayed full reconnect is
+// scheduled: closing the socket drives the ordinary reconnect state machine
+// (token resume inside the server grace window) instead of stranding the
+// client in Offline until a manual retry.
+let exhaustedReconnectTimer;
+const exhaustedReconnectDelayMs = 3000;
 const maxIceRestartAttempts = 3;
 let reconnectAttempts = 0;
 let wasReconnectResume = false;
@@ -2820,6 +2828,11 @@ function forgetRemoteTracks(element, participantID) {
 
 function setParticipantQuality(element, quality) {
   const normalized = participantQualityLabels[quality] ? quality : "unknown";
+  if (element.item.dataset.quality === normalized) {
+    // The diagnostics loop runs per second per participant; unchanged
+    // quality must not rewrite dataset, classes, and aria labels.
+    return;
+  }
   const label = participantQualityLabels[normalized];
   element.item.dataset.quality = normalized;
   element.item.classList.toggle("is-poor-connection", normalized === "poor");
@@ -3681,6 +3694,8 @@ function resetMediaConnection() {
   enableAudio.hidden = true;
   renegotiationQueue?.close(new Error("signaling connection closed"));
   renegotiationQueue = undefined;
+  clearTimeout(exhaustedReconnectTimer);
+  exhaustedReconnectTimer = undefined;
   peer?.close();
   peer = undefined;
   videoTransceiver = undefined;
@@ -3968,14 +3983,24 @@ async function startWebRTC() {
     if (restoreCamera) {
       try {
         await enableCameraOnce({ negotiate: false, markRequested: !audioOnly?.checked });
-      } catch (error) {
+      } catch (firstError) {
         if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
-        if (audioOnly?.checked) cameraBeforeAudioOnly = false;
-        else cameraRequested = false;
-        meetingViewState.cameraEnabled = false;
-        setLocalMediaControls();
-        sendMediaState();
-        showStatus(mediaAccessMessage("video", error));
+        // One retry: a capture that fails right after a drop is often the
+        // device still settling, and losing the user's camera intent over a
+        // transient error is worse than a short delay.
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+          await enableCameraOnce({ negotiate: false, markRequested: !audioOnly?.checked });
+        } catch (error) {
+          if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+          if (audioOnly?.checked) cameraBeforeAudioOnly = false;
+          else cameraRequested = false;
+          meetingViewState.cameraEnabled = false;
+          setLocalMediaControls();
+          sendMediaState();
+          showStatus(mediaAccessMessage("video", error));
+        }
       }
     }
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
@@ -3986,6 +4011,12 @@ async function startWebRTC() {
     if (cameraSender && cameraSenderPeer === currentPeer) cameraSenderNegotiated = true;
   } catch (error) {
     showStatus(`Media unavailable: ${error.message}`);
+    // A failed media setup leaves a live signaling socket with no peer
+    // connection and no retry; closing it hands control to the reconnect
+    // state machine, which re-enters the meeting with the token.
+    if (isCurrentWebRTC(generation, currentPeer, currentSocket) && currentSocket?.readyState === WebSocket.OPEN) {
+      currentSocket.close();
+    }
   }
 }
 
@@ -4132,6 +4163,8 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
   if (isPeerConnectionConnected(targetPeer)) {
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
+    clearTimeout(exhaustedReconnectTimer);
+    exhaustedReconnectTimer = undefined;
     restartRequested = false;
     iceRestartAttempts = 0;
     setConnection("good", "Connected");
@@ -4148,7 +4181,10 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     status.textContent = iceRestartAttempts >= maxIceRestartAttempts
       ? connectionMethodFailureMessage()
       : "Restarting media...";
-    if (iceRestartAttempts >= maxIceRestartAttempts) showStatus(connectionMethodFailureMessage());
+    if (iceRestartAttempts >= maxIceRestartAttempts) {
+      showStatus(connectionMethodFailureMessage());
+      scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
+    }
     requestIceRestart(targetPeer, targetSocket, generation);
     return;
   }
@@ -4160,6 +4196,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     if (!restartRequested && iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
       showStatus(connectionMethodFailureMessage());
+      scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
       return;
     }
     scheduleIceRestartRetry(targetPeer, targetSocket, generation);
@@ -4199,6 +4236,19 @@ function scheduleIceRestartRetry(targetPeer, targetSocket, generation) {
   }, 5000);
 }
 
+// One delayed full reconnect after ICE restarts are exhausted: closing the
+// socket hands control to the ordinary reconnect state machine, whose token
+// resume re-enters the meeting without the room renegotiating (grace window).
+function scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation) {
+  if (exhaustedReconnectTimer !== undefined) return;
+  exhaustedReconnectTimer = setTimeout(() => {
+    exhaustedReconnectTimer = undefined;
+    if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+    if (isPeerConnectionConnected(targetPeer)) return;
+    targetSocket?.close();
+  }, exhaustedReconnectDelayMs);
+}
+
 function hasNewRemoteICECredentials(previousDescription, nextSDP) {
   const previousUfrag = previousDescription?.sdp.match(/^a=ice-ufrag:(.+)$/m)?.[1];
   const nextUfrag = nextSDP.match(/^a=ice-ufrag:(.+)$/m)?.[1];
@@ -4230,6 +4280,18 @@ function setStatValue(element, value) {
   syncConnectionPopoverStats();
 }
 
+// The settings panel's metric rows are queried once and cached: the
+// one-second diagnostics loop was making a dozen querySelector calls per tick
+// for elements that never change identity.
+const metricElementCache = new Map();
+
+function metricElement(id) {
+  if (!metricElementCache.has(id)) {
+    metricElementCache.set(id, document.querySelector(`#${id}`));
+  }
+  return metricElementCache.get(id);
+}
+
 function updateConnectionMetrics(values) {
   const next = {
     ...connectionMetrics,
@@ -4253,7 +4315,7 @@ function updateConnectionMetrics(values) {
   };
   Object.assign(connectionMetrics, next);
   const text = (id, value) => {
-    const node = document.querySelector(`#${id}`);
+    const node = metricElement(id);
     if (!node) return;
     const rendered = String(value);
     if (node.textContent !== rendered) node.textContent = rendered;
@@ -4590,9 +4652,8 @@ async function runDiagnosticsUpdate() {
     jitterMs: values.jitterMs,
     availableOutgoingKbps: values.availableOutgoingKbps
   });
-  const { poor, critical, good } = networkCondition;
+  const { poor, critical, good, transportHealthy } = networkCondition;
   criticalSamples = critical ? criticalSamples + 1 : 0;
-  recoverySamples = good ? recoverySamples + 1 : 0;
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
     goodSamples = good ? goodSamples + 1 : 0;
@@ -4612,10 +4673,27 @@ async function runDiagnosticsUpdate() {
       await applyProfile(profiles[adaptationLevel].name);
     }
   }
+  // Video recovery must not be gated on the BWE threshold inside `good`:
+  // after congestion the browser's bandwidth estimate can sit below the 350
+  // kbps `good` bar for a long time while the floor profile needs only
+  // 90 kbps. At the floor profile, recovered loss/RTT/jitter are enough.
+  // While an automatic pause holds, the estimate starves outright (almost
+  // nothing is being sent), so recovery keys on transport health alone —
+  // otherwise a paused sender with a fixed profile could never resume.
+  const atFloorProfile = profile.value === "auto" && adaptationLevel === 0;
+  const suspendedHealthy = videoSuspended && transportHealthy && !critical;
+  const recoverable = good || (atFloorProfile && !poor && !critical) || suspendedHealthy;
+  recoverySamples = recoverable ? recoverySamples + 1 : 0;
   if (simulcastEnabled) {
+    // Decode-side frame drops are not network damage: when the measured
+    // packet loss is zero, drop the drop count from the layer decision so a
+    // slow decoder on a perfect link does not downgrade (and never recover)
+    // the SFU layer.
+    const decodeDropsNotNetwork = lossKnown && packetLoss === 0;
     const layerDecision = chooseCameraLayer(
       cameraLayer, cameraLayerPoorSamples, cameraLayerGoodSamples,
-      values.cameraPacketLossPct, values.cameraDroppedFramesPct
+      values.cameraPacketLossPct,
+      decodeDropsNotNetwork ? 0 : values.cameraDroppedFramesPct
     );
     cameraLayerPoorSamples = layerDecision.poorSamples;
     cameraLayerGoodSamples = layerDecision.goodSamples;
@@ -4630,7 +4708,7 @@ async function runDiagnosticsUpdate() {
       addChatSystem("Auto quality dropped to audio only");
       showToast("Your video paused to protect audio");
     }
-  } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, good)) {
+  } else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, recoverable)) {
     recoverySamples = 0;
     await setVideoSending(true);
   }
@@ -4745,8 +4823,20 @@ async function applyVideoCaptureConstraints(videoTrack, resolvedProfile) {
   }).catch(() => {});
 }
 
-async function applyProfile(name, targetPeer = peer, targetStream = localStream, options = {}) {
-  if (!targetPeer) return;
+// Sender parameter writes are read-modify-write cycles on shared
+// RTCRtpSender state; the adaptation loop, the profile picker, config
+// updates, device switches, and camera enables can all race. Serialize them
+// so a stale getParameters snapshot cannot clobber a newer write.
+let senderParameterChain = Promise.resolve();
+
+function applyProfile(name, targetPeer = peer, targetStream = localStream, options = {}) {
+  if (!targetPeer) return Promise.resolve();
+  const run = () => doApplyProfile(name, targetPeer, targetStream, options);
+  senderParameterChain = senderParameterChain.then(run, run);
+  return senderParameterChain;
+}
+
+async function doApplyProfile(name, targetPeer, targetStream, options = {}) {
   const resolvedProfile = options.resolvedProfile || resolveVideoProfile(name, targetStream);
   if (!resolvedProfile) return;
   const { selected, requested, bitrate, fps, width, height, audioBitrate } = resolvedProfile;
@@ -4757,7 +4847,15 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream,
       `${fps} FPS / ${Math.round(bitrate / 1000)} kbps video / ${Math.round(audioBitrate / 1000)} kbps audio`;
   }
   const videoTrack = targetStream?.getVideoTracks()[0];
-  if (!options.captureConstraintsApplied) await applyVideoCaptureConstraints(videoTrack, resolvedProfile);
+  if (!options.captureConstraintsApplied && !isCaptureDownStep(videoTrack, height)) {
+    await applyVideoCaptureConstraints(videoTrack, resolvedProfile);
+  }
+  // A down-step (isCaptureDownStep true) skips capture reconfiguration on
+  // purpose: reconfiguring a live camera briefly stalls the track on
+  // precisely the weakest link. The encoder's maintain-framerate degradation
+  // preference shrinks the encoded resolution immediately under the lower
+  // bitrate cap instead; capture constraints re-arm on the next up-step or
+  // manual change.
   for (const sender of targetPeer.getSenders()) {
     if (sender.track?.kind !== "video") continue;
     const parameters = sender.getParameters();
@@ -4788,6 +4886,16 @@ async function applyProfile(name, targetPeer = peer, targetStream = localStream,
     parameters.encodings[0].maxBitrate = audioBitrate;
     await sender.setParameters(parameters).catch(() => {});
   }
+}
+
+// isCaptureDownStep reports whether a profile targets a materially lower
+// capture height than the track is running at. Down-steps skip live capture
+// reconfiguration (the encoder's degradation preference handles them without
+// stalling the track); up-steps and unknown states re-arm the constraints.
+function isCaptureDownStep(videoTrack, targetHeight) {
+  const settings = videoTrack?.getSettings?.();
+  const currentHeight = Number(settings?.height) || 0;
+  return currentHeight > 0 && targetHeight > 0 && targetHeight < currentHeight * 0.95;
 }
 
 profile.addEventListener("change", async () => {
@@ -5068,7 +5176,11 @@ async function setSenderEncodingActive(sender, enabled) {
   if (!sender) return true;
   const parameters = sender.getParameters();
   parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-  parameters.encodings[0].active = enabled;
+  // Every encoding must flip: a simulcast camera carries three, and pausing
+  // only the first leaves the medium and high layers streaming — the
+  // protect-audio pause would recover a fraction of the uplink exactly when
+  // it matters most.
+  for (const encoding of parameters.encodings) encoding.active = enabled;
   try {
     await sender.setParameters(parameters);
     return true;
@@ -5518,6 +5630,8 @@ leave.addEventListener("click", () => {
   socketGeneration++;
   clearTimeout(iceDisconnectRestartTimer);
   iceDisconnectRestartTimer = undefined;
+  clearTimeout(exhaustedReconnectTimer);
+  exhaustedReconnectTimer = undefined;
   clearTimeout(reconnectTimer);
   clearInterval(statsTimer);
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {

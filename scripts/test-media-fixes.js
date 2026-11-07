@@ -179,3 +179,93 @@ assert.match(audioOnlyHandler, /updateScreenShareUI\(\);/,
   "the audio-only change handler must refresh the screen-share control state");
 
 console.log("Media fix checks passed");
+
+// Automatic congestion pauses on fixed (non-auto) profiles must have a
+// recovery path: while video is suspended the bandwidth estimate starves, so
+// recovery has to key on transport health instead of the capacity estimate.
+assert.match(appSource, /const suspendedHealthy = videoSuspended && transportHealthy && !critical;/,
+  "the diagnostics loop must count suspended-and-healthy samples toward recovery");
+assert.match(appSource, /const recoverable = good \(?\|\|/s,
+  "the recovery gate must keep the good and floor-profile paths");
+
+console.log("Media fix checks passed (adaptation recovery)");
+
+// Pass 4: the protect-audio pause must deactivate every simulcast encoding,
+// not just the first — a camera carries three and the pause exists to free
+// uplink on weak connections.
+const setSenderEncodingActiveSource = appSource.slice(
+  appSource.indexOf("async function setSenderEncodingActive("),
+  appSource.indexOf("\nasync function setVideoSenderActive("));
+assert.match(setSenderEncodingActiveSource,
+  /for \(const encoding of parameters\.encodings\) encoding\.active = enabled;/,
+  "pausing a sender must flip all of its encodings");
+
+// Video recovery must not be gated on the BWE threshold inside `good`: at the
+// floor profile, recovered loss/RTT/jitter are enough.
+const adaptationTick = slice(appSource, "const { poor, critical, good, transportHealthy } = networkCondition;",
+  "} else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, recoverable))");
+assert.match(adaptationTick,
+  /const atFloorProfile = profile\.value === "auto" && adaptationLevel === 0;/,
+  "the floor profile must be detected for ungated video recovery");
+assert.match(adaptationTick,
+  /const recoverable = good \|\| \(atFloorProfile && !poor && !critical\) \|\| suspendedHealthy;/,
+  "recovery must accept floor-profile non-poor samples and healthy transports while suspended");
+
+// ICE-restart exhaustion schedules one full reconnect instead of stranding
+// the client in Offline until a manual retry.
+assert.match(appSource, /function scheduleExhaustedMediaReconnect\(/,
+  "exhaustion must schedule a full reconnect");
+assert.equal((appSource.match(/scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/g) || []).length, 2,
+  "both exhaustion sites (failed and disconnected) must schedule the reconnect");
+assert.match(appSource, /clearTimeout\(exhaustedReconnectTimer\);\s*\n\s*exhaustedReconnectTimer = undefined;\s*\n\s*clearTimeout\(reconnectTimer\);/,
+  "an intentional leave must cancel the exhausted reconnect");
+
+// The screen-share adaptation steps back up after sustained within-budget
+// samples instead of staying degraded forever.
+const screenShareSource = fs.readFileSync(
+  path.join(__dirname, "..", "web/js/screen-share-adaptation.js"), "utf8");
+assert.match(screenShareSource, /underLimitSamplesToRecover/,
+  "the screen sampler must track a recovery streak");
+assert.match(screenShareSource,
+  /frameRate = Math\.min\(maxFrameRate, Math\.ceil\(frameRate \* 1\.25\)\);/,
+  "recovery must raise the frame rate first, mirroring the down-step");
+assert.match(screenShareSource,
+  /if \(nextBitrate < maxBitrate && Number\.isFinite\(lastMeasuredBitrate\) && lastMeasuredBitrate > 0\) \{/,
+  "a budget cut must seed the learned state from the measured bitrate");
+
+// Decode-side frame drops must not downgrade the SFU layer when the measured
+// packet loss is zero.
+const layerDecisionSource = slice(appSource, "const decodeDropsNotNetwork = lossKnown && packetLoss === 0;",
+  "setCameraLayer(layerDecision.layer);");
+assert.match(layerDecisionSource,
+  /decodeDropsNotNetwork \? 0 : values\.cameraDroppedFramesPct/,
+  "zero-loss drops must be excluded from the layer decision");
+
+// A failed media setup closes the socket so the reconnect state machine
+// takes over instead of stranding a live socket with no peer.
+const startWebRTCCatch = slice(appSource, 'showStatus(`Media unavailable: ${error.message}`);',
+  "\n}\n\nfunction syncConnectionPopoverStats");
+assert.match(startWebRTCCatch, /currentSocket\.close\(\);/,
+  "startWebRTC failure must hand control to the reconnect state machine");
+
+// Sender parameter writes are serialized across competing callers.
+assert.match(appSource, /let senderParameterChain = Promise\.resolve\(\);/,
+  "applyProfile must serialize sender parameter writes");
+assert.match(appSource, /senderParameterChain = senderParameterChain\.then\(run, run\);/,
+  "applyProfile must chain onto the sender parameter queue");
+
+// Camera intent survives a transient reconnect-restore failure via one retry.
+const restoreCatch = slice(appSource, "} catch (firstError) {",
+  "showStatus(mediaAccessMessage(\"video\", error));");
+assert.match(restoreCatch, /await new Promise\(\(resolve\) => setTimeout\(resolve, 250\)\);[\s\S]*?await enableCameraOnce\(\{ negotiate: false, markRequested: !audioOnly\?\.checked \}\);/,
+  "a failed camera restore must retry once before dropping the intent");
+
+// Auto-profile down-steps skip live capture reconfiguration; the encoder's
+// degradation preference shrinks resolution without stalling the track.
+assert.match(appSource, /function isCaptureDownStep\(videoTrack, targetHeight\) \{/,
+  "down-step detection must exist");
+assert.match(appSource,
+  /if \(!options\.captureConstraintsApplied && !isCaptureDownStep\(videoTrack, height\)\) \{\s*\n\s*await applyVideoCaptureConstraints/,
+  "down-steps must skip capture reconfiguration");
+
+console.log("Media fix checks passed (pass 4)");

@@ -267,6 +267,31 @@ const recoveringCapacity = classifyNetworkSample({
 if (recoveringCapacity.poor || recoveringCapacity.critical || !recoveringCapacity.good) {
   throw new Error("healthy measured capacity should count toward recovery");
 }
+// While video is suspended the bandwidth estimate starves (nothing is being
+// sent); transport health alone must remain decidable for recovery.
+const starvedCapacityHealthyTransport = classifyNetworkSample({
+  rttMs: 30, packetLoss: 0, jitterMs: 5, availableOutgoingKbps: 62
+});
+if (!starvedCapacityHealthyTransport.poor || starvedCapacityHealthyTransport.critical ||
+    !starvedCapacityHealthyTransport.transportHealthy) {
+  throw new Error("a starved bandwidth estimate must stay poor yet keep transport health decidable");
+}
+const starvedCapacityImpairedTransport = classifyNetworkSample({
+  rttMs: 300, packetLoss: 0, jitterMs: 5, availableOutgoingKbps: 62
+});
+if (starvedCapacityImpairedTransport.transportHealthy) {
+  throw new Error("impaired RTT must not count as healthy transport even when capacity is starved");
+}
+const starvedCapacityLossyTransport = classifyNetworkSample({
+  rttMs: 30, packetLoss: 8, jitterMs: 5, availableOutgoingKbps: 62
+});
+if (starvedCapacityLossyTransport.transportHealthy) {
+  throw new Error("impaired packet loss must not count as healthy transport even when capacity is starved");
+}
+const noSignalTransport = classifyNetworkSample({ availableOutgoingKbps: 62 });
+if (noSignalTransport.transportHealthy) {
+  throw new Error("transport health requires at least one measured signal");
+}
 const fallbackMetrics = classifyNetworkSample({ rttMs: 90, packetLoss: 0, jitterMs: 10 });
 if (fallbackMetrics.poor || fallbackMetrics.critical || !fallbackMetrics.good) {
   throw new Error("RTT, loss, and jitter should remain usable when outgoing capacity is unavailable");

@@ -151,13 +151,21 @@ deterministic default profile.
 independent browser instances (two Chromium, two Firefox by default) join one
 room and exercise join/roster convergence, camera and microphone state
 fan-out, chat (sequential, simultaneous, unread badge, 500-character messages,
-emoji picker, and retained-history replay after a reconnect), reactions,
-raised-hand FIFO ordering, screen share (start/stop, lease race, sharer
-departure), incoming video, Protect-audio, camera quality presets, tile
-hiding, stage focus, pinning, keyboard shortcuts, and push-to-talk,
-responsive layout, departures (single, simultaneous, abrupt browser kill),
-signaling reconnect within the grace window, admin `config_update` broadcast,
-and fifth-participant capacity rejection.
+emoji picker, system join/leave notices, new-message jump and preview toast,
+a 300-node rail cap, and retained-history replay after a reconnect without
+duplicates), reactions (sequential, simultaneous, and the 6-per-3s limit),
+raised-hand FIFO ordering plus duplicate raise/lower no-ops, screen share
+(start/stop, lease race, sharer departure, eviction by admin policy, and
+remote frames actually decoding), incoming video, Protect-audio, camera
+quality presets, self-view, tile hiding, stage focus, pinning, the 1:1
+auto-pin as the room shrinks, keyboard shortcuts, push-to-talk, the Escape
+dismissal chain, an axe accessibility scan, responsive layout, departures
+(single, simultaneous, abrupt browser kill), reconnect dynamics (grace-window
+churn, token-resume or expiry-rejoin, second-socket token takeover, and
+late-joiner replay), admin `config_update` broadcast (share toggle, bitrate
+caps, chat-history reset), connection-method switching, the `/metrics`
+endpoint, the prejoin room-roster preview, and fifth-participant capacity
+rejection with its room-full broadcast.
 
 Run a subset while debugging a single scenario:
 

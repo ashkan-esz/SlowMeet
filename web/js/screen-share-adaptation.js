@@ -2,6 +2,11 @@
   const sampleIntervalMs = 5000;
   const minimumFrameRate = 5;
   const maximumResolutionScale = 3;
+  // Consecutive within-budget samples before one recovery step up. Mirrors
+  // the camera ladder's asymmetric 2-down / N-up hysteresis so a share that
+  // was degraded by transient congestion steps back up instead of staying at
+  // the floor forever.
+  const underLimitSamplesToRecover = 5;
 
   function createScreenShareAdaptation(sender) {
     let timer;
@@ -12,7 +17,9 @@
     let resolutionScale = 1;
     let previousBytes;
     let previousTimestamp;
+    let lastMeasuredBitrate;
     let overLimitSamples = 0;
+    let underLimitSamples = 0;
     let sampleInProgress = false;
     let generation = 0;
 
@@ -63,14 +70,33 @@
         const elapsedMs = outbound.timestamp - previousTimestamp;
         if (elapsedMs > 0) {
           const bitrate = ((outbound.bytesSent - previousBytes) * 8 * 1000) / elapsedMs;
-          if (bitrate > maxBitrate * 1.1) overLimitSamples++;
-          else overLimitSamples = 0;
+          lastMeasuredBitrate = bitrate;
+          if (bitrate > maxBitrate * 1.1) {
+            overLimitSamples++;
+            underLimitSamples = 0;
+          } else {
+            overLimitSamples = 0;
+            // Full quality already: nothing to step up into.
+            if (frameRate < maxFrameRate || resolutionScale > 1) underLimitSamples++;
+            else underLimitSamples = 0;
+          }
           if (overLimitSamples >= 2) {
             overLimitSamples = 0;
+            underLimitSamples = 0;
             if (frameRate > minimumFrameRate) {
               frameRate = Math.max(minimumFrameRate, Math.floor(frameRate * 0.8));
             } else if (resolutionScale < maximumResolutionScale) {
               resolutionScale = Math.min(maximumResolutionScale, resolutionScale + 0.25);
+            }
+            await applyParameters();
+          } else if (underLimitSamples >= underLimitSamplesToRecover) {
+            underLimitSamples = 0;
+            // Mirror of the down-step: frame rate recovers first (readability
+            // of moving content), then resolution.
+            if (frameRate < maxFrameRate) {
+              frameRate = Math.min(maxFrameRate, Math.ceil(frameRate * 1.25));
+            } else if (resolutionScale > 1) {
+              resolutionScale = Math.max(1, resolutionScale - 0.25);
             }
             await applyParameters();
           }
@@ -98,11 +124,27 @@
         }
         maxBitrate = nextBitrate;
         maxFrameRate = nextFrameRate;
-        frameRate = maxFrameRate;
-        resolutionScale = 1;
+        // A changed budget used to reset the learned stepping to full quality,
+        // which overspends for two sampling windows right after a camera
+        // up-step and can re-trigger congestion. Keep the learned adaptation
+        // (clamped to the new budget) — the recovery up-step reopens quality
+        // once the measured bitrate stays under the new cap.
+        if (frameRate > 0) {
+          frameRate = Math.min(maxFrameRate, frameRate);
+        } else {
+          frameRate = maxFrameRate;
+        }
+        if (nextBitrate < maxBitrate && Number.isFinite(lastMeasuredBitrate) && lastMeasuredBitrate > 0) {
+          // A budget cut: seed the frame rate roughly in proportion to the
+          // measured share of the old cap so the sender starts near the link.
+          frameRate = Math.max(minimumFrameRate, Math.min(frameRate,
+            Math.ceil(maxFrameRate * Math.min(1, lastMeasuredBitrate / nextBitrate))));
+        }
+        resolutionScale = Math.min(maximumResolutionScale, Math.max(1, resolutionScale));
         previousBytes = undefined;
         previousTimestamp = undefined;
         overLimitSamples = 0;
+        underLimitSamples = 0;
         await applyParameters();
         ensureSampling();
       },

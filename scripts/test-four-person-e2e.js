@@ -8,6 +8,9 @@ const path = require("node:path");
 const net = require("node:net");
 const { setTimeout: delay } = require("node:timers/promises");
 const { chromium, firefox } = require("playwright-core");
+const axeSource = (() => {
+  try { return require("axe-core").source; } catch (_) { return ""; }
+})();
 
 const root = path.join(__dirname, "..");
 const names = ["Avery", "Blake", "Casey", "Drew"];
@@ -64,7 +67,7 @@ async function startServer() {
   } };
 }
 
-async function createParticipant(role, name, expectRejected = false) {
+async function createParticipant(role, name, expectRejected = false, skipJoin = false) {
   const browserName = browserNames.get(role) || "chromium";
   const browserType = browserName === "firefox" ? firefox : chromium;
   const configuredPath = browserName === "firefox"
@@ -107,7 +110,8 @@ async function createParticipant(role, name, expectRejected = false) {
             const parsed = JSON.parse(value);
             message = { type: parsed.type, participant_id: parsed.participant_id,
               screen_share_active: parsed.screen_share_active, screen_share_owner: parsed.screen_share_owner,
-              screen_share_enabled: parsed.screen_share_enabled,
+              screen_share_enabled: parsed.screen_share_enabled, max_video_bitrate: parsed.max_video_bitrate,
+              reconnect_token: parsed.reconnect_token,
               hand_raised: parsed.hand_raised, audio_enabled: parsed.audio_enabled,
               video_enabled: parsed.video_enabled, error: parsed.error };
           } catch (_) { message = value.slice(0, 200); }
@@ -141,6 +145,7 @@ async function createParticipant(role, name, expectRejected = false) {
   page.on("requestfailed", (request) => events.get(role).push({ type: "requestfailed", url: request.url(), error: request.failure()?.errorText }));
   await page.goto(server.url);
   await page.locator("#join-form").waitFor({ timeout: 15000 });
+  if (skipJoin) return page;
   await page.locator("#name").fill(name);
   await page.locator("#join").click();
   if (expectRejected) {
@@ -961,40 +966,602 @@ async function scenarioFifthParticipantCapacity() {
   assert.match(result || "", /full|capacity/i, `fifth client not rejected: ${result}`);
   await acknowledgeSignalingErrors(fifth);
   pages.delete("P5");
+  // The rejection is announced to the whole room, not only the rejected client.
+  for (const [role, page] of pages) {
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#toast-region .toast--warning")]
+        .some((toast) => /full/i.test(toast.textContent)), null, { timeout: 5000 });
+  }
+}
+
+// Every browser saw the other three join as system chat messages; a leave and
+// rejoin add the matching notices on the continuous browsers.
+async function scenarioChatSystemMessages() {
+  await setupRoom();
+  for (const page of pages.values()) await openChat(page);
+  for (const [role, page] of pages) {
+    const joined = await page.evaluate(() =>
+      [...document.querySelectorAll("#chat-messages .chat-message--system")]
+        .filter((item) => item.textContent.includes("joined the room")).length);
+    assert.equal(joined, 3, `${role} expected 3 join system messages, saw ${joined}`);
+  }
+  const p4 = pages.get("P4");
+  await p4.locator("#leave").click();
+  await p4.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 });
+  pages.delete("P4");
+  await delay(2000);
+  const observers = [...pages.entries()].filter(([role]) => role !== "P4");
+  for (const [role, page] of observers) {
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#chat-messages .chat-message--system")]
+        .some((item) => item.textContent.includes("Drew left the room")), null, { timeout: 10000 });
+  }
+  await join("P4");
+  for (const page of pages.values()) await roster(page, names);
+  for (const [role, page] of observers) {
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#chat-messages .chat-message--system")]
+        .some((item) => item.textContent.includes("Drew joined the room")), null, { timeout: 10000 });
+  }
+}
+
+// The server rate-limits reactions to 6 per 3s per client and silently drops
+// the rest; the tile still shows the surviving reaction.
+async function scenarioReactionRateLimit() {
+  await setupRoom();
+  // Prior scenarios' reactions may have consumed part of the sender's current
+  // fixed 3s window; wait it out so the burst starts from a fresh one.
+  await delay(3100);
+  const sender = pages.get("P1");
+  const observer = pages.get("P2");
+  const participantID = await participantIDFor(sender, names[0]);
+  const baseline = await observer.evaluate(() => (window.__slowMeetTest?.socketEvents || []).length);
+  await sender.evaluate(({ participantID }) => {
+    const socket = window.__slowMeetTest.sockets.at(-1);
+    for (let i = 0; i < 10; i += 1) {
+      socket.send(JSON.stringify({ version: 1, type: "emoji_reaction", participant_id: participantID, emoji: "👍" }));
+    }
+  }, { participantID });
+  const received = await observer.evaluate((baseline) =>
+    (window.__slowMeetTest?.socketEvents || []).slice(baseline).filter((event) =>
+      event.direction === "receive" && event.message?.type === "emoji_reaction").length, baseline);
+  assert.equal(received, 6, `expected the 6-per-3s reaction limit to pass 6 of 10, saw ${received}`);
+  await observer.waitForFunction((name) => {
+    const tile = [...document.querySelectorAll("li[data-participant-id]")]
+      .find((item) => item.textContent.includes(name));
+    return tile?.querySelector(".participant-reaction")?.textContent === "👍";
+  }, names[0], { timeout: 5000 });
+}
+
+// Duplicate raises and lowers are server-side no-ops: exactly one broadcast
+// per real transition reaches the room.
+async function scenarioHandStateEdgeCases() {
+  await setupRoom();
+  const raiser = pages.get("P1");
+  const observer = pages.get("P2");
+  const participantID = await participantIDFor(raiser, names[0]);
+  const sendHandState = (raised) => raiser.evaluate(({ participantID, raised }) => {
+    const socket = window.__slowMeetTest.sockets.at(-1);
+    socket.send(JSON.stringify({ version: 1, type: "hand_state", participant_id: participantID, hand_raised: raised }));
+  }, { participantID, raised });
+  const baseline = await observer.evaluate(() => (window.__slowMeetTest?.socketEvents || []).length);
+  await sendHandState(true);
+  await waitForTileState(observer, participantID, "handRaised", "true");
+  await sendHandState(true);
+  await delay(400);
+  await sendHandState(false);
+  await waitForTileState(observer, participantID, "handRaised", "false");
+  await sendHandState(false);
+  await delay(400);
+  const handStates = await observer.evaluate((baseline) =>
+    (window.__slowMeetTest?.socketEvents || []).slice(baseline).filter((event) =>
+      event.direction === "receive" && event.message?.type === "hand_state")
+      .map((event) => event.message.hand_raised), baseline);
+  assert.deepEqual(handStates, [true, false],
+    `duplicate raise/lower must be server-side no-ops, saw ${JSON.stringify(handStates)}`);
+}
+
+// The remote screen video must actually decode advancing frames on every
+// viewer, not only flip the sharing state.
+async function scenarioRemoteScreenDecodes() {
+  await setupRoom();
+  const sharer = pages.get("P3");
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "true");
+  for (const [role, page] of pages) {
+    if (role === "P3") continue;
+    await page.waitForFunction(() => {
+      const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+      return Boolean(video) && video.videoWidth > 0 && video.readyState >= 2;
+    }, null, { timeout: 20000 });
+    const advanced = await page.evaluate(async () => {
+      const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+      const before = video.currentTime;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      return video.currentTime > before + 0.3;
+    });
+    assert.ok(advanced, `${role}'s remote screen video did not advance`);
+  }
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "false");
+}
+
+// Hiding self-view removes the local tile from that browser's stage only;
+// the other participants still see and hear the person.
+async function scenarioSelfViewToggle() {
+  await setupRoom();
+  const page = pages.get("P1");
+  const peer = pages.get("P2");
+  await openSettingsPanel(page);
+  await page.locator("#self-view").uncheck();
+  await page.waitForFunction(() => {
+    const tile = [...document.querySelectorAll("#meeting-layout-host .participant-tile")]
+      .find((item) => item.classList.contains("is-local"));
+    return !tile || tile.hidden || tile.closest("#layout-parking") !== null;
+  }, null, { timeout: 5000 });
+  const averyVisible = await peer.evaluate((name) =>
+    [...document.querySelectorAll("#meeting-layout-host .participant-tile")]
+      .some((item) => item.textContent.includes(name) && !item.hidden && item.closest("#layout-parking") === null), names[0]);
+  assert.ok(averyVisible, "the peer lost Avery's tile when Avery hid self-view");
+  await page.locator("#self-view").check();
+  await page.waitForFunction(() => {
+    const tile = [...document.querySelectorAll("#meeting-layout-host .participant-tile")]
+      .find((item) => item.classList.contains("is-local"));
+    return Boolean(tile) && !tile.hidden && tile.closest("#layout-parking") === null;
+  }, null, { timeout: 5000 });
+  await page.keyboard.press("Escape");
+}
+
+// The "New messages" jump appears when a message lands while scrolled up, and
+// a rail-closed message surfaces a preview toast.
+async function scenarioChatUxDetails() {
+  await setupRoom();
+  const reader = pages.get("P1");
+  await openChat(reader);
+  for (let i = 0; i < 18; i += 1) {
+    await sendChat(pages.get(roles[(i % 3) + 1]), `filler-${i}`);
+  }
+  await reader.evaluate(() => { document.querySelector("#chat-messages").scrollTop = 0; });
+  const jumpProbe = `jump-probe-${Date.now()}`;
+  await sendChat(pages.get("P2"), jumpProbe);
+  await reader.waitForFunction(() => document.querySelector("#new-messages")?.hidden === false, null, { timeout: 10000 });
+  await reader.locator("#new-messages").click();
+  await reader.waitForFunction(() => document.querySelector("#new-messages")?.hidden === true, null, { timeout: 5000 });
+  await closeChat(reader);
+  const toastProbe = `toast-probe-${Date.now()}`;
+  await sendChat(pages.get("P3"), toastProbe);
+  await reader.waitForFunction((text) =>
+    [...document.querySelectorAll("#toast-region .toast")].some((toast) => toast.textContent.includes(text)),
+  toastProbe, { timeout: 10000 });
+}
+
+// Escape has two tiers: an active stage focus consumes the first press, and
+// one further press dismisses every remaining popover/picker plus the open
+// panel together. Popover-style surfaces also close on outside pointerdown —
+// opening the reactions picker dismisses the connection popover.
+async function scenarioEscapePriorityChain() {
+  await setupRoom();
+  const page = pages.get("P1");
+  const p2ID = await participantIDFor(page, names[1]);
+  await page.locator(`li[data-participant-id="${p2ID}"] .participant-menu-trigger`).click();
+  await page.locator("#participant-menu-stage-focus").waitFor({ state: "visible", timeout: 5000 });
+  await page.locator("#participant-menu-stage-focus").click();
+  await page.waitForFunction(() => document.querySelector("#meeting-layout-host")?.dataset.stageFocus === "true", null, { timeout: 5000 });
+  await page.locator("#connection").click();
+  await page.locator("#connection-popover-retry").waitFor({ state: "visible", timeout: 5000 });
+  await page.locator("#reactions").click();
+  await page.locator("#reaction-picker").waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector("#connection-popover")?.hidden === true, null, { timeout: 5000 });
+  await page.keyboard.press("c");
+  await page.waitForFunction(() => {
+    const rail = document.querySelector("#chat-rail");
+    return rail && !rail.hidden && rail.classList.contains("is-open");
+  }, null, { timeout: 5000 });
+
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector("#meeting-layout-host")?.dataset.stageFocus === "false", null, { timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector("#reaction-picker")?.hidden === false, null, { timeout: 5000 });
+  await page.waitForFunction(() => {
+    const rail = document.querySelector("#chat-rail");
+    return rail && !rail.hidden;
+  }, null, { timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector("#reaction-picker")?.hidden === true, null, { timeout: 5000 });
+  await page.waitForFunction(() => {
+    const rail = document.querySelector("#chat-rail");
+    return rail && rail.hidden;
+  }, null, { timeout: 5000 });
+}
+
+// During a member's reconnect grace window the other browsers show the
+// "Participant left" state, then the same identity resumes without ghosts.
+async function scenarioGraceWindowChurn() {
+  await setupRoom();
+  const leaver = pages.get("P2");
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  const socketCount = await leaver.evaluate(() => window.__slowMeetTest.sockets.length);
+  const baselines = new Map();
+  for (const [role, page] of pages) baselines.set(role, await page.evaluate(() => (window.__slowMeetTest?.socketEvents || []).length));
+  await leaver.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "grace churn check"));
+  for (const [role, page] of pages) {
+    if (role === "P2") continue;
+    const sawLeft = await page.evaluate((baseline) =>
+      (window.__slowMeetTest?.socketEvents || []).slice(baseline).some((event) =>
+        event.direction === "receive" && event.message?.type === "participant_left"), baselines.get(role));
+    assert.ok(sawLeft, `${role} did not observe Blake's participant_left during the grace window`);
+  }
+  await leaver.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+    window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+  const observers = [...pages.entries()].filter(([role]) => role !== "P2").map(([, page]) => page);
+  if (reconnectGraceSeconds >= 2) {
+    // The reconnect beats the grace window: the same identity resumes.
+    for (const peer of observers) await waitForTileState(peer, p2ID, "connection", "connected", 20000);
+  } else {
+    // The reconnect arrives after expiry: the stale tile is removed and a
+    // fresh join replaces it under a new identity.
+    for (const peer of observers) {
+      await peer.waitForFunction((id) => ![...document.querySelectorAll("li[data-participant-id]")]
+        .some((tile) => tile.dataset.participantId === id), p2ID, { timeout: 20000 });
+    }
+  }
+  for (const page of pages.values()) await roster(page, names);
+  const p2IDAfter = await participantIDFor(pages.get("P1"), names[1]);
+  if (reconnectGraceSeconds >= 2) {
+    assert.equal(p2IDAfter, p2ID, "grace resume must keep Blake's participant identity");
+  } else {
+    assert.notEqual(p2IDAfter, p2ID, "reconnect after expiry must issue a fresh identity");
+  }
+  await assertMedia();
+}
+
+// A second socket presenting the live reconnect token actively takes over the
+// seat; the displaced client then reclaims it, keeping identity and media.
+async function scenarioTokenTakeover() {
+  await setupRoom();
+  const p2 = pages.get("P2");
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  const token = await p2.evaluate(() => {
+    const events = window.__slowMeetTest?.socketEvents || [];
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event.direction === "receive" && event.message?.type === "participant" && event.message.reconnect_token) {
+        return event.message.reconnect_token;
+      }
+    }
+    return "";
+  });
+  assert.ok(token, "no reconnect token recorded on P2");
+  const baseline = await p2.evaluate(() => (window.__slowMeetTest?.socketEvents || []).length);
+  const socketCount = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+  await p2.evaluate((token) => {
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+    socket.addEventListener("open", () => socket.send(JSON.stringify({
+      version: 1, type: "join", name: "Blake", password: "", reconnect_token: token
+    })));
+  }, token);
+  // The raw socket wins the seat, the app's socket is displaced, and the app
+  // then reclaims the token from the raw socket (two socket generations +).
+  await p2.waitForFunction((count) => window.__slowMeetTest.sockets.length > count + 1,
+    socketCount, { timeout: 25000 });
+  const acked = await p2.evaluate((baseline) =>
+    (window.__slowMeetTest?.socketEvents || []).slice(baseline).some((event) =>
+      event.direction === "receive" && event.message?.type === "participant"), baseline);
+  assert.ok(acked, "the takeover socket never received a participant ack");
+  for (const page of pages.values()) await roster(page, names);
+  const p2IDAfter = await participantIDFor(pages.get("P1"), names[1]);
+  assert.equal(p2IDAfter, p2ID, "takeover must keep Blake's participant identity");
+  await assertMedia();
+}
+
+// A member who rejoins must rebuild the room state purely from the server's
+// replay: mic state, the active sharer, and the sharer's screen video.
+async function scenarioLateJoinerReplay() {
+  await setupRoom();
+  const p4 = pages.get("P4");
+  await p4.locator("#leave").click();
+  await p4.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 });
+  pages.delete("P4");
+  await delay(2000);
+  for (const page of pages.values()) await roster(page, names.slice(0, 3));
+  const p2 = pages.get("P2");
+  if (await p2.locator("#mic").getAttribute("aria-pressed") === "false") {
+    await p2.locator("#mic").click();
+  }
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  const p3 = pages.get("P3");
+  await p3.locator("#screen").click();
+  await waitForScreenButton(p3, "true");
+  await join("P4");
+  const fresh = pages.get("P4");
+  await waitForTileState(fresh, p2ID, "mic", "on");
+  await assertSingleSharer(fresh, names[2]);
+  await fresh.waitForFunction(() => {
+    const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+    return Boolean(video) && video.videoWidth > 0 && video.currentTime > 0;
+  }, null, { timeout: 20000 });
+  await p2.locator("#mic").click();
+  await p3.locator("#screen").click();
+  await waitForScreenButton(p3, "false");
+  for (const page of pages.values()) await roster(page, names);
+}
+
+// With two people left the client auto-pins the remote peer; regrowing the
+// room dismisses the automatic pin and restores the grid.
+async function scenarioAutoPinShrink() {
+  await setupRoom();
+  await Promise.all(["P2", "P4"].map((role) => pages.get(role).locator("#leave").click()));
+  pages.delete("P2"); pages.delete("P4");
+  await delay(2000);
+  for (const page of pages.values()) await roster(page, [names[0], names[2]]);
+  for (const page of pages.values()) {
+    await page.waitForFunction(() => document.querySelector("#meeting-layout-host")?.dataset.layoutMode === "pinned", null, { timeout: 10000 });
+    await page.waitForFunction(() => {
+      const pinnedTile = document.querySelector("#pinned-main .participant-tile");
+      return Boolean(pinnedTile) && !pinnedTile.classList.contains("is-local");
+    }, null, { timeout: 5000 });
+  }
+  await Promise.all([join("P2"), join("P4")]);
+  for (const page of pages.values()) await roster(page, names);
+  for (const page of pages.values()) {
+    await page.waitForFunction(() => document.querySelector("#meeting-layout-host")?.dataset.layoutMode === "grid", null, { timeout: 15000 });
+  }
+}
+
+// The welcome screen previews who is already in the room before joining.
+async function scenarioWelcomeRosterPreview() {
+  await setupRoom();
+  const p4 = pages.get("P4");
+  await p4.locator("#leave").click();
+  await p4.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 });
+  pages.delete("P4");
+  await delay(2000);
+  for (const page of pages.values()) await roster(page, names.slice(0, 3));
+  const preview = await createParticipant("P5", "Fifth", false, true);
+  const previewNames = [names[0], names[1], names[2]];
+  await preview.waitForFunction((expected) => {
+    const list = document.querySelector("#room-roster-list")?.textContent || "";
+    return expected.every((name) => list.includes(name));
+  }, previewNames, { timeout: 15000 });
+  const count = await preview.evaluate(() => document.querySelector("#room-roster-count")?.textContent || "");
+  assert.ok(/3/.test(count), `roster preview count should mention 3, got ${count}`);
+  pages.delete("P5");
+  await join("P4");
+  for (const page of pages.values()) await roster(page, names);
+}
+
+// Disabling screen sharing while a lease is held evicts the sharer and frees
+// the seat for the next participant once re-enabled.
+async function scenarioAdminShareEviction() {
+  await setupRoom();
+  const p3 = pages.get("P3");
+  await p3.locator("#screen").click();
+  await waitForScreenButton(p3, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[2]);
+  const adminHeaders = { "Content-Type": "application/json", "X-Admin-Password": adminPassword };
+  const disable = await fetch(`${server.url}/admin/config`, {
+    method: "POST", headers: adminHeaders, body: JSON.stringify({ screen_share_enabled: false })
+  });
+  assert.equal(disable.status, 200, "admin update to disable screen share was rejected");
+  for (const page of pages.values()) {
+    await page.waitForFunction(() => ![...document.querySelectorAll("li[data-participant-id]")]
+      .some((tile) => tile.dataset.sharing === "true"), null, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector("#screen")?.disabled === true, null, { timeout: 10000 });
+  }
+  await p3.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "false", null, { timeout: 10000 });
+  const enable = await fetch(`${server.url}/admin/config`, {
+    method: "POST", headers: adminHeaders, body: JSON.stringify({ screen_share_enabled: true })
+  });
+  assert.equal(enable.status, 200, "admin update to enable screen share was rejected");
+  for (const page of pages.values()) {
+    await page.waitForFunction(() => document.querySelector("#screen")?.disabled === false, null, { timeout: 10000 });
+  }
+  const p4 = pages.get("P4");
+  await p4.locator("#screen").click();
+  await waitForScreenButton(p4, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[3]);
+  await p4.locator("#screen").click();
+  await waitForScreenButton(p4, "false");
+}
+
+// Admin caps and retention changes fan out to every browser, and turning
+// history retention off empties what a reconnect replays.
+async function scenarioAdminCapsAndChatReset() {
+  await setupRoom();
+  const baselines = new Map();
+  for (const [role, page] of pages) baselines.set(role, await page.evaluate(() => (window.__slowMeetTest?.socketEvents || []).length));
+  const adminHeaders = { "Content-Type": "application/json", "X-Admin-Password": adminPassword };
+  const update = await fetch(`${server.url}/admin/config`, {
+    method: "POST", headers: adminHeaders, body: JSON.stringify({ max_video_bitrate: 300000, retain_chat_history: false })
+  });
+  assert.equal(update.status, 200, "admin caps update was rejected");
+  for (const [role, page] of pages) {
+    const applied = await page.evaluate((baseline) =>
+      (window.__slowMeetTest?.socketEvents || []).slice(baseline).some((event) =>
+        event.direction === "receive" && event.message?.type === "config_update" &&
+        event.message.max_video_bitrate === 300000), baselines.get(role));
+    assert.ok(applied, `${role} did not receive the bitrate cap config_update`);
+  }
+  const marker = `cap-probe-${Date.now()}`;
+  await sendChat(pages.get("P1"), marker);
+  for (const page of pages.values()) await waitText(page, "#chat-messages", marker);
+  const reconnecting = pages.get("P1");
+  const socketCount = await reconnecting.evaluate(() => window.__slowMeetTest.sockets.length);
+  await reconnecting.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "chat reset check"));
+  await reconnecting.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+    window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+  await delay(1000);
+  const stillThere = await reconnecting.evaluate((text) =>
+    (document.querySelector("#chat-messages")?.textContent || "").includes(text), marker);
+  assert.ok(!stillThere, "chat history survived the retain_chat_history=false reset");
+  const restore = await fetch(`${server.url}/admin/config`, {
+    method: "POST", headers: adminHeaders, body: JSON.stringify({ retain_chat_history: true })
+  });
+  assert.equal(restore.status, 200, "restoring retain_chat_history was rejected");
+  for (const page of pages.values()) await roster(page, names);
+}
+
+// Switching the connection method mid-meeting rebuilds the media path on that
+// browser while the other three keep flowing.
+async function scenarioConnectionMethodSwitch() {
+  await setupRoom();
+  const p2 = pages.get("P2");
+  const socketCount = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+  await openSettingsPanel(p2);
+  await p2.locator("#settings-connection-method").selectOption("direct", { force: true });
+  await p2.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+    window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+  for (const page of pages.values()) await roster(page, names);
+  await assertMedia();
+}
+
+// The diagnostics loop feeds /metrics: four active participants and live
+// network samples from every browser.
+async function scenarioMetricsEndpoint() {
+  await setupRoom();
+  await delay(2000);
+  const response = await fetch(`${server.url}/metrics`);
+  assert.equal(response.status, 200, "metrics endpoint request failed");
+  const body = await response.text();
+  const participants = body.match(/slowmeet_active_participants (\d+)/);
+  assert.ok(participants && Number(participants[1]) === 4,
+    `expected 4 active participants in metrics, got ${participants?.[1] ?? "none"}`);
+  const samples = body.match(/slowmeet_network_samples_total (\d+)/);
+  assert.ok(samples && Number(samples[1]) > 0, "no network samples recorded in metrics");
+}
+
+// Four senders flooding the room cannot grow the chat rail without bound.
+async function scenarioChatDomCap() {
+  await setupRoom();
+  for (const [role, page] of pages) {
+    const participantID = await participantIDFor(page, names[roles.indexOf(role)]);
+    await page.evaluate(({ participantID }) => {
+      const socket = window.__slowMeetTest.sockets.at(-1);
+      for (let i = 0; i < 90; i += 1) {
+        socket.send(JSON.stringify({ version: 1, type: "chat_message", participant_id: participantID, text: `flood-${i}` }));
+      }
+    }, { participantID });
+  }
+  await pages.get("P4").waitForFunction(() =>
+    document.querySelectorAll("#chat-messages .chat-message").length >= 250, null, { timeout: 30000 });
+  for (const [role, page] of pages) {
+    const count = await page.evaluate(() => document.querySelectorAll("#chat-messages .chat-message").length);
+    assert.ok(count <= 300, `${role} kept ${count} chat nodes; the 300-node cap should hold`);
+  }
+}
+
+// Injected heavy packet loss drives the automatic adaptation: the sender's
+// video pauses room-wide, then recovers when the stats do.
+async function scenarioCongestionAdaptation() {
+  await setupRoom();
+  const sender = pages.get("P1");
+  const participantID = await participantIDFor(sender, names[0]);
+  const injected = await sender.evaluate(() => {
+    const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+    if (!peer || typeof peer.getStats !== "function") return false;
+    const native = peer.getStats.bind(peer);
+    peer.__injectPoor = true;
+    // Loss percentages come from deltas between cumulative counters, so the
+    // injected counters must keep growing with 60% of samples lost.
+    peer.__poorSampleIndex = 0;
+    peer.getStats = async () => {
+      const report = await native();
+      if (!peer.__injectPoor) return report;
+      peer.__poorSampleIndex += 1;
+      const total = peer.__poorSampleIndex * 100;
+      const entries = [...report.values()].map((entry) => ({ ...entry }));
+      for (const entry of entries) {
+        if (entry.type === "inbound-rtp" && entry.kind === "video") {
+          entry.packetsReceived = Math.round(total * 0.4);
+          entry.packetsLost = Math.round(total * 0.6);
+        }
+      }
+      return { forEach: (cb) => entries.forEach(cb), values: () => entries, get: (id) => entries.find((item) => item.id === id) };
+    };
+    return true;
+  });
+  assert.ok(injected, "could not instrument the peer connection's getStats");
+  const observers = [...pages.entries()].filter(([role]) => role !== "P1").map(([, page]) => page);
+  for (const peer of observers) await waitForTileState(peer, participantID, "camera", "paused", 30000);
+  await sender.evaluate(() => {
+    const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+    if (peer) peer.__injectPoor = false;
+  });
+  // Recovery is sample-driven: the adaptation level must ramp back to the
+  // floor and five good samples must pass, so allow a generous window.
+  for (const peer of observers) await waitForTileState(peer, participantID, "camera", "on", 60000);
+  await assertMedia();
+}
+
+// The meeting surface must stay free of critical and serious accessibility
+// violations (axe-core, same bar as the two-person suite). The app's CSP only
+// allows same-origin scripts, so axe is served through a routed URL.
+async function scenarioAxeAccessibility() {
+  await setupRoom();
+  assert.ok(axeSource, "axe-core is required for the accessibility scenario; install npm dependencies first");
+  const page = pages.get("P1");
+  const axeScriptURL = new URL("/__four-e2e__/axe-core.js", server.url).href;
+  const fulfillAxeScript = (route) => route.fulfill({
+    status: 200, contentType: "application/javascript; charset=utf-8", body: axeSource
+  });
+  await page.route(axeScriptURL, fulfillAxeScript);
+  try {
+    await page.addScriptTag({ url: axeScriptURL });
+  } finally {
+    await page.unroute(axeScriptURL, fulfillAxeScript);
+  }
+  const results = await page.evaluate(async () => window.axe.run(document.querySelector("#meeting")));
+  const blocking = results.violations.filter((violation) =>
+    violation.impact === "critical" || violation.impact === "serious");
+  assert.deepEqual(blocking.map(({ id, impact, nodes }) => ({ id, impact, nodes: nodes.map((node) => node.target) })), [],
+    "the meeting surface has axe critical/serious violations");
 }
 
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
+  { name: "chat-system-messages", description: "Join and leave notices appear as system chat messages on every browser.", run: scenarioChatSystemMessages },
   { name: "media-state-propagation", description: "Mic and camera toggles by each participant flip the matching tile state on every other browser.", run: scenarioMediaStatePropagation },
   { name: "four-way-chat", description: "Each participant's chat message appears on all four browsers.", run: scenarioFourWayChat },
   { name: "simultaneous-four-way-chat", description: "Concurrent chat messages from all participants appear on all four browsers.", run: scenarioSimultaneousFourWayChat },
   { name: "chat-unread-and-history", description: "Closed-rail unread badge increments and clears, a 500-character message renders everywhere, and reconnect replays retained chat history without duplicates.", run: scenarioChatUnreadAndHistory },
   { name: "reactions-and-raised-hands", description: "Each participant's reaction and raised-hand state synchronizes to the other browsers.", run: scenarioReactionsAndRaisedHands },
   { name: "simultaneous-reactions", description: "Concurrent reactions from all participants appear on all four browsers.", run: scenarioSimultaneousReactions },
+  { name: "reaction-rate-limit", description: "Ten rapid reactions from one client deliver exactly the six the 3-second limit allows, and the tile still renders the reaction.", run: scenarioReactionRateLimit },
   { name: "hand-order-fifo", description: "Raised hands queue first-come-first-served with hand orders 1..4 on every browser and renumber when a hand goes down.", run: scenarioHandOrderFIFO },
+  { name: "hand-state-edge-cases", description: "Duplicate raises and lowers are server-side no-ops that broadcast nothing.", run: scenarioHandStateEdgeCases },
   { name: "camera-and-microphone-toggles", description: "Rotating camera and microphone toggles complete while peer media remains connected.", run: scenarioCameraAndMicrophoneToggles },
   { name: "ice-restart", description: "The connection popover's manual retry forces an ICE restart and media keeps flowing on every browser.", run: scenarioIceRestart },
   { name: "generated-screen-share", description: "Every browser observes Casey's screen-share state start and stop.", run: scenarioGeneratedScreenShare },
+  { name: "remote-screen-decodes", description: "The remote screen video element decodes and advances on every viewer while the share is live.", run: scenarioRemoteScreenDecodes },
   { name: "screen-share-lease-race", description: "Simultaneous share attempts grant the exclusive lease to exactly one participant and the loser succeeds after the winner stops.", run: scenarioScreenShareLeaseRace },
   { name: "sharer-departs-mid-share", description: "A sharer leaving clears sharing state room-wide and releases the lease for the next participant.", run: scenarioSharerDepartsMidShare },
   { name: "receive-video-toggle", description: "Disabling incoming video pauses one viewer's remote decoding while others continue, and re-enabling resumes it.", run: scenarioReceiveVideoToggle },
   { name: "audio-only-mode", description: "Protect audio pauses the participant's camera room-wide and blocks screen sharing until it is turned off again.", run: scenarioAudioOnlyMode },
+  { name: "self-view-toggle", description: "Hiding self-view removes only the local tile on that browser while everyone else still sees the participant.", run: scenarioSelfViewToggle },
+  { name: "camera-quality-preset", description: "Setting the camera quality to off pauses the participant's camera room-wide and a preset restores it.", run: scenarioCameraQualityPreset },
   { name: "pin-and-layout", description: "Pinning a participant switches that browser to pinned layout without touching the others and unpinning restores the grid.", run: scenarioPinAndLayout },
   { name: "keyboard-shortcuts", description: "The m/v single-key shortcuts toggle mic and camera, c opens the chat rail and Escape closes it.", run: scenarioKeyboardShortcuts },
-  { name: "camera-quality-preset", description: "Setting the camera quality to off pauses the participant's camera room-wide and a preset restores it.", run: scenarioCameraQualityPreset },
-  { name: "hide-and-show-tile", description: "Hiding a remote tile removes it from one browser's visible roster without dropping the participant, and the people panel restores it.", run: scenarioHideAndShowTile },
-  { name: "stage-focus-toggle", description: "Expand tile stage-focuses one participant on that browser and Escape returns to the grid.", run: scenarioStageFocusToggle },
-  { name: "push-to-talk", description: "Holding Space unmutes a muted mic for the room and releasing mutes it again.", run: scenarioPushToTalk },
   { name: "chat-emoji-picker", description: "The composer's emoji picker appends to the draft and the message delivers to all four browsers.", run: scenarioChatEmojiPicker },
+  { name: "chat-ux-details", description: "The new-messages jump button appears when scrolled up and clears on click, and a rail-closed message surfaces a preview toast.", run: scenarioChatUxDetails },
+  { name: "escape-priority-chain", description: "Escape dismisses stacked stage focus, connection popover, reaction picker, and chat rail in priority order.", run: scenarioEscapePriorityChain },
   { name: "responsive-layout", description: "Each participant view fits a 375-pixel viewport without horizontal overflow.", run: scenarioResponsiveLayout },
   { name: "departure-and-rejoin", description: "Drew leaves without a ghost tile, then rejoins the four-person roster.", run: scenarioDepartureAndRejoin },
   { name: "rejoin-via-button", description: "Drew rejoins through the post-leave Rejoin action with the name preserved and media re-establishes.", run: scenarioRejoinViaButton },
   { name: "simultaneous-departures", description: "Two participants leaving at once converge every roster to the same two members and both slots are reusable.", run: scenarioSimultaneousDepartures },
-  { name: "signaling-reconnect", description: "After a forced signaling close Avery recovers within the reconnect grace window (token resume with the default 5s grace, or reconnect-after-expiry rejoin with a 1s grace) and every browser still receives advancing video.", run: scenarioSignalingReconnect },
-  { name: "abrupt-close-no-resume", description: "A killed browser frees its seat after the reconnect grace period and the roster recovers on rejoin.", run: scenarioAbruptCloseNoResume },
+  { name: "grace-window-churn", description: "During a member's reconnect grace window the other browsers see the left state, then the room recovers — same identity on resume with the default grace, a fresh identity after expiry with a 1s grace.", run: scenarioGraceWindowChurn },
+  { name: "token-takeover", description: "A second socket presenting the live reconnect token takes over the seat and the displaced client reclaims it with identity and media intact.", run: scenarioTokenTakeover },
+  { name: "late-joiner-replay", description: "A member who rejoins rebuilds mic state, the active sharer, and the sharer's screen video purely from the server replay.", run: scenarioLateJoinerReplay },
+  { name: "auto-pin-shrink", description: "A 1:1 room auto-pins the remote peer on both remaining browsers and regrowing dismisses the automatic pin.", run: scenarioAutoPinShrink },
+  { name: "welcome-roster-preview", description: "The prejoin screen previews the three current members before the fourth joins.", run: scenarioWelcomeRosterPreview },
   { name: "admin-config-broadcast", description: "An admin policy change reaches all four browsers via config_update and the share control disables and re-enables room-wide.", run: scenarioAdminConfigBroadcast },
-  { name: "fifth-participant-capacity", description: "The room rejects a fifth browser with a clear full-room message.", run: scenarioFifthParticipantCapacity }
+  { name: "admin-share-eviction", description: "Disabling screen sharing mid-share evicts the lease room-wide and the seat is reusable after re-enabling.", run: scenarioAdminShareEviction },
+  { name: "admin-caps-and-chat-reset", description: "Admin bitrate caps and history-retention changes fan out to every browser and a reset empties what reconnect replays.", run: scenarioAdminCapsAndChatReset },
+  { name: "connection-method-switch", description: "Switching the connection method mid-meeting rebuilds that participant's media path while the others keep flowing.", run: scenarioConnectionMethodSwitch },
+  { name: "metrics-endpoint", description: "The metrics endpoint reports four active participants and live network samples.", run: scenarioMetricsEndpoint },
+  { name: "chat-dom-cap", description: "A four-sender flood cannot grow the chat rail past its 300-node cap.", run: scenarioChatDomCap },
+  { name: "congestion-adaptation", description: "Injected packet loss drives automatic video pause room-wide and recovery restores it.", run: scenarioCongestionAdaptation },
+  { name: "axe-accessibility", description: "The meeting surface has no axe critical or serious accessibility violations.", run: scenarioAxeAccessibility },
+  { name: "fifth-participant-capacity", description: "The room rejects a fifth browser with a clear full-room message and every present participant sees the room-full notice.", run: scenarioFifthParticipantCapacity }
 ];
 
 function scenarioFilter() {
@@ -1029,6 +1596,8 @@ async function saveFailure(error) {
         connectionState: pc.connectionState, iceConnectionState: pc.iceConnectionState,
         signalingState: pc.signalingState, iceGatheringState: pc.iceGatheringState
       })),
+      networkQuality: window.__slowMeetTest?.networkQuality || null,
+      adaptationState: window.__slowMeetTest?.adaptationState || null,
       videos: [...document.querySelectorAll("video")].map((video) => ({ width: video.videoWidth, height: video.videoHeight, time: video.currentTime }))
     })).catch((cause) => ({ error: cause.message }));
     await page.screenshot({ path: path.join(directory, `${role}.png`), fullPage: true }).catch(() => {});
