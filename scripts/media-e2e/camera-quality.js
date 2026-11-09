@@ -315,9 +315,9 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
   }
 
   function scan() {
-    for (const row of document.querySelectorAll("#participants li[data-participant-id]")) recordState(row);
+    for (const row of document.querySelectorAll("#meeting-layout-host li[data-participant-id]")) recordState(row);
     for (const video of document.querySelectorAll(
-      "#participants li.is-local video.camera-video, #participants video[data-media-role='camera']")) {
+      "#meeting-layout-host li.is-local video.camera-video, #meeting-layout-host video[data-media-role='camera']")) {
       ensureVideo(video);
       const registration = videoTiles.get(video);
       const row = video.closest("li[data-participant-id]");
@@ -542,7 +542,7 @@ function installCameraQualityRecorder({ label, pageRole, requireMarkers = true, 
     scan();
   }, 50);
   capture.observer = new MutationObserver(() => scan());
-  capture.observer.observe(document.querySelector("#participants") || document.body, {
+  capture.observer.observe(document.querySelector("#meeting-layout-host") || document.body, {
     attributes: true,
     attributeFilter: ["data-camera"],
     childList: true,

@@ -1,8 +1,10 @@
 package media
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,9 +76,10 @@ type publication struct {
 // block the publisher's read loop or delay the other receivers; overflowing
 // drops the packet and the receiver recovers via RTCP feedback.
 type publicationTarget struct {
-	track   *pion.TrackLocalStaticRTP
-	pending chan *rtp.Packet
-	done    chan struct{}
+	track       *pion.TrackLocalStaticRTP
+	pending     chan *rtp.Packet
+	done        chan struct{}
+	videoLosses atomic.Pointer[targetVideoLosses]
 	// lastSentLayer tracks the camera layer most recently forwarded to this
 	// receiver by the owning publication, so a receiver that starts receiving
 	// the layer mid-GOP triggers a keyframe request. Written only by the
@@ -114,15 +117,17 @@ func newPublicationTarget(track *pion.TrackLocalStaticRTP, queueDepth int) *publ
 // storage before rewriting its SSRC and payload type, so concurrent writers
 // never mutate the caller's packet. If the pinned pion version is upgraded,
 // re-verify that behavior before removing the copy-once note below.
-func (t *publicationTarget) enqueue(packet *rtp.Packet) {
+func (t *publicationTarget) enqueue(packet *rtp.Packet) bool {
 	if len(t.pending) >= cap(t.pending) {
 		// The receiver's mailbox is full because its egress is slow; drop the
 		// packet. RTP receivers recover loss through NACK and PLI feedback.
-		return
+		return false
 	}
 	select {
 	case t.pending <- packet:
+		return true
 	default:
+		return false
 	}
 }
 
@@ -872,11 +877,14 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 	}
 }
 
-// senderMigrated reports whether a queued RemoveTrack became stale because a
-// publication swap migrated the sender into a different registered
-// publication. The decide phase deletes the sender from its publication's
-// maps before the lock is released, so the only case where a registered
-// publication still holds it is a migration.
+// senderMigrated is cheap defense for queued RemoveTrack operations: the
+// decide phase deletes the sender from its publication's maps in the same
+// exclusive-lock hold that queues the op, and migration also runs under the
+// lock — so at apply time no registered publication can still hold a
+// queued-for-removal sender, and this scan never fires today. It guards
+// against a future decide-phase reordering where a swap could relocate a
+// sender between the queueing and the application of its removal; in that
+// state, removing the sender would silently kill a live publication's media.
 func (r *Router) senderMigrated(op pendingTrackOp) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -970,30 +978,63 @@ func (r *Router) forward(pub *publication) {
 
 func (r *Router) forwardVideo(pub *publication) {
 	var frame videoFrameBuffer
+	var history videoFrameHistory
+	var wasPaused bool
 	frames := make(chan videoFrame, maxQueuedVideoFrames)
 	stopPacer := make(chan struct{})
 	go r.forwardVideoFrames(pub, frames, stopPacer)
 	defer close(stopPacer)
+	// TrackRemote checks Pion's separate RTX queue before waiting for primary
+	// RTP. Wake periodically so a quiet screen share can deliver a queued
+	// retransmission even if no more primary packets arrive.
+	if err := pub.remote.SetReadDeadline(time.Now().Add(videoRTXReadPollInterval)); err != nil {
+		r.reportPublicationReadStop(pub, err)
+		return
+	}
+	select {
+	case <-pub.stoppedChannel():
+		return
+	default:
+	}
 	for {
 		packet, err := readIngressPacket(pub)
 		if err != nil {
+			select {
+			case <-pub.stoppedChannel():
+				return
+			default:
+			}
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				if err = pub.remote.SetReadDeadline(time.Now().Add(videoRTXReadPollInterval)); err == nil {
+					select {
+					case <-pub.stoppedChannel():
+						return
+					default:
+					}
+					continue
+				}
+			}
 			r.reportPublicationReadStop(pub, err)
 			return
 		}
 		pub.lastPacketAt.Store(time.Now().UnixNano())
 		if pub.paused.Load() {
+			if !wasPaused {
+				history = videoFrameHistory{}
+				wasPaused = true
+			}
 			continue
 		}
-		packets, _, complete := frame.add(packet)
-		if !complete || !pub.limiter.allowFrame(packets[0].Timestamp) {
-			continue
-		}
-		if !enqueueVideoFrame(frames, videoFrame{packets: packets}) {
-			// Keep the publisher read loop moving when a receiver cannot
-			// drain its bounded pacing queue; never forward a partial frame.
+		wasPaused = false
+		if queueVideoPacket(pub, &frame, &history, frames, packet) {
+			if targets := r.videoLossTargets(pub, packet); len(targets) > 0 {
+				enqueueVideoFrame(frames, videoFrame{packets: []*rtp.Packet{packet}, repairTargets: targets})
+			}
 		}
 	}
 }
+
+const videoRTXReadPollInterval = 100 * time.Millisecond
 
 func (r *Router) forwardAudio(pub *publication) {
 	for {
@@ -1019,11 +1060,9 @@ func (r *Router) forwardAudio(pub *publication) {
 // churn. Unmarshal aliases the reused buffer for both the payload and the
 // header extension payloads (pion rtp's Header.Unmarshal slices extension
 // payloads straight out of the input), and the next read overwrites them
-// while the frame buffer and mailboxes hold packets asynchronously — so the
-// packet is deep-copied via Packet.Clone (verified to clone extensions and
-// payload in the pinned rtp version) before it escapes the read loop. An
-// unparseable packet is fatal for the publication, matching ReadRTP's
-// behavior exactly.
+// while the frame buffer and mailboxes hold packets asynchronously. The
+// decoder copies the bytes into owned storage before parsing. An unparseable
+// packet is fatal for the publication, matching ReadRTP's behavior exactly.
 func readIngressPacket(pub *publication) (*rtp.Packet, error) {
 	n, _, err := pub.remote.Read(pub.readBuf)
 	if err != nil {
@@ -1032,16 +1071,16 @@ func readIngressPacket(pub *publication) (*rtp.Packet, error) {
 	return decodeIngressPacket(pub.readBuf[:n])
 }
 
-// decodeIngressPacket deep-copies a wire packet out of a reused buffer: both
-// the payload and the header extension payloads alias the input after
-// Unmarshal, and Packet.Clone is what makes the returned packet safe to hold
-// while the next read overwrites the buffer.
+// decodeIngressPacket copies the wire bytes before parsing because Unmarshal
+// aliases its input for the payload and header extensions. The returned packet
+// remains valid when the next read overwrites the publication's buffer.
 func decodeIngressPacket(wire []byte) (*rtp.Packet, error) {
 	packet := &rtp.Packet{}
-	if err := packet.Unmarshal(wire); err != nil {
+	owned := append([]byte(nil), wire...)
+	if err := packet.Unmarshal(owned); err != nil {
 		return nil, err
 	}
-	return packet.Clone(), nil
+	return packet, nil
 }
 
 func (r *Router) reportPublicationReadStop(pub *publication, err error) {
@@ -1070,7 +1109,25 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 			// The camera-layer selection can only change per frame, not per
 			// packet; resolve the target list and any layer transitions once.
 			targets, layerStarts := r.resolveFrameTargets(pub)
+			if frame.repairTargets != nil {
+				// A duplicate source packet is useful only to receivers whose
+				// mailbox dropped it. Recheck current subscriptions and losses:
+				// a prior queued repair may already have reached the mailbox.
+				eligible := targets[:0]
+				for _, target := range targets {
+					for _, repairTarget := range frame.repairTargets {
+						if target == repairTarget && target.hasVideoLoss(frame.packets[0]) {
+							eligible = append(eligible, target)
+							break
+						}
+					}
+				}
+				targets = eligible
+			}
 			if len(targets) == 0 {
+				for _, receiverID := range layerStarts {
+					r.requestVideoKeyFrameForPublication(pub, receiverID)
+				}
 				continue
 			}
 			for _, packet := range frame.packets {
@@ -1086,7 +1143,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 					return
 				}
 				for _, target := range targets {
-					target.enqueue(packet)
+					if frame.repairTargets == nil || target.hasVideoLoss(packet) {
+						target.enqueueVideo(packet)
+					}
 				}
 			}
 			// A receiver just started receiving this publication's layer
@@ -1226,13 +1285,16 @@ type videoFrameBuffer struct {
 	lastTimestamp    uint32
 	packets          []*rtp.Packet
 	bytes            int
+	lastSequence     uint16
+	consecutive      bool
 	active           bool
 	dropping         bool
 	hasLastTimestamp bool
 }
 
 type videoFrame struct {
-	packets []*rtp.Packet
+	packets       []*rtp.Packet
+	repairTargets []*publicationTarget
 }
 
 // add returns a complete video frame only after its marker packet arrives.
@@ -1251,8 +1313,15 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	}
 
 	if !f.dropping {
-		if framePacketDuplicate(f.packets, packet.SequenceNumber) {
-			return nil, 0, false
+		if len(f.packets) > 0 {
+			// The common in-order case cannot contain a duplicate: a frame is
+			// limited to 128 packets, far fewer than a sequence number cycle.
+			if !f.consecutive || packet.SequenceNumber != f.lastSequence+1 {
+				f.consecutive = false
+				if framePacketDuplicate(f.packets, packet.SequenceNumber) {
+					return nil, 0, false
+				}
+			}
 		}
 		packetBytes := packet.MarshalSize()
 		if packetBytes > maxVideoFrameBufferBytes-f.bytes || len(f.packets) >= maxFramePackets {
@@ -1262,6 +1331,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 		} else {
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
+			f.lastSequence = packet.SequenceNumber
 		}
 	}
 	if !packet.Marker {
@@ -1312,6 +1382,7 @@ func (f *videoFrameBuffer) start(timestamp uint32) {
 	*f = videoFrameBuffer{
 		timestamp:        timestamp,
 		lastTimestamp:    lastTimestamp,
+		consecutive:      true,
 		active:           true,
 		hasLastTimestamp: hasLastTimestamp,
 	}

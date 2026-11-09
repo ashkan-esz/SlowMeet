@@ -1608,7 +1608,7 @@ async function saveFailure(error) {
     await context.tracing.stop({ path: path.join(directory, `trace-${index + 1}.zip`) }).catch(() => {}); traces.delete(context);
   }
   fs.writeFileSync(path.join(directory, "failure.json"), JSON.stringify(report, null, 2));
-  const findings = path.join(root, "docs/four-person-e2e-findings.md");
+  const findings = process.env.MEDIA_E2E_FINDINGS_PATH || path.join(root, "docs/four-person-e2e-findings.md");
   const header = "# Four Person Room E2E Findings\n\nFailures from `make test-media-e2e-four` are appended; prior entries and artifacts are preserved.\n";
   const prior = fs.existsSync(findings) ? fs.readFileSync(findings, "utf8") : header;
   const section = `\n## ${new Date().toISOString()} — ${activeScenario}\n\n- Reproduction: \`${report.reproduction}\`\n- Expected: ${report.expected}\n- Actual: ${report.actual}\n- Failure type: ${report.failureType}\n- Participant roles: ${report.participants.map((item) => `${item.role}=${item.name}`).join(", ")}\n- Artifacts: \`${directory}\`\n`;

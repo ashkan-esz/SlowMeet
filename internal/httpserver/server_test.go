@@ -1080,3 +1080,47 @@ func TestPrecompressedRootPageKeepsHTMLContentType(t *testing.T) {
 		t.Fatalf("HEAD Content-Type = %q, want text/html; charset=utf-8", head.Header().Get("Content-Type"))
 	}
 }
+
+func TestAcceptsGzipParsesQualityValues(t *testing.T) {
+	request := func(acceptEncoding string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/js/app.js", nil)
+		if acceptEncoding != "" {
+			r.Header.Set("Accept-Encoding", acceptEncoding)
+		}
+		return r
+	}
+	tests := []struct {
+		acceptEncoding string
+		want           bool
+	}{
+		{"gzip", true},
+		{"gzip, deflate, br", true},
+		{"deflate, GZIP", true},
+		{"gzip;q=0.5", true},
+		{"gzip ; q=0.8", true},
+		{"gzip;q=0", false},
+		{"gzip;q=0.000", false},
+		{"gzip;q=garbage", true}, // malformed q defaults to accept
+		{"deflate", false},
+		{"", false},
+	}
+	for _, test := range tests {
+		if got := acceptsGzip(request(test.acceptEncoding)); got != test.want {
+			t.Errorf("acceptsGzip(%q) = %v, want %v", test.acceptEncoding, got, test.want)
+		}
+	}
+}
+
+func TestBrandedHTMLRejectsNonGETMethods(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, "/", nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s / status = %d, want 405", method, response.Code)
+		}
+		if allow := response.Header().Get("Allow"); !strings.Contains(allow, http.MethodGet) {
+			t.Fatalf("%s / Allow = %q, want it to include GET", method, allow)
+		}
+	}
+}

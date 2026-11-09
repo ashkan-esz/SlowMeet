@@ -231,6 +231,137 @@ func TestVideoFrameBufferAcceptsRTPTimeStampWrap(t *testing.T) {
 	}
 }
 
+func TestVideoFrameBufferDeduplicatesAfterReorderingAndSequenceWrap(t *testing.T) {
+	var frame videoFrameBuffer
+	for _, sequence := range []uint16{65534, 65535, 0, 2, 1, 2} {
+		frame.add(&rtp.Packet{Header: rtp.Header{Timestamp: 10, SequenceNumber: sequence}})
+	}
+	packets, _, complete := frame.add(&rtp.Packet{Header: rtp.Header{Timestamp: 10, SequenceNumber: 3, Marker: true}})
+	if !complete || len(packets) != 6 {
+		t.Fatalf("completed frame has %d packets, complete = %t; want six unique packets", len(packets), complete)
+	}
+	for i, want := range []uint16{65534, 65535, 0, 1, 2, 3} {
+		if packets[i].SequenceNumber != want {
+			t.Fatalf("packet %d has sequence %d, want %d", i, packets[i].SequenceNumber, want)
+		}
+	}
+}
+
+func TestVideoFrameQueueForwardsLateRepairsWithoutDelayingFrames(t *testing.T) {
+	pub := &publication{limiter: newBitrateLimiter(0)}
+	var frame videoFrameBuffer
+	var history videoFrameHistory
+	queue := make(chan videoFrame, 8)
+	packet := func(timestamp uint32, sequence uint16, marker bool) *rtp.Packet {
+		return &rtp.Packet{Header: rtp.Header{Timestamp: timestamp, SequenceNumber: sequence, Marker: marker}}
+	}
+
+	queueVideoPacket(pub, &frame, &history, queue, packet(100, 10, false))
+	queueVideoPacket(pub, &frame, &history, queue, packet(100, 12, true))
+	completed := <-queue
+	if len(completed.packets) != 2 || completed.packets[1].SequenceNumber != 12 {
+		t.Fatal("the marker must release the frame immediately")
+	}
+	queueVideoPacket(pub, &frame, &history, queue, packet(200, 13, true))
+	<-queue
+	queueVideoPacket(pub, &frame, &history, queue, packet(100, 11, false))
+	select {
+	case repaired := <-queue:
+		if len(repaired.packets) != 1 || repaired.packets[0].SequenceNumber != 11 {
+			t.Fatal("late repair did not preserve the missing packet")
+		}
+	default:
+		t.Fatal("a late packet for a forwarded frame should remain deliverable")
+	}
+	queueVideoPacket(pub, &frame, &history, queue, packet(50, 9, false))
+	select {
+	case <-queue:
+		t.Fatal("packets for unforwarded frames must not be replayed")
+	default:
+	}
+}
+
+func TestVideoFrameHistoryBoundsRepairs(t *testing.T) {
+	now := time.Now()
+	var history videoFrameHistory
+	history.remember([]*rtp.Packet{{Header: rtp.Header{Timestamp: 42, SequenceNumber: 1, Marker: true}}}, now)
+	packet := &rtp.Packet{Header: rtp.Header{Timestamp: 42, SequenceNumber: 65535}}
+	entry := history.repair(packet, now)
+	if entry == nil {
+		t.Fatal("a repair across the sequence number wrap should be accepted")
+	}
+	entry.markSeen(packet.SequenceNumber)
+	if history.repair(packet, now) != nil {
+		t.Fatal("duplicate repairs must not be forwarded")
+	}
+	packet.SequenceNumber = 65534
+	if history.repair(packet, now.Add(videoRepairWindow+time.Nanosecond)) != nil {
+		t.Fatal("expired frames must not accept repairs")
+	}
+	packet.SequenceNumber = 1
+	if history.repair(packet, now) != nil {
+		t.Fatal("packets already in the original frame must not be replayed")
+	}
+	packet.SequenceNumber = 2
+	if history.repair(packet, now) != nil {
+		t.Fatal("packets after the marker must not be accepted")
+	}
+}
+
+func TestVideoFrameHistoryRespectsQueueDrops(t *testing.T) {
+	pub := &publication{limiter: newBitrateLimiter(0)}
+	var frame videoFrameBuffer
+	var history videoFrameHistory
+	queue := make(chan videoFrame, 1)
+	packet := func(timestamp uint32, sequence uint16) *rtp.Packet {
+		return &rtp.Packet{Header: rtp.Header{Timestamp: timestamp, SequenceNumber: sequence, Marker: true}}
+	}
+	queueVideoPacket(pub, &frame, &history, queue, packet(100, 10))
+	queueVideoPacket(pub, &frame, &history, queue, packet(200, 20)) // dropped
+	late := packet(100, 9)
+	late.Marker = false
+	queueVideoPacket(pub, &frame, &history, queue, late) // queue still full
+	<-queue
+	queueVideoPacket(pub, &frame, &history, queue, late)
+	if len(queue) != 1 {
+		t.Fatal("a repair dropped by a full queue must remain eligible")
+	}
+	<-queue
+	late = packet(200, 19)
+	late.Marker = false
+	queueVideoPacket(pub, &frame, &history, queue, late)
+	if len(queue) != 0 {
+		t.Fatal("a dropped frame must not become eligible for repair")
+	}
+}
+
+func TestVideoFrameQueueRepairsMarkerFirstAndSkipsLimitedFrames(t *testing.T) {
+	pub := &publication{limiter: newBitrateLimiter(0)}
+	pub.limiter.maxFPS = 10
+	var frame videoFrameBuffer
+	var history videoFrameHistory
+	queue := make(chan videoFrame, 4)
+	packet := func(timestamp uint32, sequence uint16, marker bool) *rtp.Packet {
+		return &rtp.Packet{Header: rtp.Header{Timestamp: timestamp, SequenceNumber: sequence, Marker: marker}}
+	}
+	queueVideoPacket(pub, &frame, &history, queue, packet(1000, 12, true))
+	<-queue
+	queueVideoPacket(pub, &frame, &history, queue, packet(1000, 10, false))
+	if len(queue) != 1 {
+		t.Fatal("a marker-first frame must accept an earlier packet")
+	}
+	<-queue
+	queueVideoPacket(pub, &frame, &history, queue, packet(1000, 10, false))
+	if len(queue) != 0 {
+		t.Fatal("a duplicate late packet must not be forwarded")
+	}
+	queueVideoPacket(pub, &frame, &history, queue, packet(1001, 22, true))
+	queueVideoPacket(pub, &frame, &history, queue, packet(1001, 21, false))
+	if len(queue) != 0 {
+		t.Fatal("a frame dropped by the FPS limit must not be repaired")
+	}
+}
+
 func TestBitrateLimiterPacesOversizedPacketAndChargesDebt(t *testing.T) {
 	limiter := newBitrateLimiter(10_000)
 	if !limiter.waitForBytes(2_000, make(chan struct{})) {
@@ -247,6 +378,60 @@ func TestBitrateLimiterPacesOversizedPacketAndChargesDebt(t *testing.T) {
 
 func newTestPublicationTarget(track *pion.TrackLocalStaticRTP) *publicationTarget {
 	return &publicationTarget{track: track, pending: make(chan *rtp.Packet, 2), done: make(chan struct{})}
+}
+
+func TestSlowVideoTargetDoesNotBlockOtherMedia(t *testing.T) {
+	router := NewRouter()
+	slow := newTestPublicationTarget(nil)
+	healthy := &publicationTarget{pending: make(chan *rtp.Packet, 8), done: make(chan struct{})}
+	audio := newTestPublicationTarget(nil)
+	for i := 0; i < cap(slow.pending); i++ {
+		slow.enqueue(&rtp.Packet{})
+	}
+	videoPub := &publication{tracks: map[string]*publicationTarget{"slow": slow, "healthy": healthy}, limiter: newBitrateLimiter(0)}
+	audioPub := &publication{tracks: map[string]*publicationTarget{"receiver": audio}}
+	frames := make(chan videoFrame, 1)
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		router.forwardVideoFrames(videoPub, frames, stop)
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Error("video forwarding did not stop")
+		}
+	})
+
+	packets := []*rtp.Packet{
+		{Header: rtp.Header{SequenceNumber: 1}},
+		{Header: rtp.Header{SequenceNumber: 2}},
+		{Header: rtp.Header{SequenceNumber: 3, Marker: true}},
+	}
+	frames <- videoFrame{packets: packets}
+	audioPacket := &rtp.Packet{Header: rtp.Header{SequenceNumber: 4}}
+	router.forwardAudioPacket(audioPub, audioPacket)
+	for _, want := range packets {
+		select {
+		case got := <-healthy.pending:
+			if got != want {
+				t.Fatalf("healthy receiver got %v, want %v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("a full video mailbox blocked the healthy receiver")
+		}
+	}
+	select {
+	case got := <-audio.pending:
+		if got != audioPacket {
+			t.Fatal("audio packet was not preserved")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a full video mailbox blocked audio")
+	}
 }
 
 func TestRouterSetLimitsUpdatesExistingPublication(t *testing.T) {

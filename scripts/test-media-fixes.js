@@ -97,6 +97,12 @@ const updateDiagnostics = slice(appSource, "async function updateDiagnostics() {
   "\nasync function runDiagnosticsUpdate()");
 assert.match(updateDiagnostics, /if \(document\.hidden\) return;/,
   "the stats loop must idle while the tab is hidden");
+const runDiagnosticsUpdate = slice(appSource, "async function runDiagnosticsUpdate() {",
+  "\nfunction resolveVideoProfile(");
+assert.match(runDiagnosticsUpdate, /cameraLostSincePreviousSample \+= packetDeltas\.lost/,
+  "camera layer loss must use each existing RTP stream's interval deltas");
+assert.doesNotMatch(runDiagnosticsUpdate, /cameraLost - previousStats\.cameraLost/,
+  "track churn must not turn lifetime camera counters into apparent loss");
 assert.match(appSource, /if \(!diagnostics\.hidden && !diagnostics\.closest\("\[hidden\]"\)\) \{[\s\S]*?diagnostics\.textContent = JSON\.stringify/,
   "the diagnostics dump must be skipped while its panel is hidden");
 assert.match(appSource, /function syncConnectionPopoverStats\(\) \{\n  if \(!connectionPopover \|\| connectionPopover\.hidden\) return;/,

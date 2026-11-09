@@ -2350,3 +2350,175 @@ func TestIntentionalLeaveTearsDownMediaImmediately(t *testing.T) {
 		return !publicationRegistered(hub, participantID) && hub.ActiveParticipants() == 0
 	})
 }
+
+func TestHubCloseTearsDownGraceWindowMedia(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 30 * time.Second,
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	conn := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	participantID := joined.Participant.ID
+	seedPublicationFor(t, hub, participantID)
+
+	// Drop into the reconnect grace window, then shut the hub down: the
+	// deferred media (peer connection, publications, forward goroutines)
+	// must be released by Close, not outlive it.
+	conn.Close()
+	waitForHubCondition(t, "disconnect did not enter the reconnect grace window", func() bool {
+		hub.mu.RLock()
+		defer hub.mu.RUnlock()
+		return len(hub.pending) == 1
+	})
+
+	hub.Close()
+
+	if publicationRegistered(hub, participantID) {
+		t.Fatal("hub shutdown left grace-window media registered")
+	}
+	if hub.ActiveParticipants() != 0 {
+		t.Fatalf("hub shutdown left %d meeting slot(s) reserved", hub.ActiveParticipants())
+	}
+}
+
+// buildGraceState constructs the post-disconnect state directly: a meeting
+// slot held by a pending reconnect whose media was deferred, so a test can
+// drive a resume against it without replaying the socket drop.
+func buildGraceState(t *testing.T, hub *Hub, name string) (meeting.Participant, string) {
+	t.Helper()
+	participant, err := hub.Meeting.Join(name)
+	if err != nil {
+		t.Fatalf("meeting join: %v", err)
+	}
+	token := "token-" + name
+	client := &client{
+		participant: participant, participantID: participant.ID, reconnectToken: token,
+		finished: make(chan struct{}),
+	}
+	close(client.finished) // the disconnect that created the pending entry has completed
+	hub.mu.Lock()
+	hub.activeTokens[token] = client
+	hub.pending[token] = &pendingReconnect{participant: participant, token: token, client: client}
+	hub.mu.Unlock()
+	hub.router.AddPublicationFixture(participant.ID, media.SourceRoleCamera)
+	return participant, token
+}
+
+func TestWebRTCInitFailureAfterReclaimReleasesSlotImmediately(t *testing.T) {
+	// An invalid ICE transport policy makes every peer-connection creation
+	// fail, deterministically exercising the failed-resume path.
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout:   30 * time.Second,
+		ICETransportPolicy: "bogus",
+	}
+	hub := NewHub(meeting.New(4), config.NewStore(cfg), slog.Default())
+	defer hub.Close()
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	participant, token := buildGraceState(t, hub, "Ashkan")
+
+	resumed := dialTestSocket(t, "ws"+server.URL[len("http"):])
+	defer resumed.Close()
+	writeTestMessage(t, resumed, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan", ReconnectToken: token,
+	})
+	var resumeResponse Message
+	readTestMessage(t, resumed, &resumeResponse)
+	if resumeResponse.Type != TypeError || resumeResponse.Error != "unable to initialize WebRTC" {
+		t.Fatalf("resume response = %+v, want the WebRTC failure", resumeResponse)
+	}
+
+	waitForHubCondition(t, "failed resume did not release the reclaimed slot", func() bool {
+		return hub.ActiveParticipants() == 0 && len(hub.pending) == 0
+	})
+	if hub.router.HasPublication(participant.ID, media.SourceRoleCamera) {
+		t.Fatal("the grace-window publication outlived the failed resume")
+	}
+}
+
+func TestAdmissionFailureAfterReclaimReleasesSlotImmediately(t *testing.T) {
+	hub := NewHub(meeting.New(4), config.NewStore(config.Config{
+		MaxParticipants: 4, ReconnectTimeout: 30 * time.Second,
+	}), slog.Default())
+	defer hub.Close()
+
+	participant, token := buildGraceState(t, hub, "Ashkan")
+
+	// A resumed client whose admission deadline expires after reclaim: the
+	// join flow drops the resume intent (c.resumed = false), and the ensuing
+	// disconnect must release the slot and media immediately.
+	resumed := &client{
+		outbound:   make(chan *Message, outboundQueueSize),
+		writerDone: make(chan struct{}),
+		finished:   make(chan struct{}),
+	}
+	if _, resumedOK, _ := hub.reclaim(resumed, token); !resumedOK {
+		t.Fatal("reclaim rejected a valid grace-window token")
+	}
+	hub.expireAdmission(resumed)
+	if err := hub.admit(resumed, participant, Message{Version: ProtocolVersion, Type: TypeParticipant}, false); err == nil {
+		t.Fatal("admission succeeded past its deadline")
+	}
+	resumed.resumed = false
+
+	hub.disconnect(resumed)
+
+	waitForHubCondition(t, "failed admission did not release the reclaimed slot", func() bool {
+		return hub.ActiveParticipants() == 0 && len(hub.pending) == 0
+	})
+	if hub.router.HasPublication(participant.ID, media.SourceRoleCamera) {
+		t.Fatal("the grace-window publication outlived the failed admission")
+	}
+}
+
+func TestChatHistoryReArmSurvivesRoomRefill(t *testing.T) {
+	oldExpiry := chatHistoryExpiry
+	chatHistoryExpiry = 40 * time.Millisecond
+	t.Cleanup(func() { chatHistoryExpiry = oldExpiry })
+
+	hub := NewHub(meeting.New(4), config.NewStore(config.Config{RetainChatHistory: true}), slog.Default())
+	defer hub.Close()
+
+	hub.recordChatMessage("default", ChatHistoryEntry{ID: "m1", Text: "kept"})
+	hub.scheduleChatHistoryExpiry("default")
+
+	// The room refills just before the first expiry fires; the re-armed timer
+	// must not delete the history while the room is occupied.
+	time.Sleep(20 * time.Millisecond)
+	if _, err := hub.Meeting.Join("Late"); err != nil {
+		t.Fatalf("refill join: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	hub.mu.RLock()
+	history := hub.chatHistory["default"]
+	hub.mu.RUnlock()
+	if history == nil || len(history.messages) != 1 {
+		t.Fatalf("re-armed expiry deleted history while the room was occupied: %+v", history)
+	}
+
+	// Once the room empties again, the re-armed timer cleans up.
+	hub.mu.Lock()
+	participants := hub.Meeting.List()
+	hub.mu.Unlock()
+	for _, participant := range participants {
+		_ = hub.Meeting.Leave(participant.ID)
+	}
+	waitForHubCondition(t, "re-armed expiry did not clean the emptied room's history", func() bool {
+		hub.mu.RLock()
+		defer hub.mu.RUnlock()
+		return hub.chatHistory["default"] == nil
+	})
+}

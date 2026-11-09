@@ -4402,11 +4402,10 @@ async function runDiagnosticsUpdate() {
   let hasFrameDropStats = false;
   let totalLost = 0;
   let totalReceived = 0;
-  let cameraLost = 0;
-  let cameraReceived = 0;
+  let cameraLostSincePreviousSample = 0;
+  let cameraReceivedSincePreviousSample = 0;
   let cameraFramesDropped = 0;
   let cameraFramesDecoded = 0;
-  let hasCameraLossStats = false;
   let hasCameraFrameStats = false;
   let timestamp = 0;
   let hasInboundVideo = false;
@@ -4508,9 +4507,10 @@ async function runDiagnosticsUpdate() {
       } else if (role === "camera") {
         values.cameraResolution = `${stat.frameWidth || "?"}x${stat.frameHeight || "?"}`;
         values.cameraFps = stat.framesPerSecond ?? null;
-        cameraLost += lostPackets;
-        cameraReceived += receivedPackets;
-        hasCameraLossStats = true;
+        if (packetDeltas) {
+          cameraLostSincePreviousSample += packetDeltas.lost;
+          cameraReceivedSincePreviousSample += packetDeltas.received;
+        }
         if (Number.isFinite(stat.framesDropped) && Number.isFinite(stat.framesDecoded)) {
           cameraFramesDropped += Math.max(0, stat.framesDropped);
           cameraFramesDecoded += Math.max(0, stat.framesDecoded);
@@ -4573,13 +4573,9 @@ async function runDiagnosticsUpdate() {
     inboundAudioKbps: values.inboundAudioKbps,
     outboundAudioKbps: values.outboundAudioKbps
   });
-  if (previousStats && timestamp > previousStats.timestamp && hasCameraLossStats) {
-    const lostDelta = Math.max(0, cameraLost - previousStats.cameraLost);
-    const receivedDelta = Math.max(0, cameraReceived - previousStats.cameraReceived);
-    if (lostDelta + receivedDelta > 0) {
-      values.cameraPacketLossPct = Number((lostDelta / (lostDelta + receivedDelta) * 100).toFixed(1));
-    }
-  }
+  values.cameraPacketLossPct = packetLossPercentFromDeltas(
+    cameraLostSincePreviousSample, cameraReceivedSincePreviousSample
+  );
   if (previousStats && timestamp > previousStats.timestamp && hasCameraFrameStats && previousStats.hasCameraFrameStats) {
     const droppedDelta = Math.max(0, cameraFramesDropped - previousStats.cameraFramesDropped);
     const decodedDelta = Math.max(0, cameraFramesDecoded - previousStats.cameraFramesDecoded);
@@ -4590,7 +4586,7 @@ async function runDiagnosticsUpdate() {
   values.framesDropped = hasFrameDropStats ? framesDropped : null;
   previousStats = {
     timestamp, sentBytes, receivedBytes, sentAudioBytes, receivedAudioBytes,
-    cameraLost, cameraReceived, cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats,
+    cameraFramesDropped, cameraFramesDecoded, hasCameraFrameStats,
     packetCounters, videoPlayoutSamples
   };
   const lossKnown = values.packetLoss != null;

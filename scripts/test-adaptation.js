@@ -100,6 +100,25 @@ if (packetCounterDeltas(undefined, { lost: 3, received: 10 }) !== null ||
     packetCounterDeltas({ lost: 5, received: 10 }, { lost: 5, received: 10 })?.lost !== 0) {
   throw new Error("new or reset RTP counters must establish a baseline without fabricating packet loss");
 }
+// A newly subscribed stream may already have large lifetime counters. Only
+// streams present in both samples can contribute to this interval's loss.
+const previousCameraCounters = new Map([
+  ["existing", { lost: 2, received: 1000 }],
+  ["removed", { lost: 300, received: 700 }]
+]);
+const currentCameraCounters = new Map([
+  ["existing", { lost: 2, received: 1100 }],
+  ["new", { lost: 500, received: 500 }]
+]);
+const cameraDeltas = [...currentCameraCounters].map(([id, counters]) =>
+  packetCounterDeltas(previousCameraCounters.get(id), counters)).filter(Boolean);
+const cameraLoss = packetLossPercentFromDeltas(
+  cameraDeltas.reduce((sum, delta) => sum + delta.lost, 0),
+  cameraDeltas.reduce((sum, delta) => sum + delta.received, 0)
+);
+if (cameraLoss !== 0 || chooseCameraLayer("high", 1, 0, cameraLoss, null).layer !== "high") {
+  throw new Error("joining and leaving camera tracks must not fabricate a loss-driven layer downgrade");
+}
 if (classifyParticipantQuality({ hasData: true, packetLossPct: 2 }, 45) !== "degraded" ||
     classifyParticipantQuality({ hasData: true, packetLossPct: 5.1 }, 45) !== "poor" ||
     classifyParticipantQuality({ hasData: true, packetLossPct: null }, 151) !== "degraded") {

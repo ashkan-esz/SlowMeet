@@ -417,6 +417,82 @@ func TestRouterRegistersLateReceiverForActiveCamera(t *testing.T) {
 	}
 }
 
+func TestRouterForwardsReorderedVideoPacketAfterMarker(t *testing.T) {
+	router := NewRouter()
+	sourceClient := newIntegrationPeer(t)
+	sourceIngress := newIntegrationWrapperPeer(t)
+	targetEgress := newIntegrationWrapperPeer(t)
+	targetClient := newIntegrationPeer(t)
+	t.Cleanup(func() {
+		router.Unregister("source")
+		router.Unregister("target")
+		_ = sourceClient.Close()
+		_ = targetClient.Close()
+		_ = sourceIngress.Close()
+		_ = targetEgress.Close()
+	})
+
+	if _, err := targetClient.AddTransceiverFromKind(pion.RTPCodecTypeVideo, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatal(err)
+	}
+	targetTracks := make(chan *pion.TrackRemote, 1)
+	targetClient.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) { targetTracks <- track })
+	router.Register("source", sourceIngress, nil)
+	sourceIngress.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+		router.Publish("source", SourceRoleCamera, sourceIngress, track)
+	})
+	sourceTrack := newIntegrationTrack(pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8, ClockRate: 90_000}, "reordered-camera")
+	if _, err := sourceClient.AddTrack(sourceTrack); err != nil {
+		t.Fatal(err)
+	}
+	negotiateIntegrationPeers(t, sourceClient, sourceIngress.Connection())
+	waitIntegrationPeerConnected(t, sourceClient, "publisher")
+	waitIntegrationPeerConnected(t, sourceIngress.Connection(), "ingress")
+	sendIntegrationPacket(t, sourceTrack, pion.RTPCodecTypeVideo, 90_000, 1)
+	waitIntegrationPublicationCount(t, router, 1)
+
+	offer := make(chan struct{}, 1)
+	router.Register("target", targetEgress, func() error {
+		select {
+		case offer <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	router.SetVideoSubscriptionsWithLayer("target", []string{"source"}, "medium")
+	waitIntegrationSignal(t, offer, "receiver offer")
+	negotiateIntegrationPeers(t, targetClient, targetEgress.Connection())
+	waitIntegrationPeerConnected(t, targetClient, "receiver")
+	waitIntegrationPeerConnected(t, targetEgress.Connection(), "egress")
+
+	write := func(sequence uint16, marker bool) {
+		t.Helper()
+		packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence, Timestamp: 180_000, Marker: marker}, Payload: []byte{0x10, 0x00}}
+		if err := sourceTrack.WriteRTP(packet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(2, false)
+	write(4, true)
+	ctx, cancel := context.WithTimeout(context.Background(), routerIntegrationTimeout)
+	defer cancel()
+	track := waitIntegrationTrack(t, ctx, targetTracks, "receiver track")
+	if err := track.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []uint16{2, 4} {
+		packet, _, err := track.ReadRTP()
+		if err != nil || packet.SequenceNumber != want {
+			t.Fatalf("got packet %v, error %v; want sequence %d", packet, err, want)
+		}
+	}
+	write(3, false)
+	packet, _, err := track.ReadRTP()
+	if err != nil || packet.SequenceNumber != 3 {
+		t.Fatalf("late packet = %v, error %v; want sequence 3", packet, err)
+	}
+}
+
 func TestRouterForwardsSimultaneousCamerasBothWays(t *testing.T) {
 	router := NewRouter()
 	clientA := newIntegrationPeer(t)

@@ -367,24 +367,36 @@ func (h *Hub) scheduleChatHistoryExpiry(roomID string) {
 		history.expiry.Stop()
 	}
 	history.expiry = time.AfterFunc(chatHistoryExpiry, func() {
-		if h.Meeting.Count() != 0 {
-			// Someone rejoined before the expiry fired; re-arm so the history
-			// is still cleaned when the room empties again.
-			h.mu.Lock()
-			if current := h.chatHistory[roomID]; current == history {
-				current.expiry = time.AfterFunc(chatHistoryExpiry, func() {
-					h.mu.Lock()
-					delete(h.chatHistory, roomID)
-					h.mu.Unlock()
-				})
-			}
-			h.mu.Unlock()
-			return
-		}
-		h.mu.Lock()
-		delete(h.chatHistory, roomID)
-		h.mu.Unlock()
+		h.expireChatHistory(roomID, history, 0)
 	})
+}
+
+// expireChatHistory deletes the room's history once the room has stayed empty
+// for the full TTL. If the room refilled before the timer fired — or refills
+// while it is firing — the deletion is postponed by re-arming instead, so
+// history survives for the occupants and is still cleaned when the room
+// empties again.
+func (h *Hub) expireChatHistory(roomID string, history *roomChatHistory, depth int) {
+	if depth > 8 {
+		// The room keeps refilling; leave the history for the next explicit
+		// schedule/close event rather than looping indefinitely.
+		return
+	}
+	if h.Meeting.Count() != 0 {
+		h.mu.Lock()
+		if current := h.chatHistory[roomID]; current == history {
+			current.expiry = time.AfterFunc(chatHistoryExpiry, func() {
+				h.expireChatHistory(roomID, history, depth+1)
+			})
+		}
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Lock()
+	if current := h.chatHistory[roomID]; current == history {
+		delete(h.chatHistory, roomID)
+	}
+	h.mu.Unlock()
 }
 
 func (h *Hub) disconnect(c *client) {
@@ -1256,19 +1268,21 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 		c.negotiationMu.Unlock()
 		return err
 	}
-	// SDP size telemetry: offer bytes grow with m-line count, and when they
-	// approach maxSignalingMessageSize the connection is torn down on read —
-	// this line is the early warning that feeds the renegotiation-slimming
-	// work (single-sender simulcast). sendOfferWithPeer is package-level (no
-	// hub logger), so the default logger carries the debug line.
-	slog.Default().Debug("sdp_offer_sent",
-		"participant_id", c.participantID,
-		"bytes", len(offer),
-		"media_sections", strings.Count(offer, "\nm="),
-		"ice_restart", iceRestart,
-	)
 	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
-	if err != nil {
+	if err == nil {
+		// SDP size telemetry, logged only after a successful write: offer
+		// bytes grow with m-line count, and when they approach
+		// maxSignalingMessageSize the connection is torn down on read — this
+		// line is the early warning that feeds the renegotiation-slimming
+		// work (single-sender simulcast). sendOfferWithPeer is package-level
+		// (no hub logger), so the default logger carries the debug line.
+		slog.Default().Debug("sdp_offer_sent",
+			"participant_id", c.participantID,
+			"bytes", len(offer),
+			"media_sections", strings.Count(offer, "\nm="),
+			"ice_restart", iceRestart,
+		)
+	} else {
 		c.offerInFlight = false
 		c.offerICERestart = false
 		c.remoteDescription = previousRemoteDescription
