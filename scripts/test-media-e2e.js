@@ -3775,10 +3775,6 @@ async function main() {
       when: "networkImpairment",
       profile: "network",
       required: false,
-      // The reconnect lands on a clean link, but as the third scenario in a
-      // loaded netns run the post-reconnect media waits still race machine
-      // load. Report loudly without gating the suite until it is stable.
-      tolerateFailure: true,
       async run(fixture) {
         await fixture.join("A");
         await fixture.join("B");

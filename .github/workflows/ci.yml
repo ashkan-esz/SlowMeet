@@ -109,14 +109,18 @@ jobs:
 
   weaknet:
     runs-on: ubuntu-24.04
-    # The suites need unprivileged user namespaces (unshare --user
-    # --map-root-user). Report-only until the hosted runner's namespace
-    # support is proven, then drop continue-on-error.
-    continue-on-error: true
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      # Ubuntu 24.04 blocks unprivileged user namespaces
+      # (kernel.apparmor_restrict_unprivileged_userns=1), which the netns
+      # suites need for unshare --user --map-root-user; GitHub declined to
+      # change the image (actions/runner-images #10443, #10015). The hosted
+      # runner has passwordless sudo, and iproute2/tc is preinstalled.
+      - name: Allow unprivileged user namespaces for the netns suites
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -140,5 +144,5 @@ jobs:
       - name: Run the isolated browser network profile
         run: ./scripts/test-media-e2e-netns.sh
 
-      - name: Run the four-person mixed-quality room suite in an isolated namespace
-        run: make test-media-e2e-four-netns
+      - name: Run the four-person mixed-quality room scenarios in an isolated namespace
+        run: MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality" make test-media-e2e-four-netns
