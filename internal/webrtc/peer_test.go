@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +131,80 @@ func TestPeerCloseIsIdempotent(t *testing.T) {
 	}
 	if err := peer.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+// The custom interceptor registry must negotiate SDP content-identical to
+// pion's default construction: the removed stats interceptor contributes no
+// MediaEngine state, so codec, header-extension, and feedback negotiation
+// must not shift. Volatile per-connection fields (the o= line, ICE
+// credentials, the DTLS fingerprint, and the random SSRC/CNAME and
+// stream/track identifiers pion generates per connection) are stripped, and
+// the remaining lines are compared as multisets: pion emits the a=extmap
+// lines of an m-section in map-iteration order (mediaengine.go
+// negotiatedHeaderExtensions), which is not even stable between two default
+// constructions — the ID-to-URI mapping is the negotiated contract, not the
+// line order.
+func TestCustomRegistrySDPMatchesDefaultInterceptors(t *testing.T) {
+	normalize := func(sdp string) []string {
+		var kept []string
+		for _, line := range strings.Split(sdp, "\n") {
+			line = strings.TrimRight(line, "\r")
+			if strings.HasPrefix(line, "o=") ||
+				strings.HasPrefix(line, "a=ice-ufrag") ||
+				strings.HasPrefix(line, "a=ice-pwd") ||
+				strings.HasPrefix(line, "a=fingerprint") ||
+				strings.HasPrefix(line, "a=ssrc") ||
+				strings.HasPrefix(line, "a=msid") {
+				continue
+			}
+			kept = append(kept, line)
+		}
+		return kept
+	}
+
+	defaultPC, err := pion.NewAPI(pion.WithSettingEngine(pion.SettingEngine{})).
+		NewPeerConnection(pion.Configuration{})
+	if err != nil {
+		t.Fatalf("create default peer connection: %v", err)
+	}
+	defer defaultPC.Close()
+	customPeer, err := newPeerWithPortRange(pion.Configuration{}, 0, 0, false, "")
+	if err != nil {
+		t.Fatalf("create custom-registry peer: %v", err)
+	}
+	defer customPeer.Close()
+
+	for _, connection := range []*pion.PeerConnection{defaultPC, customPeer.Connection()} {
+		for _, kind := range []pion.RTPCodecType{pion.RTPCodecTypeAudio, pion.RTPCodecTypeVideo} {
+			if _, err := connection.AddTransceiverFromKind(kind,
+				pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionSendrecv}); err != nil {
+				t.Fatalf("add %s transceiver: %v", kind, err)
+			}
+		}
+	}
+
+	defaultOffer, err := defaultPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create default offer: %v", err)
+	}
+	customOffer, err := customPeer.Connection().CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create custom-registry offer: %v", err)
+	}
+
+	defaultLines := normalize(defaultOffer.SDP)
+	customLines := normalize(customOffer.SDP)
+	sort.Strings(defaultLines)
+	sort.Strings(customLines)
+	if len(defaultLines) != len(customLines) {
+		t.Fatalf("custom-registry SDP has %d lines, default has %d\ncustom:\n%s\ndefault:\n%s",
+			len(customLines), len(defaultLines), customOffer.SDP, defaultOffer.SDP)
+	}
+	for index := range defaultLines {
+		if defaultLines[index] != customLines[index] {
+			t.Fatalf("custom-registry SDP differs at sorted line %d\ncustom full SDP:\n%s\ndefault full SDP:\n%s",
+				index, customOffer.SDP, defaultOffer.SDP)
+		}
 	}
 }

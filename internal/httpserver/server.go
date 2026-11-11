@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"slices"
 	"strconv"
@@ -263,6 +264,42 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	// Runtime profiling behind the /admin/config credential gate, so live
+	// CPU/heap/goroutine profiles are reachable only by the authenticated
+	// admin surface. The gate is fail-closed: with no admin password
+	// configured, profiling stays disabled. Profile generation itself costs
+	// CPU while it runs, but only an authenticated admin can trigger it, and
+	// the shared admin limiter bounds password guessing on this surface too.
+	adminProfiling := func(target http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			cfg := store.Snapshot()
+			if cfg.AdminPassword == "" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			clientIP := ratelimit.ClientIPWithTrustedProxyCIDRs(r, cfg.TrustedProxyCIDRs)
+			if !adminLimiter.AllowAttempt(clientIP) {
+				http.Error(w, "too many attempts", http.StatusTooManyRequests)
+				return
+			}
+			if !store.CheckAdminPassword(r.Header.Get("X-Admin-Password")) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			adminLimiter.RefundAttempt(clientIP)
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			target(w, r)
+		}
+	}
+	mux.HandleFunc("/debug/pprof/", adminProfiling(pprof.Index))
+	mux.HandleFunc("/debug/pprof/profile", adminProfiling(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/cmdline", adminProfiling(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/symbol", adminProfiling(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", adminProfiling(pprof.Trace))
 	mux.Handle("/ws", hub)
 	mux.Handle("/admin", http.RedirectHandler("/admin.html", http.StatusFound))
 	mux.Handle("/", newStaticFileHandler(cfg.AppName))

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"SlowMeet/internal/meeting"
 )
@@ -180,7 +181,7 @@ func (m Message) Validate() error {
 		if m.ParticipantID == "" || text == "" {
 			return fmt.Errorf("chat message requires participant_id and text")
 		}
-		if len([]rune(text)) > 500 {
+		if utf8.RuneCountInString(text) > 500 {
 			return fmt.Errorf("chat message is too long")
 		}
 	case TypeReaction:

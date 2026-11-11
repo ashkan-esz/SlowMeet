@@ -4,6 +4,24 @@ SlowMeet should be tested with two or more browsers while applying impairment
 to the client network namespace or interface. These commands require Linux
 `iproute2` and usually root privileges.
 
+Two automated suites cover the weak-network guarantees without touching any
+host interface:
+
+- `make test-weaknet` runs the Go integration suite (`//go:build weaknet`)
+  inside a disposable network namespace: real peer connections over shaped
+  loopback assert that audio survives what starves video, loss is repaired
+  through NACK, and recovery is immediate once the impairment lifts.
+- `make test-media-e2e-netns` runs the browser network profile in the same
+  kind of namespace: impairment measurement and recovery, the severe 100 kbps
+  profile (video yields before audio), and a signaling reconnect whose
+  resumed session must survive impairment.
+- `make test-media-e2e-four-netns` runs the four-person mixed-quality room:
+  P1/P4 stay clean while P2 sees 200 kbit/200 ms/3% loss and P3 sees
+  100 kbit/300 ms/5%, applied per participant by classifying each browser's
+  ICE UDP port into per-tier `tc` classes. The scenarios assert that audio
+  keeps moving for everyone, each participant's degradation stays theirs, and
+  a clean participant's screen share reaches the impaired viewers.
+
 Inspect the active interface first:
 
 ```sh

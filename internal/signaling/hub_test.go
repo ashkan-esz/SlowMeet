@@ -1829,6 +1829,176 @@ func TestHubBroadcastDoesNotBlockOnStalledClient(t *testing.T) {
 	}
 }
 
+// Broadcast fan-out shares one prepared *Message across every member's writer
+// goroutine. The regression this pins: the shared struct stays immutable once
+// enqueued, so every member receives byte-identical frames — and under -race,
+// no writer observes another mutating it.
+func TestHubBroadcastDeliversIdenticalFramesToAllMembers(t *testing.T) {
+	hub := NewHub(meeting.New(4), config.NewStore(config.Config{}), slog.Default())
+
+	serverConnections := make(chan *websocket.Conn, 2)
+	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnections <- conn
+	}))
+	defer websocketServer.Close()
+	dial := func() *websocket.Conn {
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+websocketServer.URL[len("http"):], nil)
+		if err != nil {
+			t.Fatalf("dial websocket test peer: %v", err)
+		}
+		return conn
+	}
+
+	peers := make([]*websocket.Conn, 0, 2)
+	for i := 0; i < 2; i++ {
+		peer := dial()
+		defer peer.Close()
+		member := &client{
+			conn:       <-serverConnections,
+			finished:   make(chan struct{}),
+			outbound:   make(chan *Message, outboundQueueSize),
+			writerDone: make(chan struct{}),
+		}
+		defer member.conn.Close()
+		startTestWriter(t, member)
+		hub.mu.Lock()
+		hub.clients[member] = struct{}{}
+		hub.roomMembers[member] = struct{}{}
+		hub.mu.Unlock()
+		peers = append(peers, peer)
+	}
+
+	hub.broadcast(Message{Version: ProtocolVersion, Type: TypeChat, ParticipantID: "author", ChatText: "identical frame"})
+
+	payloads := make([][]byte, 0, len(peers))
+	for _, peer := range peers {
+		if err := peer.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		_, payload, err := peer.ReadMessage()
+		if err != nil {
+			t.Fatalf("read broadcast frame: %v", err)
+		}
+		payloads = append(payloads, payload)
+	}
+	for i, payload := range payloads[1:] {
+		if string(payload) != string(payloads[0]) {
+			t.Fatalf("member %d received a different broadcast frame:\n%s\nwant:\n%s", i+1, payload, payloads[0])
+		}
+	}
+	if !strings.Contains(string(payloads[0]), `"text":"identical frame"`) {
+		t.Fatalf("broadcast frame content unexpected: %s", payloads[0])
+	}
+}
+
+// A connection that dies mid-meeting — the phone lost signal, the radio
+// dropped — must be dropped without wedging the hub, the room must be told it
+// left, and its reconnect token must still reclaim the slot within the grace
+// window. A weak-network stall ends in a clean reconnect, not a lost
+// participant.
+func TestHubDeadConnectionEntersGraceThenReclaims(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",
+		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
+		MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+		ReconnectTimeout: 5 * time.Second,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	defer hub.Close()
+
+	socketURL := "ws" + server.URL[len("http"):]
+	dead := dialTestSocket(t, socketURL)
+	writeTestMessage(t, dead, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, dead, &joined)
+	if joined.Type != TypeParticipant || joined.ReconnectToken == "" {
+		t.Fatalf("join response = %+v", joined)
+	}
+
+	observer := dialTestSocket(t, socketURL)
+	defer observer.Close()
+	writeTestMessage(t, observer, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var observerJoined Message
+	readTestMessage(t, observer, &observerJoined)
+	if observerJoined.Type != TypeParticipant {
+		t.Fatalf("observer join response = %+v", observerJoined)
+	}
+	var observerSawAshkan Message
+	readTestMessage(t, observer, &observerSawAshkan)
+	if observerSawAshkan.Type != TypeJoined || observerSawAshkan.Participant.ID != joined.Participant.ID {
+		t.Fatalf("observer existing participant = %+v", observerSawAshkan)
+	}
+
+	observerEvents := make(chan Message, 8)
+	observerDone := make(chan struct{})
+	go func() {
+		defer close(observerDone)
+		for {
+			var event Message
+			if err := observer.ReadJSON(&event); err != nil {
+				return
+			}
+			select {
+			case observerEvents <- event:
+			default:
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		observer.SetReadDeadline(time.Now())
+		<-observerDone
+	})
+
+	// The radio dropped: close the socket the way a crashed client does,
+	// with a TCP reset rather than a WebSocket close handshake.
+	if tcp, ok := dead.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+	}
+	dead.Close()
+
+	waitForEvent := func(wantType string, timeout time.Duration) Message {
+		t.Helper()
+		deadline := time.After(timeout)
+		for {
+			select {
+			case event := <-observerEvents:
+				if event.Type == wantType {
+					return event
+				}
+			case <-deadline:
+				t.Fatalf("observer never saw %q within %s", wantType, timeout)
+			}
+		}
+	}
+	left := waitForEvent(TypeLeft, 5*time.Second)
+	if left.Participant == nil || left.Participant.ID != joined.Participant.ID {
+		t.Fatalf("participant_left = %+v, want participant %q", left, joined.Participant.ID)
+	}
+
+	// The grace window holds the slot: the token still reclaims it.
+	reclaim := dialTestSocket(t, socketURL)
+	defer reclaim.Close()
+	writeTestMessage(t, reclaim, Message{
+		Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan",
+		ReconnectToken: joined.ReconnectToken,
+	})
+	var rejoined Message
+	readTestMessage(t, reclaim, &rejoined)
+	if rejoined.Type != TypeParticipant || rejoined.Participant.ID != joined.Participant.ID {
+		t.Fatalf("reclaim response = %+v, want participant %q", rejoined, joined.Participant.ID)
+	}
+	if got := hub.ActiveParticipants(); got != 2 {
+		t.Fatalf("active participants after reclaim = %d, want 2", got)
+	}
+}
+
 func TestHubHandStateUnderConcurrentConfigBroadcast(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low",

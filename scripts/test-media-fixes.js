@@ -236,8 +236,16 @@ assert.match(screenShareSource,
   /frameRate = Math\.min\(maxFrameRate, Math\.ceil\(frameRate \* 1\.25\)\);/,
   "recovery must raise the frame rate first, mirroring the down-step");
 assert.match(screenShareSource,
-  /if \(nextBitrate < maxBitrate && Number\.isFinite\(lastMeasuredBitrate\) && lastMeasuredBitrate > 0\) \{/,
-  "a budget cut must seed the learned state from the measured bitrate");
+  /if \(nextBitrate < previousBitrate && Number\.isFinite\(lastMeasuredBitrate\) && lastMeasuredBitrate > 0\) \{/,
+  "a budget cut must compare against the previous budget and seed the learned state from the measured bitrate");
+
+// Own-link loss attribution: the diagnostics sampler must estimate the
+// receiver's own link from the minimum per-stream loss (via the policy
+// module), never from loss pooled across every inbound stream — pooled loss
+// let one impaired sender's uplink suspend video room-wide.
+assert.match(appSource,
+  /selectOwnLinkMeasurements\(streamLossSamples, \{/,
+  "packet loss for adaptation must come from the per-stream own-link estimate");
 
 // Decode-side frame drops must not downgrade the SFU layer when the measured
 // packet loss is zero.

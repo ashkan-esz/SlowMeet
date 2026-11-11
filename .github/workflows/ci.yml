@@ -106,3 +106,39 @@ jobs:
             --build-arg VCS_REF="$GITHUB_SHA" \
             --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             .
+
+  weaknet:
+    runs-on: ubuntu-24.04
+    # The suites need unprivileged user namespaces (unshare --user
+    # --map-root-user). Report-only until the hosted runner's namespace
+    # support is proven, then drop continue-on-error.
+    continue-on-error: true
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the Go weak-network integration suite in an isolated namespace
+        run: make test-weaknet
+
+      - name: Install browser test dependencies
+        run: |
+          npm ci
+          npx playwright-core install chromium firefox
+
+      - name: Run the isolated browser network profile
+        run: ./scripts/test-media-e2e-netns.sh
+
+      - name: Run the four-person mixed-quality room suite in an isolated namespace
+        run: make test-media-e2e-four-netns

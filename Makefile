@@ -133,11 +133,21 @@ test-media-e2e-four-scenario: ## Run a subset of the four-person suite: MEDIA_E2
 test-media-e2e-four-list: ## List the four-person suite scenarios
 	MEDIA_E2E_FOUR_LIST=1 $(NODE) scripts/test-four-person-e2e.js
 
+test-media-e2e-four-netns: ## Run the four-person mixed-quality room scenarios in an isolated network namespace
+	./scripts/test-four-person-e2e-netns.sh
+
 test-connection-methods-e2e: ## Verify live connection method switching and admin policy refresh
 	MEDIA_E2E_SCENARIO="connection method switch and admin policy refresh" $(NODE) scripts/test-media-e2e.js
 
 test-media-e2e-netns: ## Test media quality degradation and recovery in an isolated network namespace
 	./scripts/test-media-e2e-netns.sh
+
+test-weaknet: ## Run the Go weak-network integration suite in an isolated network namespace
+	./scripts/test-go-weaknet.sh
+
+.PHONY: test-soak
+test-soak: ## Run a sustained synthetic-meeting soak with server CPU/heap profiles: SOAK_PARTICIPANTS=4 SOAK_SECONDS=30
+	$(NODE) scripts/test-soak.js
 
 test-media-e2e-screen-share: ## Run headed generated-content screen-share scenarios
 	MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE=1 $(NODE) scripts/test-media-e2e.js

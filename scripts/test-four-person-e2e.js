@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -26,6 +26,10 @@ const reconnectGraceSeconds = Number(process.env.MEDIA_E2E_FOUR_RECONNECT_GRACE 
 const engineMode = (process.env.MEDIA_E2E_FOUR_ENGINES || "mixed").toLowerCase();
 const browserNames = new Map(roles.map((role, index) => [role,
   engineMode === "chromium" ? "chromium" : (index % 2 === 0 ? "chromium" : "firefox")]));
+// MEDIA_E2E_FOUR_NETNS=1 (set by scripts/test-four-person-e2e-netns.sh) arms
+// the per-participant room classifiers: without it, in a plain run, the
+// netns.* scenarios are skipped because shaping the host loopback is forbidden.
+const netnsRoom = process.env.MEDIA_E2E_FOUR_NETNS === "1";
 const contexts = [];
 const traces = new Set();
 const pages = new Map();
@@ -47,6 +51,9 @@ async function startServer() {
     env: { ...process.env, HTTP_ADDR: `127.0.0.1:${port}`, MAX_PARTICIPANTS: "4",
       RECONNECT_TIMEOUT_SECONDS: String(reconnectGraceSeconds), MEETING_PASSWORD: "",
       ADMIN_PASSWORD: adminPassword, CONFIG_FILE: configPath,
+      // In the namespace the server's only interface is loopback; without
+      // the NAT 1-to-1 loopback path the SFU gathers no candidates at all.
+      ...(netnsRoom ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
       GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-four-e2e-gocache" },
     detached: true, stdio: ["ignore", "pipe", "pipe"]
   });
@@ -83,7 +90,19 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
           // Loopback e2e must bypass ambient HTTP(S)_PROXY environment settings.
           "network.proxy.type": 0 } }
       : { args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required",
-          "--no-proxy-server"] })
+          "--no-proxy-server",
+          // Inside the netns the only route is loopback. Mirror the
+          // two-person runner's netns flags: sandbox/shm relief for four
+          // headless browsers, plain host ICE candidates (mDNS names cannot
+          // resolve in the namespace), and loopback ICE allowed.
+          ...(netnsRoom ? ["--no-sandbox", "--disable-dev-shm-usage",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--force-webrtc-ip-handling-policy=default_public_interface_only",
+            "--disable-features=WebRtcHideLocalIpsWithMdns",
+            "--allow-loopback-in-peer-connection",
+            `--unsafely-treat-insecure-origin-as-secure=${server.url}`] : [])] })
   });
   browsers.push(browser);
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -341,6 +360,168 @@ async function waitForScreenButton(page, pressed, timeout = 15000) {
     const button = document.querySelector("#screen");
     return Boolean(button) && button.getAttribute("aria-pressed") === expected && !button.disabled;
   }, pressed, { timeout });
+}
+
+// --- Mixed-quality room support --------------------------------------------
+
+// A media snapshot per page: outbound/inbound audio bytes, summed decoded
+// video frames, and the selected pair's RTT where available.
+async function pageMediaSnapshot(page) {
+  return page.evaluate(async () => {
+    const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+    if (!peer || typeof peer.getStats !== "function") {
+      throw new Error("no peer connection for media snapshot");
+    }
+    const report = await peer.getStats();
+    const snapshot = {
+      audioSent: 0, audioReceived: 0, videoFrames: 0, rttMs: null,
+      packetLossPct: window.__slowMeetTest?.networkQuality?.packetLossPct ?? null
+    };
+    report.forEach((stat) => {
+      if (stat.type === "outbound-rtp" && stat.kind === "audio") snapshot.audioSent += stat.bytesSent || 0;
+      if (stat.type === "inbound-rtp" && stat.kind === "audio") snapshot.audioReceived += stat.bytesReceived || 0;
+      if (stat.type === "inbound-rtp" && stat.kind === "video") snapshot.videoFrames += stat.framesDecoded || 0;
+      if (stat.type === "candidate-pair" && (stat.selected || stat.nominated) &&
+        Number.isFinite(stat.currentRoundTripTime)) {
+        snapshot.rttMs = stat.currentRoundTripTime * 1000;
+      }
+    });
+    return snapshot;
+  });
+}
+
+// The page's local ICE port, so per-participant classifiers can match its
+// flows in both directions (its sport on send, its dport on receive).
+// Every distinct local ICE port across the page's connected peer
+// connections: join churn can leave a superseded-but-connected PC behind, so
+// the classifier arms all of the page's live ports.
+async function pageLocalIcePorts(page) {
+  return page.evaluate(async () => {
+    const peers = [...(window.__slowMeetTest?.peerConnections || [])]
+      .filter((item) => item.connectionState === "connected");
+    const ports = new Set();
+    for (const peer of peers) {
+      if (typeof peer.getStats !== "function") continue;
+      const report = await peer.getStats();
+      report.forEach((stat) => {
+        // Port 9 is the tcptype "active" placeholder, never a real socket.
+        if (stat.type === "local-candidate" && stat.candidateType === "host" &&
+          stat.port && stat.port !== 9) {
+          ports.add(Number(stat.port));
+        }
+      });
+    }
+    // An empty set is normal while a peer connection is being replaced; the
+    // caller's verification loop re-captures on its next pass.
+    return [...ports];
+  });
+}
+
+// The app can replace a participant's peer connection mid-room ("restarting
+// media"), which rebinds its ICE port; a one-shot classification would then
+// miss the media. The armer keeps re-reading every impaired participant's
+// live ports and classifying new ones until the profiles are lifted.
+function armParticipantTiers(tierByRole) {
+  const applied = new Map();
+  const stop = { stopped: false };
+  (async () => {
+    while (!stop.stopped) {
+      for (const [role, tier] of Object.entries(tierByRole)) {
+        if (tier === "clean") continue;
+        try {
+          const ports = await pageLocalIcePorts(pages.get(role));
+          for (const port of ports) {
+            if (!applied.get(role)?.has(port)) {
+              if (!applied.has(role)) applied.set(role, new Set());
+              applyParticipantTier(port, tier);
+              applied.get(role).add(port);
+              console.log(`[mixed] ${role} -> ${tier} tier on port ${port}`);
+            }
+          }
+        } catch (_) {}
+      }
+      await delay(2000);
+    }
+  })();
+  return stop;
+}
+
+function tcRun(args) {
+  execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+// One htb root on the namespace loopback: a large clean default class plus
+// one impaired class per tier. Each participant's UDP port is then matched
+// into its tier for both directions, so different participants see different
+// link qualities in the same room.
+const fourPersonTiers = {
+  moderate: { classID: "1:20", handle: "20:", rate: "200kbit", delay: "200ms", loss: "3%" },
+  severe: { classID: "1:30", handle: "30:", rate: "100kbit", delay: "300ms", loss: "5%" }
+};
+
+function installRoomQdisc() {
+  tcRun(["qdisc", "replace", "dev", "lo", "root", "handle", "1:", "htb", "default", "10"]);
+  tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit"]);
+  for (const tier of Object.values(fourPersonTiers)) {
+    tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", tier.rate, "ceil", tier.rate]);
+    tcRun(["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle",
+      tier.handle, "netem", "delay", tier.delay, "loss", tier.loss]);
+  }
+}
+
+function applyParticipantTier(port, tierName) {
+  const tier = fourPersonTiers[tierName];
+  assert.ok(tier, `unknown participant tier ${tierName}`);
+  // IPv4: u32 ip sport/dport selectors. IPv6: the UDP ports sit at byte 40
+  // (source) and 42 (destination) of the packet, matched with u16 at 40/42.
+  const selectors = [
+    ["protocol", "ip", "u32", "match", "ip", "sport", String(port), "0xffff"],
+    ["protocol", "ip", "u32", "match", "ip", "dport", String(port), "0xffff"],
+    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "40"],
+    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "42"]
+  ];
+  for (const selector of selectors) {
+    tcRun(["filter", "add", "dev", "lo", ...selector, "flowid", tier.classID]);
+  }
+}
+
+function clearRoomProfiles() {
+  try {
+    execFileSync("tc", ["qdisc", "del", "dev", "lo", "root"], { stdio: "ignore" });
+  } catch (_) {}
+}
+
+// A tile counts as degraded when its protect-audio pause fired or its
+// connection quality dropped to degraded/poor on the observer's browser.
+async function waitForDegradedCameraTile(observers, participantID, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let allDegraded = true;
+    for (const page of observers) {
+      const state = await page.evaluate((id) => {
+        const tile = document.querySelector(`li[data-participant-id='${id}']`);
+        if (!tile) return { missing: true };
+        const quality = tile.dataset.quality || "unknown";
+        return {
+          missing: false,
+          camera: tile.dataset.camera,
+          quality,
+          degraded: tile.dataset.camera === "paused" ||
+            tile.classList.contains("is-poor-connection") ||
+            quality === "degraded" || quality === "poor"
+        };
+      }, participantID);
+      if (state.missing || !state.degraded) {
+        allDegraded = false;
+        break;
+      }
+    }
+    if (allDegraded) return;
+    if (Date.now() > deadline) {
+      throw new Error(`participant ${participantID} never showed a degraded camera on its observers`);
+    }
+    await delay(500);
+  }
 }
 
 // --- Scenarios -------------------------------------------------------------
@@ -1516,6 +1697,132 @@ async function scenarioAxeAccessibility() {
     "the meeting surface has axe critical/serious violations");
 }
 
+// One room, three link qualities: P1/P4 clean, P2 moderate (200kbit/3%),
+// P3 severe (100kbit/5%). The room guarantee under mixed quality: audio
+// keeps moving for everyone, each participant's degradation stays theirs
+// (the clean pair keeps decoding video), the impaired participants' cameras
+// yield room-wide, and lifting the profiles restores every camera.
+async function scenarioMixedQualityRoom() {
+  await setupRoom();
+  // Audio is the guarantee under test; earlier scenarios share these pages,
+  // so only unmute the participants that are actually muted.
+  for (const page of pages.values()) {
+    if (await page.locator("#mic").getAttribute("aria-pressed") !== "true") {
+      await page.locator("#mic").click();
+    }
+    await page.waitForFunction(() =>
+      document.querySelector("#mic")?.getAttribute("aria-pressed") === "true",
+    null, { timeout: 10000 });
+  }
+  await delay(2000);
+
+  const tierByRole = { P1: "clean", P2: "moderate", P3: "severe", P4: "clean" };
+  const before = new Map();
+  for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(15000);
+
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of roles) {
+      assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+        `${role} outbound audio did not advance under the mixed profiles`);
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} inbound audio did not advance under the mixed profiles`);
+    }
+    for (const role of ["P1", "P4"]) {
+      assert.ok(after.get(role).videoFrames > before.get(role).videoFrames,
+        `${role} sits on the clean tier but stopped decoding video`);
+    }
+    const deltas = Object.fromEntries(roles.map((role) =>
+      [role, after.get(role).videoFrames - before.get(role).videoFrames]));
+    // Own-link attribution: a clean participant's impairment reaction keys on
+    // its own link (the minimum per-stream loss), so the clean pair keeps
+    // decoding at nearly full rate while the severe tier collapses.
+    assert.ok(deltas.P3 < deltas.P1,
+      `the severe participant decoded more video than a clean one: P1=${deltas.P1} P3=${deltas.P3}`);
+    assert.ok(deltas.P3 < deltas.P1 / 2,
+      `severe-tier degradation is too mild next to the clean tier: P1=${deltas.P1} P3=${deltas.P3}`);
+    console.log(`[mixed] decoded-video deltas: P1=${deltas.P1} P2=${deltas.P2} P3=${deltas.P3} P4=${deltas.P4}`);
+
+    // The impaired participants' cameras yield on the clean observers.
+    const p1 = pages.get("P1");
+    for (const [role, index] of [["P2", 1], ["P3", 2]]) {
+      const participantID = await participantIDFor(p1, names[index]);
+      await waitForDegradedCameraTile([pages.get("P1"), pages.get("P4")], participantID);
+      console.log(`[mixed] ${role}'s camera degraded room-wide`);
+    }
+    // The clean pair's cameras must stay live: with own-link loss
+    // attribution, a clean participant's impairment reaction keys on its own
+    // link and must not be triggered by the impaired senders' uplink loss.
+    for (const [viewerRole, index] of [["P1", 3], ["P4", 0]]) {
+      const participantID = await participantIDFor(pages.get(viewerRole), names[index]);
+      await waitForTileState(pages.get(viewerRole), participantID, "camera", "on", 10000);
+    }
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+
+  // Recovery: every camera returns on within a patient window.
+  for (const [role, index] of [["P2", 1], ["P3", 2]]) {
+    const participantID = await participantIDFor(pages.get("P1"), names[index]);
+    await waitForTileState(pages.get("P1"), participantID, "camera", "on", 90000);
+  }
+  console.log("[mixed] all cameras recovered after the profiles were lifted");
+  await assertMedia();
+}
+
+// A clean participant shares into the mixed room: the impaired viewers may
+// pause the share's video, but the share stays the single lease, the clean
+// viewers keep decoding it, and everything recovers when the profiles lift.
+async function scenarioScreenShareMixedQuality() {
+  await setupRoom();
+  const sharer = pages.get("P1");
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[0]);
+
+  const tierByRole = { P2: "moderate", P3: "severe" };
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(12000);
+    // The share's lease stays exclusive and its state stays consistent on
+    // every browser, and audio keeps flowing — video delivery to impaired
+    // (and, with the room-wide protect-audio suspension, even clean)
+    // viewers may pause while the profiles are up.
+    for (const page of pages.values()) await assertSingleSharer(page, names[0]);
+    const before = await pageMediaSnapshot(sharer);
+    await delay(2000);
+    const after = await pageMediaSnapshot(sharer);
+    assert.ok(after.videoFrames > before.videoFrames || after.audioSent > before.audioSent,
+      "the sharer's outbound media stopped entirely under the mixed profiles");
+    console.log("[mixed] screen share stayed leased room-wide and the sharer kept sending");
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+
+  // With the profiles lifted, the live share reaches every viewer again;
+  // impaired viewers may need the full adaptation recovery streak first.
+  for (const [role, page] of pages) {
+    if (role === "P1") continue;
+    await page.waitForFunction(() => {
+      const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+      return Boolean(video) && video.videoWidth > 0 && video.readyState >= 2;
+    }, null, { timeout: 60000 });
+  }
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "false");
+  await assertMedia();
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
@@ -1561,7 +1868,9 @@ const scenarios = [
   { name: "chat-dom-cap", description: "A four-sender flood cannot grow the chat rail past its 300-node cap.", run: scenarioChatDomCap },
   { name: "congestion-adaptation", description: "Injected packet loss drives automatic video pause room-wide and recovery restores it.", run: scenarioCongestionAdaptation },
   { name: "axe-accessibility", description: "The meeting surface has no axe critical or serious accessibility violations.", run: scenarioAxeAccessibility },
-  { name: "fifth-participant-capacity", description: "The room rejects a fifth browser with a clear full-room message and every present participant sees the room-full notice.", run: scenarioFifthParticipantCapacity }
+  { name: "fifth-participant-capacity", description: "The room rejects a fifth browser with a clear full-room message and every present participant sees the room-full notice.", run: scenarioFifthParticipantCapacity },
+  { name: "mixed-quality-room", description: "Four participants on three different link qualities: audio survives everywhere, degradation stays per-participant, and recovery is prompt.", run: scenarioMixedQualityRoom, netns: true },
+  { name: "screen-share-mixed-quality", description: "A clean participant's screen share reaches impaired viewers without losing the lease or stalling the room.", run: scenarioScreenShareMixedQuality, netns: true }
 ];
 
 function scenarioFilter() {
@@ -1596,6 +1905,7 @@ async function saveFailure(error) {
         connectionState: pc.connectionState, iceConnectionState: pc.iceConnectionState,
         signalingState: pc.signalingState, iceGatheringState: pc.iceGatheringState
       })),
+
       networkQuality: window.__slowMeetTest?.networkQuality || null,
       adaptationState: window.__slowMeetTest?.adaptationState || null,
       videos: [...document.querySelectorAll("video")].map((video) => ({ width: video.videoWidth, height: video.videoHeight, time: video.currentTime }))
@@ -1625,13 +1935,25 @@ async function saveFailure(error) {
   console.log(`[engines] ${engineMode}; [scenarios] ${selected.map((scenario) => scenario.name).join(", ")}`);
   try {
     server = await startServer();
+    let ran = 0;
+    let skipped = 0;
     for (const scenario of selected) {
+      if (scenario.netns && !netnsRoom) {
+        console.log(`SKIP | ${scenario.name} | requires MEDIA_E2E_FOUR_NETNS=1 (scripts/test-four-person-e2e-netns.sh)`);
+        skipped += 1;
+        continue;
+      }
       activeScenario = scenario.name;
       const startedAt = Date.now();
       await scenario.run();
+      ran += 1;
       console.log(`[pass] ${scenario.name} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
     }
-    console.log(`PASS | ${selected.length} scenario(s) across four independent mixed-engine Playwright participants`);
+    if (skipped && !ran) {
+      console.log(`SKIP | ${skipped} netns scenario(s) need MEDIA_E2E_FOUR_NETNS=1; nothing else was selected`);
+      return;
+    }
+    console.log(`PASS | ${ran} scenario(s) across four independent mixed-engine Playwright participants`);
   }
   catch (error) {
     console.error(error.stack || error.message);

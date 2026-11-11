@@ -122,6 +122,7 @@
           ensureSampling();
           return;
         }
+        const previousBitrate = maxBitrate;
         maxBitrate = nextBitrate;
         maxFrameRate = nextFrameRate;
         // A changed budget used to reset the learned stepping to full quality,
@@ -134,7 +135,7 @@
         } else {
           frameRate = maxFrameRate;
         }
-        if (nextBitrate < maxBitrate && Number.isFinite(lastMeasuredBitrate) && lastMeasuredBitrate > 0) {
+        if (nextBitrate < previousBitrate && Number.isFinite(lastMeasuredBitrate) && lastMeasuredBitrate > 0) {
           // A budget cut: seed the frame rate roughly in proportion to the
           // measured share of the old cap so the sender starts near the link.
           frameRate = Math.max(minimumFrameRate, Math.min(frameRate,

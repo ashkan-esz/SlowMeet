@@ -206,7 +206,9 @@ const scenarios = [
       await page.waitForFunction(() =>
         document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 5000 });
       await page.waitForFunction(() => {
-        const localVideo = [...document.querySelectorAll("#participants video[data-media-role='camera']")]
+        // The local preview video never carries data-media-role (that is set
+        // when a REMOTE track binds), so match the tile's camera-video class.
+        const localVideo = [...document.querySelectorAll("#participants video.camera-video, #pinned-main video.camera-video, #pinned-filmstrip video.camera-video, #layout-parking video.camera-video")]
           .find((video) => video.closest("li")?.classList.contains("is-local"));
         return localVideo && !localVideo.hidden && localVideo.readyState >= 2 && localVideo.currentTime > 0;
       }, null, { timeout: 5000 });
@@ -223,7 +225,9 @@ const scenarios = [
       await page.waitForFunction(() =>
         document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 5000 });
       await page.waitForFunction(() => {
-        const localVideo = [...document.querySelectorAll("#participants video[data-media-role='camera']")]
+        // The local preview video never carries data-media-role (that is set
+        // when a REMOTE track binds), so match the tile's camera-video class.
+        const localVideo = [...document.querySelectorAll("#participants video.camera-video, #pinned-main video.camera-video, #pinned-filmstrip video.camera-video, #layout-parking video.camera-video")]
           .find((video) => video.closest("li")?.classList.contains("is-local"));
         return localVideo && !localVideo.hidden && localVideo.readyState >= 2 && localVideo.currentTime > 0;
       }, null, { timeout: 5000 });
@@ -677,11 +681,12 @@ const scenarios = [
         null, { timeout: 5000 });
       await fixture.assertNoLiveCapturedTracks("A", "leave during delayed camera capture");
 
-      await fixture.pageB.waitForFunction(() =>
-        document.querySelectorAll("#participants li[data-participant-id]").length === 1,
-      null, { timeout: 10000 });
+      const leavingLifecycleSelector = "#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id], #layout-parking li[data-participant-id]";
+      await fixture.pageB.waitForFunction((selector) =>
+        document.querySelectorAll(selector).length === 1,
+      leavingLifecycleSelector, { timeout: 10000 });
       await fixture.waitForConnected("B");
-      assert.equal(await fixture.pageB.locator("#participants li[data-participant-id]").count(), 1,
+      assert.equal(await fixture.pageB.locator(leavingLifecycleSelector).count(), 1,
         "B should have exactly one local participant after A leaves during capture");
     }
   },
@@ -915,7 +920,7 @@ const scenarios = [
       await joinPair(fixture, "ICE and camera overlap startup");
       await enableCamera(fixture, "A", "A camera before overlapping ICE restart");
       await fixture.pageB.evaluate((senderName) => {
-        const participant = [...document.querySelectorAll("#participants li[data-participant-id]")]
+        const participant = [...document.querySelectorAll("#participants li[data-participant-id], #pinned-main li[data-participant-id], #pinned-filmstrip li[data-participant-id], #layout-parking li[data-participant-id]")]
           .find((item) => !item.classList.contains("is-local") && item.textContent.includes(senderName));
         if (!participant) throw new Error(`remote participant ${senderName} was not found`);
         window.__iceCameraStatesDuringRestart = [];

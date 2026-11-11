@@ -6,6 +6,11 @@ import (
 	"sync"
 
 	ice "github.com/pion/ice/v4"
+	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/nack"
+	"github.com/pion/interceptor/pkg/report"
+	"github.com/pion/interceptor/pkg/twcc"
+	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
 )
@@ -76,6 +81,49 @@ func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	return newPeerWithPortRange(configuration, portMin, portMax, false, "")
 }
 
+// newMediaEngineAndRegistry replicates pion's RegisterDefaultInterceptors
+// (webrtc/v4@v4.2.23 interceptor.go:33-74, including its logger wiring and
+// the default logger fallback of api.go:40-42) minus the stats interceptor
+// (interceptor.go:69). The recorder data the stats interceptor collects is
+// consumed only by PeerConnection.GetStats, which nothing in this application
+// calls (the SR/RR report interceptors keep their own per-stream state), while
+// it adds a full rtp.Header clone plus a mutex critical section to every
+// outgoing packet, mutex-and-counter work to every inbound packet, and an
+// O(streams) walk under a shared mutex to every RTCP batch. The skipped step
+// touches no MediaEngine state, so codecs, header extensions, and feedback
+// negotiation are unchanged; TestCustomRegistrySDPMatchesDefault pins the
+// negotiated SDP against a default-construction peer. Re-verify this recipe
+// against interceptor.go if the pion version is ever bumped.
+func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEngine, *interceptor.Registry, error) {
+	loggerFactory := settingEngine.LoggerFactory
+	if loggerFactory == nil {
+		loggerFactory = logging.NewDefaultLoggerFactory()
+	}
+	mediaEngine := &pion.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		return nil, nil, err
+	}
+	registry := &interceptor.Registry{}
+	if err := pion.ConfigureNackWithOptions(mediaEngine, registry,
+		[]nack.GeneratorOption{nack.WithGeneratorLoggerFactory(loggerFactory)},
+		nack.WithResponderLoggerFactory(loggerFactory)); err != nil {
+		return nil, nil, err
+	}
+	if err := pion.ConfigureRTCPReportsWithOptions(registry,
+		[]report.ReceiverOption{report.WithReceiverLoggerFactory(loggerFactory)},
+		report.WithSenderLoggerFactory(loggerFactory)); err != nil {
+		return nil, nil, err
+	}
+	if err := pion.ConfigureSimulcastExtensionHeaders(mediaEngine); err != nil {
+		return nil, nil, err
+	}
+	if err := pion.ConfigureTWCCSenderWithOptions(mediaEngine, registry,
+		twcc.WithLoggerFactory(loggerFactory)); err != nil {
+		return nil, nil, err
+	}
+	return mediaEngine, registry, nil
+}
+
 func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool, publicIP string) (*Peer, error) {
 	settingEngine := pion.SettingEngine{}
 	if portMin != 0 || portMax != 0 {
@@ -103,7 +151,12 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 			})
 		}
 	}
-	api := pion.NewAPI(pion.WithSettingEngine(settingEngine))
+	mediaEngine, registry, err := newMediaEngineAndRegistry(&settingEngine)
+	if err != nil {
+		return nil, fmt.Errorf("configure media engine and interceptors: %w", err)
+	}
+	api := pion.NewAPI(pion.WithSettingEngine(settingEngine),
+		pion.WithMediaEngine(mediaEngine), pion.WithInterceptorRegistry(registry))
 	connection, err := api.NewPeerConnection(configuration)
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)

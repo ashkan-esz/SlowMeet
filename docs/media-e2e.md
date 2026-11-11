@@ -184,6 +184,10 @@ Knobs:
 - `MEDIA_E2E_FOUR_RECONNECT_GRACE` — server reconnect grace seconds for the
   run (default 5, which exercises true token resume; a 1s grace forces the
   reconnect-after-expiry full-rejoin path).
+- `MEDIA_E2E_FOUR_NETNS` — arms the per-participant mixed-quality scenarios
+  (`mixed-quality-room`, `screen-share-mixed-quality`). Set automatically by
+  `make test-media-e2e-four-netns`; without it those scenarios are skipped
+  because shaping the host loopback is forbidden.
 - `MEDIA_E2E_HEADED`, `MEDIA_E2E_ARTIFACT_DIR` — shared with the two-person
   runner.
 

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1004,7 +1004,14 @@ func (r *Router) forwardVideo(pub *publication) {
 				return
 			default:
 			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
+			// The poll deadline expiring is the loop's wake-up signal, not a
+			// transport failure. Pion returns two distinct timeout values with
+			// the same "i/o timeout" message: os.ErrDeadlineExceeded from the
+			// SRTP read stream and packetio.ErrTimeout from transport
+			// buffers — recognize both, or one lost-mid-gap read under delay
+			// tears down a live publication.
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
 				if err = pub.remote.SetReadDeadline(time.Now().Add(videoRTXReadPollInterval)); err == nil {
 					select {
 					case <-pub.stoppedChannel():

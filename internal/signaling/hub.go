@@ -2,6 +2,7 @@ package signaling
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -347,7 +348,7 @@ func (h *Hub) recordAndBroadcastChat(c *client, msg Message, entry *ChatHistoryE
 	}
 	for member := range h.roomMembers {
 		if member != c {
-			_ = member.write(msg)
+			_ = member.writePrepared(&msg)
 		}
 	}
 	h.mu.Unlock()
@@ -1158,12 +1159,16 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		err := applyRemoteAnswer(c, c.peer, msg.SDP)
-		h.Logger.Debug("sdp_answer_received",
-			"participant_id", c.participantID,
-			"bytes", len(msg.SDP),
-			"media_sections", strings.Count(msg.SDP, "\nm="),
-			"error", err,
-		)
+		// The media-section scan walks the full SDP; compute it only when the
+		// debug record will actually be emitted.
+		if h.Logger.Enabled(context.Background(), slog.LevelDebug) {
+			h.Logger.Debug("sdp_answer_received",
+				"participant_id", c.participantID,
+				"bytes", len(msg.SDP),
+				"media_sections", strings.Count(msg.SDP, "\nm="),
+				"error", err,
+			)
+		}
 		completedICERestart := c.offerICERestart
 		c.offerICERestart = false
 		shouldOffer := c.offerInFlight && c.pendingOffer
@@ -1276,12 +1281,14 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 		// line is the early warning that feeds the renegotiation-slimming
 		// work (single-sender simulcast). sendOfferWithPeer is package-level
 		// (no hub logger), so the default logger carries the debug line.
-		slog.Default().Debug("sdp_offer_sent",
-			"participant_id", c.participantID,
-			"bytes", len(offer),
-			"media_sections", strings.Count(offer, "\nm="),
-			"ice_restart", iceRestart,
-		)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Default().Debug("sdp_offer_sent",
+				"participant_id", c.participantID,
+				"bytes", len(offer),
+				"media_sections", strings.Count(offer, "\nm="),
+				"ice_restart", iceRestart,
+			)
+		}
 	} else {
 		c.offerInFlight = false
 		c.offerICERestart = false
@@ -1296,11 +1303,22 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 // full queue means the connection is not draining, so it is closed and the
 // read loop's cleanup path takes over.
 func (c *client) write(msg Message) error {
+	return c.writePrepared(&msg)
+}
+
+// writePrepared enqueues a message pointer for the client's writer goroutine.
+// Broadcast fan-out passes the same *Message to every member: the writers only
+// read msg.raw and msg.flush (WriteMessage copies the payload onto the wire
+// before returning), and the channel send establishes the happens-before edge.
+// The shared struct is therefore immutable once enqueued — never mutate a
+// Message after passing it here. Like write, it never blocks: a full queue
+// closes the connection.
+func (c *client) writePrepared(msg *Message) error {
 	if c.conn == nil || c.outbound == nil {
 		return errors.New("client connection is not initialized")
 	}
 	select {
-	case c.outbound <- &msg:
+	case c.outbound <- msg:
 		return nil
 	default:
 		_ = c.conn.Close()
@@ -1409,13 +1427,13 @@ func (h *Hub) broadcast(msg Message) {
 
 func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 	msg.prepare()
-	// Fan out directly under the read lock: client.write never blocks (a full
+	// Fan out directly under the read lock: writePrepared never blocks (a full
 	// queue closes the connection), so collecting a slice first would only
 	// allocate per broadcast.
 	h.mu.RLock()
 	for c := range h.roomMembers {
 		if c != excluded {
-			_ = c.write(msg)
+			_ = c.writePrepared(&msg)
 		}
 	}
 	h.mu.RUnlock()
@@ -1425,7 +1443,7 @@ func (h *Hub) broadcastToRoom(msg Message) {
 	msg.prepare()
 	h.mu.RLock()
 	for c := range h.roomMembers {
-		_ = c.write(msg)
+		_ = c.writePrepared(&msg)
 	}
 	h.mu.RUnlock()
 }

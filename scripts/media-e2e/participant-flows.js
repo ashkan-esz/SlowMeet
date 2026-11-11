@@ -9,6 +9,16 @@ function pageFor(fixture, role) {
   return page;
 }
 
+// Tiles move between the grid, the pinned layout, and the parking lot as the
+// pair-aware automatic pinning and layout modes change; roster checks must
+// look in every container that can hold a participant tile.
+const participantTileSelector = [
+  "#participants li[data-participant-id]",
+  "#pinned-main li[data-participant-id]",
+  "#pinned-filmstrip li[data-participant-id]",
+  "#layout-parking li[data-participant-id]"
+].join(", ");
+
 async function openPrejoin(fixture, role = "A") {
   const page = pageFor(fixture, role);
   await page.goto(fixture.baseURL);
@@ -97,18 +107,31 @@ async function waitForReactionAtStageBottomRight(page, emoji) {
 
 async function waitForParticipantNames(page, expectedNames) {
   const expected = [...expectedNames].sort();
-  await page.waitForFunction((expected) => {
-    const actual = [...document.querySelectorAll("#participants li[data-participant-id] .participant-name")]
-      .map((element) => element.textContent.trim())
-      .filter(Boolean)
-      .sort();
-    return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
-  }, expected, { timeout: 30000 });
-  const actual = (await page.locator("#participants li[data-participant-id] .participant-name").allTextContents())
-    .map((name) => name.trim())
-    .filter(Boolean)
-    .sort();
-  assert.deepEqual(actual, expected);
+  try {
+    await page.waitForFunction(({ selector, expected }) => {
+      const actual = [...document.querySelectorAll(selector)]
+        .map((tile) => tile.querySelector(".participant-name")?.textContent.trim())
+        .filter(Boolean)
+        .sort();
+      return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
+    }, { selector: participantTileSelector, expected }, { timeout: 30000 });
+  } catch (error) {
+    const dump = await page.evaluate(() => ({
+      tiles: [...document.querySelectorAll("li[data-participant-id]")].map((tile) => ({
+        parent: tile.parentElement?.id || tile.parentElement?.className,
+        name: tile.querySelector(".participant-name")?.textContent
+      }))
+    }));
+    console.error(`[roster-dump] ${JSON.stringify(dump)}`);
+    throw error;
+  }
+  const actual = (await page.locator(participantTileSelector).all())
+    .map((locator) => locator.locator(".participant-name").first());
+  const names = [];
+  for (const name of actual) {
+    names.push((await name.textContent() || "").trim());
+  }
+  assert.deepEqual(names.filter(Boolean).sort(), expected);
 }
 
 async function joinPair(fixture, nameA = "Alice", nameB = "Bob") {
@@ -246,7 +269,7 @@ const scenarios = [
       for (const role of ["A", "B"]) {
         const page = pageFor(fixture, role);
         await waitForParticipantNames(page, ["Alice", "Bob"]);
-        assert.equal(await page.locator("#participants li[data-participant-id]").count(), 2);
+        assert.equal(await page.locator(participantTileSelector).count(), 2);
         assert.match((await page.locator("#participant-count").textContent()).trim(), /^2 participants$/);
         assert.equal((await page.locator("#participant-count-badge").textContent()).trim(), "2");
       }
@@ -277,7 +300,7 @@ const scenarios = [
       null, { timeout: 15000 });
 
       assert.match(await pageB.locator("#status").textContent(), /This room is full/);
-      assert.equal(await pageA.locator("#participants li[data-participant-id]").count(), 1,
+      assert.equal(await pageA.locator(participantTileSelector).count(), 1,
         "the room owner should remain the only participant after B is rejected");
       await fixture.assertPeersConnected("capacity rejection preserves A's connection");
       await fixture.assertNoDuplicateParticipants();
@@ -486,7 +509,9 @@ const scenarios = [
         ]);
         await assertNoHorizontalOverflow(pageFor(fixture, "A"), width);
         await assertNoHorizontalOverflow(pageFor(fixture, "B"), width);
-        await pageFor(fixture, "A").locator("#participants").waitFor({ state: "visible" });
+        await pageFor(fixture, "A").waitForFunction(() =>
+          [document.querySelector("#participants"), document.querySelector("#pinned-layout")]
+            .some((surface) => surface && !surface.hidden && surface.offsetParent !== null));
       }
       await fixture.assertPeersConnected("responsive layout widths");
     }
@@ -518,8 +543,10 @@ const scenarios = [
         }
         socket.close(4001, "participant flow reconnect check");
       });
-      await pageA.waitForFunction(() => /Reconnecting/.test(document.querySelector("#status")?.textContent || ""),
-        null, { timeout: 10000 });
+      await pageA.waitForFunction(() =>
+        ["#status", "#meeting-status"].some((selector) =>
+          /Reconnecting/i.test(document.querySelector(selector)?.textContent || "")),
+      null, { timeout: 10000 });
       await pageA.waitForFunction(() => window.__slowMeetTest?.sockets?.at(-1)?.readyState === WebSocket.OPEN,
         null, { timeout: 30000 });
       await fixture.waitForConnected("A");
@@ -529,9 +556,9 @@ const scenarios = [
 
       await pageA.locator("#leave").click();
       await pageA.locator("#meeting-ended").waitFor({ state: "visible" });
-      await pageB.waitForFunction(() =>
-        document.querySelectorAll("#participants li[data-participant-id]").length === 1,
-      null, { timeout: 10000 });
+      await pageB.waitForFunction((selector) =>
+        document.querySelectorAll(selector).length === 1,
+      participantTileSelector, { timeout: 10000 });
       await pageA.locator("#rejoin").click();
       await pageA.locator("#join-form").waitFor({ state: "visible" });
       await submitPrejoin(pageA, "Alice", fixture.password);

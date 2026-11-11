@@ -244,6 +244,26 @@ function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, 
   return criticalSamples >= threshold && (!isAutomaticProfile || adaptationLevel === 0);
 }
 
+// Estimate the receiver's own-link loss from per-stream measurements. Loss
+// measured on one inbound stream mixes the sender's uplink with the shared
+// downlink, so pooling every stream blames the receiver's link for a remote
+// sender's congestion — in a mixed-quality room that suspends video
+// room-wide. A stream can only arrive with LOW loss if the receiver's own
+// path delivers it intact, so the minimum per-stream loss is the best
+// own-link estimate. Streams with too few packets in the window are too
+// noisy to trust (and suspended streams report none at all), so they are
+// skipped; with no qualifying stream, fall back to the pooled measurement.
+function selectOwnLinkMeasurements(streams, { pooledLossPct = null, minimumPackets = 5 } = {}) {
+  let best = null;
+  for (const stream of Array.isArray(streams) ? streams : []) {
+    if (!stream || !Number.isFinite(stream.lossPct) || stream.lossPct < 0) continue;
+    if (!Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
+    if (best === null || stream.lossPct < best) best = stream.lossPct;
+  }
+  if (best !== null) return best;
+  return Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null;
+}
+
 function chooseParticipantLayout({
   width,
   height,
@@ -309,6 +329,7 @@ if (typeof module !== "undefined") {
     normalizePacketLoss10,
     packetCounterDeltas,
     packetLossPercentFromDeltas,
+    selectOwnLinkMeasurements,
     classifyParticipantQuality,
     stabilizeParticipantQuality,
     chooseAdaptationLevel,

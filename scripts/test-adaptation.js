@@ -3,6 +3,7 @@ const {
   normalizePacketLoss10,
   packetCounterDeltas,
   packetLossPercentFromDeltas,
+  selectOwnLinkMeasurements,
   classifyParticipantQuality,
   stabilizeParticipantQuality,
   chooseAdaptationLevel,
@@ -414,6 +415,45 @@ for (const [width, height] of [[390, 844], [780, 493], [1440, 900]]) {
 const singleLayout = chooseParticipantLayout({ width: 1600, height: 800, count: 1 });
 if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWidth > 720) {
   throw new Error("single participant layout should have a sensible maximum size");
+}
+
+// Own-link loss attribution: the minimum per-stream loss estimates the
+// receiver's own path, so one impaired sender's uplink cannot suspend a
+// clean participant's video room-wide.
+{
+  const assert = require("node:assert/strict");
+  const cleanParticipantStreams = [
+    { lossPct: 60, receivedDelta: 300 },   // impaired sender's uplink
+    { lossPct: 0.4, receivedDelta: 300 },  // clean sender through my own link
+    { lossPct: 2.1, receivedDelta: 250 }
+  ];
+  assert.equal(selectOwnLinkMeasurements(cleanParticipantStreams, { pooledLossPct: 30 }),
+    0.4, "a clean stream proves the receiver's own path is intact");
+
+  const impairedParticipantStreams = [
+    { lossPct: 42, receivedDelta: 120 },
+    { lossPct: 38.5, receivedDelta: 90 },
+    { lossPct: 55, receivedDelta: 60 }
+  ];
+  assert.equal(selectOwnLinkMeasurements(impairedParticipantStreams, { pooledLossPct: 44 }),
+    38.5, "when every stream traverses my congested link, own-link loss stays high");
+
+  // Streams with too few packets in the window are too noisy to trust.
+  assert.equal(selectOwnLinkMeasurements(
+    [{ lossPct: 0, receivedDelta: 2 }, { lossPct: 8, receivedDelta: 120 }],
+    { pooledLossPct: 7.5 }
+  ), 8, "a tiny window must not be treated as a trustworthy clean signal");
+  assert.equal(selectOwnLinkMeasurements([{ lossPct: 0, receivedDelta: 1 }], { pooledLossPct: 7.5 }),
+    7.5, "with no qualifying stream, fall back to the pooled measurement");
+  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: 3.3 }), 3.3,
+    "an empty stream list falls back to the pooled measurement");
+  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: null }), null,
+    "unknown pooled loss stays unknown");
+  assert.equal(selectOwnLinkMeasurements(undefined, {}), null,
+    "missing stream list without pooled loss yields null");
+  // Two-person rooms: one stream means min == pooled, behavior unchanged.
+  assert.equal(selectOwnLinkMeasurements([{ lossPct: 6.5, receivedDelta: 200 }], { pooledLossPct: 6.5 }),
+    6.5, "single-stream rooms keep the exact pooled value");
 }
 
 const fs = require("node:fs");

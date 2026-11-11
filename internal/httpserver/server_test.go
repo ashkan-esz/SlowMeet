@@ -563,6 +563,60 @@ func TestAdminConfigRequiresPasswordAndUpdatesRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestDebugPprofRequiresAdminPassword(t *testing.T) {
+	handler := New(testConfig(t), NewLogger("error"))
+
+	unauthenticated := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated pprof status = %d, want 401", unauthenticated.Code)
+	}
+
+	wrong := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	wrong.Header.Set("X-Admin-Password", "wrong")
+	wrongResponse := httptest.NewRecorder()
+	handler.ServeHTTP(wrongResponse, wrong)
+	if wrongResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-password pprof status = %d, want 401", wrongResponse.Code)
+	}
+
+	authorized := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	authorized.Header.Set("X-Admin-Password", "admin-secret")
+	authorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(authorizedResponse, authorized)
+	if authorizedResponse.Code != http.StatusOK {
+		t.Fatalf("authenticated pprof index status = %d, want 200", authorizedResponse.Code)
+	}
+
+	heap := httptest.NewRequest(http.MethodGet, "/debug/pprof/heap?debug=1", nil)
+	heap.Header.Set("X-Admin-Password", "admin-secret")
+	heapResponse := httptest.NewRecorder()
+	handler.ServeHTTP(heapResponse, heap)
+	if heapResponse.Code != http.StatusOK {
+		t.Fatalf("authenticated heap profile status = %d, want 200", heapResponse.Code)
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/debug/pprof/", nil)
+	post.Header.Set("X-Admin-Password", "admin-secret")
+	postResponse := httptest.NewRecorder()
+	handler.ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST pprof status = %d, want 405", postResponse.Code)
+	}
+}
+
+func TestDebugPprofDisabledWithoutAdminPassword(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.AdminPassword = ""
+	handler := New(cfg, NewLogger("error"))
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("pprof with no admin password configured status = %d, want 401", response.Code)
+	}
+}
+
 func TestPasswordSurfacesRateLimitFailedAttempts(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.MeetingPassword = "room-secret"

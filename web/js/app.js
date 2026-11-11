@@ -4427,6 +4427,9 @@ async function runDiagnosticsUpdate() {
   const videoPlayoutSamples = new Map(previousStats?.videoPlayoutSamples || []);
   let lostPacketsSincePreviousSample = 0;
   let receivedPacketsSincePreviousSample = 0;
+  // Per-stream window measurements for the own-link loss estimate; the
+  // pooled totals stay as the fallback when no stream is measurable.
+  const streamLossSamples = [];
   const recordPacketCounters = (stat, lostPackets, receivedPackets) => {
     const previous = previousStats?.packetCounters?.get(stat.id);
     const current = { lost: lostPackets, received: receivedPackets };
@@ -4435,6 +4438,10 @@ async function runDiagnosticsUpdate() {
     if (deltas) {
       lostPacketsSincePreviousSample += deltas.lost;
       receivedPacketsSincePreviousSample += deltas.received;
+      streamLossSamples.push({
+        lossPct: packetLossPercentFromDeltas(deltas.lost, deltas.received),
+        receivedDelta: deltas.received
+      });
     }
     return deltas;
   };
@@ -4498,7 +4505,12 @@ async function runDiagnosticsUpdate() {
         hasFrameDropStats = true;
         framesDropped += stat.framesDropped;
       }
-      if (stat.jitter != null) values.jitterMs = Math.round(stat.jitter * 1000);
+      // A suspended video stream receives no packets, so its jitter stat
+      // freezes at the congested value and would keep every later sample
+      // "critical" — the protect-audio pause could then never recover. While
+      // video sending is suspended, let the still-flowing audio stream
+      // provide the jitter signal instead.
+      if (stat.jitter != null && !videoSuspended) values.jitterMs = Math.round(stat.jitter * 1000);
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       const role = remoteTrackRoles.get(stat.trackIdentifier);
       if (role === "screen") {
@@ -4559,10 +4571,12 @@ async function runDiagnosticsUpdate() {
     values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
     values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
-  values.packetLoss = packetLossPercentFromDeltas(
-    lostPacketsSincePreviousSample,
-    receivedPacketsSincePreviousSample
-  );
+  values.packetLoss = selectOwnLinkMeasurements(streamLossSamples, {
+    pooledLossPct: packetLossPercentFromDeltas(
+      lostPacketsSincePreviousSample,
+      receivedPacketsSincePreviousSample
+    )
+  });
   connectionHistoryModel?.addSample({
     at: values.timestamp,
     rttMs: values.rttMs,
