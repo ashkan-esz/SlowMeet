@@ -37,8 +37,13 @@ const browsers = [];
 const contexts = [];
 const pages = [];
 let server;
-const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "slowmeet-soak-"));
-const serverBinary = path.join(workDir, "slowmeet-soak");
+// Profiles land here and survive the run: an earlier pass lost its baseline
+// when tmp cleaners wiped the /tmp workdir, leaving no evidence for the
+// pooling/GOGC gate decisions. The server binary still builds into
+// os.tmpdir() so no binary ever lands in the repo.
+const artifactsDir = path.join(root, "soak-artifacts",
+  `${new Date().toISOString().replace(/[:.]/g, "-")}-p${participants}-s${soakSeconds}s`);
+const serverBinary = path.join(os.tmpdir(), `slowmeet-soak-${process.pid}`);
 
 function reservePort() {
   return new Promise((resolve, reject) => {
@@ -55,7 +60,7 @@ async function startServer() {
   console.log("building server binary...");
   execFileSync("go", ["build", "-o", serverBinary, "."], { cwd: root, stdio: "inherit" });
   const port = await reservePort();
-  const configPath = path.join(workDir, "config.json");
+  const configPath = path.join(os.tmpdir(), `slowmeet-soak-config-${process.pid}.json`);
   fs.writeFileSync(configPath, JSON.stringify({ retain_chat_history: true }));
   const output = [];
   const child = spawn(serverBinary, [], {
@@ -76,7 +81,7 @@ async function startServer() {
   }
   assert.ok(ready, `local server did not become ready\n${output.join("").slice(-8000)}`);
   return {
-    url, port, profileDir: workDir,
+    url, port, profileDir: artifactsDir,
     async stop() {
       try { process.kill(-child.pid, "SIGTERM"); } catch (_) { child.kill("SIGTERM"); }
       await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(5000)]);
@@ -162,7 +167,7 @@ async function waitForFlowingMedia() {
 }
 
 async function captureProfile(windowName, seconds) {
-  const file = path.join(workDir, `${windowName}.prof`);
+  const file = path.join(artifactsDir, `${windowName}.prof`);
   const response = await fetch(
     `${server.url}/debug/pprof/profile?seconds=${seconds}`,
     { headers: { "X-Admin-Password": adminPassword } });
@@ -177,12 +182,42 @@ async function captureProfile(windowName, seconds) {
 }
 
 async function captureTextProfile(name) {
-  const file = path.join(workDir, `${name}.txt`);
+  const file = path.join(artifactsDir, `${name}.txt`);
   const response = await fetch(`${server.url}/debug/pprof/${name}?debug=1`,
     { headers: { "X-Admin-Password": adminPassword } });
   assert.equal(response.status, 200, `${name} profile status ${response.status}`);
   fs.writeFileSync(file, await response.text());
   return file;
+}
+
+// Binary profiles for numeric analysis: allocation-rate deltas need
+// sample_index selection and -diff_base, both pprof features over protobuf.
+async function captureProtoProfile(profile, fileBase) {
+  const file = path.join(artifactsDir, `${fileBase}.pb`);
+  const response = await fetch(`${server.url}/debug/pprof/${profile}`,
+    { headers: { "X-Admin-Password": adminPassword } });
+  assert.equal(response.status, 200, `${profile} profile status ${response.status}`);
+  fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+  return file;
+}
+
+// pprof prints "Showing nodes accounting for 1.2MB, 3.45% of 27MB total".
+function parsePprofTotalBytes(top) {
+  const match = /accounting for [^,]+, [\d.]+% of ([\d.]+)(B|kB|MB|GB) total/.exec(top);
+  assert.ok(match, `pprof total not parseable in output: ${top.split("\n")[0]}`);
+  return Number(match[1]) * { B: 1, kB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[match[2]];
+}
+
+function pprofTop(binary, file, sampleIndex, extraFlags = []) {
+  return execFileSync("go", ["tool", "pprof", "-top", `-sample_index=${sampleIndex}`,
+    ...extraFlags, binary, file], { env: noProxyEnv, encoding: "utf8" });
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)}GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(2)}MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}kB`;
+  return `${bytes}B`;
 }
 
 (async () => {
@@ -195,20 +230,48 @@ async function captureTextProfile(name) {
     await Promise.all(pages.map((page) => enableMedia(page)));
     await waitForFlowingMedia();
 
+    fs.mkdirSync(artifactsDir, { recursive: true });
+    // Allocation-rate windows: the two allocs snapshots bracket the CPU
+    // windows (~30s apart), so the allocs delta measures allocation during
+    // steady-state media flow. GOGC=100 collects when the heap roughly
+    // doubles, so rough GC cadence ≈ live heap / allocation rate.
+    const allocs1 = await captureProtoProfile("allocs", "allocs-1");
+    const heap1 = await captureProtoProfile("heap", "heap-1");
+    const sampleStart = Date.now();
     const first = await captureProfile("cpu-window1", profileSeconds);
     const second = await captureProfile("cpu-window2", profileSeconds);
-    const heapFile = await captureTextProfile("heap");
+    const allocs2 = await captureProtoProfile("allocs", "allocs-2");
+    const heap2 = await captureProtoProfile("heap", "heap-2");
+    const sampleSeconds = Math.max(1, (Date.now() - sampleStart) / 1000);
     const goroutineFile = await captureTextProfile("goroutine");
     const goroutines = (fs.readFileSync(goroutineFile, "utf8").match(/^goroutine profile: total (\d+)$/m) || [])[1];
+
+    const allocBefore = parsePprofTotalBytes(pprofTop(serverBinary, allocs1, "alloc_space"));
+    const allocAfter = parsePprofTotalBytes(pprofTop(serverBinary, allocs2, "alloc_space"));
+    const allocatedDuring = Math.max(0, allocAfter - allocBefore);
+    const allocRateMBps = allocatedDuring / sampleSeconds / 1024 ** 2;
+    const liveHeapBytes = parsePprofTotalBytes(pprofTop(serverBinary, heap2, "inuse_space"));
+    const deltaTop = execFileSync("go", ["tool", "pprof", "-top", "-sample_index=alloc_space",
+      "-nodecount", "10", `-diff_base=${allocs1}`, serverBinary, allocs2],
+      { env: noProxyEnv, encoding: "utf8" });
 
     console.log("\n=== soak summary ===");
     console.log(`participants: ${participants}, profile windows: 2 x ${profileSeconds}s`);
     console.log(`cpu window 1 total samples: ${first.totalSamples} ${first.unit}`);
     console.log(`cpu window 2 total samples: ${second.totalSamples} ${second.unit}`);
+    console.log(`allocation over ${sampleSeconds.toFixed(0)}s: ${formatBytes(allocatedDuring)} = ${allocRateMBps.toFixed(2)} MB/s (cumulative allocs ${formatBytes(allocBefore)} -> ${formatBytes(allocAfter)})`);
+    console.log(`live heap (inuse): ${formatBytes(liveHeapBytes)}`);
+    if (allocRateMBps > 0) {
+      console.log(`rough GC cadence (GOGC=100, heap doubles): ~${(liveHeapBytes / (allocRateMBps * 1024 ** 2)).toFixed(1)}s between collections`);
+    }
+    console.log(`top allocation-rate sites (delta over ${sampleSeconds.toFixed(0)}s):`);
+    console.log(deltaTop.trim());
     console.log(`goroutines: ${goroutines}`);
-    console.log(`profiles in ${workDir}: cpu-window1.prof, cpu-window2.prof, heap.txt, goroutine.txt`);
+    console.log(`artifacts in ${artifactsDir}`);
     assert.ok(first.totalSamples > 0 && second.totalSamples > 0,
       "CPU profiles contain no samples — media was not flowing during capture");
+    assert.ok(allocatedDuring > 0,
+      "allocs snapshots show no allocation delta — media was not flowing during capture");
   } finally {
     for (const context of contexts) await context.close().catch(() => {});
     for (const browser of browsers) await browser.close().catch(() => {});

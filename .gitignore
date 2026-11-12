@@ -17,3 +17,4 @@ slowmeet
 
 node_modules
 coverage.out
+soak-artifacts/

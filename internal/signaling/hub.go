@@ -44,6 +44,12 @@ const (
 	reactionBurstLimit  = 6
 	reactionBurstWindow = 3 * time.Second
 
+	// Chat fan-out is the most expensive room event (history entry, N-member
+	// queue writes), so it is burst-limited per connection far above normal
+	// typing but below a flood.
+	chatBurstLimit  = 10
+	chatBurstWindow = 10 * time.Second
+
 	// maxPendingCandidates bounds the ICE candidates queued before a remote
 	// description exists, so a misbehaving client cannot queue without bound.
 	maxPendingCandidates = 512
@@ -104,6 +110,8 @@ type client struct {
 	activeScreenMediaTrackID  string
 	reactionWindowStart       time.Time
 	reactionCount             int
+	chatWindowStart           time.Time
+	chatCount                 int
 }
 
 type offerPeer interface {
@@ -914,6 +922,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if msg.Type == TypeChat {
+				if !c.allowChat() {
+					// Unlike reactions (silently dropped), a dropped chat
+					// message is user-meaningful, so the sender is told it
+					// did not go through. The text is not echoed back.
+					_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "chat message rate limit exceeded"})
+					continue
+				}
 				msg = roomMessage(c, msg)
 				var entry *ChatHistoryEntry
 				if h.Config.Snapshot().RetainChatHistory {
@@ -1070,6 +1085,19 @@ func (c *client) allowReaction() bool {
 		return false
 	}
 	c.reactionCount++
+	return true
+}
+
+func (c *client) allowChat() bool {
+	now := time.Now()
+	if c.chatWindowStart.IsZero() || now.Sub(c.chatWindowStart) >= chatBurstWindow {
+		c.chatWindowStart = now
+		c.chatCount = 0
+	}
+	if c.chatCount >= chatBurstLimit {
+		return false
+	}
+	c.chatCount++
 	return true
 }
 

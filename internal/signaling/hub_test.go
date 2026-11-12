@@ -936,6 +936,81 @@ func TestReactionRateLimit(t *testing.T) {
 	}
 }
 
+func TestChatRateLimit(t *testing.T) {
+	client := &client{}
+	for range chatBurstLimit {
+		if !client.allowChat() {
+			t.Fatal("chat within burst limit was rejected")
+		}
+	}
+	if client.allowChat() {
+		t.Fatal("chat beyond burst limit was accepted")
+	}
+	client.chatWindowStart = time.Now().Add(-chatBurstWindow)
+	if !client.allowChat() {
+		t.Fatal("chat after rate-limit window was rejected")
+	}
+}
+
+// A flooded chat sender is told the message was dropped, and nothing beyond
+// the burst limit reaches the rest of the room.
+func TestChatRateLimitRejectsBeyondBurstWithoutBroadcast(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr:            ":8080",
+		MaxParticipants:     2,
+		DefaultVideoQuality: "low",
+		DefaultVideoFPS:     15,
+		MaxVideoFPS:         30,
+		DefaultAudioBitrate: 32000,
+		MaxVideoBitrate:     500000,
+		MaxAudioBitrate:     64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+	socketURL := "ws" + server.URL[len("http"):]
+
+	first := dialTestSocket(t, socketURL)
+	defer first.Close()
+	writeTestMessage(t, first, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var firstJoined Message
+	readTestMessage(t, first, &firstJoined)
+
+	second := dialTestSocket(t, socketURL)
+	defer second.Close()
+	writeTestMessage(t, second, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ali"})
+	var secondJoined Message
+	readTestMessage(t, second, &secondJoined)
+	readTestMessage(t, second, &secondJoined) // sees Ashkan's join
+	readTestMessage(t, first, &secondJoined)  // sees Ali's join
+
+	for index := range chatBurstLimit {
+		writeTestMessage(t, first, Message{
+			Version: ProtocolVersion, Type: TypeChat,
+			ParticipantID: firstJoined.Participant.ID, ChatText: fmt.Sprintf("msg %d", index),
+		})
+		var broadcast Message
+		readTestMessage(t, second, &broadcast)
+		if broadcast.Type != TypeChat || broadcast.ChatText != fmt.Sprintf("msg %d", index) {
+			t.Fatalf("accepted chat %d = %+v, want chat broadcast", index, broadcast)
+		}
+	}
+
+	writeTestMessage(t, first, Message{
+		Version: ProtocolVersion, Type: TypeChat,
+		ParticipantID: firstJoined.Participant.ID, ChatText: "overflow",
+	})
+	var rejection Message
+	readTestMessage(t, first, &rejection)
+	if rejection.Type != TypeError || rejection.Error != "chat message rate limit exceeded" {
+		t.Fatalf("flooded chat response = %+v, want rate-limit error", rejection)
+	}
+	assertNoTestMessage(t, second)
+	if got := hub.chatHistorySnapshot(chatRoomID); got != nil && len(got) != chatBurstLimit {
+		t.Fatalf("chat history holds %d entries, want only the %d accepted messages", len(got), chatBurstLimit)
+	}
+}
+
 func TestReactionBroadcastsToAllParticipantsWithoutHistory(t *testing.T) {
 	cfg := config.Config{
 		HTTPAddr:            ":8080",
@@ -2129,8 +2204,11 @@ func TestHubChatRecordedDuringJoinIsDeliveredExactlyOnce(t *testing.T) {
 
 	// Chats recorded while the second client is being admitted must reach it
 	// exactly once: through the admission replay or the live broadcast. The
-	// old snapshot-before-admit ordering could drop them entirely.
-	const concurrentChats = 40
+	// old snapshot-before-admit ordering could drop them entirely. The volume
+	// stays within the per-connection chat burst limit — the exactly-once
+	// property is about replay/live interleaving, not flood volume, and the
+	// burst limiter now rejects anything beyond it by design.
+	const concurrentChats = chatBurstLimit
 	second := dialTestSocket(t, socketURL)
 	defer second.Close()
 	writes := make(chan struct{})
