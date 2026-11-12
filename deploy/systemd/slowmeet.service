@@ -13,6 +13,9 @@ ExecStart=/opt/slowmeet/slowmeet
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=16384
+# Go does not automatically apply systemd's cgroup memory limit as GOMEMLIMIT.
+# Match the Compose soft heap default; /opt/slowmeet/.env can override it.
+Environment=GOMEMLIMIT=200MiB
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

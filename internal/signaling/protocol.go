@@ -41,6 +41,8 @@ const (
 	TypeRoomFull           = "room_full"
 	TypeError              = "error"
 	MaxCameraSubscriptions = 64
+	maxReportedVideoKbps   = 25_000
+	maxReportedAudioKbps   = 1_024
 )
 
 var approvedReactionEmojis = map[string]struct{}{
@@ -157,7 +159,8 @@ func (m Message) Validate() error {
 		}
 		if m.RTTMs < -1 || m.PacketLoss10 < -1 || m.PacketLoss10 > 1000 ||
 			m.JitterMs < -1 || m.VideoKbps < -1 || m.AudioKbps < -1 ||
-			m.RTTMs > 120000 || m.JitterMs > 120000 {
+			m.RTTMs > 120000 || m.JitterMs > 120000 ||
+			m.VideoKbps > maxReportedVideoKbps || m.AudioKbps > maxReportedAudioKbps {
 			return fmt.Errorf("network state contains invalid values")
 		}
 	case TypeVideoSubscriptions:

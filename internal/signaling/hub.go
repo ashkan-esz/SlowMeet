@@ -50,6 +50,16 @@ const (
 	chatBurstLimit  = 10
 	chatBurstWindow = 10 * time.Second
 
+	// The browser tries at most three ICE restarts during recovery. Allow twice
+	// that budget per 30 seconds while bounding the expensive pion CreateOffer.
+	iceRestartBurstLimit  = 6
+	iceRestartBurstWindow = 30 * time.Second
+
+	// The browser normally sends about two subscription updates per second;
+	// leave burst headroom while bounding router and renegotiation work.
+	videoSubscriptionsBurstLimit  = 30
+	videoSubscriptionsBurstWindow = 10 * time.Second
+
 	// maxPendingCandidates bounds the ICE candidates queued before a remote
 	// description exists, so a misbehaving client cannot queue without bound.
 	maxPendingCandidates = 512
@@ -91,27 +101,31 @@ type client struct {
 	// announced records whether this participant's join was broadcast to the
 	// room; only announced departures broadcast a left event. Written by the
 	// connection's read loop and read by its cleanup path (same goroutine).
-	announced                 bool
-	intentionalLeave          bool
-	joinAttempts              int
-	admissionExpired          bool // guarded by Hub.mu
-	peer                      *webrtc.Peer
-	negotiationMu             sync.Mutex
-	negotiationReady          bool
-	remoteDescription         bool
-	iceFailureTimer           *time.Timer // guarded by negotiationMu
-	pendingCandidates         []Message
-	pendingLocalCandidates    []Message
-	offerInFlight             bool
-	offerICERestart           bool
-	pendingOffer              bool
-	pendingICERestart         bool
-	activeScreenMediaStreamID string
-	activeScreenMediaTrackID  string
-	reactionWindowStart       time.Time
-	reactionCount             int
-	chatWindowStart           time.Time
-	chatCount                 int
+	announced                     bool
+	intentionalLeave              bool
+	joinAttempts                  int
+	admissionExpired              bool // guarded by Hub.mu
+	peer                          *webrtc.Peer
+	negotiationMu                 sync.Mutex
+	negotiationReady              bool
+	remoteDescription             bool
+	iceFailureTimer               *time.Timer // guarded by negotiationMu
+	pendingCandidates             []Message
+	pendingLocalCandidates        []Message
+	offerInFlight                 bool
+	offerICERestart               bool
+	pendingOffer                  bool
+	pendingICERestart             bool
+	activeScreenMediaStreamID     string
+	activeScreenMediaTrackID      string
+	reactionWindowStart           time.Time
+	reactionCount                 int
+	chatWindowStart               time.Time
+	chatCount                     int
+	iceRestartWindowStart         time.Time
+	iceRestartCount               int
+	videoSubscriptionsWindowStart time.Time
+	videoSubscriptionsCount       int
 }
 
 type offerPeer interface {
@@ -881,6 +895,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if msg.Type == TypeVideoSubscriptions {
+				if !c.allowVideoSubscriptions() {
+					// Subscription state is self-correcting on the next update.
+					continue
+				}
 				h.router.SetVideoSubscriptionsWithLayer(c.participant.ID, msg.CameraParticipantIDs, msg.CameraLayer)
 				continue
 			}
@@ -1101,6 +1119,32 @@ func (c *client) allowChat() bool {
 	return true
 }
 
+func (c *client) allowICERestart() bool {
+	now := time.Now()
+	if c.iceRestartWindowStart.IsZero() || now.Sub(c.iceRestartWindowStart) >= iceRestartBurstWindow {
+		c.iceRestartWindowStart = now
+		c.iceRestartCount = 0
+	}
+	if c.iceRestartCount >= iceRestartBurstLimit {
+		return false
+	}
+	c.iceRestartCount++
+	return true
+}
+
+func (c *client) allowVideoSubscriptions() bool {
+	now := time.Now()
+	if c.videoSubscriptionsWindowStart.IsZero() || now.Sub(c.videoSubscriptionsWindowStart) >= videoSubscriptionsBurstWindow {
+		c.videoSubscriptionsWindowStart = now
+		c.videoSubscriptionsCount = 0
+	}
+	if c.videoSubscriptionsCount >= videoSubscriptionsBurstLimit {
+		return false
+	}
+	c.videoSubscriptionsCount++
+	return true
+}
+
 func readMessage(conn *websocket.Conn, message *Message) error {
 	messageType, payload, err := conn.ReadMessage()
 	if err != nil {
@@ -1228,6 +1272,12 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		}
 	case TypeICERestart:
+		if !c.allowICERestart() {
+			// The browser's generic error path rearms its bounded recovery retry;
+			// silently dropping would leave restartRequested latched.
+			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "ice restart rate limit exceeded"})
+			return
+		}
 		if err := h.sendOffer(c, true); err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		}

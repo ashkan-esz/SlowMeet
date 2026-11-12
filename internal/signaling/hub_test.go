@@ -952,6 +952,63 @@ func TestChatRateLimit(t *testing.T) {
 	}
 }
 
+func TestICERestartRateLimit(t *testing.T) {
+	client := &client{}
+	for range iceRestartBurstLimit {
+		if !client.allowICERestart() {
+			t.Fatal("ICE restart within burst limit was rejected")
+		}
+	}
+	if client.allowICERestart() {
+		t.Fatal("ICE restart beyond burst limit was accepted")
+	}
+	client.iceRestartWindowStart = time.Now().Add(-iceRestartBurstWindow)
+	if !client.allowICERestart() {
+		t.Fatal("ICE restart after rate-limit window was rejected")
+	}
+}
+
+func TestVideoSubscriptionsRateLimit(t *testing.T) {
+	client := &client{}
+	for range videoSubscriptionsBurstLimit {
+		if !client.allowVideoSubscriptions() {
+			t.Fatal("video subscription within burst limit was rejected")
+		}
+	}
+	if client.allowVideoSubscriptions() {
+		t.Fatal("video subscription beyond burst limit was accepted")
+	}
+	client.videoSubscriptionsWindowStart = time.Now().Add(-videoSubscriptionsBurstWindow)
+	if !client.allowVideoSubscriptions() {
+		t.Fatal("video subscription after rate-limit window was rejected")
+	}
+}
+
+func TestICERestartRateLimitReportsErrorWithoutQueueingOffer(t *testing.T) {
+	c := &client{
+		conn:                  &websocket.Conn{},
+		outbound:              make(chan *Message, 1),
+		iceRestartWindowStart: time.Now(),
+		iceRestartCount:       iceRestartBurstLimit,
+	}
+	h := &Hub{}
+
+	h.handleWebRTCMessage(c, Message{Version: ProtocolVersion, Type: TypeICERestart})
+
+	select {
+	case response := <-c.outbound:
+		if response.Type != TypeError || response.Error != "ice restart rate limit exceeded" {
+			t.Fatalf("rate-limit response = %+v", response)
+		}
+	default:
+		t.Fatal("rate-limited ICE restart did not enqueue an error")
+	}
+	if c.pendingOffer || c.pendingICERestart || c.offerInFlight {
+		t.Fatalf("rate-limited ICE restart queued negotiation work: offer=%t restart=%t in_flight=%t",
+			c.pendingOffer, c.pendingICERestart, c.offerInFlight)
+	}
+}
+
 // A flooded chat sender is told the message was dropped, and nothing beyond
 // the burst limit reaches the rest of the room.
 func TestChatRateLimitRejectsBeyondBurstWithoutBroadcast(t *testing.T) {

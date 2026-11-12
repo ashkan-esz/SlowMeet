@@ -125,6 +125,38 @@ func TestValidateNetworkState(t *testing.T) {
 	}
 }
 
+func TestValidateNetworkStateThroughputBounds(t *testing.T) {
+	base := Message{
+		Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: "p1",
+	}
+	cases := []struct {
+		name      string
+		videoKbps int
+		audioKbps int
+		wantErr   bool
+	}{
+		{name: "video at limit", videoKbps: 25_000, audioKbps: 40},
+		{name: "video above limit", videoKbps: 25_001, audioKbps: 40, wantErr: true},
+		{name: "audio at limit", videoKbps: 300, audioKbps: 1_024},
+		{name: "audio above limit", videoKbps: 300, audioKbps: 1_025, wantErr: true},
+		{name: "unknown sentinels", videoKbps: -1, audioKbps: -1},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			message := base
+			message.VideoKbps = test.videoKbps
+			message.AudioKbps = test.audioKbps
+			err := message.Validate()
+			if test.wantErr && err == nil {
+				t.Fatal("out-of-range throughput was accepted")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("valid throughput was rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateScreenShareRequest(t *testing.T) {
 	active := true
 	if err := (Message{
