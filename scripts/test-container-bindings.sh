@@ -6,6 +6,7 @@ TEST_DIR=$(mktemp -d)
 readonly ROOT_DIR TEST_DIR
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 : > "$TEST_DIR/empty.env"
+: > "$TEST_DIR/.env"
 
 fail() {
     printf 'Container binding test failed: %s\n' "$*" >&2
@@ -16,9 +17,9 @@ check_binding() {
     local compose_file=$1 expected_address=$2 output_file=$3
     shift 3
     "$@" docker compose \
-        --project-directory "$ROOT_DIR" \
+        --project-directory "$TEST_DIR" \
         --env-file "$TEST_DIR/empty.env" \
-        --file "$ROOT_DIR/$compose_file" \
+        --file "$compose_file" \
         config --format json --no-env-resolution > "$output_file"
     jq -e --arg address "$expected_address" \
         '[.services.slowmeet.ports[] | select(.target == 8080 and .protocol == "tcp") | .host_ip] == [$address]' \
@@ -27,8 +28,10 @@ check_binding() {
 }
 
 for compose_file in docker-compose.yml podman-compose.yml; do
-    check_binding "$compose_file" 127.0.0.1 "$TEST_DIR/default.json" env -u HTTP_PUBLISH_ADDRESS -u HTTP_PUBLISH_PORT
-    check_binding "$compose_file" 0.0.0.0 "$TEST_DIR/public.json" env HTTP_PUBLISH_ADDRESS=0.0.0.0
+    compose_fixture="$TEST_DIR/$compose_file"
+    cp "$ROOT_DIR/$compose_file" "$compose_fixture"
+    check_binding "$compose_fixture" 127.0.0.1 "$TEST_DIR/default.json" env -u HTTP_PUBLISH_ADDRESS -u HTTP_PUBLISH_PORT
+    check_binding "$compose_fixture" 0.0.0.0 "$TEST_DIR/public.json" env HTTP_PUBLISH_ADDRESS=0.0.0.0
 done
 
 awk -F= '$1 == "HTTP_PUBLISH_ADDRESS" && $2 == "127.0.0.1" { found=1 } END { exit !found }' \
