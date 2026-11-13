@@ -863,6 +863,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := msg.Validate(); err != nil {
+			// Invalid messages are otherwise invisible server-side: log the
+			// rejection so production can tell whether clients are hitting
+			// new validation (for example network_state bounds).
+			h.Logger.Warn("invalid_message", "participant_id", c.participant.ID,
+				"msg_type", msg.Type, "error", err.Error())
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 			continue
 		}
@@ -896,7 +901,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.Type == TypeVideoSubscriptions {
 				if !c.allowVideoSubscriptions() {
-					// Subscription state is self-correcting on the next update.
+					// Subscription state is self-correcting on the next update,
+					// but the drop is silent to the client: log it so bursts of
+					// lost subscriptions are visible in production.
+					h.Logger.Warn("video_subscriptions_rate_limited", "participant_id", c.participant.ID,
+						"camera_participants", len(msg.CameraParticipantIDs))
 					continue
 				}
 				h.router.SetVideoSubscriptionsWithLayer(c.participant.ID, msg.CameraParticipantIDs, msg.CameraLayer)
@@ -1275,6 +1284,7 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		if !c.allowICERestart() {
 			// The browser's generic error path rearms its bounded recovery retry;
 			// silently dropping would leave restartRequested latched.
+			h.Logger.Warn("ice_restart_rate_limited", "participant_id", c.participant.ID)
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "ice restart rate limit exceeded"})
 			return
 		}

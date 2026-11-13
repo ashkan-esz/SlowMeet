@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -36,6 +38,14 @@ func run() error {
 		IdleTimeout:       2 * time.Minute,
 	}
 	logger.Info("server_starting", "addr", cfg.HTTPAddr)
+	// Container-aware runtime defaults (Go >= 1.25 derives GOMAXPROCS from the
+	// cgroup CPU limit) silently change scheduling behavior between deploy
+	// environments; record the effective values at startup.
+	logger.Info("runtime_info",
+		"go", runtime.Version(),
+		"max_procs", runtime.GOMAXPROCS(0),
+		"num_cpu", runtime.NumCPU(),
+		"mem_limit_bytes", debug.SetMemoryLimit(-1))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

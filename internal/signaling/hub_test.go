@@ -3,6 +3,7 @@ package signaling
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -991,7 +992,7 @@ func TestICERestartRateLimitReportsErrorWithoutQueueingOffer(t *testing.T) {
 		iceRestartWindowStart: time.Now(),
 		iceRestartCount:       iceRestartBurstLimit,
 	}
-	h := &Hub{}
+	h := &Hub{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	h.handleWebRTCMessage(c, Message{Version: ProtocolVersion, Type: TypeICERestart})
 
