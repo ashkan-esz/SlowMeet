@@ -1874,6 +1874,15 @@ const maxIceRestartAttempts = 3;
 // direct pair and starts the disconnect cycle over.
 const iceRestartRetryDelayMs = 5000;
 const iceRestartRelayGraceDelayMs = 12000;
+// Some paths police valid-STUN UDP while also resetting TURN allocations that
+// run concurrently with direct-UDP bursts, so "Automatic" sessions can cycle
+// direct-led disconnects without ever gathering a relay candidate. After this
+// many restarts burned on direct-led cycles, the next reconnect builds the
+// peer as TURN/TCP instead (no UDP burst, so the relay allocation gets a clean
+// window) for the rest of the session. Explicit user method choices are never
+// overridden; the strike count resets on page load.
+const autoTurnFailoverStrikesLimit = 2;
+let autoTurnFailoverStrikes = 0;
 let reconnectAttempts = 0;
 let wasReconnectResume = false;
 const maxReconnectAttempts = 5;
@@ -2083,6 +2092,7 @@ function selectConnectionMethod(methodID) {
   }
   if (connectionMethod === methodID) return true;
   connectionMethod = methodID;
+  autoTurnFailoverStrikes = 0;
   writeStoredValue("meeting.connectionMethod", methodID);
   refreshConnectionMethodSelectors();
   if (!meeting.hidden) {
@@ -3772,11 +3782,12 @@ async function startWebRTC() {
   clearTimeout(iceDisconnectRestartTimer);
   iceDisconnectRestartTimer = undefined;
   renegotiationQueue?.close(new Error("WebRTC connection replaced"));
-  const selectedICEServers = filteredICEServers(connectionMethod);
-  const selectedICEPolicy = connectionMethod.startsWith("turn-")
+  const effectiveMethod = effectiveConnectionMethod();
+  const selectedICEServers = filteredICEServers(effectiveMethod);
+  const selectedICEPolicy = effectiveMethod.startsWith("turn-")
     ? "relay"
-    : connectionMethod === "direct" ? "all" : iceTransportPolicy;
-  if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(connectionMethod) &&
+    : effectiveMethod === "direct" ? "all" : iceTransportPolicy;
+  if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(effectiveMethod) &&
       selectedICEServers.length === 0) {
     showStatus("The selected connection method is unavailable. Choose another method and retry.");
     setConnection("poor", "Method unavailable");
@@ -4222,11 +4233,23 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
     targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
     restartRequested = true;
     iceRestartAttempts += 1;
+    if (connectionMethod === "auto") autoTurnFailoverStrikes += 1;
     status.textContent = "Restarting media...";
     return true;
   } catch (_) {
     return false;
   }
+}
+
+// "Automatic" is direct-first: direct candidates win while the network allows
+// them, and once the session has burned enough restarts on direct-led cycles
+// the reconnect below rebuilds the peer as TURN/TCP instead. An explicit
+// method choice always wins over this fallback.
+function effectiveConnectionMethod() {
+  if (connectionMethod === "auto" && autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
+    return "turn-tcp";
+  }
+  return connectionMethod;
 }
 
 // Relay candidates show up in the local SDP once gathered; their presence
