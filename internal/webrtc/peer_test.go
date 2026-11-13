@@ -208,3 +208,38 @@ func TestCustomRegistrySDPMatchesDefaultInterceptors(t *testing.T) {
 		}
 	}
 }
+
+// ICETransportPolicyRelay skips host-candidate gathering entirely, so the
+// 1:1 public-IP host rewrite must not be applied: pion's ICE agent rejects
+// the combination ("address rewrite for host candidate ineffective") when
+// the first local description is set. This is the failure mode behind the
+// November 2026 VPS relay-only deployment (docs/vps-regression-diagnostics.md).
+func TestNewPeerWithRelayPolicyAndPublicIPSetsLocalDescription(t *testing.T) {
+	peer, err := NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
+		nil, nil, "", "", 50000, 50100, true, "relay", "203.0.113.42",
+	)
+	if err != nil {
+		t.Fatalf("create relay-policy peer with public IP: %v", err)
+	}
+	defer peer.Close()
+
+	if _, err := peer.Connection().AddTransceiverFromKind(pion.RTPCodecTypeAudio); err != nil {
+		t.Fatalf("add audio transceiver: %v", err)
+	}
+	gatheringComplete := pion.GatheringCompletePromise(peer.Connection())
+	offer, err := peer.Connection().CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create offer: %v", err)
+	}
+	if err := peer.Connection().SetLocalDescription(offer); err != nil {
+		t.Fatalf("set local offer under relay policy: %v", err)
+	}
+	select {
+	case <-gatheringComplete:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ICE candidate gathering did not complete")
+	}
+	if sdp := peer.Connection().LocalDescription().SDP; strings.Contains(sdp, "typ host") {
+		t.Fatalf("relay-only peer gathered a host candidate:\n%s", sdp)
+	}
+}

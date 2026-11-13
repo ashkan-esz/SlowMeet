@@ -137,7 +137,12 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	if ipv4Only {
 		settingEngine.SetNetworkTypes([]pion.NetworkType{pion.NetworkTypeUDP4})
 	}
-	if publicIP != "" {
+	if publicIP != "" && configuration.ICETransportPolicy != pion.ICETransportPolicyRelay {
+		// The 1:1 host-candidate rewrite only applies when the agent gathers
+		// host candidates; under ICETransportPolicyRelay pion rejects the
+		// combination ("address rewrite for host candidate ineffective"), and
+		// a relay-only deployment sources its public address from the TURN
+		// server's relayed candidates instead.
 		publicAddress := net.ParseIP(publicIP)
 		if publicAddress == nil {
 			return nil, fmt.Errorf("ICE public IP must be a valid IP address")
