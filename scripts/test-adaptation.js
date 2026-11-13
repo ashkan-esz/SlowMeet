@@ -427,7 +427,7 @@ if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWi
     { lossPct: 0.4, receivedDelta: 300 },  // clean sender through my own link
     { lossPct: 2.1, receivedDelta: 250 }
   ];
-  assert.equal(selectOwnLinkMeasurements(cleanParticipantStreams, { pooledLossPct: 30 }),
+  assert.equal(selectOwnLinkMeasurements(cleanParticipantStreams, { pooledLossPct: 30 }).lossPct,
     0.4, "a clean stream proves the receiver's own path is intact");
 
   const impairedParticipantStreams = [
@@ -435,25 +435,49 @@ if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWi
     { lossPct: 38.5, receivedDelta: 90 },
     { lossPct: 55, receivedDelta: 60 }
   ];
-  assert.equal(selectOwnLinkMeasurements(impairedParticipantStreams, { pooledLossPct: 44 }),
+  assert.equal(selectOwnLinkMeasurements(impairedParticipantStreams, { pooledLossPct: 44 }).lossPct,
     38.5, "when every stream traverses my congested link, own-link loss stays high");
 
   // Streams with too few packets in the window are too noisy to trust.
   assert.equal(selectOwnLinkMeasurements(
     [{ lossPct: 0, receivedDelta: 2 }, { lossPct: 8, receivedDelta: 120 }],
     { pooledLossPct: 7.5 }
-  ), 8, "a tiny window must not be treated as a trustworthy clean signal");
-  assert.equal(selectOwnLinkMeasurements([{ lossPct: 0, receivedDelta: 1 }], { pooledLossPct: 7.5 }),
+  ).lossPct, 8, "a tiny window must not be treated as a trustworthy clean signal");
+  assert.equal(selectOwnLinkMeasurements([{ lossPct: 0, receivedDelta: 1 }], { pooledLossPct: 7.5 }).lossPct,
     7.5, "with no qualifying stream, fall back to the pooled measurement");
-  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: 3.3 }), 3.3,
+  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: 3.3 }).lossPct, 3.3,
     "an empty stream list falls back to the pooled measurement");
-  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: null }), null,
+  assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: null }).lossPct, null,
     "unknown pooled loss stays unknown");
-  assert.equal(selectOwnLinkMeasurements(undefined, {}), null,
+  assert.equal(selectOwnLinkMeasurements(undefined, {}).lossPct, null,
     "missing stream list without pooled loss yields null");
   // Two-person rooms: one stream means min == pooled, behavior unchanged.
-  assert.equal(selectOwnLinkMeasurements([{ lossPct: 6.5, receivedDelta: 200 }], { pooledLossPct: 6.5 }),
+  assert.equal(selectOwnLinkMeasurements([{ lossPct: 6.5, receivedDelta: 200 }], { pooledLossPct: 6.5 }).lossPct,
     6.5, "single-stream rooms keep the exact pooled value");
+  // A qualifying stream without jitter keeps the caller's fallback jitter.
+  assert.deepEqual(selectOwnLinkMeasurements(
+    [{ lossPct: 0.1, receivedDelta: 200, jitterMs: null }], { pooledLossPct: 0.2, fallbackJitterMs: 70 }),
+    { lossPct: 0.1, jitterMs: 70 },
+    "a qualifying stream without jitter keeps the fallback jitter");
+
+  // Jitter follows the same attribution rule: a congested remote sender's
+  // arrival jitter is that sender's queueing, not my link.
+  const jitterStreams = [
+    { lossPct: 0.2, receivedDelta: 200, jitterMs: 180 },  // impaired sender
+    { lossPct: 0.1, receivedDelta: 200, jitterMs: 12 },   // clean sender
+    { lossPct: 0.3, receivedDelta: 200, jitterMs: 45 }
+  ];
+  assert.deepEqual(selectOwnLinkMeasurements(jitterStreams, { pooledLossPct: 1.1, fallbackJitterMs: 180 }),
+    { lossPct: 0.1, jitterMs: 12 },
+    "the cleanest stream's jitter proves my own path and overrides the first-stream fallback");
+  assert.deepEqual(selectOwnLinkMeasurements(
+    [{ lossPct: 0.1, receivedDelta: 2, jitterMs: 180 }], { pooledLossPct: 5, fallbackJitterMs: 90 }),
+    { lossPct: 5, jitterMs: 90 },
+    "an unqualified stream leaves both fallbacks in place");
+  assert.deepEqual(selectOwnLinkMeasurements(
+    [{ lossPct: 0.1, receivedDelta: 200, jitterMs: null }], { pooledLossPct: 0.2, fallbackJitterMs: 70 }),
+    { lossPct: 0.1, jitterMs: 70 },
+    "a qualifying stream without jitter keeps the fallback jitter");
 }
 
 const fs = require("node:fs");

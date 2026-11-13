@@ -4454,7 +4454,8 @@ async function runDiagnosticsUpdate() {
       receivedPacketsSincePreviousSample += deltas.received;
       streamLossSamples.push({
         lossPct: packetLossPercentFromDeltas(deltas.lost, deltas.received),
-        receivedDelta: deltas.received
+        receivedDelta: deltas.received,
+        jitterMs: stat.jitter != null ? Math.round(stat.jitter * 1000) : null
       });
     }
     return deltas;
@@ -4585,12 +4586,18 @@ async function runDiagnosticsUpdate() {
     values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
     values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
-  values.packetLoss = selectOwnLinkMeasurements(streamLossSamples, {
+  const ownLink = selectOwnLinkMeasurements(streamLossSamples, {
     pooledLossPct: packetLossPercentFromDeltas(
       lostPacketsSincePreviousSample,
       receivedPacketsSincePreviousSample
-    )
+    ),
+    fallbackJitterMs: values.jitterMs
   });
+  values.packetLoss = ownLink.lossPct;
+  // The in-loop assignments above keep the video-wins/audio-fills fallback;
+  // the own-link minimum (a clean sender's stream proves my path is calm)
+  // overrides them so a remote sender's queueing cannot read as my jitter.
+  if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
   connectionHistoryModel?.addSample({
     at: values.timestamp,
     rttMs: values.rttMs,

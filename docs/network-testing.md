@@ -16,9 +16,11 @@ host interface:
   profile (video yields before audio), and a signaling reconnect whose
   resumed session must survive impairment.
 - `make test-media-e2e-four-netns` runs the four-person mixed-quality room:
-  P1/P4 stay clean while P2 sees 200 kbit/200 ms/3% loss and P3 sees
-  100 kbit/300 ms/5%, applied per participant by classifying each browser's
-  ICE UDP port into per-tier `tc` classes. The scenarios assert that audio
+  P1/P4 stay clean while P2 sees 200 kbit/200 ms/8% loss and P3 sees
+  100 kbit/300 ms/12% loss (loss values sit above the client's poor/critical
+  thresholds so the adaptation reaction is deterministic on any machine),
+  applied per participant by classifying each browser's ICE UDP port into
+  per-tier `tc` classes. The scenarios assert that audio
   keeps moving for everyone, each participant's degradation stays theirs, and
   a clean participant's screen share reaches the impaired viewers.
 

@@ -244,24 +244,36 @@ function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, 
   return criticalSamples >= threshold && (!isAutomaticProfile || adaptationLevel === 0);
 }
 
-// Estimate the receiver's own-link loss from per-stream measurements. Loss
-// measured on one inbound stream mixes the sender's uplink with the shared
-// downlink, so pooling every stream blames the receiver's link for a remote
-// sender's congestion — in a mixed-quality room that suspends video
-// room-wide. A stream can only arrive with LOW loss if the receiver's own
-// path delivers it intact, so the minimum per-stream loss is the best
-// own-link estimate. Streams with too few packets in the window are too
-// noisy to trust (and suspended streams report none at all), so they are
-// skipped; with no qualifying stream, fall back to the pooled measurement.
-function selectOwnLinkMeasurements(streams, { pooledLossPct = null, minimumPackets = 5 } = {}) {
-  let best = null;
+// Estimate the receiver's own-link loss and jitter from per-stream
+// measurements. Both metrics measured on one inbound stream mix the sender's
+// uplink with the shared downlink, so pooling every stream blames the
+// receiver's link for a remote sender's congestion — in a mixed-quality room
+// that suspends video room-wide. A stream can only arrive with LOW loss and
+// LOW jitter if the receiver's own path delivers it intact, so the minimum
+// per-stream values are the best own-link estimate. Streams with too few
+// packets in the window are too noisy to trust (and suspended streams report
+// none at all), so they are skipped; with no qualifying stream, fall back to
+// the pooled loss / the caller's previous jitter signal.
+function selectOwnLinkMeasurements(streams, { pooledLossPct = null, fallbackJitterMs = null, minimumPackets = 5 } = {}) {
+  let bestLoss = null;
+  let bestJitter = null;
   for (const stream of Array.isArray(streams) ? streams : []) {
-    if (!stream || !Number.isFinite(stream.lossPct) || stream.lossPct < 0) continue;
-    if (!Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
-    if (best === null || stream.lossPct < best) best = stream.lossPct;
+    if (!stream || !Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
+    if (Number.isFinite(stream.lossPct) && stream.lossPct >= 0 &&
+        (bestLoss === null || stream.lossPct < bestLoss)) {
+      bestLoss = stream.lossPct;
+    }
+    if (Number.isFinite(stream.jitterMs) && stream.jitterMs >= 0 &&
+        (bestJitter === null || stream.jitterMs < bestJitter)) {
+      bestJitter = stream.jitterMs;
+    }
   }
-  if (best !== null) return best;
-  return Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null;
+  return {
+    lossPct: bestLoss !== null ? bestLoss
+      : (Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null),
+    jitterMs: bestJitter !== null ? bestJitter
+      : (Number.isFinite(fallbackJitterMs) && fallbackJitterMs >= 0 ? fallbackJitterMs : null)
+  };
 }
 
 function chooseParticipantLayout({
