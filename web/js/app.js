@@ -57,6 +57,7 @@ const connectionSummary = document.querySelector("#connection-summary");
 const connectionSummaryTitle = document.querySelector("#connection-summary-title");
 const connectionSummaryCopy = document.querySelector("#connection-summary-copy");
 const connectionPreference = document.querySelector("#connection-preference");
+const connectionActivePath = document.querySelector("#connection-active-path");
 const joinConnectionMethod = document.querySelector("#join-connection-method");
 const settingsConnectionMethod = document.querySelector("#settings-connection-method");
 const joinConnectionMethodHelp = document.querySelector("#join-connection-method-help");
@@ -2077,6 +2078,25 @@ function refreshConnectionMethodSelectors() {
 function updateConnectionMethodSummary() {
   const method = connectionMethodOptions.get(connectionMethod);
   if (connectionPreference) connectionPreference.textContent = `Connection method: ${method?.label || "Automatic"}`;
+}
+
+// The Live status card shows the transport actually in use (from the selected
+// candidate pair), which can differ from the chosen method: "Automatic"
+// starts direct and converges on the relay when the path kills direct UDP.
+function describeActivePath(icePath) {
+  if (!icePath) return "measuring…";
+  if (icePath.startsWith("TURN")) {
+    const protocol = icePath.split("/")[1];
+    return protocol ? `relay — TURN over ${protocol}` : "relay — TURN";
+  }
+  const protocol = icePath.split("/")[1];
+  return protocol ? `direct — ${protocol}` : "direct";
+}
+
+function updateConnectionActivePath() {
+  if (connectionActivePath) {
+    connectionActivePath.textContent = `Using: ${describeActivePath(connectionMetrics.icePath)}`;
+  }
 }
 
 function scheduleConnectionMethodReconnect() {
@@ -4371,6 +4391,7 @@ function updateConnectionMetrics(values) {
     audioState: values.inboundAudioKbps == null && values.outboundAudioKbps == null ? "No sample" : "Connected"
   };
   Object.assign(connectionMetrics, next);
+  updateConnectionActivePath();
   const text = (id, value) => {
     const node = metricElement(id);
     if (!node) return;

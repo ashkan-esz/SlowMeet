@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {filterICEServers, requiresConfiguredICEServers} = require("../web/js/connection-methods.js");
 
 const servers = [
@@ -40,5 +42,15 @@ assert.equal(requiresConfiguredICEServers("turn-tcp"), true,
 assert.equal(requiresConfiguredICEServers("turn-tls"), true,
   "TURN modes require a configured TURN server");
 assert.deepEqual(servers[1].urls.length, 4, "filtering should not mutate the server configuration");
+
+// The Live status card shows the transport actually in use, which can differ
+// from the chosen method once "Automatic" fails over to the relay.
+const appSource = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8");
+assert.match(appSource, /const connectionActivePath = document\.querySelector\("#connection-active-path"\);/,
+  "the Live status card must have an active-path line");
+assert.match(appSource, /function describeActivePath\(icePath\) \{[\s\S]*?if \(!icePath\) return "measuring…";[\s\S]*?relay — TURN over \$\{protocol\}/,
+  "the active path should describe relay usage from the selected candidate pair");
+assert.match(appSource, /Object\.assign\(connectionMetrics, next\);\s*updateConnectionActivePath\(\);/,
+  "the active path line must refresh with every diagnostics sample");
 
 console.log("Connection method tests passed");
