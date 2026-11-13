@@ -88,6 +88,12 @@ was cut mid-flow (~43%) — inconsistent treatment of non-service ports, but
 operationally irrelevant. The WebRTC block has not lifted; the relay-only
 deployment remains correct.
 
+**Re-checked again the same day** with the one-command marker probe
+(`scripts/probe-stun-path.sh`, runnable from any machine or network): 729 real
+Binding Requests → 16 responses, all within the first 0.5s. Same verdict. The
+script prints the operational verdict itself and needs no root or server
+access — run it periodically to detect when the blocking lifts.
+
 **Consequences:**
 
 - Moving the ICE port range cannot restore direct UDP: real WebRTC requires
