@@ -311,6 +311,12 @@ async function run() {
     "without relay candidates the delayed restart keeps the 5s cadence");
   assert.match(appSource, /const iceRestartRelayGraceDelayMs = 12000;/,
     "with relay candidates the restart waits 12s for ICE to nominate the fallback pair");
+  assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto" && autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return "turn-tcp";/,
+    "an Automatic session that cycled direct-led restarts must reconnect as TURN/TCP");
+  assert.match(appSource, /if \(connectionMethod === "auto"\) \{\s*autoTurnFailoverStrikes \+= 1;\s*if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
+    "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP)");
+  assert.match(appSource, /const effectiveMethod = effectiveConnectionMethod\(\);\s*const selectedICEServers = filteredICEServers\(effectiveMethod\);/,
+    "the peer must be built from the effective (possibly fallback) method");
   assert.match(appSource, /function requestIceRestart\(targetPeer, targetSocket, generation\)[\s\S]*?type: "ice_restart"/,
     "the delayed restart request should send an ice_restart message");
   assert.match(appSource, /renegotiationQueue = createRenegotiationQueue\(/);

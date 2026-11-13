@@ -282,8 +282,12 @@ endedExportConnectionHistory?.addEventListener("click", exportRecordedConnection
 function updateControlLabel(button, label) {
   if (!button) return;
   const visibleLabel = button.querySelector("[data-control-label]")?.textContent.trim();
-  const count = button.id === "participants-button"
-    ? button.querySelector(".count-badge")?.textContent.trim() : undefined;
+  // Count badges (participants, unread chat) are part of the button's visible
+  // text; the accessible name must include them or axe's
+  // label-content-name-mismatch fires the moment a badge appears.
+  const badge = button.querySelector(".count-badge");
+  const count = (button.id === "participants-button" || button.id === "chat") &&
+    badge && !badge.hidden ? badge.textContent.trim() : undefined;
   const namePrefix = count ? `${count}${visibleLabel}` : visibleLabel;
   const accessibleLabel = namePrefix && !` ${label.toLowerCase()} `.includes(` ${namePrefix.toLowerCase()} `)
     ? `${namePrefix}: ${label}` : label;
@@ -1457,6 +1461,9 @@ function addChatMessage(author, body, system = false, own = false, timestampValu
       chatBadge.textContent = String(unreadMessages);
     }
     chatToggle?.classList.add("has-unread");
+    // The badge changes the button's visible text; the accessible name must
+    // follow or axe's label-content-name-mismatch fires.
+    if (chatToggle) updateControlLabel(chatToggle, "Open chat");
     if (!own) {
       const preview = body.length > 120 ? `${body.slice(0, 120)}…` : body;
       showToast(`${author}: ${preview}`);
@@ -4229,11 +4236,24 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
       !isCurrentWebRTC(generation, targetPeer, targetSocket) || targetSocket.readyState !== WebSocket.OPEN) {
     return false;
   }
+  if (connectionMethod === "auto") {
+    autoTurnFailoverStrikes += 1;
+    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
+      // Another ice_restart would just reset the agent into the same dying
+      // direct path. Hand this connection to the reconnect state machine: its
+      // next peer is built as TURN/TCP (see effectiveConnectionMethod), which
+      // gets a clean relay allocation. The close is cancelled if ICE recovers
+      // during the grace window.
+      restartRequested = true;
+      status.textContent = "Reconnecting media...";
+      scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
+      return true;
+    }
+  }
   try {
     targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
     restartRequested = true;
     iceRestartAttempts += 1;
-    if (connectionMethod === "auto") autoTurnFailoverStrikes += 1;
     status.textContent = "Restarting media...";
     return true;
   } catch (_) {
