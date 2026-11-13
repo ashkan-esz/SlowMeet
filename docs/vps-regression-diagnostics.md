@@ -44,7 +44,7 @@ through coturn (raise `TURN_CPUS` accordingly — done, 1.0), and reverting
 networks. The client's per-user connection-method switcher (auto / direct /
 turn-udp / turn-tcp / turn-tls) remains available.
 
-Evidence so far:
+## Original diagnosis notes (Nov 13)
 
 - The deployed binary is committed `d759b35` — confirmed by rebuilding that
   commit with the Dockerfile flags and matching the handoff-recorded deployed
@@ -58,6 +58,43 @@ Evidence so far:
   ([vps-cpu-investigation-handoff.md](vps-cpu-investigation-handoff.md)):
   0.75-core container quota with documented throttling, 75-80% system CPU,
   coturn limited to 0.20 CPU.
+
+## Probe campaign (Nov 14): the policer's rule, fully characterized
+
+An attempt to restore the direct UDP path by moving the ICE port range was
+probed out. Sustained single-flow probes from a client machine (tcpdump on the
+VPS eth0 verifying arrivals, 20s per probe):
+
+| Flow | Port(s) | Result |
+|---|---|---|
+| plain UDP 50pps, 1000B | 50050 (current ICE range) | **passes** (~95% arrived, no cutting) |
+| plain UDP 50pps | 40050, 60050 (fresh ranges) | passes |
+| SRTP-shaped (RTP v2 header + random payload) 220pps | 50050, 40050, 60050 | **passes** (~97% arrived) |
+| real WebRTC session (STUN+DTLS+SRTP) | current range | **cut ~1s after handshake** (metronomic cycle returns) |
+| real STUN Binding Requests 50pps (valid structure) | 3478 (coturn) | **exactly 16 arrived, then silence** for the remaining 21s |
+| invalid STUN-shaped payload (magic cookie, bogus length) | 41234 | passes |
+
+**Rule:** the path allows roughly the first 16 packets of any UDP flow, then
+cuts flows that carry *structurally valid* STUN messages — regardless of port
+(3478, 50000-50100, fresh ranges), rate, or packet size. Plain UDP and
+non-STUN traffic flow indefinitely; TURN over TCP also flows (STUN inside TCP
+is not inspected). This is deliberate, content-validating WebRTC blocking —
+characteristic of ISP-side anti-VPN filtering, not of a server or code fault.
+
+**Consequences:**
+
+- Moving the ICE port range cannot restore direct UDP: real WebRTC requires
+  valid STUN (ICE mandates it), and valid STUN is exactly what gets cut.
+- TURN over UDP is equally cut (it is STUN over UDP) — confirmed live when the
+  relay-UDP pair died mid-media during the original diagnosis.
+- The relay-over-TCP deployment is the correct and only working architecture
+  for this path. `ICE_TRANSPORT_POLICY=relay` with TCP-only TURN stays.
+- Re-run `scripts/diagnose-vps-regression.sh` (or the raw-UDP/STUN probes)
+  periodically: if real STUN flows start passing, the blocking has lifted and
+  `ICE_TRANSPORT_POLICY=all` restores the direct path with TURN fallback.
+- A phone on mobile data joins with relay like any other client; testing there
+  only tells us whether a *different* ISP also blocks (useful to attribute the
+  blocking to the home ISP vs the provider edge, not to change the fix).
 
 ## Session flow
 

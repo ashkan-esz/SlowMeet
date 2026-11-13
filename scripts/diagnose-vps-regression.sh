@@ -80,9 +80,13 @@ capture_cpu() {
   [ -s "$OUT/cpu.stat.$$" ] && mv "$OUT/cpu.stat.$$" "$1/cpu.stat" || rm -f "$OUT/cpu.stat.$$"
   cgroup_cpu_pressure >"$1/cpu.pressure" 2>/dev/null
   docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' 2>/dev/null | grep -iE 'slowmeet|coturn' >"$1/docker-stats.txt"
-  # UDP sockets in the ICE range, from inside the container (hex 50000=C350..50100=C374)
+  # UDP sockets in the configured ICE range, from inside the container. The
+  # deployment may have moved the range (e.g. 50000-50100 -> something else to
+  # dodge path policing); read the bounds from the container env when present.
+  ice_min="${ICE_UDP_PORT_MIN:-50000}"
+  ice_max="${ICE_UDP_PORT_MAX:-50100}"
   docker exec "$CONTAINER" sh -c 'cat /proc/net/udp /proc/net/udp6 2>/dev/null' 2>/dev/null \
-    | awk '{split($2,a,":"); port=strtonum("0x" a[2]); if (port>=50000 && port<=50100) n++} END {print "ice_udp_sockets=" n+0}' \
+    | awk -v min="$ice_min" -v max="$ice_max" '{split($2,a,":"); port=strtonum("0x" a[2]); if (port>=min && port<=max) n++} END {print "ice_udp_sockets=" n+0 " range=" min "-" max}' \
     >"$1/udp-sockets.txt" 2>/dev/null || echo 'ice_udp_sockets=unknown' >"$1/udp-sockets.txt"
 }
 
