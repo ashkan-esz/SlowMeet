@@ -26,23 +26,40 @@ during a live repro):
   the SFU code changes (the local e2e passes at HEAD; the captures show the
   packets never reach the NIC).
 
-**Fix deployed on the VPS:** relay all media through TURN over TCP, which the
+**Fix deployed on the VPS (Nov 13):** relay all media through TURN over TCP, which the
 path cannot cut. coturn is now enabled (compose `turn` profile) and SlowMeet
-is configured with `ICE_TRANSPORT_POLICY=relay`, so every viable ICE pair
-terminates inside coturn; clients reach coturn over TCP 3478. Verified by
+was configured with `ICE_TRANSPORT_POLICY=relay`, so every viable ICE pair
+terminated inside coturn; clients reach coturn over TCP 3478. Verified by
 scripted two-participant sessions through the deployed server: 75s with zero
 ICE state changes, video+audio received in both directions.
+
+**Product decision (Nov 14): direct-first is the default again.** The
+deployment moved back to `ICE_TRANSPORT_POLICY=all` (coturn and TCP-only TURN
+URLs stay — TURN/TLS on 5349 with the ACME cert was added as a second
+fallback), so direct candidates win whenever the network allows them and the
+connection-method switcher offers every choice. Because the path cuts
+direct-led sessions, the client recovery learned to converge instead of
+cycling (commits 7abb0e3/ecb1edf):
+
+- an ICE-restart waits 12s (instead of 5s) when relay candidates were
+  gathered, letting Chrome nominate the fallback pair naturally;
+- after two direct-led restart cycles, an "Automatic" session stops
+  restarting and reconnects with its peer built as TURN/TCP — no UDP burst
+  races the relay allocation, so it lands on a stable relay pair (verified:
+  2 cycles, then stable relay→host for 60s+); explicit user method choices
+  are never overridden, and the strike count resets on page load.
 
 Companion code change: `internal/webrtc/peer.go` skips the 1:1 host-candidate
 rewrite when the transport policy is relay (pion rejects the combination
 otherwise); regression test
 `TestNewPeerWithRelayPolicyAndPublicIPSetsLocalDescription`.
 
-Trade-offs to revisit when the UDP path heals: relay-only routes all media
-through coturn (raise `TURN_CPUS` accordingly — done, 1.0), and reverting
-`ICE_TRANSPORT_POLICY=all` restores the direct low-latency path for clean
-networks. The client's per-user connection-method switcher (auto / direct /
-turn-udp / turn-tcp / turn-tls) remains available.
+Trade-offs to revisit when the UDP path heals: with direct-first, sessions on
+this path spend ~20-30s reconnecting before settling on relay, and relay
+routes all fallback media through coturn (`TURN_CPUS` raised to 1.0). When
+the STUN probe reports CLEAR, the transient cycle disappears on its own and
+direct carries all traffic. The client's per-user connection-method switcher
+(auto / direct / turn-udp / turn-tcp / turn-tls) remains available.
 
 ## Original diagnosis notes (Nov 13)
 
@@ -100,11 +117,14 @@ access — run it periodically to detect when the blocking lifts.
   valid STUN (ICE mandates it), and valid STUN is exactly what gets cut.
 - TURN over UDP is equally cut (it is STUN over UDP) — confirmed live when the
   relay-UDP pair died mid-media during the original diagnosis.
-- The relay-over-TCP deployment is the correct and only working architecture
-  for this path. `ICE_TRANSPORT_POLICY=relay` with TCP-only TURN stays.
-- Re-run `scripts/diagnose-vps-regression.sh` (or the raw-UDP/STUN probes)
+- The relay-over-TCP architecture is the only working fallback for this path.
+  Since Nov 14 the product default is direct-first (`ICE_TRANSPORT_POLICY=all`)
+  with this relay as the automatic fallback and a client-side learning rule
+  (see the product-decision note above); relay-only remains the posture for
+  deployments on fully-blocked paths.
+- Re-run `scripts/probe-stun-path.sh` (or `scripts/diagnose-vps-regression.sh`)
   periodically: if real STUN flows start passing, the blocking has lifted and
-  `ICE_TRANSPORT_POLICY=all` restores the direct path with TURN fallback.
+  direct-first sessions stop cycling entirely — no config change needed.
 - A phone on mobile data joins with relay like any other client; testing there
   only tells us whether a *different* ISP also blocks (useful to attribute the
   blocking to the home ISP vs the provider edge, not to change the fix).
