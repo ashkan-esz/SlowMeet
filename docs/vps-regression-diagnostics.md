@@ -81,6 +81,13 @@ non-STUN traffic flow indefinitely; TURN over TCP also flows (STUN inside TCP
 is not inspected). This is deliberate, content-validating WebRTC blocking —
 characteristic of ISP-side anti-VPN filtering, not of a server or code fault.
 
+**Re-probed Nov 14:** the rule is stable. Valid STUN to coturn:3478 was cut
+again after ~12 packets (12 of 1092 arrived, all in the first 0.3s); plain UDP
+on a ufw-allowed port passed fully (969/995); plain UDP on a non-allowed port
+was cut mid-flow (~43%) — inconsistent treatment of non-service ports, but
+operationally irrelevant. The WebRTC block has not lifted; the relay-only
+deployment remains correct.
+
 **Consequences:**
 
 - Moving the ICE port range cannot restore direct UDP: real WebRTC requires
