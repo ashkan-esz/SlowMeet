@@ -4621,9 +4621,9 @@ async function runDiagnosticsUpdate() {
       recordParticipantPacketDeltas(participantID, packetDeltas);
     }
   });
-  if (selectedCandidatePair) {
-    const localCandidate = candidatesById.get(selectedCandidatePair.localCandidateId);
-    const remoteCandidate = candidatesById.get(selectedCandidatePair.remoteCandidateId);
+  if (selectedPair) {
+    const localCandidate = candidatesById.get(selectedPair.localCandidateId);
+    const remoteCandidate = candidatesById.get(selectedPair.remoteCandidateId);
     if (localCandidate?.candidateType || remoteCandidate?.candidateType) {
       values.iceCandidateType = `${localCandidate?.candidateType || "unknown"}/` +
         `${remoteCandidate?.candidateType || "unknown"}`;

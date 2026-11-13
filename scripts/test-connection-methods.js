@@ -52,5 +52,5 @@ assert.match(appSource, /function describeActivePath\(icePath\) \{[\s\S]*?if \(!
   "the active path should describe relay usage from the selected candidate pair");
 assert.match(appSource, /Object\.assign\(connectionMetrics, next\);\s*updateConnectionActivePath\(\);/,
   "the active path line must refresh with every diagnostics sample");
-
+  assert.doesNotMatch(appSource, /if \(selectedCandidatePair\) \{\s*const localCandidate = candidatesById\.get\(selectedCandidatePair\.localCandidateId\)/,    "the path derivation must read the extracted selected pair, not the helper function");  assert.match(appSource, /if \(selectedPair\) \{\s*const localCandidate = candidatesById\.get\(selectedPair\.localCandidateId\)/,    "icePath derives from the selected pair actually extracted from getStats");
 console.log("Connection method tests passed");
