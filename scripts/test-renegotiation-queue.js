@@ -303,8 +303,14 @@ async function run() {
   assert.match(appSource, /function isPeerConnectionConnected\(targetPeer\)[\s\S]*?targetPeer\?\.connectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "connected"[\s\S]*?targetPeer\.iceConnectionState === "completed"/);
   assert.match(appSource, /if \(label === "Connected" && !isPeerConnectionConnected\(peer\)\) return;/,
     "stats must not replace a disconnected transport label with Connected");
-  assert.match(appSource, /iceDisconnectRestartTimer = setTimeout\(\(\) => \{[\s\S]*?if \(requestIceRestart\(targetPeer, targetSocket, generation\)\) return;[\s\S]*?\}, 5000\);/,
+  assert.match(appSource, /iceDisconnectRestartTimer = setTimeout\(\(\) => \{[\s\S]*?if \(requestIceRestart\(targetPeer, targetSocket, generation\)\) return;[\s\S]*?\}, iceRestartDelayMs\(targetPeer\)\);/,
     "a sustained disconnected peer should request one delayed ICE restart");
+  assert.match(appSource, /function iceRestartDelayMs\(targetPeer\)[\s\S]*?\/typ relay\/\.test\(sdp\) \? iceRestartRelayGraceDelayMs : iceRestartRetryDelayMs/,
+    "the restart delay must give ICE a longer grace window when relay candidates exist (natural failover before agent reset)");
+  assert.match(appSource, /const iceRestartRetryDelayMs = 5000;/,
+    "without relay candidates the delayed restart keeps the 5s cadence");
+  assert.match(appSource, /const iceRestartRelayGraceDelayMs = 12000;/,
+    "with relay candidates the restart waits 12s for ICE to nominate the fallback pair");
   assert.match(appSource, /function requestIceRestart\(targetPeer, targetSocket, generation\)[\s\S]*?type: "ice_restart"/,
     "the delayed restart request should send an ice_restart message");
   assert.match(appSource, /renegotiationQueue = createRenegotiationQueue\(/);

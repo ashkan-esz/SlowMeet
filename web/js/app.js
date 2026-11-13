@@ -1868,6 +1868,12 @@ let iceDisconnectRestartTimer;
 let exhaustedReconnectTimer;
 const exhaustedReconnectDelayMs = 3000;
 const maxIceRestartAttempts = 3;
+// When TURN (relay) candidates were gathered, ICE can nominate the relay pair
+// on its own after a direct path dies; give Chrome that window before
+// resetting the agent with an ice_restart, which re-nominates the (dying)
+// direct pair and starts the disconnect cycle over.
+const iceRestartRetryDelayMs = 5000;
+const iceRestartRelayGraceDelayMs = 12000;
 let reconnectAttempts = 0;
 let wasReconnectResume = false;
 const maxReconnectAttempts = 5;
@@ -4223,6 +4229,14 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
   }
 }
 
+// Relay candidates show up in the local SDP once gathered; their presence
+// means a working fallback pair may exist that ICE can nominate without a
+// restart, so the restart timer uses the longer grace window.
+function iceRestartDelayMs(targetPeer) {
+  const sdp = targetPeer?.currentLocalDescription?.sdp ?? targetPeer?.localDescription?.sdp ?? "";
+  return /typ relay/.test(sdp) ? iceRestartRelayGraceDelayMs : iceRestartRetryDelayMs;
+}
+
 function scheduleIceRestartRetry(targetPeer, targetSocket, generation) {
   if (restartRequested || iceRestartAttempts >= maxIceRestartAttempts || iceDisconnectRestartTimer !== undefined) return;
   iceDisconnectRestartTimer = setTimeout(() => {
@@ -4233,7 +4247,7 @@ function scheduleIceRestartRetry(targetPeer, targetSocket, generation) {
       setConnection("poor", "Offline");
       showStatus("Media connection failed. Retry to reconnect.");
     }
-  }, 5000);
+  }, iceRestartDelayMs(targetPeer));
 }
 
 // One delayed full reconnect after ICE restarts are exhausted: closing the
