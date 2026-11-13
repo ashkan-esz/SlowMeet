@@ -31,6 +31,9 @@ func run() error {
 	}
 	logger := httpserver.NewLogger(cfg.LogLevel)
 	app := httpserver.New(cfg, logger)
+	// Package-level code that logs through slog.Default() (for example the
+	// offer-send debug record in internal/signaling) must honor LOG_LEVEL too.
+	slog.SetDefault(logger)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           app,
