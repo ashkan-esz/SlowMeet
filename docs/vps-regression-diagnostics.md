@@ -105,6 +105,17 @@ was cut mid-flow (~43%) — inconsistent treatment of non-service ports, but
 operationally irrelevant. The WebRTC block has not lifted; the relay-only
 deployment remains correct.
 
+**d759b35 revert A/B (Nov 14): no effect, as predicted.** A binary built at
+`db9ac7f` (this repo's `d759b35`'s parent — identical code minus exactly
+d759b35's rate limiters, `network_state` validation, and systemd `GOMEMLIMIT`
+line) was deployed temporarily with `ICE_TRANSPORT_POLICY=all`. The valid-STUN
+cut was identical (725 real Binding Requests → 12 responses, all within
+0.5s), and the solo session cycled without converging within the window. This
+matches the wire evidence: d759b35 is signaling-layer only and cannot alter
+the fate of browser-generated UDP packets that never reach the server. The
+revert is not a fix and was not kept; the HEAD deployment was restored and
+re-verified (2 cycles → stable relay→host).
+
 **Re-checked again the same day** with the one-command marker probe
 (`scripts/probe-stun-path.sh`, runnable from any machine or network): 729 real
 Binding Requests → 16 responses, all within the first 0.5s. Same verdict. The
