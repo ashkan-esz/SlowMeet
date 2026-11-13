@@ -1955,7 +1955,7 @@ const speakerAnalyzers = new Map();
 const activeSpeakers = new Set();
 const speakerLevels = new Map();
 const pendingSpeakerStates = new Map();
-const speakerThresholdDb = -50;
+const speakerThresholdDb = -45;
 const speakerStartHoldMs = 200;
 const speakerStopHoldMs = 300;
 const speakerActivationDelayMs = 300;
@@ -4621,9 +4621,9 @@ async function runDiagnosticsUpdate() {
       recordParticipantPacketDeltas(participantID, packetDeltas);
     }
   });
-  if (selectedPair) {
-    const localCandidate = candidatesById.get(selectedPair.localCandidateId);
-    const remoteCandidate = candidatesById.get(selectedPair.remoteCandidateId);
+  if (selectedCandidatePair) {
+    const localCandidate = candidatesById.get(selectedCandidatePair.localCandidateId);
+    const remoteCandidate = candidatesById.get(selectedCandidatePair.remoteCandidateId);
     if (localCandidate?.candidateType || remoteCandidate?.candidateType) {
       values.iceCandidateType = `${localCandidate?.candidateType || "unknown"}/` +
         `${remoteCandidate?.candidateType || "unknown"}`;

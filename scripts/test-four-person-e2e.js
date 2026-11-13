@@ -1617,20 +1617,37 @@ async function scenarioMetricsEndpoint() {
 // Four senders flooding the room cannot grow the chat rail without bound.
 async function scenarioChatDomCap() {
   await setupRoom();
+  // The server's chat limiter allows 10 messages per 10 s per client: a raw
+  // flood is mostly rejected with error events that poison every later
+  // scenario's strict signaling-error check. Pace the flood just under the
+  // sustained allowance (4 clients ≈ 3.6 msg/s) until the cap provably
+  // engages, then assert the rail stopped growing at 300 nodes.
+  const participantIDs = new Map();
   for (const [role, page] of pages) {
-    const participantID = await participantIDFor(page, names[roles.indexOf(role)]);
-    await page.evaluate(({ participantID }) => {
-      const socket = window.__slowMeetTest.sockets.at(-1);
-      for (let i = 0; i < 90; i += 1) {
-        socket.send(JSON.stringify({ version: 1, type: "chat_message", participant_id: participantID, text: `flood-${i}` }));
-      }
-    }, { participantID });
+    participantIDs.set(role, await participantIDFor(page, names[roles.indexOf(role)]));
+  }
+  let floodRounds = 0;
+  const floodDeadline = Date.now() + 150000;
+  while (floodRounds < 90) {
+    for (const [role, page] of pages) {
+      await page.evaluate(({ participantID, round }) => {
+        const socket = window.__slowMeetTest.sockets.at(-1);
+        socket.send(JSON.stringify({ version: 1, type: "chat_message", participant_id: participantID, text: `flood-${round}-${participantID.slice(0, 6)}` }));
+      }, { participantID: participantIDs.get(role), round: floodRounds });
+    }
+    floodRounds += 1;
+    const domCount = await pages.get("P4").evaluate(() =>
+      document.querySelectorAll("#chat-messages .chat-message").length);
+    if (domCount >= 310 && floodRounds > 300 / (pages.size - 0)) break;
+    await delay(1100);
+    if (Date.now() > floodDeadline) break;
   }
   await pages.get("P4").waitForFunction(() =>
-    document.querySelectorAll("#chat-messages .chat-message").length >= 250, null, { timeout: 30000 });
+    document.querySelectorAll("#chat-messages .chat-message").length >= 250, null, { timeout: 60000 });
   for (const [role, page] of pages) {
     const count = await page.evaluate(() => document.querySelectorAll("#chat-messages .chat-message").length);
     assert.ok(count <= 300, `${role} kept ${count} chat nodes; the 300-node cap should hold`);
+    assert.ok(count >= 250, `${role} only reached ${count} chat nodes; the flood must exceed the cap to prove it trims`);
   }
 }
 
@@ -1655,7 +1672,10 @@ async function scenarioCongestionAdaptation() {
       const total = peer.__poorSampleIndex * 100;
       const entries = [...report.values()].map((entry) => ({ ...entry }));
       for (const entry of entries) {
-        if (entry.type === "inbound-rtp" && entry.kind === "video") {
+        // Audio AND video must both carry the injected loss: the client's
+        // own-link loss attribution takes the minimum across streams, so a
+        // clean audio stream would mask the impaired video path entirely.
+        if (entry.type === "inbound-rtp" && (entry.kind === "video" || entry.kind === "audio")) {
           entry.packetsReceived = Math.round(total * 0.4);
           entry.packetsLost = Math.round(total * 0.6);
         }
@@ -1666,7 +1686,10 @@ async function scenarioCongestionAdaptation() {
   });
   assert.ok(injected, "could not instrument the peer connection's getStats");
   const observers = [...pages.entries()].filter(([role]) => role !== "P1").map(([, page]) => page);
-  for (const peer of observers) await waitForTileState(peer, participantID, "camera", "paused", 30000);
+  // The pause needs ~8 one-second samples: 2 poor samples per adaptation
+  // level to descend from "normal" to the floor, then 3 critical samples for
+  // the pause itself — 30s was mathematically too tight.
+  for (const peer of observers) await waitForTileState(peer, participantID, "camera", "paused", 60000);
   await sender.evaluate(() => {
     const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
     if (peer) peer.__injectPoor = false;

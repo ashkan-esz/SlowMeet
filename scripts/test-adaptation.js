@@ -889,7 +889,7 @@ if (!/localParticipantID = participant\.id;\s+markLocalParticipant\(participant\
   throw new Error("local participant setup must mark the participant before refreshing pagination");
 }
 for (const behavior of [
-  "speakerThresholdDb = -50",
+  "speakerThresholdDb = -45",
   "speakerStartHoldMs = 200",
   "speakerStopHoldMs = 300",
   "pendingSpeakerStates",
