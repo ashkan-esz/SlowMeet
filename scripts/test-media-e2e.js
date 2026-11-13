@@ -2562,6 +2562,10 @@ async function testNetworkImpairmentMode(pageA, pageB, peers, expectedPeerConnec
     for (const profile of profiles) {
       const queueBefore = networkQueueStats();
       applyNetworkProfile(profile);
+      // Dwell under the profile before measuring: the impairment must
+      // accumulate observable loss, delay, and queue-drop evidence (a fast
+      // runner moves so little media that an instant check would see none).
+      await delay(8000);
       // On a saturated link ICE consent flaps while the queue stands; the
       // weak-network guarantee is that audio RTP keeps moving, not that the
       // connection state never blips.
@@ -3681,6 +3685,9 @@ async function main() {
         const states = await Promise.all([fixture.diagnostics("A"), fixture.diagnostics("B")]);
         await testNetworkImpairmentMode(peers[0], peers[1], peers,
           states.map((state) => state.peerConnectionCount), states.map((state) => state.socketCount), Date.now());
+        // A sustained queue can blip ICE to disconnected during the impaired
+        // window; after recovery, judge the room from a fresh baseline.
+        await fixture.refreshPeerBaseline();
         await fixture.assertPeersConnected("network recovery");
       }
     },
