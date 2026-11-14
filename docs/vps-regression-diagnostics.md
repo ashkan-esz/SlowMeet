@@ -105,6 +105,13 @@ was cut mid-flow (~43%) — inconsistent treatment of non-service ports, but
 operationally irrelevant. The WebRTC block has not lifted; the relay-only
 deployment remains correct.
 
+**Re-probed Nov 15:** rule unchanged — 733 valid STUN Binding Requests → 14
+responses (first 0.37s only), while 1093/1094 plain UDP packets arrived on a
+allowed port. TURN-over-UDP was also re-tested end-to-end (UDP TURN URL added
+to TURN_URLS): allocations survive the allowance but the sustained relay pair
+is cut mid-session, so the UDP entry was reverted; TCP/TLS relay remains the
+working path. Direct-first still converges on relay within ~2 cycles.
+
 **d759b35 revert A/B (Nov 14): no effect, as predicted.** A binary built at
 `db9ac7f` (this repo's `d759b35`'s parent — identical code minus exactly
 d759b35's rate limiters, `network_state` validation, and systemd `GOMEMLIMIT`
