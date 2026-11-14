@@ -4695,7 +4695,9 @@ async function runDiagnosticsUpdate() {
   if (connectionHasMetrics) {
     if ((values.rttMs != null && values.rttMs > 250) || (lossKnown && values.packetLoss > 5)) {
       setMeasuredConnection("poor", "Unstable connection");
-    } else if ((values.rttMs != null && values.rttMs > 120) || (lossKnown && values.packetLoss >= 2)) {
+    } else if ((values.rttMs != null && values.rttMs > 200) || (lossKnown && values.packetLoss >= 4)) {
+      // Yellow is reserved for clearly degraded links: typical relayed connections
+      // (~120-200 ms RTT) stay green. Red remains at 250 ms / 5% loss.
       setMeasuredConnection("fair", "Unstable connection");
     } else {
       setMeasuredConnection("good", "Connected");
