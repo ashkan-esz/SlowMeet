@@ -61,6 +61,9 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	if values["max_video_quality"] != "ultra" {
 		t.Fatalf("unexpected maximum video quality: %#v", values["max_video_quality"])
 	}
+	if values["meeting_password_required"] != false {
+		t.Fatalf("unexpected meeting_password_required: %#v", values["meeting_password_required"])
+	}
 	if _, exposed := values["admin_password"]; exposed {
 		t.Fatal("public config exposed admin password")
 	}
@@ -86,6 +89,25 @@ func TestHealthAndPublicConfig(t *testing.T) {
 		!strings.Contains(body, "slowmeet_last_rtt_ms 84") ||
 		!strings.Contains(body, "slowmeet_last_packet_loss_percent 0.4") {
 		t.Fatalf("metrics response omitted observed network sample: %s", body)
+	}
+}
+
+func TestPublicConfigFlagsMeetingPasswordRequirement(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MeetingPassword = "room-secret"
+	handler := New(cfg, NewLogger("error"))
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/config", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("config status = %d, want 200", response.Code)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"meeting_password_required":true`) {
+		t.Fatalf("public config did not flag the meeting password requirement: %s", body)
+	}
+	if strings.Contains(body, "room-secret") {
+		t.Fatal("public config leaked the meeting password value")
 	}
 }
 

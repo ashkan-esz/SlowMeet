@@ -91,16 +91,17 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"max_participants":      cfg.MaxParticipants,
-			"default_video_quality": cfg.DefaultVideoQuality,
-			"max_video_quality":     cfg.EffectiveMaxVideoQuality(),
-			"default_video_fps":     cfg.DefaultVideoFPS,
-			"default_audio_bitrate": cfg.DefaultAudioBitrate,
-			"max_video_bitrate":     cfg.MaxVideoBitrate,
-			"max_video_fps":         cfg.MaxVideoFPS,
-			"max_audio_bitrate":     cfg.MaxAudioBitrate,
-			"screen_share_enabled":  cfg.EnableScreenShare,
-			"retain_chat_history":   cfg.RetainChatHistory,
+			"max_participants":          cfg.MaxParticipants,
+			"default_video_quality":     cfg.DefaultVideoQuality,
+			"max_video_quality":         cfg.EffectiveMaxVideoQuality(),
+			"default_video_fps":         cfg.DefaultVideoFPS,
+			"default_audio_bitrate":     cfg.DefaultAudioBitrate,
+			"max_video_bitrate":         cfg.MaxVideoBitrate,
+			"max_video_fps":             cfg.MaxVideoFPS,
+			"max_audio_bitrate":         cfg.MaxAudioBitrate,
+			"screen_share_enabled":      cfg.EnableScreenShare,
+			"retain_chat_history":       cfg.RetainChatHistory,
+			"meeting_password_required": cfg.MeetingPassword != "",
 		})
 	})
 	participantPreview := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

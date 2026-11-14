@@ -1,6 +1,7 @@
 const form = document.querySelector("#join-form");
 const nameInput = document.querySelector("#name");
 const passwordInput = document.querySelector("#password");
+const passwordField = document.querySelector("#password-field");
 const joinButton = document.querySelector("#join");
 const status = document.querySelector("#status");
 const brandBar = document.querySelector(".brand-bar");
@@ -3233,6 +3234,7 @@ fetch("/config").then((response) => response.json()).then((config) => {
   }
   screenShareEnabled = config.screen_share_enabled !== false;
   screen.disabled = !screenShareEnabled;
+  if (config.meeting_password_required === false) passwordField.hidden = true;
   if (!storedProfile && config.default_video_quality) {
     profile.value = config.default_video_quality === "ultra" ? "ultra" :
       config.default_video_quality === "very-good" ? "very-good" :
@@ -4621,9 +4623,9 @@ async function runDiagnosticsUpdate() {
       recordParticipantPacketDeltas(participantID, packetDeltas);
     }
   });
-  if (selectedCandidatePair) {
-    const localCandidate = candidatesById.get(selectedCandidatePair.localCandidateId);
-    const remoteCandidate = candidatesById.get(selectedCandidatePair.remoteCandidateId);
+  if (selectedPair) {
+    const localCandidate = candidatesById.get(selectedPair.localCandidateId);
+    const remoteCandidate = candidatesById.get(selectedPair.remoteCandidateId);
     if (localCandidate?.candidateType || remoteCandidate?.candidateType) {
       values.iceCandidateType = `${localCandidate?.candidateType || "unknown"}/` +
         `${remoteCandidate?.candidateType || "unknown"}`;
