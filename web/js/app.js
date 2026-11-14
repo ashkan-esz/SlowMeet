@@ -71,6 +71,9 @@ const connectionPopoverEmpty = document.querySelector("#connection-popover-empty
 const connectionPopoverRetry = document.querySelector("#connection-popover-retry");
 const connectionPopoverControls = document.querySelector("#connection-popover-controls");
 const meetingAlert = document.querySelector("#meeting-alert");
+const pathFallbackBanner = document.querySelector("#path-fallback-banner");
+const pathFallbackSwitch = document.querySelector("#path-fallback-switch");
+const pathFallbackDismiss = document.querySelector("#path-fallback-dismiss");
 const meetingStatusBanner = document.querySelector("#meeting-status");
 const testMedia = document.querySelector("#test-media");
 const deviceTest = document.querySelector(".device-test");
@@ -1615,6 +1618,14 @@ connectionPopoverRetry?.addEventListener("click", () => {
     connectSocket(nameInput.value.trim(), passwordInput.value);
   }
 });
+pathFallbackSwitch?.addEventListener("click", () => {
+  // The user confirmed direct UDP is unusable here; remember it so future
+  // "Automatic" joins start on the relay, then switch immediately.
+  recordDirectUdpFailure();
+  hidePathFallbackBanner();
+  selectConnectionMethod("turn-tcp");
+});
+pathFallbackDismiss?.addEventListener("click", hidePathFallbackBanner);
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
   if (chatPinnedToBottom && newMessages) newMessages.hidden = true;
@@ -1892,6 +1903,14 @@ const iceRestartRelayGraceDelayMs = 12000;
 // overridden; the strike count resets on page load.
 const autoTurnFailoverStrikesLimit = 2;
 let autoTurnFailoverStrikes = 0;
+// A direct-led connection that never establishes within this window gets a
+// user-facing prompt offering the TURN/TCP method (only when the server
+// enables it). Confirmed direct failures are remembered per browser so the
+// next "Automatic" join skips the doomed direct attempt entirely.
+const directPathPromptDelayMs = 8000;
+const directPathMemoryTtlMs = 86400000;
+const directUdpFailureStorageKey = "meeting.directUdpFailAt";
+let directPathWatchdogTimer;
 let reconnectAttempts = 0;
 let wasReconnectResume = false;
 const maxReconnectAttempts = 5;
@@ -2121,6 +2140,9 @@ function selectConnectionMethod(methodID) {
   if (connectionMethod === methodID) return true;
   connectionMethod = methodID;
   autoTurnFailoverStrikes = 0;
+  hidePathFallbackBanner();
+  clearTimeout(directPathWatchdogTimer);
+  directPathWatchdogTimer = undefined;
   writeStoredValue("meeting.connectionMethod", methodID);
   refreshConnectionMethodSelectors();
   if (!meeting.hidden) {
@@ -3776,6 +3798,9 @@ function resetMediaConnection() {
   pendingCandidates.splice(0);
   clearTimeout(iceDisconnectRestartTimer);
   iceDisconnectRestartTimer = undefined;
+  clearTimeout(directPathWatchdogTimer);
+  directPathWatchdogTimer = undefined;
+  hidePathFallbackBanner();
   restartRequested = false;
   iceRestartAttempts = 0;
   previousStats = undefined;
@@ -3816,6 +3841,11 @@ async function startWebRTC() {
   const selectedICEPolicy = effectiveMethod.startsWith("turn-")
     ? "relay"
     : effectiveMethod === "direct" ? "all" : iceTransportPolicy;
+  if (effectiveMethod === "turn-tcp" && connectionMethod === "auto" &&
+      autoTurnFailoverStrikes < autoTurnFailoverStrikesLimit) {
+    // The memory shortcut (not the strike-based failover) picked the relay.
+    showToast("Connecting via TURN/TCP — direct UDP failed recently.", "warning");
+  }
   if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(effectiveMethod) &&
       selectedICEServers.length === 0) {
     showStatus("The selected connection method is unavailable. Choose another method and retry.");
@@ -3828,6 +3858,7 @@ async function startWebRTC() {
   restartRequested = false;
   iceRestartAttempts = 0;
   peer = currentPeer;
+  armDirectPathWatchdog(currentPeer, currentSocket, generation);
   renegotiationChain = Promise.resolve();
   renegotiationQueue = createRenegotiationQueue({
     isCurrent: () => isCurrentWebRTC(generation, currentPeer, currentSocket),
@@ -4207,6 +4238,9 @@ function connectionMethodFailureMessage() {
 function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
   if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || targetPeer.connectionState === "closed") return;
   if (isPeerConnectionConnected(targetPeer)) {
+    clearTimeout(directPathWatchdogTimer);
+    directPathWatchdogTimer = undefined;
+    hidePathFallbackBanner();
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
     clearTimeout(exhaustedReconnectTimer);
@@ -4266,6 +4300,7 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
       // next peer is built as TURN/TCP (see effectiveConnectionMethod), which
       // gets a clean relay allocation. The close is cancelled if ICE recovers
       // during the grace window.
+      recordDirectUdpFailure();
       restartRequested = true;
       status.textContent = "Reconnecting media...";
       scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
@@ -4283,13 +4318,67 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
   }
 }
 
+function recordDirectUdpFailure() {
+  writeStoredValue(directUdpFailureStorageKey, String(Date.now()));
+}
+
+function clearDirectUdpFailure() {
+  try {
+    localStorage.removeItem(directUdpFailureStorageKey);
+  } catch (_) {
+    // Storage is optional; a blocked storage policy must not break the call.
+  }
+}
+
+function hasFreshDirectUdpFailure() {
+  const timestamp = window.SlowMeetPathMemory.parseStoredTimestamp(
+    readStoredValue(directUdpFailureStorageKey)
+  );
+  return window.SlowMeetPathMemory.isFreshFailure(timestamp, Date.now(), directPathMemoryTtlMs);
+}
+
+function turnTcpMethodEnabled() {
+  return connectionMethodOptions.get("turn-tcp")?.enabled === true;
+}
+
+function showPathFallbackBanner() {
+  if (pathFallbackBanner) pathFallbackBanner.hidden = false;
+}
+
+function hidePathFallbackBanner() {
+  if (pathFallbackBanner) pathFallbackBanner.hidden = true;
+}
+
+// Arms the "direct is slow" watchdog for direct-led connections. It only
+// prompts: ICE keeps running, and the banner offers the relay method the
+// server has enabled instead of silently burning restart cycles first.
+function armDirectPathWatchdog(targetPeer, targetSocket, generation) {
+  clearTimeout(directPathWatchdogTimer);
+  directPathWatchdogTimer = undefined;
+  if (effectiveConnectionMethod().startsWith("turn-") || !turnTcpMethodEnabled()) return;
+  directPathWatchdogTimer = setTimeout(() => {
+    directPathWatchdogTimer = undefined;
+    if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || isPeerConnectionConnected(targetPeer)) return;
+    showPathFallbackBanner();
+  }, directPathPromptDelayMs);
+}
+
 // "Automatic" is direct-first: direct candidates win while the network allows
 // them, and once the session has burned enough restarts on direct-led cycles
 // the reconnect below rebuilds the peer as TURN/TCP instead. An explicit
 // method choice always wins over this fallback.
 function effectiveConnectionMethod() {
-  if (connectionMethod === "auto" && autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
-    return "turn-tcp";
+  if (connectionMethod === "auto") {
+    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
+      return "turn-tcp";
+    }
+    // The same browser recorded a direct-UDP failure within the TTL and the
+    // server still enables TURN/TCP: skip the doomed direct attempt. A live
+    // direct pair clears the memory, so this only shortcuts joins on
+    // networks that keep killing direct UDP.
+    if (turnTcpMethodEnabled() && hasFreshDirectUdpFailure()) {
+      return "turn-tcp";
+    }
   }
   return connectionMethod;
 }
@@ -4638,6 +4727,9 @@ async function runDiagnosticsUpdate() {
       values.icePath = relayProtocol ? `TURN/${relayProtocol.toUpperCase()}` : "TURN";
     } else if (values.iceTransport) {
       values.icePath = `Direct/${values.iceTransport.toUpperCase()}`;
+      // A live non-relay pair proves direct UDP works here; a remembered
+      // failure must not shortcut future joins into TURN/TCP.
+      clearDirectUdpFailure();
     }
   }
   if (previousStats && timestamp > previousStats.timestamp && hasInboundVideo) {

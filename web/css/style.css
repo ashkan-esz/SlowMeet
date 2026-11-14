@@ -980,6 +980,11 @@ html:has(.meeting-shell:not([hidden])) #root {
   transform: translateX(-50%);
 }
 .meeting-alert[data-level="poor"] { color: var(--lm-danger); border-color: rgba(239, 102, 109, .35); }
+/* The path-fallback banner carries buttons, so it sits below the meeting
+   alert pill as a rounded row instead of reusing its single-line shape. */
+.path-fallback-banner { inset-block-start: 56px; border-radius: 12px; }
+.path-fallback-banner:not([hidden]) { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 2px 12px; }
+.path-fallback-banner .text-button { color: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; }
 
 .meeting-status {
   position: absolute;
