@@ -75,6 +75,21 @@ host interface:
   MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share" make test-media-e2e-four-netns
   ```
 
+- `make test-soak-netns` runs the sustained weak-network soak: the same
+  four-tier room (P1 clean, P2 moderate, P3 severe, P4 capped-downlink)
+  under CYCLING impairment — two impaired windows (~90 s each, a CPU
+  profile captured mid-window) each followed by a clean recovery window.
+  Where the scenarios above prove each guarantee in a short window, the
+  soak proves it holds over time: audio advances within every window
+  (impaired ones included), every lift recovers every camera for the clean
+  observer, reconnect counts stay bounded per window, and the goroutine
+  count returns to baseline after each clean window (recovery-loop leak
+  guard). Artifacts land in `soak-artifacts/` with the usual pprof
+  captures plus a `metrics.json` timeline of `/metrics` snapshots per
+  window. `SOAK_SECONDS=300` (default) runs two full cycles; the plain
+  clean soak (`make test-soak`) is unchanged. Not gated in CI — opt-in
+  until its runtime is proven stable.
+
 Inspect the active interface first:
 
 ```sh

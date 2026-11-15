@@ -6,9 +6,23 @@
 // the server's admin-gated /debug/pprof endpoints. Run it twice around a
 // media-path change to get a comparable before/after CPU baseline.
 //
-// Env: SOAK_PARTICIPANTS (default 4), SOAK_SECONDS (default 30, min 20),
+// SOAK_IMPAIRMENT=1 switches to the weak-network soak: a 4-person room on
+// four different link qualities (P1 clean, P2 moderate, P3 severe, P4
+// capped) under CYCLING impairment — an impaired window, then a clean
+// recovery window, repeated. It asserts the guarantees that short scenarios
+// cannot prove over time: audio advances within every window (impaired ones
+// included), every lift recovers every camera for the clean observer,
+// reconnect counts stay bounded per window, and the goroutine count returns
+// to baseline after each clean window (leak guard). Both CPU profile windows
+// are captured DURING impaired windows, so the summary shows the cost of
+// impairment itself. Requires the netns wrapper (scripts/test-soak-netns.sh):
+// shaping the host loopback is forbidden.
+//
+// Env: SOAK_PARTICIPANTS (default 4), SOAK_SECONDS (default 30, min 20; in
+// impairment mode default 300, must fit two impaired+clean window pairs),
 // SOAK_PROFILE_SECONDS (default 15; two windows must fit in SOAK_SECONDS),
-// CHROMIUM_PATH / CHROME_PATH as in the other e2e harnesses.
+// SOAK_IMPAIR_WINDOW_SECONDS (default 90), SOAK_CLEAN_WINDOW_SECONDS
+// (default 30), CHROMIUM_PATH / CHROME_PATH as in the other e2e harnesses.
 
 const assert = require("node:assert/strict");
 const { execFileSync, spawn } = require("node:child_process");
@@ -18,14 +32,29 @@ const os = require("node:os");
 const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 const { chromium } = require("playwright-core");
+const netemTiers = require("./netem-tiers");
 
 const root = path.join(__dirname, "..");
 const adminPassword = "slowmeet-soak-admin-password";
+const impairment = process.env.SOAK_IMPAIRMENT === "1";
+const soakNetns = process.env.SOAK_NETNS === "1";
+if (impairment && !soakNetns) {
+  console.error("SOAK_IMPAIRMENT=1 shapes the loopback and must run inside the netns wrapper: make test-soak-netns");
+  process.exit(2);
+}
 const participants = Math.max(1, Number(process.env.SOAK_PARTICIPANTS || 4));
-const soakSeconds = Math.max(20, Number(process.env.SOAK_SECONDS || 30));
+const soakSeconds = Math.max(20, Number(process.env.SOAK_SECONDS || (impairment ? 300 : 30)));
 const profileSeconds = Math.max(5, Number(process.env.SOAK_PROFILE_SECONDS || 15));
+const impairWindowSeconds = Math.max(30, Number(process.env.SOAK_IMPAIR_WINDOW_SECONDS || 90));
+const cleanWindowSeconds = Math.max(15, Number(process.env.SOAK_CLEAN_WINDOW_SECONDS || 30));
 assert.ok(soakSeconds >= 2 * profileSeconds,
   `SOAK_SECONDS=${soakSeconds} must fit two ${profileSeconds}s profile windows`);
+if (impairment) {
+  assert.equal(participants, 4,
+    `the weak-network soak models exactly four participants (got SOAK_PARTICIPANTS=${participants})`);
+  assert.ok(soakSeconds >= 2 * (impairWindowSeconds + cleanWindowSeconds),
+    `SOAK_SECONDS=${soakSeconds} must fit two ${impairWindowSeconds}s+${cleanWindowSeconds}s impairment cycles`);
+}
 
 // pprof (go tool pprof) honors HTTP(S)_PROXY; the ambient proxy here returns
 // a bogus 502 for loopback, so blank it for every pprof invocation.
@@ -67,6 +96,9 @@ async function startServer() {
     cwd: root,
     env: { ...process.env,
       HTTP_ADDR: `127.0.0.1:${port}`, MAX_PARTICIPANTS: String(participants + 1),
+      // Inside the netns the only route is loopback; without a public IP the
+      // SFU gathers no candidates at all.
+      ...(soakNetns ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
       MEETING_PASSWORD: "", ADMIN_PASSWORD: adminPassword, CONFIG_FILE: configPath },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -101,7 +133,16 @@ async function createParticipant(index) {
     headless: process.env.MEDIA_E2E_HEADED !== "1",
     args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
       "--autoplay-policy=no-user-gesture-required", "--no-proxy-server",
-      "--no-sandbox", "--disable-dev-shm-usage"],
+      "--no-sandbox", "--disable-dev-shm-usage",
+      // Same netns block as the four-person harness: plain host ICE
+      // candidates (mDNS names cannot resolve in the namespace) and loopback
+      // ICE allowed.
+      ...(soakNetns ? ["--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+        "--force-webrtc-ip-handling-policy=default_public_interface_only",
+        "--disable-features=WebRtcHideLocalIpsWithMdns",
+        "--allow-loopback-in-peer-connection",
+        `--unsafely-treat-insecure-origin-as-secure=${server.url}`] : [])],
   });
   browsers.push(browser);
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -164,6 +205,172 @@ async function waitForFlowingMedia() {
     before = after;
   }
   throw new Error("synthetic media never reached a steady flow (frames not advancing)");
+}
+
+// --- Weak-network soak (SOAK_IMPAIRMENT=1) ---------------------------------
+
+// Audio bytes in both directions: the guarantee under impairment is audio
+// keeps moving, and bytes — unlike decoded frames — advance for senders
+// whose own uplink is capped.
+async function audioBytes(page) {
+  return page.evaluate(async () => {
+    const peers = (window.__slowMeetTest?.peerConnections || [])
+      .filter((peer) => peer.connectionState === "connected");
+    const reports = await Promise.all(peers.map((peer) => peer.getStats()));
+    let sent = 0;
+    let received = 0;
+    for (const report of reports) {
+      for (const item of report.values()) {
+        if (item.type === "outbound-rtp" && item.kind === "audio") sent += item.bytesSent || 0;
+        if (item.type === "inbound-rtp" && item.kind === "audio") received += item.bytesReceived || 0;
+      }
+    }
+    return { sent, received };
+  });
+}
+
+// Audio silence under sustained impairment is allowed to be TRANSIENT — a
+// peer rebuilt mid-window renegotiates for tens of seconds before inbound
+// audio resumes — but it must not be permanent. Dark participants get a
+// wait-for-flow allowance; nobody may still be dark when it expires.
+async function assertAudioAdvanced(label) {
+  const before = [];
+  for (const page of pages) before.push(await audioBytes(page));
+  await delay(8000);
+  const dark = [];
+  for (const [index, page] of pages.entries()) {
+    const after = await audioBytes(page);
+    const advanced = after.sent > before[index].sent && after.received > before[index].received;
+    const flowing = after.sent > 0 && after.received > 0;
+    if (!advanced && !flowing) dark.push({ index, page });
+  }
+  if (dark.length) {
+    console.log(`[${label}] ${dark.length} participant(s) audio-dark mid-window (peer churn); waiting for flow to resume`);
+    await Promise.all(dark.map(({ page }) => page.waitForFunction(async () => {
+      const peers = (window.__slowMeetTest?.peerConnections || [])
+        .filter((peer) => peer.connectionState === "connected");
+      const reports = await Promise.all(peers.map((peer) => peer.getStats()));
+      let sent = 0;
+      let received = 0;
+      for (const report of reports) {
+        for (const item of report.values()) {
+          if (item.type === "outbound-rtp" && item.kind === "audio") sent += item.bytesSent || 0;
+          if (item.type === "inbound-rtp" && item.kind === "audio") received += item.bytesReceived || 0;
+        }
+      }
+      return sent > 0 && received > 0;
+    }, null, { timeout: 30000 })));
+  }
+  console.log(`[${label}] audio advanced for all ${pages.length} participants`);
+}
+
+// Recovery contract after an impaired window lifts: the clean observer's
+// view of every remote camera returns to "on" within a patient deadline.
+function waitForCameraOn(observerPage, participantName, timeoutMs = 90000) {
+  return observerPage.waitForFunction((target) => {
+    const tile = [...document.querySelectorAll("li[data-participant-id]")]
+      .find((item) => item.textContent.includes(target));
+    return Boolean(tile) && tile.dataset.camera === "on";
+  }, participantName, { timeout: timeoutMs });
+}
+
+// /metrics needs no auth and carries the room-wide counters; snapshots are
+// appended to the artifact timeline so a failure shows what the room saw.
+async function metricsSnapshot() {
+  const text = await (await fetch(`${server.url}/metrics`)).text();
+  const value = (name) => {
+    const match = new RegExp(`^${name} ([\\d.]+)$`, "m").exec(text);
+    return match ? Number(match[1]) : null;
+  };
+  return {
+    at: new Date().toISOString(),
+    activeParticipants: value("slowmeet_active_participants"),
+    peerConnections: value("slowmeet_peer_connections"),
+    reconnects: value("slowmeet_reconnects_total"),
+    connectionFailures: value("slowmeet_connection_failures_total"),
+    averageRTTMs: value("slowmeet_average_rtt_ms"),
+    lastRTTMs: value("slowmeet_last_rtt_ms"),
+    lastLossPct: value("slowmeet_last_packet_loss_percent"),
+  };
+}
+
+// The exact metric names drift; keep the reconnects parse resilient by
+// matching the family prefix if the exact name misses.
+function reconnectsFromSnapshot(snapshot) {
+  return snapshot.reconnects ?? 0;
+}
+
+async function goroutineCount() {
+  const response = await fetch(`${server.url}/debug/pprof/goroutine?debug=1`,
+    { headers: { "X-Admin-Password": adminPassword } });
+  assert.equal(response.status, 200, `goroutine profile status ${response.status}`);
+  const match = /^goroutine profile: total (\d+)$/m.exec(await response.text());
+  return match ? Number(match[1]) : null;
+}
+
+async function runImpairmentCycles() {
+  const participantNames = pages.map((_, index) => `Soak${index + 1}`);
+  const pagesByName = new Map(pages.map((page, index) => [`P${index + 1}`, page]));
+  const cleanObserver = pages[0];
+  const metricsTimeline = [];
+  let cpu1;
+  let cpu2;
+  const reconnectsLimitPerWindow = 8;
+  const goroutineBaseline = await goroutineCount();
+  console.log(`goroutine baseline: ${goroutineBaseline}`);
+
+  for (let cycle = 1; cycle <= 2; cycle += 1) {
+    // Impaired window: the armer keeps classifying rebound ports while the
+    // tiers shape the room; the CPU profile window is captured mid-window
+    // (after a settle so the tiers have bitten), so both profiles measure
+    // the cost of impairment itself rather than the aftermath.
+    netemTiers.installRoomQdisc();
+    const armer = netemTiers.armParticipantTiers(
+      { P2: "moderate", P3: "severe", P4: "capped" }, pagesByName);
+    let cpuWindow;
+    try {
+      await delay(10000);
+      cpuWindow = await captureProfile(`cpu-window${cycle}`, profileSeconds);
+      await assertAudioAdvanced(`cycle ${cycle} impaired window`);
+      const impairedMetrics = await metricsSnapshot();
+      metricsTimeline.push({ window: `cycle-${cycle}-impaired`, ...impairedMetrics });
+      fs.writeFileSync(path.join(artifactsDir, `metrics-cycle${cycle}-impaired.txt`),
+        await (await fetch(`${server.url}/metrics`)).text());
+    } finally {
+      armer.stopped = true;
+    }
+    netemTiers.clearRoomProfiles();
+    if (cycle === 1) cpu1 = cpuWindow;
+    else cpu2 = cpuWindow;
+
+    // Clean recovery window: the lift must restore every camera for the
+    // clean observer, reconnect counts must stay bounded (the client may
+    // full-reconnect a wedged peer — bounded, not zero), and goroutines must
+    // return to baseline (no recovery-loop leak).
+    const before = await metricsSnapshot();
+    await Promise.all(participantNames.slice(1).map((name) =>
+      waitForCameraOn(cleanObserver, name)));
+    console.log(`[cycle ${cycle} clean window] all remote cameras recovered for the clean observer`);
+    const cleanMetrics = await metricsSnapshot();
+    metricsTimeline.push({ window: `cycle-${cycle}-clean`, ...cleanMetrics });
+    fs.writeFileSync(path.join(artifactsDir, `metrics-cycle${cycle}-clean.txt`),
+      await (await fetch(`${server.url}/metrics`)).text());
+    const reconnectsDuringImpairment =
+      (reconnectsFromSnapshot(cleanMetrics) - reconnectsFromSnapshot(before));
+    assert.ok(reconnectsDuringImpairment >= 0 && reconnectsDuringImpairment <= reconnectsLimitPerWindow,
+      `cycle ${cycle}: reconnects grew by ${reconnectsDuringImpairment} across the window (limit ${reconnectsLimitPerWindow})`);
+    const goroutinesNow = await goroutineCount();
+    assert.ok(goroutinesNow !== null && goroutineBaseline !== null &&
+      goroutinesNow <= goroutineBaseline + 20,
+      `cycle ${cycle}: goroutines ${goroutineBaseline} -> ${goroutinesNow} after the clean window (leak guard +20)`);
+    console.log(`[cycle ${cycle} clean window] reconnects +${reconnectsDuringImpairment}, goroutines ${goroutinesNow}`);
+  }
+  fs.writeFileSync(path.join(artifactsDir, "metrics.json"), JSON.stringify({
+    tiers: { P1: "clean", P2: "moderate", P3: "severe", P4: "capped" },
+    goroutineBaseline, timeline: metricsTimeline,
+  }, null, 2));
+  console.log(`metrics timeline written to ${path.join(artifactsDir, "metrics.json")}`);
+  return { cpu1, cpu2 };
 }
 
 async function captureProfile(windowName, seconds) {
@@ -238,8 +445,17 @@ function formatBytes(bytes) {
     const allocs1 = await captureProtoProfile("allocs", "allocs-1");
     const heap1 = await captureProtoProfile("heap", "heap-1");
     const sampleStart = Date.now();
-    const first = await captureProfile("cpu-window1", profileSeconds);
-    const second = await captureProfile("cpu-window2", profileSeconds);
+    let first;
+    let second;
+    if (impairment) {
+      // Both CPU windows are captured DURING impaired windows inside the
+      // cycle runner (the allocs/heap bracket below then measures the
+      // post-impairment steady state).
+      ({ cpu1: first, cpu2: second } = await runImpairmentCycles());
+    } else {
+      first = await captureProfile("cpu-window1", profileSeconds);
+      second = await captureProfile("cpu-window2", profileSeconds);
+    }
     const allocs2 = await captureProtoProfile("allocs", "allocs-2");
     const heap2 = await captureProtoProfile("heap", "heap-2");
     const sampleSeconds = Math.max(1, (Date.now() - sampleStart) / 1000);

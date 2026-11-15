@@ -152,6 +152,10 @@ test-weaknet: ## Run the Go weak-network integration suite in an isolated networ
 test-soak: ## Run a sustained synthetic-meeting soak with server CPU/heap profiles: SOAK_PARTICIPANTS=4 SOAK_SECONDS=30
 	$(NODE) scripts/test-soak.js
 
+.PHONY: test-soak-netns
+test-soak-netns: ## Run the weak-network soak (4 participants, cycling impairment tiers) in an isolated namespace: SOAK_SECONDS=300
+	./scripts/test-soak-netns.sh
+
 test-media-e2e-screen-share: ## Run headed generated-content screen-share scenarios
 	MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE=1 $(NODE) scripts/test-media-e2e.js
 
