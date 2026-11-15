@@ -1,15 +1,118 @@
 package media
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"SlowMeet/internal/webrtc"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
 )
+
+type rtcpTestReader struct {
+	data  []byte
+	attrs interceptor.Attributes
+	err   error
+}
+
+func (r rtcpTestReader) Read(buf []byte) (int, interceptor.Attributes, error) {
+	return copy(buf, r.data), r.attrs, r.err
+}
+
+func TestReadSenderRTCP(t *testing.T) {
+	packet := &rtcp.PictureLossIndication{SenderSSRC: 10, MediaSSRC: 20}
+	raw, err := packet.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := make(interceptor.Attributes)
+	cached, err := attrs.GetRTCPPackets(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		attrs  interceptor.Attributes
+		cached bool
+	}{{"cached", attrs, true}, {"uncached", nil, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			packets, err := readSenderRTCP(rtcpTestReader{data: raw, attrs: tc.attrs}, make([]byte, receiveMTU))
+			if err != nil || len(packets) != 1 {
+				t.Fatalf("packets = %v, error = %v", packets, err)
+			}
+			pli, ok := packets[0].(*rtcp.PictureLossIndication)
+			if !ok || *pli != *packet {
+				t.Fatalf("unexpected packet: %#v", packets[0])
+			}
+			if tc.cached && packets[0] != cached[0] {
+				t.Fatal("did not reuse interceptor's parsed packet")
+			}
+		})
+	}
+	t.Run("cached compound feedback", func(t *testing.T) {
+		nack := &rtcp.TransportLayerNack{SenderSSRC: 10, MediaSSRC: 20, Nacks: []rtcp.NackPair{{PacketID: 42, LostPackets: 3}}}
+		raw, err := rtcp.Marshal([]rtcp.Packet{packet, nack, &rtcp.ReceiverReport{SSRC: 10}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		attrs := make(interceptor.Attributes)
+		cached, err := attrs.GetRTCPPackets(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, receiveMTU)
+		packets, err := readSenderRTCP(rtcpTestReader{data: raw, attrs: attrs}, buf)
+		if err != nil || len(packets) != 3 || packets[1] != cached[1] {
+			t.Fatalf("compound packets = %v, error = %v", packets, err)
+		}
+		routed := routeRTCPFeedback(packets, 99)
+		got, ok := routed[1].(*rtcp.TransportLayerNack)
+		if !ok || got.MediaSSRC != 99 || len(got.Nacks) != 1 || got.Nacks[0] != nack.Nacks[0] {
+			t.Fatalf("routed NACK = %#v", routed[1])
+		}
+		if cached[1].(*rtcp.TransportLayerNack).MediaSSRC != 20 {
+			t.Fatal("routing mutated the interceptor's cached NACK")
+		}
+	})
+	readErr := errors.New("read failed")
+	if _, err := readSenderRTCP(rtcpTestReader{err: readErr}, make([]byte, receiveMTU)); !errors.Is(err, readErr) {
+		t.Fatalf("read error = %v", err)
+	}
+	if _, err := readSenderRTCP(rtcpTestReader{data: []byte{1}}, make([]byte, receiveMTU)); err == nil {
+		t.Fatal("expected malformed RTCP error")
+	}
+}
+
+func BenchmarkReadSenderRTCP(b *testing.B) {
+	// A transport-wide feedback packet with no received-packet status chunks.
+	raw := []byte{0x8f, 205, 0, 4, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0}
+	attrs := make(interceptor.Attributes)
+	if _, err := attrs.GetRTCPPackets(raw); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("unmarshal-again", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := rtcp.Unmarshal(raw); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("reuse-interceptor-result", func(b *testing.B) {
+		buf := make([]byte, receiveMTU)
+		reader := rtcpTestReader{data: raw, attrs: attrs}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := readSenderRTCP(reader, buf); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
 
 func TestRouteRTCPFeedbackTargetsSourceTrack(t *testing.T) {
 	const sourceSSRC = 1234

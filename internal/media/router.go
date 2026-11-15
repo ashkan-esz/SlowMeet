@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"SlowMeet/internal/webrtc"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
@@ -926,8 +927,9 @@ func dispatchOffers(offers map[string]Offerer) {
 // retargets the feedback to the new source track without restarting the
 // goroutine (the sender keeps one RTCP reader for its whole lifetime).
 func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.Uint32) {
+	buf := make([]byte, receiveMTU)
 	for {
-		packets, _, err := sender.ReadRTCP()
+		packets, err := readSenderRTCP(sender, buf)
 		if err != nil {
 			return
 		}
@@ -935,6 +937,18 @@ func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.U
 			return
 		}
 	}
+}
+
+func readSenderRTCP(sender interface {
+	Read([]byte) (int, interceptor.Attributes, error)
+}, buf []byte) ([]rtcp.Packet, error) {
+	n, attrs, err := sender.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	// The NACK interceptor has usually parsed this batch already. Reuse it
+	// instead of unmarshalling the same RTCP a second time.
+	return attrs.GetRTCPPackets(buf[:n])
 }
 
 func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
