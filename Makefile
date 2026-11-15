@@ -58,7 +58,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
+	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-path-memory test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
 
 test-js-syntax: ## Syntax-check every browser JavaScript file
 	@status=0; \
@@ -75,6 +75,9 @@ test-protocol: ## Test the signaling protocol
 
 test-connection-methods: ## Test strict ICE server selection by connection method
 	$(NODE) scripts/test-connection-methods.js
+
+test-path-memory: ## Test remembered direct-UDP failure freshness rules
+	$(NODE) scripts/test-path-memory.js
 
 test-adaptation: ## Test media adaptation behavior
 	$(NODE) scripts/test-adaptation.js

@@ -159,6 +159,26 @@ if (participantQuality.quality !== "good") {
   throw new Error("five consecutive healthy samples should clear participant warnings");
 }
 
+// A flapping link: degraded and poor samples count toward one warning
+// streak, a short clean blip must not clear the warning early, and the
+// five-healthy-sample rule still governs clearance across flapping windows.
+let flapQuality = stabilizeParticipantQuality("good", "poor");
+flapQuality = stabilizeParticipantQuality(flapQuality.quality, "degraded", flapQuality.poorSamples, flapQuality.goodSamples);
+if (flapQuality.quality !== "degraded") {
+  throw new Error("mixed degraded and poor samples should count toward one warning streak");
+}
+flapQuality = stabilizeParticipantQuality(flapQuality.quality, "good", flapQuality.poorSamples, flapQuality.goodSamples);
+flapQuality = stabilizeParticipantQuality(flapQuality.quality, "good", flapQuality.poorSamples, flapQuality.goodSamples);
+if (flapQuality.quality !== "degraded") {
+  throw new Error("a clean blip inside a flapping link must not clear the warning early");
+}
+for (let sample = 0; sample < 3; sample += 1) {
+  flapQuality = stabilizeParticipantQuality(flapQuality.quality, "good", flapQuality.poorSamples, flapQuality.goodSamples);
+}
+if (flapQuality.quality !== "good") {
+  throw new Error("warning clearance still requires five consecutive healthy samples across flapping windows");
+}
+
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
 layerState = chooseCameraLayer(layerState.layer, layerState.poorSamples, layerState.goodSamples, 5, null);
 if (layerState.layer !== "high" || layerState.poorSamples !== 1) {
@@ -194,6 +214,58 @@ if (transition(2, 1, 0).level !== 2) throw new Error("downgrade requires two sam
 if (transition(0, 0, 4).level !== 0) throw new Error("upgrade requires five samples");
 if (!shouldRecoverVideo(5, true) || shouldRecoverVideo(4, true) || shouldRecoverVideo(5, false)) {
   throw new Error("video recovery requires five consecutive good samples");
+}
+
+// One diagnostics tick, mirroring the app's sample loop: streaks accumulate
+// per sample and chooseAdaptationLevel consumes a satisfied streak once.
+function stepAdaptationLadder(state, sample) {
+  let poorSamples = sample.poor || sample.critical ? state.poorSamples + 1 : 0;
+  let goodSamples = sample.good ? state.goodSamples + 1 : 0;
+  const next = chooseAdaptationLevel(state.level, poorSamples, goodSamples, 4);
+  if (next.reset === "poor") poorSamples = 0;
+  if (next.reset === "good") goodSamples = 0;
+  return { level: next.level, poorSamples, goodSamples };
+}
+
+// A fluctuating link: two poor samples step the ladder down one level, a
+// short clean blip must not recover it (five good samples required), the
+// recovery is one level, and the next impaired window steps down again
+// without ever double-stepping.
+let fluctuating = { level: 2, poorSamples: 0, goodSamples: 0 };
+const fluctuationPoorSample = { poor: true };
+const fluctuationGoodSample = { good: true };
+fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
+fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
+if (fluctuating.level !== 1) {
+  throw new Error("a fluctuating link should step down one level after two poor samples");
+}
+for (let sample = 0; sample < 4; sample += 1) {
+  fluctuating = stepAdaptationLadder(fluctuating, fluctuationGoodSample);
+}
+if (fluctuating.level !== 1) {
+  throw new Error("four clean samples inside a fluctuating link must not recover the ladder");
+}
+fluctuating = stepAdaptationLadder(fluctuating, fluctuationGoodSample);
+if (fluctuating.level !== 2) {
+  throw new Error("five consecutive clean samples should recover exactly one ladder level");
+}
+fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
+fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
+if (fluctuating.level !== 1) {
+  throw new Error("a second impaired window should step down again from the recovered level");
+}
+for (let sample = 0; sample < 20; sample += 1) {
+  fluctuating = stepAdaptationLadder(fluctuating, sample % 2 ? fluctuationGoodSample : fluctuationPoorSample);
+}
+if (fluctuating.level !== 1) {
+  throw new Error("alternating poor and good samples must hold the ladder steady without double-stepping");
+}
+let floorWalk = { level: 0, poorSamples: 0, goodSamples: 0 };
+for (let sample = 0; sample < 10; sample += 1) {
+  floorWalk = stepAdaptationLadder(floorWalk, fluctuationPoorSample);
+}
+if (floorWalk.level !== 0) {
+  throw new Error("sustained poor samples must hold the ladder at the very-slow floor");
 }
 const profile = { name: "slow", fps: 10, audioBitrate: 32000 };
 const configured = applyServerDefaults(profile, { videoFPS: 15, audioBitrate: 48000 }, true);
@@ -348,6 +420,22 @@ criticalStreak = sustainedCriticalSample.critical ? criticalStreak + 1 : 0;
 if (!shouldPauseVideo(true, 0, criticalStreak)) {
   throw new Error("three consecutive critical samples must still pause automatic video");
 }
+// An inconsistent link that keeps dipping into critical conditions but never
+// sustains them must degrade quality without ever pausing video: every clean
+// sample resets the critical streak, so protect-audio stays out of the way.
+const fluctuationHealthySample = classifyNetworkSample({
+  rttMs: 80, packetLoss: 0, jitterMs: 10, availableOutgoingKbps: 600
+});
+let flapCriticalStreak = 0;
+let pausedDuringFlap = false;
+for (let sample = 0; sample < 40; sample += 1) {
+  const flapSample = sample % 4 < 2 ? sustainedCriticalSample : fluctuationHealthySample;
+  flapCriticalStreak = flapSample.critical ? flapCriticalStreak + 1 : 0;
+  pausedDuringFlap = pausedDuringFlap || shouldPauseVideo(true, 0, flapCriticalStreak);
+}
+if (pausedDuringFlap) {
+  throw new Error("alternating critical and good samples must never sustain the critical streak that pauses video");
+}
 let recoveryStreak = 0;
 for (let sample = 0; sample < 5; sample += 1) {
   const healthySample = classifyNetworkSample({
@@ -478,6 +566,32 @@ if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWi
     [{ lossPct: 0.1, receivedDelta: 200, jitterMs: null }], { pooledLossPct: 0.2, fallbackJitterMs: 70 }),
     { lossPct: 0.1, jitterMs: 70 },
     "a qualifying stream without jitter keeps the fallback jitter");
+
+  // A fluctuating room where a different sender is impaired in each window:
+  // the clean receiver's own-link estimate stays keyed to its own path in
+  // both windows because at least one stream still arrives cleanly.
+  const firstFlapWindow = [
+    { lossPct: 48, receivedDelta: 150 },  // sender A's congested uplink
+    { lossPct: 0.3, receivedDelta: 200 }  // sender B still reaches me cleanly
+  ];
+  assert.equal(selectOwnLinkMeasurements(firstFlapWindow, { pooledLossPct: 24 }).lossPct,
+    0.3, "the clean sender's stream carries the receiver's own-link loss in the first window");
+  const secondFlapWindow = [
+    { lossPct: 0.5, receivedDelta: 200 }, // sender A recovered
+    { lossPct: 52, receivedDelta: 140 }   // sender B's uplink is now congested
+  ];
+  assert.equal(selectOwnLinkMeasurements(secondFlapWindow, { pooledLossPct: 26 }).lossPct,
+    0.5, "when the impaired sender changes, the minimum still tracks the receiver's own path");
+
+  // When the receiver's own link degrades instead, every stream degrades
+  // with it and the minimum rises above the poor threshold — that is the
+  // signal adaptation must react to.
+  const ownDegradedFlapWindow = [
+    { lossPct: 31, receivedDelta: 180 },
+    { lossPct: 9.5, receivedDelta: 160 }
+  ];
+  assert.equal(selectOwnLinkMeasurements(ownDegradedFlapWindow, { pooledLossPct: 20 }).lossPct,
+    9.5, "a degraded own link raises the minimum across all of the receiver's streams");
 }
 
 const fs = require("node:fs");
@@ -871,6 +985,7 @@ for (const behavior of [
   "(You)",
   'setMeasuredConnection("fair", "Unstable connection")',
   'setMeasuredConnection("poor", "Unstable connection")',
+  '(values.rttMs != null && values.rttMs > 200) || (lossKnown && values.packetLoss >= 4)',
   'button.dataset.receiveVideo = enabled ? "on" : "off"',
   "setMoreIncomingVideoState(enabled)",
   'updateControlLabel(chatToggle, open ? "Close chat" : "Open chat")',

@@ -417,11 +417,39 @@ async function pageLocalIcePorts(page) {
   });
 }
 
+// Every local ICE host port the page has gathered regardless of connection
+// state. A cold join must be classified while its handshake is still in
+// flight — the connected-only reader would shape only the aftermath, and the
+// whole point of a cold-join scenario is that establishment itself happens
+// under impairment.
+async function pageGatheredIcePorts(page) {
+  return page.evaluate(async () => {
+    const peers = [...(window.__slowMeetTest?.peerConnections || [])]
+      .filter((peer) => peer.connectionState !== "closed" && peer.connectionState !== "failed");
+    const ports = new Set();
+    for (const peer of peers) {
+      if (typeof peer.getStats !== "function") continue;
+      try {
+        const report = await peer.getStats();
+        report.forEach((stat) => {
+          if (stat.type === "local-candidate" && stat.candidateType === "host" &&
+            stat.port && stat.port !== 9) {
+            ports.add(Number(stat.port));
+          }
+        });
+      } catch (_) {}
+    }
+    return [...ports];
+  });
+}
+
 // The app can replace a participant's peer connection mid-room ("restarting
 // media"), which rebinds its ICE port; a one-shot classification would then
 // miss the media. The armer keeps re-reading every impaired participant's
-// live ports and classifying new ones until the profiles are lifted.
-function armParticipantTiers(tierByRole) {
+// live ports and classifying new ones until the profiles are lifted. The
+// port reader is injectable: cold-join scenarios classify ports that have
+// not connected yet (see pageGatheredIcePorts), the default reads live ports.
+function armParticipantTiers(tierByRole, readPorts = pageLocalIcePorts) {
   const applied = new Map();
   const stop = { stopped: false };
   (async () => {
@@ -429,7 +457,7 @@ function armParticipantTiers(tierByRole) {
       for (const [role, tier] of Object.entries(tierByRole)) {
         if (tier === "clean") continue;
         try {
-          const ports = await pageLocalIcePorts(pages.get(role));
+          const ports = await readPorts(pages.get(role));
           for (const port of ports) {
             if (!applied.get(role)?.has(port)) {
               if (!applied.has(role)) applied.set(role, new Set());
@@ -460,7 +488,23 @@ function tcRun(args) {
 // that rate shaping alone leaves the severe tier barely degraded.
 const fourPersonTiers = {
   moderate: { classID: "1:20", handle: "20:", rate: "200kbit", delay: "200ms", loss: "8%" },
-  severe: { classID: "1:30", handle: "30:", rate: "100kbit", delay: "300ms", loss: "12%" }
+  severe: { classID: "1:30", handle: "30:", rate: "100kbit", delay: "300ms", loss: "12%" },
+  // A pure bandwidth cap: rate shaping with no injected loss, the way a thin
+  // link congests without any random corruption. Three inbound camera streams
+  // massively oversubscribe the class, so the queue — deliberately left at
+  // netem's default size — congests through delay rather than early tail
+  // drops; a small limit instead yields 60%+ loss immediately, which starves
+  // ICE consent and trips the server's ICE-failure teardown (replacing the
+  // peer connection mid-scenario) instead of modeling a slow-but-alive link.
+  // Fast runners encode the fake camera efficiently, so scenarios assert this
+  // tier qualitatively (audio survives, capped video trails the clean pair)
+  // instead of exact thresholds.
+  capped: { classID: "1:40", handle: "40:", rate: "150kbit", delay: "50ms", loss: "0%" },
+  // A total media outage: every packet on this port is dropped, the way a
+  // dead radio or a NAT timeout severs the path while the WebSocket (TCP,
+  // outside these classes) stays up. Scenarios use it for a short window to
+  // exercise the client's own recovery once the path returns.
+  blackout: { classID: "1:50", handle: "50:", rate: "10gbit", delay: "50ms", loss: "100%" }
 };
 
 function installRoomQdisc() {
@@ -468,8 +512,10 @@ function installRoomQdisc() {
   tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit"]);
   for (const tier of Object.values(fourPersonTiers)) {
     tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", tier.rate, "ceil", tier.rate]);
-    tcRun(["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle",
-      tier.handle, "netem", "delay", tier.delay, "loss", tier.loss]);
+    const netemArgs = ["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle",
+      tier.handle, "netem", "delay", tier.delay, "loss", tier.loss];
+    if (tier.limit) netemArgs.push("limit", tier.limit);
+    tcRun(netemArgs);
   }
 }
 
@@ -528,6 +574,19 @@ async function waitForDegradedCameraTile(observers, participantID, timeoutMs = 4
   }
 }
 
+// Per-sender decode progress: the tile's <video> exposes presented-frame
+// counts, which a room where every sender sits on a different tier needs —
+// pageMediaSnapshot's per-page aggregate cannot separate one sender's stream
+// from another's, so cross-participant decode comparisons between receivers
+// are meaningless there.
+async function tileVideoFrames(page, participantID) {
+  return page.evaluate((id) => {
+    const video = document.querySelector(`li[data-participant-id='${id}'] video:not(.screen-video)`);
+    if (!video || typeof video.getVideoPlaybackQuality !== "function") return -1;
+    return video.getVideoPlaybackQuality().totalVideoFrames;
+  }, participantID);
+}
+
 // --- Scenarios -------------------------------------------------------------
 
 async function scenarioStaggeredJoins() {
@@ -560,6 +619,62 @@ async function scenarioMediaStatePropagation() {
     await page.locator("#camera").click();
     for (const peer of observers) await waitForTileState(peer, participantID, "camera", cameraOn ? "on" : "off");
   }
+  await assertMedia();
+}
+
+// The good-network baseline the impairment scenarios are measured against:
+// four participants on a clean link for a sustained window may not degrade
+// anything. Audio and video advance on every browser, no tile drops to a
+// degraded quality or a protect-audio pause, no participant's own connection
+// leaves the Connected state, and a screen share decodes on every viewer
+// while the camera grid keeps flowing.
+async function scenarioAllCleanFullQuality() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const before = new Map();
+  for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+  await delay(15000);
+  const after = new Map();
+  for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+  for (const role of roles) {
+    assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+      `${role} outbound audio stalled on a clean link`);
+    assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+      `${role} inbound audio stalled on a clean link`);
+    assert.ok(after.get(role).videoFrames > before.get(role).videoFrames,
+      `${role} decoded no video on a clean link`);
+  }
+  for (const [role, page] of pages) {
+    const degraded = await page.evaluate(() =>
+      [...document.querySelectorAll("li[data-participant-id]")].filter((tile) => {
+        const quality = tile.dataset.quality || "";
+        return tile.dataset.camera === "paused" ||
+          tile.classList.contains("is-poor-connection") ||
+          quality === "degraded" || quality === "poor";
+      }).map((tile) => tile.dataset.participantId));
+    assert.deepEqual(degraded, [],
+      `${role} saw degraded tiles on a clean link: ${JSON.stringify(degraded)}`);
+    const localStatus = await page.evaluate(() =>
+      document.querySelector("#status")?.textContent || "");
+    assert.ok(localStatus.includes("Connected"),
+      `${role}'s own connection left the Connected state on a clean link: "${localStatus}"`);
+  }
+  // The same clean link must carry a screen share to every viewer without
+  // disturbing the camera grid.
+  const sharer = pages.get("P1");
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[0]);
+  await delay(2000);
+  for (const [role, page] of pages) {
+    if (role === "P1") continue;
+    await page.waitForFunction(() => {
+      const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+      return Boolean(video) && video.videoWidth > 0 && video.readyState >= 2;
+    }, null, { timeout: 30000 });
+  }
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "false");
   await assertMedia();
 }
 
@@ -1724,11 +1839,12 @@ async function scenarioAxeAccessibility() {
     "the meeting surface has axe critical/serious violations");
 }
 
-// One room, three link qualities: P1/P4 clean, P2 moderate (200kbit/3%),
-// P3 severe (100kbit/5%). The room guarantee under mixed quality: audio
-// keeps moving for everyone, each participant's degradation stays theirs
-// (the clean pair keeps decoding video), the impaired participants' cameras
-// yield room-wide, and lifting the profiles restores every camera.
+// One room, three link qualities: P1/P4 clean, P2 moderate (200kbit/8%
+// loss), P3 severe (100kbit/12% loss). The room guarantee under mixed
+// quality: audio keeps moving for everyone, each participant's degradation
+// stays theirs (the clean pair keeps decoding video), the impaired
+// participants' cameras yield room-wide, and lifting the profiles restores
+// every camera.
 async function scenarioMixedQualityRoom() {
   await setupRoom();
   // Audio is the guarantee under test; earlier scenarios share these pages,
@@ -1851,11 +1967,587 @@ async function scenarioScreenShareMixedQuality() {
   await assertMedia();
 }
 
+// The audio guarantee under impairment needs live microphones: joining
+// starts muted, so unmute any participant earlier scenarios left muted.
+async function unmuteAllForAudioGuarantee() {
+  for (const page of pages.values()) {
+    if (await page.locator("#mic").getAttribute("aria-pressed") !== "true") {
+      await page.locator("#mic").click();
+    }
+    await page.waitForFunction(() =>
+      document.querySelector("#mic")?.getAttribute("aria-pressed") === "true",
+    null, { timeout: 10000 });
+  }
+  await delay(2000);
+}
+
+// An inconsistent link: the moderate tier arrives, lifts, and returns. Every
+// impaired window degrades the impaired participant's camera on the clean
+// observers while the clean pair stays live and audio keeps moving; every
+// lift restores the camera before the next window arrives.
+async function scenarioFluctuatingLink() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const cleanObservers = [pages.get("P1"), pages.get("P4")];
+  const tierByRole = { P2: "moderate" };
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  for (let cycle = 1; cycle <= 2; cycle += 1) {
+    const before = new Map();
+    for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+    installRoomQdisc();
+    let armer;
+    try {
+      armer = armParticipantTiers(tierByRole);
+      await delay(10000);
+      const after = new Map();
+      for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+      for (const role of roles) {
+        assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+          `${role} outbound audio did not advance under the impaired window`);
+        assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+          `${role} inbound audio did not advance under the impaired window`);
+      }
+      await waitForDegradedCameraTile(cleanObservers, p2ID);
+      // The clean pair's cameras must stay live through the impaired window.
+      const p1ID = await participantIDFor(pages.get("P4"), names[0]);
+      const p4ID = await participantIDFor(pages.get("P1"), names[3]);
+      await waitForTileState(pages.get("P4"), p1ID, "camera", "on", 10000);
+      await waitForTileState(pages.get("P1"), p4ID, "camera", "on", 10000);
+    } finally {
+      if (armer) armer.stopped = true;
+      clearRoomProfiles();
+    }
+    // The lift must restore the impaired camera before the next window.
+    for (const observer of cleanObservers) {
+      await waitForTileState(observer, p2ID, "camera", "on", 60000);
+    }
+    console.log(`[fluctuating] cycle ${cycle}: impairment lifted and the camera recovered`);
+  }
+  await assertMedia();
+}
+
+// A slow link with no injected loss: the capped tier congests purely through
+// rate shaping. Audio must survive the standing queue, the capped
+// participant's video intake must trail a clean participant's, degradation
+// must stay owned by the capped link, and recovery must be prompt.
+async function scenarioSlowBandwidthRoom() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P2: "capped" };
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  const before = new Map();
+  for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(15000);
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of roles) {
+      assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+        `${role} outbound audio did not advance under the rate cap`);
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} inbound audio did not advance under the rate cap`);
+    }
+    const cappedDelta = after.get("P2").videoFrames - before.get("P2").videoFrames;
+    const cleanDelta = after.get("P1").videoFrames - before.get("P1").videoFrames;
+    assert.ok(cappedDelta < cleanDelta,
+      `the capped participant decoded more video than a clean one: P1=${cleanDelta} P2=${cappedDelta}`);
+    await waitForDegradedCameraTile([pages.get("P1"), pages.get("P4")], p2ID);
+    // Own-link attribution: the clean pair must not react to the capped
+    // sender's congestion.
+    const p1ID = await participantIDFor(pages.get("P4"), names[0]);
+    const p4ID = await participantIDFor(pages.get("P1"), names[3]);
+    await waitForTileState(pages.get("P4"), p1ID, "camera", "on", 10000);
+    await waitForTileState(pages.get("P1"), p4ID, "camera", "on", 10000);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  await waitForTileState(pages.get("P1"), p2ID, "camera", "on", 90000);
+  console.log("[slow-bandwidth] capped camera recovered after the cap was lifted");
+  await assertMedia();
+}
+
+// Closing an impaired participant's signaling socket while the impairment is
+// live: the token resume restores the seat and media inside the grace
+// window, the rest of the room keeps exchanging audio throughout, and the
+// re-armed classifiers catch the resumed peer's new ICE port while the link
+// is still degraded.
+async function scenarioReconnectUnderImpairment() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P2: "moderate", P3: "severe" };
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(10000);
+    const before = new Map();
+    for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+    const reconnecting = pages.get("P2");
+    const socketCount = await reconnecting.evaluate(() => window.__slowMeetTest.sockets.length);
+    await reconnecting.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "reconnect under impairment"));
+    await reconnecting.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+      window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+    for (const page of pages.values()) await roster(page, names);
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of ["P1", "P3", "P4"]) {
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} stopped receiving audio while P2 was reconnecting under impairment`);
+    }
+    // P2's counters restart at zero on the resumed peer connection, so a
+    // delta against the pre-close snapshot would compare different peers.
+    // Wait until the resumed peer's microphone is republishing instead.
+    await reconnecting.waitForFunction(async () => {
+      const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+      if (!peer || peer.connectionState !== "connected" || typeof peer.getStats !== "function") {
+        return false;
+      }
+      const report = await peer.getStats();
+      let audioSent = 0;
+      report.forEach((stat) => {
+        if (stat.type === "outbound-rtp" && stat.kind === "audio") audioSent += stat.bytesSent || 0;
+      });
+      return audioSent > 0;
+    }, null, { timeout: 30000 });
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  for (const [role, index] of [["P2", 1], ["P3", 2]]) {
+    const participantID = await participantIDFor(pages.get("P1"), names[index]);
+    await waitForTileState(pages.get("P1"), participantID, "camera", "on", 90000);
+  }
+  console.log("[reconnect] media fully recovered after the impaired reconnect");
+  await assertMedia();
+}
+
+// An impaired participant's manual ICE restart must renegotiate in place —
+// no signaling reconnect may appear — and media must keep flowing on a link
+// that is still degraded. The rate-capped tier keeps the link slow without
+// injecting loss, and this runs on P4: the client counts every restart
+// request (manual or automatic) toward a persistent TURN-failover latch, so
+// a page that earlier impairment scenarios pushed into transient ICE
+// disconnects could hit the latch on this scenario's first click and
+// dead-end on the namespace's missing TURN servers.
+async function scenarioIceRestartUnderImpairment() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P4: "capped" };
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(10000);
+    const restarting = pages.get("P4");
+    const socketCount = await restarting.evaluate(() => window.__slowMeetTest.sockets.length);
+    await restarting.locator("#connection").click();
+    await restarting.locator("#connection-popover-retry").waitFor({ state: "visible", timeout: 5000 });
+    await restarting.locator("#connection-popover-retry").click();
+    // The restart rebuilds this participant's media path; a superseded peer
+    // connection may linger in closed state, so gate on the newest one
+    // reaching connected rather than demanding every historical peer be live.
+    await restarting.waitForFunction(() =>
+      [...(window.__slowMeetTest?.peerConnections || [])].at(-1)?.connectionState === "connected",
+    null, { timeout: 45000 });
+    await delay(4000);
+    const laterSocketCount = await restarting.evaluate(() => window.__slowMeetTest.sockets.length);
+    assert.equal(laterSocketCount, socketCount,
+      "the ICE restart fell back to a full signaling reconnect instead of renegotiating in place");
+    for (const page of pages.values()) await roster(page, names);
+    const before = await pageMediaSnapshot(restarting);
+    await delay(2000);
+    const after = await pageMediaSnapshot(restarting);
+    assert.ok(after.audioSent > before.audioSent && after.audioReceived > before.audioReceived,
+      "audio stopped flowing on the restarted impaired peer");
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  const p4ID = await participantIDFor(pages.get("P1"), names[3]);
+  await waitForTileState(pages.get("P1"), p4ID, "camera", "on", 90000);
+  await assertMedia();
+}
+
+// A killed impaired browser frees its seat after the grace window; the fresh
+// rejoin must re-establish media while the impairment is still armed, and the
+// re-armed classifiers must catch the new browser's ICE ports.
+async function scenarioReconnectAfterExpiryUnderImpairment() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P3: "severe" };
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(10000);
+    const victim = pages.get("P3");
+    const victimContext = victim.context();
+    await victimContext.close();
+    pages.delete("P3");
+    const contextIndex = contexts.indexOf(victimContext);
+    if (contextIndex >= 0) contexts.splice(contextIndex, 1);
+    traces.delete(victimContext);
+    await delay(reconnectGraceSeconds * 1000 + 2000);
+    for (const page of pages.values()) await roster(page, [names[0], names[1], names[3]]);
+    await join("P3");
+    // A fresh join starts camera-off; enable it so the post-recovery tile
+    // assertions have something to observe.
+    const p3Page = pages.get("P3");
+    await p3Page.locator("#camera").click();
+    await p3Page.waitForFunction(() =>
+      document.querySelector("#camera")?.getAttribute("aria-pressed") === "true",
+    null, { timeout: 15000 });
+    for (const page of pages.values()) await roster(page, names);
+    const before = await pageMediaSnapshot(p3Page);
+    // The fresh joiner's inbound media takes a negotiation round to start;
+    // wait until audio bytes are actually arriving before measuring the delta.
+    await p3Page.waitForFunction(async () => {
+      const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+      if (!peer || peer.connectionState !== "connected" || typeof peer.getStats !== "function") {
+        return false;
+      }
+      const report = await peer.getStats();
+      let audioBytes = 0;
+      report.forEach((stat) => {
+        if (stat.type === "inbound-rtp" && stat.kind === "audio") audioBytes += stat.bytesReceived || 0;
+      });
+      return audioBytes > 0;
+    }, null, { timeout: 30000 });
+    await delay(3000);
+    const after = await pageMediaSnapshot(p3Page);
+    assert.ok(after.audioReceived > before.audioReceived,
+      "the fresh join under impairment never received audio");
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  const p3ID = await participantIDFor(pages.get("P1"), names[2]);
+  await waitForTileState(pages.get("P1"), p3ID, "camera", "on", 90000);
+  await assertMedia();
+}
+
+// Complete the join flow on a page opened with skipJoin: the welcome form is
+// already loaded, so only the credentials and the join click remain.
+async function joinExistingPage(page, name) {
+  await page.locator("#name").fill(name);
+  await page.locator("#join").click();
+  await page.locator("#meeting").waitFor({ state: "visible", timeout: 30000 });
+}
+
+// Free every seat the shared room still holds and retire its browsers. Cold
+// join opens fresh browsers, and the server's four seats are occupied by the
+// pages earlier scenarios left joined — a fresh join is rejected as
+// room-full. The ordinary Leave path frees a seat immediately (no reconnect
+// grace window), which killing the browser never does.
+async function leaveSharedRoom() {
+  for (const [, page] of pages) {
+    try {
+      if (await page.locator("#meeting").isVisible()) {
+        await page.locator("#leave").click({ timeout: 5000 });
+      }
+    } catch (_) {}
+  }
+  for (const [, page] of pages) {
+    try {
+      await page.locator("#join-form").waitFor({ state: "visible", timeout: 15000 });
+      await page.waitForFunction(() => {
+        const count = document.querySelector("#room-roster-count");
+        return Boolean(count) && count.textContent.startsWith("0 participant");
+      }, null, { timeout: 20000 });
+      break; // one confirmation that the room drained is enough
+    } catch (_) {}
+  }
+  for (const context of contexts.splice(0)) {
+    traces.delete(context);
+    await context.close().catch(() => {});
+  }
+  for (const browser of browsers.splice(0)) {
+    await browser.close().catch(() => {});
+  }
+  pages.clear();
+  events.clear();
+}
+
+// Every other mixed-quality scenario joins on a clean link and arms the
+// impairment only afterwards. This one arms the tiers first and opens the
+// browsers onto an impaired network: ICE gathering, DTLS, and the first
+// media seconds all happen under impairment, the way a participant on a
+// train tunnel or a congested hotel Wi-Fi experiences their first join. The
+// gathered-ports armer classifies each browser's ICE port as soon as it
+// appears (the connected-only reader would shape only the aftermath), so
+// only the very first packets of each handshake slip through unshaped.
+async function scenarioColdJoinUnderImpairment() {
+  // Earlier scenarios leave the shared room joined; the fresh browsers this
+  // scenario opens need its four seats freed first.
+  await leaveSharedRoom();
+  installRoomQdisc();
+  const tierByRole = { P2: "moderate", P3: "severe", P4: "capped" };
+  let armer;
+  try {
+    for (const [index, role] of roles.entries()) {
+      await createParticipant(role, names[index], false, true);
+    }
+    armer = armParticipantTiers(tierByRole, pageGatheredIcePorts);
+    // Staggered join while impaired, mirroring the opening scenario's
+    // two-sequential-then-parallel pattern.
+    await joinExistingPage(pages.get("P1"), names[0]);
+    await joinExistingPage(pages.get("P2"), names[1]);
+    await Promise.all(["P3", "P4"].map((role, index) =>
+      joinExistingPage(pages.get(role), names[2 + index])));
+    for (const page of pages.values()) await roster(page, names);
+    await enableCameras();
+    await unmuteAllForAudioGuarantee();
+
+    const before = new Map();
+    for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+    await delay(10000);
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of roles) {
+      assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+        `${role} outbound audio did not advance after joining into the impaired network`);
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} inbound audio did not advance after joining into the impaired network`);
+    }
+    // Degradation is per-tier even for links that never knew a clean state:
+    // the severe and moderate cameras yield on the clean observer.
+    const p1 = pages.get("P1");
+    for (const [role, index] of [["P2", 1], ["P3", 2]]) {
+      const participantID = await participantIDFor(p1, names[index]);
+      await waitForDegradedCameraTile([p1], participantID);
+      console.log(`[cold-join] ${role}'s camera degraded on the clean observer`);
+    }
+    // P1 is the room's only clean sender, so every receiver's clean-video
+    // intake is P1's camera. The capped receiver's view of it is acceptable
+    // in exactly two shapes: frames trickling through the cap, or the
+    // visible degradation reaction (protect-audio pause / quality badge).
+    // Three inbound streams oversubscribe the 150kbit class, so raw decode
+    // progress can sit at zero while the room still honors the contract —
+    // the same trickle-or-degradation shape all-distinct-qualities accepts.
+    // (Per-receiver aggregate comparisons are meaningless here: only P4
+    // receives a clean stream at all.)
+    const p1IDForP4 = await participantIDFor(pages.get("P4"), names[0]);
+    const p1FramesOnP4Start = await tileVideoFrames(pages.get("P4"), p1IDForP4);
+    assert.ok(p1FramesOnP4Start >= 0, "P1's camera tile on the capped receiver exposes no frame counter");
+    await delay(5000);
+    const p1FramesOnP4End = await tileVideoFrames(pages.get("P4"), p1IDForP4);
+    const cleanDelta = p1FramesOnP4End - p1FramesOnP4Start;
+    if (cleanDelta > 0) {
+      console.log(`[cold-join] P1's clean camera decoded ${cleanDelta} frames on the capped receiver over the impaired window`);
+    } else {
+      await waitForDegradedCameraTile([pages.get("P4")], p1IDForP4);
+      console.log("[cold-join] the capped receiver's view of the clean camera shows the degradation reaction");
+    }
+    // No camera-"on" tile wait here: a capped receiver may legitimately
+    // pause P1's video to protect its own audio during the impairment —
+    // the trickle-or-degradation check above is the in-window contract.
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  for (const [role, index] of [["P2", 1], ["P3", 2], ["P4", 3]]) {
+    const participantID = await participantIDFor(pages.get("P1"), names[index]);
+    await waitForTileState(pages.get("P1"), participantID, "camera", "on", 90000);
+  }
+  // The capped receiver's clean-video path was congested, not severed: P1's
+  // camera must be live again on P4 once the tiers lift.
+  const p1IDForP4AfterLift = await participantIDFor(pages.get("P4"), names[0]);
+  await waitForTileState(pages.get("P4"), p1IDForP4AfterLift, "camera", "on", 90000);
+  console.log("[cold-join] all impaired cameras recovered after the tiers were lifted");
+  await assertMedia();
+}
+
+// A total media blackout with live signaling: P2's ICE UDP traffic is dropped
+// entirely mid-call while the WebSocket (TCP, outside the tier classes) keeps
+// flowing. The room guarantee: the rest of the room keeps exchanging audio,
+// P2's tile shows the reconnecting state on the clean observer, and once the
+// blackout lifts the client's own recovery machinery (delayed ICE restart,
+// then the reconnect state machine) restores P2's media without anyone
+// reloading.
+async function scenarioBlackoutAndRecovery() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P2: "blackout" };
+  const before = new Map();
+  for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    // Long enough for ICE to declare the peer disconnected on both ends.
+    await delay(12000);
+    const during = new Map();
+    for (const role of roles) during.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of ["P1", "P3", "P4"]) {
+      assert.ok(during.get(role).audioSent > before.get(role).audioSent &&
+        during.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} stopped exchanging audio while P2 was blacked out`);
+    }
+    // The outage must genuinely sever P2's video intake on a clean observer.
+    // A tile-state wait is the wrong instrument here: every drop triggers the
+    // client's own recovery, which rebinds the ICE port every few seconds and
+    // reconnects briefly, so the peer flaps instead of resting in a single
+    // renderable "disconnected" state. Presented-frame counts on P1's tile
+    // for P2 versus an unimpaired sender tell the two apart.
+    const p1 = pages.get("P1");
+    const p2ID = await participantIDFor(p1, names[1]);
+    const p4ID = await participantIDFor(p1, names[3]);
+    const p2FramesStart = await tileVideoFrames(p1, p2ID);
+    const p4FramesStart = await tileVideoFrames(p1, p4ID);
+    assert.ok(p2FramesStart >= 0 && p4FramesStart >= 0, "tile frame counters are unavailable on the clean observer");
+    await delay(10000);
+    const p2FramesEnd = await tileVideoFrames(p1, p2ID);
+    const p4FramesEnd = await tileVideoFrames(p1, p4ID);
+    const p2Delta = p2FramesEnd - p2FramesStart;
+    const p4Delta = p4FramesEnd - p4FramesStart;
+    assert.ok(p4Delta > 0, "the unimpaired sender's video stalled on the clean observer");
+    assert.ok(p2Delta < p4Delta / 4,
+      `P2's video did not stall on the clean observer during the blackout: P2=+${p2Delta} frames vs P4=+${p4Delta} frames`);
+    console.log(`[blackout] P2's video intake collapsed during the outage (P2=+${p2Delta} frames vs P4=+${p4Delta}) while the room kept flowing`);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  // The client recovers on its own: no page reload, no manual retry. The
+  // current peer is what must reconnect — the churn above leaves superseded
+  // peer connections in the test hook's array, some permanently closed, so
+  // an every-peer check can never pass.
+  const p2Page = pages.get("P2");
+  await p2Page.waitForFunction(() => {
+    const peers = window.__slowMeetTest?.peerConnections || [];
+    const current = peers.at(-1);
+    return Boolean(current) && current.connectionState === "connected";
+  }, null, { timeout: 120000 });
+  for (const page of pages.values()) await roster(page, names);
+  const p2IDForP4 = await participantIDFor(pages.get("P4"), names[1]);
+  await waitForTileState(pages.get("P4"), p2IDForP4, "camera", "on", 90000);
+  const beforeRecovery = await pageMediaSnapshot(p2Page);
+  await delay(2000);
+  const afterRecovery = await pageMediaSnapshot(p2Page);
+  assert.ok(afterRecovery.audioSent > beforeRecovery.audioSent &&
+    afterRecovery.audioReceived > beforeRecovery.audioReceived,
+    "P2's media never resumed on its own after the blackout lifted");
+  console.log("[blackout] media recovered without a reload after the blackout lifted");
+  await assertMedia();
+}
+
+// The literal four-quality room: every participant on a different tier at the
+// same time. Audio advances everywhere, decoded video degrades by tier
+// (clean > moderate/severe, capped trails clean on queueing alone), the
+// severe camera yields room-wide while no tier's congestion drags another's,
+// and every camera recovers when the tiers lift.
+async function scenarioAllDistinctQualities() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P1: "clean", P2: "moderate", P3: "severe", P4: "capped" };
+  const before = new Map();
+  for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(15000);
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of roles) {
+      assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+        `${role} outbound audio did not advance under the four distinct tiers`);
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} inbound audio did not advance under the four distinct tiers`);
+    }
+    const deltas = Object.fromEntries(roles.map((role) =>
+      [role, after.get(role).videoFrames - before.get(role).videoFrames]));
+    console.log(`[distinct] decoded-video deltas: P1=${deltas.P1} P2=${deltas.P2} P3=${deltas.P3} P4=${deltas.P4}`);
+    // Cross-receiver decode ordering is meaningless in this room: P1 is the
+    // only clean sender, so P1's aggregate (three impaired streams) says
+    // nothing against P4's aggregate (P1's clean stream plus two impaired
+    // ones). The per-stream guarantees are asserted instead.
+    const p3ID = await participantIDFor(pages.get("P1"), names[2]);
+    await waitForDegradedCameraTile([pages.get("P1")], p3ID);
+    // The severe camera yields on the clean observer while P1 — the room's
+    // only clean sender — stays live everywhere. The capped receiver's own
+    // congestion must not read as everyone else's. Its intake of P1's clean
+    // camera is acceptable in exactly two observable shapes: frames still
+    // trickling through the cap, or the visible degradation reaction (the
+    // protect-audio pause / quality badge) — three inbound streams
+    // oversubscribe the 150kbit class, so raw decode progress can sit at
+    // zero while the room still honors the contract.
+    const p1IDForP4 = await participantIDFor(pages.get("P4"), names[0]);
+    const p1FramesOnP4Start = await tileVideoFrames(pages.get("P4"), p1IDForP4);
+    assert.ok(p1FramesOnP4Start >= 0, "P1's camera tile on the capped receiver exposes no frame counter");
+    await delay(5000);
+    const p1FramesOnP4End = await tileVideoFrames(pages.get("P4"), p1IDForP4);
+    const cleanDelta = p1FramesOnP4End - p1FramesOnP4Start;
+    if (cleanDelta > 0) {
+      console.log(`[distinct] P1's clean camera decoded ${cleanDelta} frames on the capped receiver`);
+    } else {
+      await waitForDegradedCameraTile([pages.get("P4")], p1IDForP4);
+      console.log("[distinct] the capped receiver's view of the clean camera shows the degradation reaction");
+    }
+    // No camera-"on" tile wait on the capped observer: with its own link
+    // capped, protect-audio may legitimately pause P1's tile during the
+    // impairment — the trickle-or-degradation check above is the contract.
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  for (const [role, index] of [["P2", 1], ["P3", 2], ["P4", 3]]) {
+    const participantID = await participantIDFor(pages.get("P1"), names[index]);
+    await waitForTileState(pages.get("P1"), participantID, "camera", "on", 90000);
+  }
+  console.log("[distinct] all cameras recovered after the four tiers were lifted");
+  await assertMedia();
+}
+
+// The inverse of the clean-sharer case: the share OWNER's own uplink is
+// impaired while every viewer is clean. The lease must survive a starving
+// owner room-wide, the sharer must keep sending, and every clean viewer
+// decodes the share again once the window lifts.
+async function scenarioImpairedSharerScreenShare() {
+  await setupRoom();
+  const sharer = pages.get("P2");
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[1]);
+
+  const tierByRole = { P2: "moderate" };
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(12000);
+    for (const page of pages.values()) await assertSingleSharer(page, names[1]);
+    const before = await pageMediaSnapshot(sharer);
+    await delay(2000);
+    const after = await pageMediaSnapshot(sharer);
+    assert.ok(after.videoFrames > before.videoFrames || after.audioSent > before.audioSent,
+      "the impaired sharer's outbound media stopped entirely under the impairment");
+    console.log("[impaired-sharer] the lease survived the impaired window and the sharer kept sending");
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  for (const page of pages.values()) {
+    await page.waitForFunction(() => {
+      const video = document.querySelector("li[data-sharing='true'] video.screen-video");
+      return Boolean(video) && video.videoWidth > 0 && video.readyState >= 2;
+    }, null, { timeout: 60000 });
+  }
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "false");
+  await assertMedia();
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
   { name: "chat-system-messages", description: "Join and leave notices appear as system chat messages on every browser.", run: scenarioChatSystemMessages },
   { name: "media-state-propagation", description: "Mic and camera toggles by each participant flip the matching tile state on every other browser.", run: scenarioMediaStatePropagation },
+  { name: "all-clean-full-quality", description: "The good-network baseline: four participants on a clean link sustain audio, video, and a screen share for a full window with no degradation, no warning states, and no dropped connections anywhere.", run: scenarioAllCleanFullQuality },
   { name: "four-way-chat", description: "Each participant's chat message appears on all four browsers.", run: scenarioFourWayChat },
   { name: "simultaneous-four-way-chat", description: "Concurrent chat messages from all participants appear on all four browsers.", run: scenarioSimultaneousFourWayChat },
   { name: "chat-unread-and-history", description: "Closed-rail unread badge increments and clears, a 500-character message renders everywhere, and reconnect replays retained chat history without duplicates.", run: scenarioChatUnreadAndHistory },
@@ -1900,7 +2592,16 @@ const scenarios = [
   { name: "axe-accessibility", description: "The meeting surface has no axe critical or serious accessibility violations.", run: scenarioAxeAccessibility },
   { name: "fifth-participant-capacity", description: "The room rejects a fifth browser with a clear full-room message and every present participant sees the room-full notice.", run: scenarioFifthParticipantCapacity },
   { name: "mixed-quality-room", description: "Four participants on three different link qualities: audio survives everywhere, degradation stays per-participant, and recovery is prompt.", run: scenarioMixedQualityRoom, netns: true },
-  { name: "screen-share-mixed-quality", description: "A clean participant's screen share reaches impaired viewers without losing the lease or stalling the room.", run: scenarioScreenShareMixedQuality, netns: true }
+  { name: "screen-share-mixed-quality", description: "A clean participant's screen share reaches impaired viewers without losing the lease or stalling the room.", run: scenarioScreenShareMixedQuality, netns: true },
+  { name: "fluctuating-link", description: "The moderate tier arrives, lifts, and returns: each impaired window degrades the impaired camera while the clean pair stays live and every lift recovers.", run: scenarioFluctuatingLink, netns: true },
+  { name: "slow-bandwidth-room", description: "A rate-only cap with no injected loss: audio survives the standing queue, the capped participant's video trails the clean pair, and recovery is prompt.", run: scenarioSlowBandwidthRoom, netns: true },
+  { name: "reconnect-under-impairment", description: "Closing an impaired participant's signaling socket mid-impairment resumes the seat and restores media while the link stays degraded and the room keeps flowing.", run: scenarioReconnectUnderImpairment, netns: true },
+  { name: "ice-restart-under-impairment", description: "On a rate-capped impaired link the manual ICE restart renegotiates in place without a signaling reconnect and media keeps flowing.", run: scenarioIceRestartUnderImpairment, netns: true },
+  { name: "reconnect-after-expiry-under-impairment", description: "A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.", run: scenarioReconnectAfterExpiryUnderImpairment, netns: true },
+  { name: "cold-join-under-impairment", description: "All four participants join while three different impairment tiers are already armed; establishment completes, media flows, and degradation stays per-tier on links that never knew a clean state.", run: scenarioColdJoinUnderImpairment, netns: true },
+  { name: "blackout-and-recovery", description: "A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.", run: scenarioBlackoutAndRecovery, netns: true },
+  { name: "all-distinct-qualities", description: "All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.", run: scenarioAllDistinctQualities, netns: true },
+  { name: "impaired-sharer-screen-share", description: "The screen-share owner's own uplink is impaired while every viewer is clean: the lease survives, the sharer keeps sending, and every viewer decodes the share again once the window lifts.", run: scenarioImpairedSharerScreenShare, netns: true }
 ];
 
 function scenarioFilter() {

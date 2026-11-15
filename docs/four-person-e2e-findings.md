@@ -900,3 +900,324 @@ Call log:
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-LKpXyi`
+
+## 2026-11-14T21:11:08.558Z — ice-restart-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: An impaired participant's manual ICE restart renegotiates in place without a signaling reconnect and media keeps flowing.
+- Actual: page.waitForFunction: Timeout 30000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-3MbANb`
+
+## 2026-11-14T21:12:08.938Z — reconnect-after-expiry-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button disabled id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not enabled
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-oichsO`
+
+## 2026-11-14T21:16:32.129Z — ice-restart-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: On a rate-capped impaired link the manual ICE restart renegotiates in place without a signaling reconnect and media keeps flowing.
+- Actual: page.waitForFunction: Timeout 30000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ByKMiA`
+
+## 2026-11-14T21:17:32.524Z — reconnect-after-expiry-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button disabled id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not enabled
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-RMe4b1`
+
+## 2026-11-14T21:24:27.307Z — reconnect-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Closing an impaired participant's signaling socket mid-impairment resumes the seat and restores media while the link stays degraded and the room keeps flowing.
+- Actual: page.waitForFunction: Timeout 20000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-qORLwA`
+
+## 2026-11-14T21:24:43.350Z — reconnect-after-expiry-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.
+- Actual: page.waitForFunction: Timeout 90000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-aqck4e`
+
+## 2026-11-14T21:25:27.671Z — ice-restart-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: On a rate-capped impaired link the manual ICE restart renegotiates in place without a signaling reconnect and media keeps flowing.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button disabled id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not enabled
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-LD0WL2`
+
+## 2026-11-14T21:26:28.046Z — reconnect-after-expiry-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button disabled id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not enabled
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-wqOFbV`
+
+## 2026-11-14T21:30:16.005Z — reconnect-after-expiry-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A killed impaired browser frees its seat after the grace window and the fresh rejoin re-establishes media while the impairment is still armed.
+- Actual: the fresh join under impairment never received audio
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-CeWFUB`
+
+## 2026-11-14T21:46:32.812Z — slow-bandwidth-room
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A rate-only cap with no injected loss: audio survives the standing queue, the capped participant's video trails the clean pair, and recovery is prompt.
+- Actual: P2 inbound audio did not advance under the rate cap
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-YXRC2k`
+
+## 2026-11-14T21:46:48.474Z — reconnect-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Closing an impaired participant's signaling socket mid-impairment resumes the seat and restores media while the link stays degraded and the room keeps flowing.
+- Actual: the resumed participant's media never came back under the impaired link
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-qQpZet`
+
+## 2026-11-14T21:50:54.389Z — cold-join-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants join while three different impairment tiers are already armed; establishment completes, media flows, and degradation stays per-tier on links that never knew a clean state.
+- Actual: the capped participant decoded more video than the clean one after a cold join: P1=7 P4=19
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-AMVfRo`
+
+## 2026-11-14T21:51:40.027Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: page.waitForFunction: Timeout 30000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-KofYSh`
+
+## 2026-11-14T21:51:58.461Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: the severe participant decoded more video than the clean one: P1=11 P3=14
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-VXcvoQ`
+
+## 2026-11-14T21:59:21.725Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: page.waitForFunction: Timeout 120000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-uDVe0W`
+
+## 2026-11-14T21:59:45.419Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: P1's clean camera never reached the capped receiver in the four-tier room (frames=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-eGmF0w`
+
+## 2026-11-14T22:07:00.490Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: page.waitForFunction: Timeout 10000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-QVBFgV`
+
+## 2026-11-14T22:12:38.590Z — cold-join-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants join while three different impairment tiers are already armed; establishment completes, media flows, and degradation stays per-tier on links that never knew a clean state.
+- Actual: P1's clean camera never reached the capped receiver after a cold join (frames=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-u3bD98`
+
+## 2026-11-14T22:13:47.768Z — cold-join-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants join while three different impairment tiers are already armed; establishment completes, media flows, and degradation stays per-tier on links that never knew a clean state.
+- Actual: locator.waitFor: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#meeting') to be visible
+    64 × locator resolved to hidden <section hidden="" id="meeting" class="meeting-shell" aria-labelledby="meeting-title">…</section>
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-XkWNIC`
+
+## 2026-11-14T22:14:48.068Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-5KpvhM`
+
+## 2026-11-14T22:15:48.368Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-MOa56F`
+
+## 2026-11-14T22:16:48.664Z — impaired-sharer-screen-share
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: The screen-share owner's own uplink is impaired while every viewer is clean: the lease survives, the sharer keeps sending, and every viewer decodes the share again once the window lifts.
+- Actual: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#camera')
+    - locator resolved to <button id="camera" type="button" aria-pressed="false" class="control-button" title="Turn camera on" aria-label="Turn camera on">…</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-Fi36Rc`

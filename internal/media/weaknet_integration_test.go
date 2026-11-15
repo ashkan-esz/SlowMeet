@@ -11,6 +11,7 @@
 package media
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -171,12 +172,13 @@ func skipWithoutWeakNetNamespace(t *testing.T) {
 	}
 }
 
-func applyWeakNetProfile(t *testing.T, rate, delay, loss string) {
+func applyWeakNetProfile(t *testing.T, rate, delay, loss string, extra ...string) {
 	t.Helper()
 	args := []string{"qdisc", "replace", "dev", "lo", "root", "netem", "rate", rate, "delay", delay}
 	if loss != "" {
 		args = append(args, "loss", loss)
 	}
+	args = append(args, extra...)
 	out, err := exec.Command("tc", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("apply netem profile: %v: %s", err, strings.TrimSpace(string(out)))
@@ -370,8 +372,19 @@ func sendWeakNetPackets(track *pion.TrackLocalStaticRTP, kind pion.RTPCodecType,
 
 func waitWeakNetConnected(t *testing.T, peer *pion.PeerConnection, name string) {
 	t.Helper()
-	if state := peer.ConnectionState(); state != pion.PeerConnectionStateConnected {
-		t.Fatalf("%s connection state after impairment = %s, want connected", name, state)
+	// ICE consent legitimately flaps while an impaired queue drains: the
+	// connection reads "disconnected" transiently even while RTP keeps
+	// moving, so poll instead of failing on one sample. A dead or failed
+	// peer still fails the check once the window closes.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if state := peer.ConnectionState(); state == pion.PeerConnectionStateConnected {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s connection state = %s, want connected within the recovery window", name, peer.ConnectionState())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -486,13 +499,43 @@ type weakNetTier struct {
 	rate  string
 	delay string
 	loss  string
+	// limit optionally caps the netem queue in packets so a rate-only tier
+	// congests through tail drops instead of bufferbloating the window away.
+	limit string
 }
 
 var (
 	weakNetTierClean    = weakNetTier{rate: "", delay: "", loss: ""}
 	weakNetTierModerate = weakNetTier{rate: "200kbit", delay: "200ms", loss: "3%"}
 	weakNetTierSevere   = weakNetTier{rate: "100kbit", delay: "300ms", loss: "5%"}
+	// A pure bandwidth cap with no injected loss: the room's paced video
+	// (150 kbps) plus audio overruns the pipe, so congestion — not netem —
+	// produces the drops, the way a thin consumer uplink does.
+	weakNetTierCapped = weakNetTier{rate: "130kbit", delay: "50ms", loss: "0%", limit: "30"}
+	// A total media outage: every packet on this port is dropped while the
+	// ICE agents stay inside their disconnected window, so the blackout test
+	// proves media freezes and then recovers without any renegotiation.
+	weakNetTierBlackout = weakNetTier{rate: "10gbit", delay: "50ms", loss: "100%"}
 )
+
+// weakNetTierID names a subscriber after its tier so failure messages and
+// per-tier count maps read the same way the browser scenario logs do.
+func weakNetTierID(tier weakNetTier) string {
+	switch tier {
+	case weakNetTierClean:
+		return "clean"
+	case weakNetTierModerate:
+		return "moderate"
+	case weakNetTierSevere:
+		return "severe"
+	case weakNetTierCapped:
+		return "capped"
+	case weakNetTierBlackout:
+		return "blackout"
+	default:
+		return "subscriber"
+	}
+}
 
 // The room qdisc shapes one loopback with per-participant classes: an htb
 // root with a large clean default class and one impaired class per tier, so
@@ -512,10 +555,16 @@ func installWeakNetRoomQdisc(t *testing.T) {
 	for tier, class := range map[weakNetTier][2]string{
 		weakNetTierModerate: {"1:20", "20:"},
 		weakNetTierSevere:   {"1:30", "30:"},
+		weakNetTierCapped:   {"1:40", "40:"},
+		weakNetTierBlackout: {"1:50", "50:"},
 	} {
 		run("tc", "class", "add", "dev", "lo", "parent", "1:", "classid", class[0], "htb", "rate", tier.rate, "ceil", tier.rate)
-		run("tc", "qdisc", "add", "dev", "lo", "parent", class[0], "handle", class[1], "netem",
-			"delay", tier.delay, "loss", tier.loss)
+		netemArgs := []string{"qdisc", "add", "dev", "lo", "parent", class[0], "handle", class[1], "netem",
+			"delay", tier.delay, "loss", tier.loss}
+		if tier.limit != "" {
+			netemArgs = append(netemArgs, "limit", tier.limit)
+		}
+		run("tc", netemArgs...)
 	}
 	t.Cleanup(func() { _ = exec.Command("tc", "qdisc", "del", "dev", "lo", "root").Run() })
 }
@@ -530,6 +579,10 @@ func classifyWeakNetPort(t *testing.T, port uint16, tier weakNetTier) {
 		classID = "1:20"
 	case weakNetTierSevere:
 		classID = "1:30"
+	case weakNetTierCapped:
+		classID = "1:40"
+	case weakNetTierBlackout:
+		classID = "1:50"
 	default:
 		t.Fatalf("unknown weak-network tier %+v", tier)
 	}
@@ -596,13 +649,18 @@ func subscriberEgressConnection(t *testing.T, router *Router, id string) *pion.P
 	return peer.Connection()
 }
 
-// newWeakNetRoomFixture wires one publisher and three subscribers (clean,
-// moderate, severe) through the router on clean loopback, with per-subscriber
-// UDP port blocks for the room classifiers. Sustained streaming starts inside
-// the fixture; impairment classes are applied afterwards by the test.
-func newWeakNetRoomFixture(t *testing.T, limits Limits) (
+// newWeakNetRoomFixture wires one publisher and its subscribers through the
+// router on clean loopback, with per-subscriber UDP port blocks for the room
+// classifiers. The default room is three subscribers on the clean, moderate,
+// and severe tiers; tests pass tiersOverride to shape a different mix (the
+// four-distinct-qualities room). Sustained streaming starts inside the
+// fixture; impairment classes are applied afterwards by the test — unless
+// impairBeforeNegotiation is set, in which case the subscriber handshakes
+// themselves run under the tiers the test installed beforehand (the cold-join
+// ordering, where no clean state ever exists).
+func newWeakNetRoomFixture(t *testing.T, limits Limits, impairBeforeNegotiation bool, tiersOverride ...weakNetTier) (
 	*weakNetNACKCounter,
-	*[3]*weakNetRoomSubscriber,
+	[]*weakNetRoomSubscriber,
 ) {
 	t.Helper()
 	router := NewRouter(limits)
@@ -614,11 +672,18 @@ func newWeakNetRoomFixture(t *testing.T, limits Limits) (
 		_ = sourceIngress.Close()
 	})
 
-	const subscriberCount = 3
-	tiers := [3]weakNetTier{weakNetTierClean, weakNetTierModerate, weakNetTierSevere}
-	portBlocks := [3][2]uint16{{52000, 52019}, {52100, 52119}, {52200, 52219}}
-	ids := [3]string{"clean", "moderate", "severe"}
-	subscribers := &[3]*weakNetRoomSubscriber{}
+	tiers := []weakNetTier{weakNetTierClean, weakNetTierModerate, weakNetTierSevere}
+	if len(tiersOverride) > 0 {
+		tiers = tiersOverride
+	}
+	portBlocks := make([][2]uint16, len(tiers))
+	ids := make([]string, len(tiers))
+	subscribers := make([]*weakNetRoomSubscriber, len(tiers))
+	for i, tier := range tiers {
+		base := uint16(52000 + i*100)
+		portBlocks[i] = [2]uint16{base, base + 19}
+		ids[i] = weakNetTierID(tier)
+	}
 
 	if _, err := sourceIngress.Connection().AddTransceiverFromKind(
 		pion.RTPCodecTypeAudio, pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionRecvonly},
@@ -691,10 +756,17 @@ func newWeakNetRoomFixture(t *testing.T, limits Limits) (
 	waitIntegrationPublicationTargets(t, router, 2, 5)
 
 	// Bring every subscriber's egress pair up and remember its bound UDP
-	// port for the room classifiers.
+	// port for the room classifiers. Under the cold-join ordering the
+	// handshake itself runs under the tiers: the subscriber's port is
+	// classified once its socket binds (gathering complete) but before the
+	// first connectivity check flows.
 	for i, id := range ids {
 		subscriber := subscribers[i]
 		egressConnection := subscriberEgressConnection(t, router, id)
+		if impairBeforeNegotiation {
+			negotiateWeakNetSubscriberUnderTier(t, egressConnection, subscriber)
+			continue
+		}
 		negotiateIntegrationPeers(t, egressConnection, subscriber.peer)
 		waitIntegrationPeerConnected(t, subscriber.peer, id+" client")
 		waitIntegrationPeerConnected(t, egressConnection, id+" egress")
@@ -741,7 +813,7 @@ func TestWeakNetMixedQualityRoomIsolatesParticipants(t *testing.T) {
 	skipWithoutWeakNetNamespace(t)
 	feedback, subscribers := newWeakNetRoomFixture(t, Limits{
 		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
-	})
+	}, false)
 
 	// Give every participant a different link: P1-class clean, moderate, and
 	// severe tiers, classified per UDP port in both directions.
@@ -790,4 +862,318 @@ func TestWeakNetMixedQualityRoomIsolatesParticipants(t *testing.T) {
 	if afterSevereVideo == severe[1] && afterSevereVideo > 0 {
 		t.Fatal("severe subscriber video stopped flowing after the impairment was lifted")
 	}
+}
+
+// One room, four subscribers, four different links at once — the Go-level
+// shape of the all-distinct-qualities browser scenario. Audio must survive
+// every tier (including the rate-only capped one, where congestion rather
+// than injected loss does the damage), the loss tiers must show genuine
+// gaps, the capped tier's video must trail the clean tier's, the clean
+// tier's own flow must stay well ahead of the severe one (no cross-tier
+// drag), the publisher's repair loop must see NACKs, and every impaired
+// tier must recover once the classes are lifted.
+func TestWeakNetAllDistinctQualitiesIsolateEveryTier(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	feedback, subscribers := newWeakNetRoomFixture(t, Limits{
+		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
+	}, false, weakNetTierClean, weakNetTierModerate, weakNetTierSevere, weakNetTierCapped)
+
+	installWeakNetRoomQdisc(t)
+	for _, subscriber := range subscribers {
+		classifyWeakNetPort(t, subscriber.port, subscriber.tier)
+	}
+
+	time.Sleep(8 * time.Second)
+	counts := make(map[string][2]int, len(subscribers))
+	for _, subscriber := range subscribers {
+		audio, video, missing, _, _ := subscriber.sink.counts()
+		counts[subscriber.id] = [2]int{audio, video}
+		t.Logf("%s tier: audio=%d video=%d missing=%d", subscriber.id, audio, video, missing)
+		if audio < 30 {
+			t.Fatalf("%s tier lost audio entirely: audio=%d (audio must survive every tier)", subscriber.id, audio)
+		}
+		if subscriber.tier == weakNetTierClean {
+			if audio < 150 || video < 60 {
+				t.Fatalf("clean subscriber starved on its own clean class: audio=%d video=%d", audio, video)
+			}
+			continue
+		}
+		if missing == 0 {
+			if subscriber.tier == weakNetTierCapped {
+				t.Fatalf("capped tier saw no sequence gaps under a standing queue: the rate cap never produced tail drops (audio=%d video=%d)", audio, video)
+			}
+			t.Fatalf("%s tier saw no loss: the impairment never reached its flows (video=%d)", subscriber.id, video)
+		}
+	}
+
+	clean := counts["clean"]
+	// The rate-only tier must trail the clean tier: its standing queue eats
+	// video before audio, but it never stops the clean flow.
+	if counts["capped"][1] >= clean[1] {
+		t.Fatalf("capped tier video=%d matched or beat the clean tier's video=%d: the rate cap must trail the clean tier", counts["capped"][1], clean[1])
+	}
+	// Isolation: the clean subscriber's video flow must stay well ahead of
+	// the severe one, proving the impaired tiers' congestion never drags the
+	// clean tier down.
+	if clean[1] < counts["severe"][1]*2 {
+		t.Fatalf("isolation violated: clean video=%d vs severe video=%d", clean[1], counts["severe"][1])
+	}
+	if feedback.count() < 1 {
+		t.Fatal("the publisher never saw a NACK: the room's repair loop is dead")
+	}
+
+	removeWeakNetProfile(t)
+	time.Sleep(2 * time.Second)
+	for _, subscriber := range subscribers[1:] {
+		afterAudio, afterVideo, _, _, _ := subscriber.sink.counts()
+		before := counts[subscriber.id]
+		if afterAudio == before[0] {
+			t.Fatalf("%s subscriber audio stopped flowing after the impairment was lifted", subscriber.id)
+		}
+		if afterVideo == before[1] && afterVideo > 0 {
+			t.Fatalf("%s subscriber video stopped flowing after the impairment was lifted", subscriber.id)
+		}
+	}
+}
+
+// An inconsistent link: the impairment arrives, lifts, and returns the way a
+// flapping connection does. Every impaired window must show genuine loss
+// with the NACK repair loop re-engaged, every clean window must restore the
+// flow, and the endpoint must come through all three cycles still connected.
+func TestWeakNetFluctuatingImpairment(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	sink, targetClient := newWeakNetFixture(t, Limits{
+		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
+	})
+
+	time.Sleep(2 * time.Second)
+	for cycle := 1; cycle <= 3; cycle++ {
+		applyWeakNetProfile(t, "500kbit", "100ms", "3%")
+		time.Sleep(8 * time.Second)
+		audio, video, missing, _, nacks := sink.counts()
+		if audio < 100 {
+			t.Fatalf("cycle %d: audio packets over the impaired window = %d, want >= 100: audio must survive every impaired window", cycle, audio)
+		}
+		if missing == 0 {
+			t.Fatalf("cycle %d: no sequence gaps over the impaired window: the impairment never reached the subscriber (audio=%d video=%d)", cycle, audio, video)
+		}
+		if nacks < 1 {
+			t.Fatalf("cycle %d: the publisher never saw a NACK: the loss-repair loop did not re-engage (audio=%d video=%d)", cycle, audio, video)
+		}
+		waitWeakNetConnected(t, targetClient, "target")
+
+		removeWeakNetProfile(t)
+		cleanAudioStart := audio
+		time.Sleep(3 * time.Second)
+		cleanAudio, cleanVideo, _, _, _ := sink.counts()
+		if cleanAudio == cleanAudioStart {
+			t.Fatalf("cycle %d: audio stopped flowing while the impairment was lifted", cycle)
+		}
+		if cleanVideo == video {
+			t.Fatalf("cycle %d: video stopped flowing while the impairment was lifted", cycle)
+		}
+		waitWeakNetConnected(t, targetClient, "target")
+	}
+
+	removeWeakNetProfile(t)
+	time.Sleep(2 * time.Second)
+	waitWeakNetConnected(t, targetClient, "target")
+}
+
+// A rate-shaped link with no injected loss: the SFU's own pacing (150 kbps
+// video + 32 kbps audio) overruns the 130 kbit pipe, so the bottleneck is
+// queueing, not netem loss. A deliberately small netem limit makes the
+// standing queue tail-drop the overflow the way a shallow consumer buffer
+// does, instead of bufferbloating the window away. The guarantee under pure
+// congestion is unchanged: audio keeps flowing while video absorbs the drop.
+func TestWeakNetRateCapOnlyBottleneck(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	sink, targetClient := newWeakNetFixture(t, Limits{
+		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
+	})
+
+	time.Sleep(2 * time.Second)
+	applyWeakNetProfile(t, "130kbit", "10ms", "", "limit", "30")
+	time.Sleep(8 * time.Second)
+
+	audio, video, missing, _, nacks := sink.counts()
+	if audio < 60 {
+		t.Fatalf("audio packets over the congested window = %d, want >= 60: audio must survive a pure rate bottleneck (video=%d)", audio, video)
+	}
+	if video >= audio {
+		t.Fatalf("video packets = %d vs audio = %d: video must absorb the congestion before audio", video, audio)
+	}
+	if missing == 0 {
+		t.Fatalf("no sequence gaps under a standing queue: the bottleneck never produced tail drops (audio=%d video=%d)", audio, video)
+	}
+	if nacks < 1 {
+		t.Fatalf("the publisher never saw a NACK under the bottleneck: the repair loop is dead (audio=%d video=%d)", audio, video)
+	}
+	waitWeakNetConnected(t, targetClient, "target")
+
+	removeWeakNetProfile(t)
+	time.Sleep(2 * time.Second)
+	afterAudio, afterVideo, _, _, _ := sink.counts()
+	if afterAudio == audio {
+		t.Fatal("audio stopped flowing after the bottleneck was lifted")
+	}
+	if afterVideo == video {
+		t.Fatal("video stopped flowing after the bottleneck was lifted")
+	}
+	waitWeakNetConnected(t, targetClient, "target")
+}
+
+// waitWeakNetConnectedWithDeadline tolerates the slower ICE+DTLS handshakes
+// that establishment-under-impairment produces; the shared 10s integration
+// budget is calibrated for clean loopback.
+func waitWeakNetConnectedWithDeadline(t *testing.T, peer *pion.PeerConnection, name string, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		if peer.ConnectionState() == pion.PeerConnectionStateConnected {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s connection state under impairment = %s", name, peer.ConnectionState())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// negotiateWeakNetSubscriberUnderTier brings one subscriber's egress pair up
+// with its UDP port classified into its tier between the socket bind and the
+// first connectivity check, so the whole handshake — ICE checks, DTLS, and
+// the initial media — happens under impairment. The port only becomes
+// readable once the client gathers (its socket binds at SetLocalDescription),
+// which is exactly the window between "the path exists" and "the path is
+// used" that a cold join on a bad network must survive.
+func negotiateWeakNetSubscriberUnderTier(t *testing.T, egressConnection *pion.PeerConnection, subscriber *weakNetRoomSubscriber) {
+	t.Helper()
+	offer, err := egressConnection.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create egress offer: %v", err)
+	}
+	if err := egressConnection.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set egress offer: %v", err)
+	}
+	waitIntegrationGatheringComplete(t, egressConnection, subscriber.id+" egress")
+	localOffer := egressConnection.LocalDescription()
+	if localOffer == nil {
+		t.Fatalf("%s egress has no local description after gathering", subscriber.id)
+	}
+	if err := subscriber.peer.SetRemoteDescription(*localOffer); err != nil {
+		t.Fatalf("set client remote offer: %v", err)
+	}
+	answer, err := subscriber.peer.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create client answer: %v", err)
+	}
+	if err := subscriber.peer.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set client answer: %v", err)
+	}
+	waitIntegrationGatheringComplete(t, subscriber.peer, subscriber.id+" client")
+	subscriber.port = weakNetLocalPort(t, subscriber.peer)
+	classifyWeakNetPort(t, subscriber.port, subscriber.tier)
+	localAnswer := subscriber.peer.LocalDescription()
+	if localAnswer == nil {
+		t.Fatalf("%s client has no local description after gathering", subscriber.id)
+	}
+	if err := egressConnection.SetRemoteDescription(*localAnswer); err != nil {
+		t.Fatalf("set egress remote answer: %v", err)
+	}
+	waitWeakNetConnectedWithDeadline(t, subscriber.peer, subscriber.id+" client", 30*time.Second)
+	waitWeakNetConnectedWithDeadline(t, egressConnection, subscriber.id+" egress", 30*time.Second)
+}
+
+// Joining is part of the weak-network contract: every other room test joins
+// on clean loopback and arms the impairment afterwards. This one installs the
+// room qdisc first, so all three subscriber handshakes establish under their
+// tiers — ICE checks, DTLS, and the first media seconds all impaired. The
+// guarantee: establishment completes on every tier, audio survives on every
+// tier, loss is repaired through NACK, and recovery is immediate on lift.
+func TestWeakNetColdJoinEstablishesUnderImpairment(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	installWeakNetRoomQdisc(t)
+	feedback, subscribers := newWeakNetRoomFixture(t, Limits{
+		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
+	}, true)
+
+	time.Sleep(8 * time.Second)
+	for _, subscriber := range subscribers {
+		audio, video, missing, _, _ := subscriber.sink.counts()
+		t.Logf("%s tier after a cold join: audio=%d video=%d missing=%d", subscriber.id, audio, video, missing)
+		if audio < 30 {
+			t.Fatalf("%s tier lost audio after joining under impairment: audio=%d (audio must survive establishment on a bad link)", subscriber.id, audio)
+		}
+		if subscriber.tier != weakNetTierClean && missing == 0 {
+			t.Fatalf("%s tier saw no loss after joining under impairment: the impairment never reached its flows", subscriber.id)
+		}
+	}
+	if feedback.count() < 1 {
+		t.Fatal("the publisher never saw a NACK: the repair loop never engaged for the cold-joined room")
+	}
+
+	beforeAudio, beforeVideo, _, _, _ := subscribers[2].sink.counts()
+	removeWeakNetProfile(t)
+	time.Sleep(2 * time.Second)
+	afterAudio, afterVideo, _, _, _ := subscribers[2].sink.counts()
+	if afterAudio == beforeAudio {
+		t.Fatal("severe subscriber audio stopped flowing after the impairment was lifted")
+	}
+	if afterVideo == beforeVideo {
+		t.Fatal("severe subscriber video stopped flowing after the impairment was lifted")
+	}
+}
+
+// A total media outage on one subscriber's port while every other flow stays
+// clean, the way a dead radio or a NAT timeout severs one participant's path
+// mid-call: that subscriber's media must freeze completely while the rest of
+// the room keeps flowing, and once the outage lifts, media must resume on the
+// same connection — the ICE agents stay inside their disconnected window, so
+// no renegotiation or restart may be required.
+func TestWeakNetBlackoutStopsMediaThenRecovers(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	_, subscribers := newWeakNetRoomFixture(t, Limits{
+		MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30,
+	}, false)
+
+	time.Sleep(2 * time.Second)
+	installWeakNetRoomQdisc(t)
+	classifyWeakNetPort(t, subscribers[1].port, weakNetTierBlackout)
+	time.Sleep(1 * time.Second) // let the classification take effect and in-flight packets drain
+	frozenAudio, frozenVideo, _, _, _ := subscribers[1].sink.counts()
+	cleanAudioStart, _, _, _, _ := subscribers[0].sink.counts()
+
+	time.Sleep(8 * time.Second)
+
+	blackoutAudio, blackoutVideo, _, _, _ := subscribers[1].sink.counts()
+	if blackoutAudio != frozenAudio || blackoutVideo != frozenVideo {
+		t.Fatalf("blacked-out subscriber still received media: audio %d -> %d, video %d -> %d (a total outage must freeze its flows)",
+			frozenAudio, blackoutAudio, frozenVideo, blackoutVideo)
+	}
+	cleanAudioEnd, cleanVideoEnd, _, _, _ := subscribers[0].sink.counts()
+	if cleanAudioEnd == cleanAudioStart || cleanVideoEnd == 0 {
+		t.Fatalf("the clean subscriber stopped flowing during the blackout: audio %d -> %d, video=%d",
+			cleanAudioStart, cleanAudioEnd, cleanVideoEnd)
+	}
+
+	// The blackout window sits inside the ICE disconnected timeout, so
+	// lifting the outage must resume the same connection without any
+	// renegotiation. Right after the window the agent is still legitimately
+	// disconnected; recovery is asserted after the lift below.
+	removeWeakNetProfile(t)
+	time.Sleep(3 * time.Second)
+	recoveredAudio, recoveredVideo, missing, _, _ := subscribers[1].sink.counts()
+	if recoveredAudio == blackoutAudio {
+		t.Fatal("blacked-out subscriber audio never resumed after the outage was lifted")
+	}
+	if recoveredVideo == blackoutVideo && blackoutVideo > 0 {
+		t.Fatal("blacked-out subscriber video never resumed after the outage was lifted")
+	}
+	if missing == 0 {
+		t.Fatal("no sequence gaps around the blackout: the outage never reached the RTP stream")
+	}
+	waitWeakNetConnected(t, subscribers[1].peer, "blackout client")
 }

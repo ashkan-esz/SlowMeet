@@ -10,7 +10,14 @@ host interface:
 - `make test-weaknet` runs the Go integration suite (`//go:build weaknet`)
   inside a disposable network namespace: real peer connections over shaped
   loopback assert that audio survives what starves video, loss is repaired
-  through NACK, and recovery is immediate once the impairment lifts.
+  through NACK, and recovery is immediate once the impairment lifts. The
+  suite also covers an inconsistent link (three impairment cycles with the
+  repair loop re-engaging in each window), a pure rate bottleneck (rate
+  shaping with a small queue limit, where congestion — not injected loss —
+  produces the drops that video must absorb before audio), a cold join whose
+  handshakes establish under per-participant tiers with no clean state, and a
+  total blackout on one subscriber's port that freezes its media while the
+  rest of the room flows and resumes on the same connection after the lift.
 - `make test-media-e2e-netns` runs the browser network profile in the same
   kind of namespace: impairment measurement and recovery, the severe 100 kbps
   profile (video yields before audio), and a signaling reconnect whose
@@ -22,7 +29,51 @@ host interface:
   applied per participant by classifying each browser's ICE UDP port into
   per-tier `tc` classes. The scenarios assert that audio
   keeps moving for everyone, each participant's degradation stays theirs, and
-  a clean participant's screen share reaches the impaired viewers.
+  a clean participant's screen share reaches the impaired viewers. The suite
+  also covers the inconsistent, slow, and reconnection cases in the same
+  four-person room:
+
+  - `fluctuating-link` — the moderate tier arrives, lifts, and returns; every
+    impaired window degrades the impaired camera while the clean pair stays
+    live, and every lift recovers it before the next window.
+  - `slow-bandwidth-room` — a rate-only `capped` tier (150 kbit/50 ms/0%
+    loss) congests through queueing instead of injected loss; audio survives
+    the standing queue, the capped participant's video trails the clean pair,
+    and degradation stays owned by the capped link.
+  - `reconnect-under-impairment` — an impaired participant's signaling socket
+    is closed mid-impairment; the token resume restores the seat and media
+    while the link stays degraded and the rest of the room keeps flowing.
+  - `ice-restart-under-impairment` — an impaired participant's manual ICE
+    restart renegotiates in place with no signaling reconnect.
+  - `reconnect-after-expiry-under-impairment` — a killed impaired browser
+    frees its seat after the grace window and the fresh rejoin re-establishes
+    media while the impairment is still armed.
+  - `cold-join-under-impairment` — all four browsers join while three tiers
+    (moderate/severe/capped) are already armed: ICE gathering, DTLS, and the
+    first media seconds happen under impairment, degradation stays per-tier
+    on links that never knew a clean state, and the clean sender's camera
+    still reaches the capped receiver.
+  - `blackout-and-recovery` — a `blackout` tier (100% loss) severs one
+    participant's media mid-call while the signaling WebSocket stays alive:
+    the room keeps flowing, the impaired participant's video intake collapses
+    on the clean observer while an unimpaired sender's keeps advancing, and
+    the client's own recovery machinery restores media after the lift
+    without a reload.
+  - `all-distinct-qualities` — all four participants sit on different tiers
+    at once (clean/moderate/severe/capped): audio advances everywhere, the
+    severe camera yields on the clean observer, the capped receiver's view of
+    the clean camera either trickles through the cap or shows the visible
+    degradation reaction, and every camera recovers on lift.
+  - `impaired-sharer-screen-share` — the inverse of the clean-sharer case:
+    the share owner's own uplink is impaired while every viewer is clean; the
+    lease survives a starving owner, the sharer keeps sending, and every
+    viewer decodes the share again once the window lifts.
+
+  Run the whole gated set the way CI does:
+
+  ```sh
+  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share" make test-media-e2e-four-netns
+  ```
 
 Inspect the active interface first:
 
@@ -73,7 +124,10 @@ sudo tc qdisc del dev IFACE root
 | 100–200 kbps | Very low or disabled video; audio remains usable |
 | Increased loss/jitter | Video degrades before audio |
 
-Also test a changing link by replacing the qdisc during a live call:
+Also test a changing link by replacing the qdisc during a live call (the
+automated form of this case is `fluctuating-link` and the Go
+`TestWeakNetFluctuatingImpairment`; the manual recipe below stays useful for
+observation):
 
 ```sh
 sudo tc qdisc replace dev IFACE root netem rate 1mbit delay 50ms
