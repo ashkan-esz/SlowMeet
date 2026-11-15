@@ -87,8 +87,9 @@ host interface:
   guard). Artifacts land in `soak-artifacts/` with the usual pprof
   captures plus a `metrics.json` timeline of `/metrics` snapshots per
   window. `SOAK_SECONDS=300` (default) runs two full cycles; the plain
-  clean soak (`make test-soak`) is unchanged. Not gated in CI — opt-in
-  until its runtime is proven stable.
+  clean soak (`make test-soak`) is unchanged. Gated in the weaknet CI
+  job; locally it stays opt-in for shorter or clean soaks (`SOAK_SECONDS`,
+  `SOAK_IMPAIRMENT=0`).
 
 Inspect the active interface first:
 
