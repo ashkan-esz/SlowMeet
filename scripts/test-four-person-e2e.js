@@ -490,16 +490,20 @@ const fourPersonTiers = {
   moderate: { classID: "1:20", handle: "20:", rate: "200kbit", delay: "200ms", loss: "8%" },
   severe: { classID: "1:30", handle: "30:", rate: "100kbit", delay: "300ms", loss: "12%" },
   // A pure bandwidth cap: rate shaping with no injected loss, the way a thin
-  // link congests without any random corruption. Three inbound camera streams
-  // massively oversubscribe the class, so the queue — deliberately left at
-  // netem's default size — congests through delay rather than early tail
-  // drops; a small limit instead yields 60%+ loss immediately, which starves
-  // ICE consent and trips the server's ICE-failure teardown (replacing the
-  // peer connection mid-scenario) instead of modeling a slow-but-alive link.
-  // Fast runners encode the fake camera efficiently, so scenarios assert this
-  // tier qualitatively (audio survives, capped video trails the clean pair)
+  // link congests without any random corruption. The class carries only the
+  // participant's DOWNLINK (see applyParticipantTier — every capped assertion
+  // is about receiving; stacking the participant's own camera on the same
+  // queue starves ICE consent on slow encoders), so the ~182 kbps forwarded
+  // mix oversubscribes the 150 kbit pipe by ~20%: a moderately bounded queue
+  // (20 packets) drops that overflow the way a real thin pipe does, instead
+  // of ballooning delay until SFU-side consent collapses and the peer
+  // rebuilds mid-window (the rebuild resets every receiver's audio counters
+  // and fails the deltas). The earlier limit-30-attempt starved consent only
+  // because the queue then also carried the saturated uplink. Fast runners
+  // encode the fake camera efficiently, so scenarios assert this tier
+  // qualitatively (audio survives, capped video trails the clean pair)
   // instead of exact thresholds.
-  capped: { classID: "1:40", handle: "40:", rate: "150kbit", delay: "50ms", loss: "0%" },
+  capped: { classID: "1:40", handle: "40:", rate: "150kbit", delay: "50ms", loss: "0%", downlinkOnly: true, limit: "20" },
   // A total media outage: every packet on this port is dropped, the way a
   // dead radio or a NAT timeout severs the path while the WebSocket (TCP,
   // outside these classes) stays up. Scenarios use it for a short window to
@@ -524,7 +528,17 @@ function applyParticipantTier(port, tierName) {
   assert.ok(tier, `unknown participant tier ${tierName}`);
   // IPv4: u32 ip sport/dport selectors. IPv6: the UDP ports sit at byte 40
   // (source) and 42 (destination) of the packet, matched with u16 at 40/42.
-  const selectors = [
+  // The capped tier shapes only the participant's downlink: every capped
+  // assertion is about receiving under a cap (frames trickle, degradation
+  // reaction, audio advances), and stacking the participant's own camera on
+  // the same tail-drop queue starves ICE consent itself on slow encoders —
+  // a 150 kbit uplink cannot carry a camera, so the peer dies instead of
+  // degrading (CI-only: fast machines encode the fake camera lightly enough
+  // to skate under the cap).
+  const selectors = tier.downlinkOnly ? [
+    ["protocol", "ip", "u32", "match", "ip", "dport", String(port), "0xffff"],
+    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "42"]
+  ] : [
     ["protocol", "ip", "u32", "match", "ip", "sport", String(port), "0xffff"],
     ["protocol", "ip", "u32", "match", "ip", "dport", String(port), "0xffff"],
     ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "40"],
