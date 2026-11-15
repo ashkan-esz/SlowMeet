@@ -152,3 +152,4 @@ jobs:
 
       - name: Run the sustained weak-network soak in an isolated namespace
         run: make test-soak-netns
+        timeout-minutes: 10
