@@ -4241,6 +4241,11 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     clearTimeout(directPathWatchdogTimer);
     directPathWatchdogTimer = undefined;
     hidePathFallbackBanner();
+    // A connected peer proves the current method works. Stale strikes from
+    // an earlier impaired window must not divert the NEXT reconnect into
+    // TURN/TCP — with no TURN configured that strands the call offline
+    // (the "Method unavailable" dead end) instead of retrying direct.
+    autoTurnFailoverStrikes = 0;
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
     clearTimeout(exhaustedReconnectTimer);

@@ -311,8 +311,13 @@ async function run() {
     "without relay candidates the delayed restart keeps the 5s cadence");
   assert.match(appSource, /const iceRestartRelayGraceDelayMs = 12000;/,
     "with relay candidates the restart waits 12s for ICE to nominate the fallback pair");
-  assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto" && autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return "turn-tcp";/,
+  // The auto guard may be written as one compound condition or as a nested
+  // branch (the nested form also carries the direct-UDP path-memory skip);
+  // the contract is the same either way.
+  assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto"[\s\S]*?autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return "turn-tcp";/,
     "an Automatic session that cycled direct-led restarts must reconnect as TURN/TCP");
+  assert.match(appSource, /if \(isPeerConnectionConnected\(targetPeer\)\) \{[\s\S]*?autoTurnFailoverStrikes = 0;/,
+    "a connected peer must clear stale TURN/TCP failover strikes so the next reconnect tries direct again (stale strikes strand the call offline when no TURN is configured)");
   assert.match(appSource, /if \(connectionMethod === "auto"\) \{\s*autoTurnFailoverStrikes \+= 1;\s*if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
     "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP)");
   assert.match(appSource, /const effectiveMethod = effectiveConnectionMethod\(\);\s*const selectedICEServers = filteredICEServers\(effectiveMethod\);/,
