@@ -1221,3 +1221,12 @@ Call log:
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-Fi36Rc`
+
+## 2026-11-15T07:16:09.434Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: P1 inbound audio did not advance under the four distinct tiers
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-JqAlUU`
