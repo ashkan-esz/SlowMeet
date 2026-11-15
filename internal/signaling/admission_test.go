@@ -160,6 +160,89 @@ func TestPendingConnectionCapAndFixedJoinDeadline(t *testing.T) {
 	defer next.Close()
 }
 
+// The ledger's flood requirement (project-review.md §5): filling the
+// pending pool must not degrade peers that are already in the room. The
+// flooders hold their pending slots until the join deadline closes them,
+// further dials are rejected with 503 while the pool is full, chat still
+// flows between admitted peers throughout, and every slot is reclaimable
+// once the deadline expires.
+func TestPendingSlotFloodKeepsAdmittedPeersUsable(t *testing.T) {
+	h := NewHub(meeting.New(3), config.NewStore(config.Config{}), slog.Default())
+	h.maxPendingConnections = 4
+	h.joinTimeout = time.Second
+	defer h.Close()
+	s := httptest.NewServer(h)
+	defer s.Close()
+	u := "ws" + strings.TrimPrefix(s.URL, "http")
+
+	join := func(name string) (id string, conn *websocket.Conn) {
+		conn = dialTestSocket(t, u)
+		t.Cleanup(func() { conn.Close() })
+		writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: name})
+		var joined Message
+		readTestMessage(t, conn, &joined)
+		if joined.Type != TypeParticipant || joined.Participant == nil {
+			t.Fatalf("%s join: %+v", name, joined)
+		}
+		return joined.Participant.ID, conn
+	}
+	authorID, author := join("author")
+	_, observer := join("observer")
+
+	// Flood: hold every pending slot with sockets that never join. Each one
+	// occupies exactly one pending slot until the join deadline closes it —
+	// pongs cannot extend that deadline (covered by the deadline test above).
+	flood := make([]*websocket.Conn, 0, h.maxPendingConnections)
+	defer func() {
+		for _, conn := range flood {
+			conn.Close()
+		}
+	}()
+	for range h.maxPendingConnections {
+		flood = append(flood, dialTestSocket(t, u))
+	}
+	if _, response, err := websocket.DefaultDialer.Dial(u, nil); err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("flooded pool admitted another connection: response=%v err=%v", response, err)
+	}
+
+	// The admitted peers are unaffected: chat still flows between them while
+	// the flood holds every pending slot (the fan-out deliberately skips the
+	// sender, so the observer is the one who must receive it). The observer's
+	// socket also carries the roster replay queued at its join, so read past
+	// any intermediate broadcasts until the chat arrives.
+	writeTestMessage(t, author, Message{Version: ProtocolVersion, Type: TypeChat, ParticipantID: authorID, ChatText: "still alive"})
+	var delivered Message
+	for read := 0; ; read++ {
+		if read >= 5 {
+			t.Fatal("chat never reached the observer under pending-slot flood")
+		}
+		readTestMessage(t, observer, &delivered)
+		if delivered.Type == TypeChat && strings.TrimSpace(delivered.ChatText) == "still alive" {
+			break
+		}
+	}
+
+	// The join deadline reclaims every flood slot on its own.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.mu.RLock()
+		n := h.pendingConnections
+		h.mu.RUnlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("flood slots not reclaimed: %d still pending", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Freed slots are immediately reusable for a real admission.
+	if nextID, _ := join("next"); nextID == "" {
+		t.Fatal("post-flood admission produced no participant id")
+	}
+}
+
 func TestHubBoundsSignalingMessageSize(t *testing.T) {
 	h := NewHub(meeting.New(2), config.NewStore(config.Config{}), slog.Default())
 	defer h.Close()

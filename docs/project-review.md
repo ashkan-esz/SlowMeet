@@ -87,23 +87,29 @@ Cloudsmith fetch reports its unavailable repository before the fallback
 assertions pass. The Xray fallback suite also passes. Both suites are included
 in `.github/workflows/ci.yml`, including the execution and ShellCheck steps.
 
-### 5. P2: Unauthenticated connections have no admission deadline or cap
+### 5. P2: Unauthenticated connections have no admission deadline or cap (closed in `2cc851f`, verified in source 2026-11-15)
 
-**Verified in source; resource impact not load-tested.** The WebSocket handler
-allocates a client queue and goroutines before admission. Its pong handler
-extends the read deadline even before join. The meeting participant limit
-does not bound these connections, and the inspected handler has no separate
-pending-connection cap. A client that responds to pings can remain unjoined.
+**Remediated before this ledger was committed; the finding text below is
+preserved as recorded.** The pending-connection pool is capped at 128
+(`maxPendingConnections`, enforced before the WebSocket upgrade — the 129th
+unauthenticated dial gets HTTP 503), every unauthenticated socket is force-closed
+by a fixed 15-second join deadline that pongs cannot extend (`joinTimeout` →
+`expireAdmission`), the pending slot is released on every exit path
+(`releasePending` via `sync.Once`), and the expensive-operation rate limits the
+"Improve" list asked for exist (chat 10/10 s, ICE restart 6/30 s, video
+subscriptions 30/10 s, per-IP password budget 20/min). A pre-auth connection
+holds no meeting slot, no router registration, and no media — only its pending
+slot, one 512-slot outbound queue, and two goroutines for at most 15 seconds.
 
-**Improve:** Add a fixed join deadline that pongs cannot extend, an explicit
-pending-connection budget, and cleanup on every rejection path. Add bounded
-message-rate controls for expensive operations such as ICE restart and
-subscription changes, plus chat fanout. Measure normal reconnect bursts
-before choosing limits.
+**Tests:** `TestPendingConnectionCapAndFixedJoinDeadline` (503 at the cap,
+pongs do not extend the deadline, slots release, admitted sockets survive the
+deadline) and `TestPendingSlotFloodKeepsAdmittedPeersUsable` (a full pending
+pool rejects further dials while chat keeps flowing between admitted peers;
+slots reclaim themselves at the deadline and are immediately reusable).
 
-**Tests:** Pending sockets expire despite pongs; pending limits reject excess
-connections and release slots after close; joined clients retain normal
-heartbeat behavior. Flood tests must show that healthy peers remain usable.
+**Residual (accepted):** the 128 pending slots are not bounded per source — a
+distributed opener can keep the pool churning at 503s for others. The impact is
+bounded (≤128 sockets × ≤15 s, no media), but it is not per-source load-tested.
 
 ### 6. P2: Publisher keyframe retries depend on one arbitrary subscriber
 
