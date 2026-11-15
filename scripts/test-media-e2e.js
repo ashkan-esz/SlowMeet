@@ -45,7 +45,12 @@ const cameraQualitySettleMs = 500;
 const cameraQualityWindowMs = 5000;
 const mediaProgressTimeoutMs = 15000;
 const mediaProgressPollMs = 250;
-const transientDisconnectGraceMs = 0;
+// A sub-200ms consent blip (getStats catching the instant between
+// disconnected and its recovery) is harmless and must not fail an assert;
+// real outages persist for seconds, well above this grace. Zero grace used
+// to turn one recorded 1ms flap after the recovery baseline into a
+// permanent failure that every retry re-observed.
+const transientDisconnectGraceMs = 200;
 
 if (!["chromium", "firefox"].includes(browserName)) {
   throw new Error("MEDIA_E2E_BROWSER must be chromium or firefox");
