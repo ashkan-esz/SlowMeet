@@ -1843,6 +1843,24 @@ async function unmuteAllForAudioGuarantee() {
   await delay(2000);
 }
 
+// Inbound audio can pause for a few seconds while an impaired peer
+// renegotiates, and a rebuilt peer restarts its counters at zero; the
+// guarantee under test is that audio RESUMES. Poll until the receiver's
+// cumulative counter advances past the pre-churn baseline instead of
+// failing on one window's delta — the same wait-for-flow allowance the
+// sustained soak grants; permanent silence still fails.
+async function waitForAudioReceived(page, beforeReceived, label, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const snapshot = await pageMediaSnapshot(page);
+    if (snapshot.audioReceived > beforeReceived) return;
+    if (Date.now() > deadline) {
+      throw new Error(`${label}: inbound audio never resumed (${beforeReceived} -> ${snapshot.audioReceived})`);
+    }
+    await delay(1000);
+  }
+}
+
 // An inconsistent link: the moderate tier arrives, lifts, and returns. Every
 // impaired window degrades the impaired participant's camera on the clean
 // observers while the clean pair stays live and audio keeps moving; every
@@ -1954,11 +1972,9 @@ async function scenarioReconnectUnderImpairment() {
     await reconnecting.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
       window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
     for (const page of pages.values()) await roster(page, names);
-    const after = new Map();
-    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
     for (const role of ["P1", "P3", "P4"]) {
-      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
-        `${role} stopped receiving audio while P2 was reconnecting under impairment`);
+      await waitForAudioReceived(pages.get(role), before.get(role).audioReceived,
+        `${role} receiving audio while P2 reconnects under impairment`);
     }
     // P2's counters restart at zero on the resumed peer connection, so a
     // delta against the pre-close snapshot would compare different peers.
@@ -2404,6 +2420,90 @@ async function scenarioImpairedSharerScreenShare() {
   await assertMedia();
 }
 
+// The two degradation shapes no rate/loss tier covers. The latency tier
+// pushes the measured RTT to ~350 ms — poor (>250 ms) but not critical
+// (>500 ms) — so P2's interactivity degrades room-wide while throughput is
+// fully preserved: their video intake keeps decoding at full rate and
+// protect-audio never engages. The jitter tier keeps audio and video
+// flowing but pushes the smoothed jitter past the 50 ms poor bar, so the
+// adaptation ladder steps down without suspending video. The clean pair
+// must not react to delay or jitter on other peers' paths (own-link
+// attribution); every camera recovers once the tiers lift.
+async function scenarioDelayAndJitterLinks() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const tierByRole = { P2: "latency", P3: "jitter" };
+  const cleanObservers = [pages.get("P1"), pages.get("P4")];
+  const p2ID = await participantIDFor(pages.get("P1"), names[1]);
+  const p1IDForP2 = await participantIDFor(pages.get("P2"), names[0]);
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(15000);
+    // Audio advances everywhere: neither delay nor jitter may break audio.
+    const before = new Map();
+    for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+    await delay(5000);
+    const after = new Map();
+    for (const role of roles) after.set(role, await pageMediaSnapshot(pages.get(role)));
+    for (const role of roles) {
+      assert.ok(after.get(role).audioSent > before.get(role).audioSent,
+        `${role} outbound audio did not advance under the delay/jitter tiers`);
+      assert.ok(after.get(role).audioReceived > before.get(role).audioReceived,
+        `${role} inbound audio did not advance under the delay/jitter tiers`);
+    }
+    // Latency degrades interactivity, not capacity: P2's tile turns
+    // poor/degraded on the clean observers (their pair RTT exceeds the
+    // 300 ms tile bar) while P2 keeps decoding P1's camera at full rate,
+    // and protect-audio must NOT fire (the 350 ms RTT is below the 500 ms
+    // critical bar).
+    await waitForDegradedCameraTile(cleanObservers, p2ID);
+    const p1FramesOnP2Start = await tileVideoFrames(pages.get("P2"), p1IDForP2);
+    assert.ok(p1FramesOnP2Start >= 0, "P1's camera tile on the latency receiver exposes no frame counter");
+    await delay(5000);
+    const p1FramesOnP2End = await tileVideoFrames(pages.get("P2"), p1IDForP2);
+    assert.ok(p1FramesOnP2End > p1FramesOnP2Start,
+      `P1's camera stopped decoding on the latency receiver: pure delay must preserve throughput (frames=${p1FramesOnP2End - p1FramesOnP2Start})`);
+    const p2Adaptation = await pages.get("P2").evaluate(() => window.__slowMeetTest?.adaptationState || {});
+    assert.equal(p2Adaptation.videoSuspended, false,
+      "protect-audio paused video under a poor-but-not-critical latency link");
+    assert.ok(p2Adaptation.profileLevel < 2,
+      `the latency link's poor samples never stepped the ladder down (profileLevel=${p2Adaptation.profileLevel})`);
+    // Jitter degrades quality without breaking flow: P3's measured jitter
+    // crosses the 50 ms poor bar (networkQuality.poor) and the ladder steps
+    // down, but audio keeps moving and video must not be suspended.
+    const p3NetworkQuality = await pages.get("P3").evaluate(() => window.__slowMeetTest?.networkQuality || {});
+    const p3Adaptation = await pages.get("P3").evaluate(() => window.__slowMeetTest?.adaptationState || {});
+    assert.ok(p3NetworkQuality.poor === true || p3Adaptation.profileLevel < 2,
+      `the jitter link never registered as degraded (poor=${p3NetworkQuality.poor} profileLevel=${p3Adaptation.profileLevel})`);
+    assert.equal(p3Adaptation.videoSuspended, false,
+      "protect-audio paused video under a poor-but-not-critical jitter link");
+    console.log(`[delay-jitter] during impairment: P2 profileLevel=${p2Adaptation.profileLevel} videoSuspended=${p2Adaptation.videoSuspended}; P3 poor=${p3NetworkQuality.poor} profileLevel=${p3Adaptation.profileLevel}; P1's camera decoded ${p1FramesOnP2End - p1FramesOnP2Start} frames on P2`);
+    // Own-link attribution: the clean pair must not react to the delay or
+    // jitter on other peers' paths.
+    const p1ID = await participantIDFor(pages.get("P4"), names[0]);
+    const p4ID = await participantIDFor(pages.get("P1"), names[3]);
+    await waitForTileState(pages.get("P4"), p1ID, "camera", "on", 10000);
+    await waitForTileState(pages.get("P1"), p4ID, "camera", "on", 10000);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  // Recovery: the latency receiver's tile quality clears (five healthy
+  // samples) and both stepped-down ladders climb back to the normal level.
+  for (const observer of cleanObservers) {
+    await waitForTileState(observer, p2ID, "quality", "good", 90000);
+  }
+  for (const role of ["P2", "P3"]) {
+    await pages.get(role).waitForFunction(() =>
+      (window.__slowMeetTest?.adaptationState?.profileLevel ?? 2) >= 2,
+    null, { timeout: 90000 });
+  }
+  console.log("[delay-jitter] tile quality and ladder levels recovered after the tiers were lifted");
+  await assertMedia();
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
@@ -2463,7 +2563,8 @@ const scenarios = [
   { name: "cold-join-under-impairment", description: "All four participants join while three different impairment tiers are already armed; establishment completes, media flows, and degradation stays per-tier on links that never knew a clean state.", run: scenarioColdJoinUnderImpairment, netns: true },
   { name: "blackout-and-recovery", description: "A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.", run: scenarioBlackoutAndRecovery, netns: true },
   { name: "all-distinct-qualities", description: "All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.", run: scenarioAllDistinctQualities, netns: true },
-  { name: "impaired-sharer-screen-share", description: "The screen-share owner's own uplink is impaired while every viewer is clean: the lease survives, the sharer keeps sending, and every viewer decodes the share again once the window lifts.", run: scenarioImpairedSharerScreenShare, netns: true }
+  { name: "impaired-sharer-screen-share", description: "The screen-share owner's own uplink is impaired while every viewer is clean: the lease survives, the sharer keeps sending, and every viewer decodes the share again once the window lifts.", run: scenarioImpairedSharerScreenShare, netns: true },
+  { name: "delay-and-jitter-links", description: "A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.", run: scenarioDelayAndJitterLinks, netns: true }
 ];
 
 function scenarioFilter() {
