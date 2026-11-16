@@ -55,11 +55,42 @@ const tiers = {
   // dead radio or a NAT timeout severs the path while the WebSocket (TCP,
   // outside these classes) stays up. Scenarios use it for a short window to
   // exercise the client's own recovery once the path returns.
-  blackout: { classID: "1:50", handle: "50:", rate: "10gbit", delay: "50ms", loss: "100%" }
+  blackout: { classID: "1:50", handle: "50:", rate: "10gbit", delay: "50ms", loss: "100%" },
+  // Pure latency: 175 ms one-way in BOTH directions ⇒ measured RTT ≈ 350 ms
+  // — above the client's 250 ms poor bar, below its 500 ms critical bar, so
+  // interactivity degrades without protect-audio ever engaging. No rate cap
+  // and no loss: throughput is fully preserved (video decodes at full rate),
+  // which is the guarantee this tier exists to prove — delay hurts
+  // interactivity, not capacity — and delay-only shaping never accumulates a
+  // queue, so ICE consent cannot starve.
+  latency: { classID: "1:60", handle: "60:", rate: "10gbit", delay: "175ms", loss: "0%" },
+  // Jitter-only: a small base delay with ±160 ms of per-packet variation
+  // (explicit zero correlation). Measured reality: the excursions cross the
+  // client's poor bar in bursts — mostly through RTT excursions, since the
+  // RFC-3550-smoothed jitter stat stays modest — so the ladder steps down
+  // without the 500 ms critical bar ever being reached. No rate cap, no
+  // loss: audio and video keep flowing throughout.
+  jitter: { classID: "1:70", handle: "70:", rate: "10gbit", delay: "30ms 160ms 0", loss: "0%" }
 };
 
 function tcRun(args) {
   execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+// Read-only tc introspection: returns the command's stdout (or a placeholder
+// on failure) so harnesses can capture per-class drop/backlog counters as
+// evidence — e.g. whether a silent participant's tier queue was starving
+// them (Drops climbing) or forwarding was paused server-side (queue idle).
+function tcOut(args) {
+  try {
+    return execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+  } catch (error) {
+    return `tc ${args.join(" ")} failed: ${error.message}`;
+  }
+}
+
+function snapshotTierStats() {
+  return `# tc -s class show dev lo\n${tcOut(["-s", "class", "show", "dev", "lo"])}\n# tc -s qdisc show dev lo\n${tcOut(["-s", "qdisc", "show", "dev", "lo"])}`;
 }
 
 function installRoomQdisc() {
@@ -67,8 +98,10 @@ function installRoomQdisc() {
   tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit"]);
   for (const tier of Object.values(tiers)) {
     tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", tier.rate, "ceil", tier.rate]);
+    // A delay spec may be multi-token ("30ms 160ms" — base plus jitter);
+    // execFileSync does not split on spaces, so split it here.
     const netemArgs = ["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle",
-      tier.handle, "netem", "delay", tier.delay, "loss", tier.loss];
+      tier.handle, "netem", "delay", ...tier.delay.split(" "), "loss", tier.loss];
     if (tier.limit) netemArgs.push("limit", tier.limit);
     tcRun(netemArgs);
   }
@@ -192,6 +225,6 @@ function armParticipantTiers(tierByRole, pages, readPorts = pageLocalIcePorts, l
 }
 
 module.exports = {
-  tiers, tcRun, installRoomQdisc, applyParticipantTier, clearRoomProfiles,
-  pageLocalIcePorts, pageGatheredIcePorts, armParticipantTiers,
+  tiers, tcRun, tcOut, snapshotTierStats, installRoomQdisc, applyParticipantTier,
+  clearRoomProfiles, pageLocalIcePorts, pageGatheredIcePorts, armParticipantTiers,
 };

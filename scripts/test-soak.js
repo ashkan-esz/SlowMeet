@@ -74,6 +74,19 @@ const artifactsDir = path.join(root, "soak-artifacts",
   `${new Date().toISOString().replace(/[:.]/g, "-")}-p${participants}-s${soakSeconds}s`);
 const serverBinary = path.join(os.tmpdir(), `slowmeet-soak-${process.pid}`);
 
+// Correlation epoch for blackout attribution: every evidence stream — the
+// 1s audio timeline, the server log lines, and the netem class snapshots —
+// records offsets from this same instant, so a dark interval can be aligned
+// across all three without clock gymnastics.
+const timelineEpoch = Date.now();
+const audioTimeline = [];
+let audioSampler;
+const netemSnapshots = [];
+
+function snapshotNetem(label) {
+  netemSnapshots.push({ at: Date.now() - timelineEpoch, label, stats: netemTiers.snapshotTierStats() });
+}
+
 function reservePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -99,6 +112,9 @@ async function startServer() {
       // Inside the netns the only route is loopback; without a public IP the
       // SFU gathers no candidates at all.
       ...(soakNetns ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
+      // Optional deeper evidence (SDP/renegotiation debug lines) for
+      // blackout attribution; info by default keeps artifacts small.
+      ...(process.env.SOAK_LOG_LEVEL ? { LOG_LEVEL: process.env.SOAK_LOG_LEVEL } : {}),
       MEETING_PASSWORD: "", ADMIN_PASSWORD: adminPassword, CONFIG_FILE: configPath },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -117,6 +133,18 @@ async function startServer() {
     async stop() {
       try { process.kill(-child.pid, "SIGTERM"); } catch (_) { child.kill("SIGTERM"); }
       await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(5000)]);
+      // The server log is blackout-attribution evidence: the slog
+      // fingerprints of a renegotiation pause (media_publication_replaced_track,
+      // network_degraded, webrtc_failed, webrtc_state_changed) only exist
+      // here — /metrics has no media counters. Persist it, timestamped
+      // relative to the audio timeline's epoch.
+      fs.writeFileSync(path.join(artifactsDir, "server.log"),
+        output.join("").split("\n").map((line) => {
+          const match = /"time":"([^"]+)"/.exec(line);
+          if (!match) return line;
+          const at = Date.parse(match[1]) - timelineEpoch;
+          return `${at >= 0 ? "+" : ""}${at}ms ${line}`;
+        }).join("\n"));
     },
   };
 }
@@ -246,6 +274,11 @@ async function assertAudioAdvanced(label) {
   }
   if (dark.length) {
     console.log(`[${label}] ${dark.length} participant(s) audio-dark mid-window (peer churn); waiting for flow to resume`);
+    // Blackout-attribution evidence, captured at dark onset: per-class
+    // drop/backlog counters show whether the dark participant's tier queue
+    // was starving them (Drops climbing = netem starvation) or idle
+    // (forwarding paused server-side = renegotiation gap).
+    snapshotNetem(`${label} dark-onset`);
     await Promise.all(dark.map(({ page }) => page.waitForFunction(async () => {
       const peers = (window.__slowMeetTest?.peerConnections || [])
         .filter((peer) => peer.connectionState === "connected");
@@ -260,6 +293,7 @@ async function assertAudioAdvanced(label) {
       }
       return sent > 0 && received > 0;
     }, null, { timeout: 30000 })));
+    snapshotNetem(`${label} dark-end`);
   }
   console.log(`[${label}] audio advanced for all ${pages.length} participants`);
 }
@@ -437,6 +471,21 @@ function formatBytes(bytes) {
     await Promise.all(pages.map((page) => enableMedia(page)));
     await waitForFlowingMedia();
 
+    // 1s per-participant audio timeline: the raw material for blackout
+    // attribution. Each sample records every participant's cumulative
+    // sent/received audio bytes relative to the correlation epoch; a dark
+    // interval shows up as a flat-lined received counter with a timestamp
+    // that aligns against server.log events and the netem snapshots.
+    let sampling = true;
+    (async () => {
+      while (sampling) {
+        const participants = [];
+        for (const page of pages) participants.push(await audioBytes(page));
+        audioTimeline.push({ at: Date.now() - timelineEpoch, participants });
+        await delay(1000);
+      }
+    })().catch(() => {});
+
     fs.mkdirSync(artifactsDir, { recursive: true });
     // Allocation-rate windows: the two allocs snapshots bracket the CPU
     // windows (~30s apart), so the allocs delta measures allocation during
@@ -489,9 +538,17 @@ function formatBytes(bytes) {
     assert.ok(allocatedDuring > 0,
       "allocs snapshots show no allocation delta — media was not flowing during capture");
   } finally {
+    sampling = false;
+    // Evidence streams for blackout attribution — written even on failure
+    // so a broken run still carries its own diagnosis.
+    fs.mkdirSync(artifactsDir, { recursive: true });
     for (const context of contexts) await context.close().catch(() => {});
     for (const browser of browsers) await browser.close().catch(() => {});
     if (server) await server.stop();
+    fs.writeFileSync(path.join(artifactsDir, "audio-timeline.json"),
+      JSON.stringify({ epoch: timelineEpoch, samples: audioTimeline }, null, 2));
+    fs.writeFileSync(path.join(artifactsDir, "netem-snapshots.json"),
+      JSON.stringify(netemSnapshots, null, 2));
   }
 })().catch((error) => {
   console.error(error);
