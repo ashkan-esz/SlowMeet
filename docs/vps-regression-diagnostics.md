@@ -170,6 +170,42 @@ SLOWMEET_ADMIN_PASSWORD=... ./scripts/diagnose-vps-regression.sh profile
 Archive `/tmp/slowmeet-diag-<timestamp>/` from each step and share it. Do not
 share the admin password.
 
+## Live call CPU capture (handoff step 2)
+
+One command captures everything the [CPU investigation handoff](vps-cpu-investigation-handoff.md)
+step 2 asks for during a real call — per-interval samples of cgroup CPU
+(including the user/system split), throttling, CPU pressure, the app process's
+own utime/stime, per-interface packet counters, `/metrics` quality gauges, the
+filtered signaling log timeline, and a metadata block (capture window, container
+image + revision, **binary sha256**, CPU quota, kernel, workload note). All
+streams share one epoch, so a slow interval aligns across files.
+
+```sh
+# Start the capture, then join/keep the five-device call for the window.
+SLOWMEET_CAPTURE_NOTE="five-device call" \
+  ./scripts/diagnose-vps-regression.sh capture 300
+
+# Optional: also take a binary CPU profile mid-window (needs the admin
+# password; the profile overlaps the load by starting a third of the way in).
+SLOWMEET_CAPTURE_PROFILE=1 SLOWMEET_ADMIN_PASSWORD=... \
+  ./scripts/diagnose-vps-regression.sh capture 300
+```
+
+Knobs: `SLOWMEET_CAPTURE_INTERVAL` (default 2 s — the effective cadence is
+slightly longer because `docker stats`/`docker exec` probing takes a second),
+`SLOWMEET_CAPTURE_PROFILE_SECONDS` (default 15), `SLOWMEET_CAPTURE_NOTE`
+(free-text workload description stored in `metadata.txt`). Ctrl-C stops early
+and still finalizes the metadata and log timeline.
+
+What each output answers: `cpu-interval.log` (throttling + user/system split),
+`pressure-interval.log` (PSI), `process-interval.log` (process-level split),
+`packets-interval.log` (packet rates = post-hoc deltas), `metrics-interval.log`
+(reconnects, RTT, loss, jitter, bitrate gauges — room-global, last-reporter
+values), `logs-capture.txt` (the media-path event fingerprints),
+`cpu-pprof.pb` (binary profile when enabled), `metadata.txt` (identity).
+Rates and deltas are computed post-hoc from the counter series. The capture is
+read-only and safe during a live call; archive the directory the same way.
+
 ## Client-side capture (browser)
 
 During the same repro:

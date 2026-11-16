@@ -13,6 +13,16 @@
 #   ./scripts/diagnose-vps-regression.sh summary     # step 4: deltas vs the baseline snapshot
 #                                                    #         (throttling, sockets, restarts)
 #
+#   SLOWMEET_CAPTURE_NOTE="five-device call" \
+#     ./scripts/diagnose-vps-regression.sh capture 300
+#                                                    # one-shot live-call capture (handoff
+#                                                    # step 2): per-interval CPU (user/system
+#                                                    # split), throttling, pressure, packet
+#                                                    # rates, /metrics quality gauges, and a
+#                                                    # filtered log timeline in ONE directory.
+#                                                    # Optional binary CPU profile:
+#                                                    # SLOWMEET_CAPTURE_PROFILE=1 (+ password).
+#
 # Outputs land in /tmp/slowmeet-diag-<timestamp>/ — archive that directory and
 # share it (it contains meeting IDs/names from logs; strip those if needed).
 # Never put the admin password in shared output.
@@ -138,6 +148,93 @@ case "${1:-}" in
     cat "$OUT/goroutines.txt"
     echo "profiles saved in $OUT (analyze locally with: go tool pprof -http=:0 cpu-pprof.pb)"
     ;;
+  capture)
+    # One-shot live-call capture (handoff step 2): per-interval, timestamped
+    # samples of everything the investigation needs, in one directory.
+    find_container; outdir
+    CAPTURE_INTERVAL="${SLOWMEET_CAPTURE_INTERVAL:-2}"
+    PROFILE_SECONDS="${SLOWMEET_CAPTURE_PROFILE_SECONDS:-15}"
+    start_epoch="$(date +%s)"
+    start_iso="$(date -Iseconds)"
+    end_epoch=$(( start_epoch + DURATION ))
+    {
+      echo "capture_start=$start_iso epoch=$start_epoch"
+      echo "requested_duration=${DURATION}s interval=${CAPTURE_INTERVAL}s"
+      echo "container=$CONTAINER"
+      docker inspect --format 'image={{.Image}} revision={{index .Config.Labels "org.opencontainers.image.revision"}} version={{index .Config.Labels "org.opencontainers.image.version"}}' "$CONTAINER"
+      docker inspect --format 'nano_cpus={{.HostConfig.NanoCpus}} cpu_quota={{.HostConfig.CpuQuota}} cpu_period={{.HostConfig.CpuPeriod}}' "$CONTAINER"
+      docker exec "$CONTAINER" sh -c 'cat /sys/fs/cgroup/cpu.max 2>/dev/null; cat /sys/fs/cgroup/memory.max 2>/dev/null' || true
+      bin_path="$(docker exec "$CONTAINER" sh -c 'readlink -f /proc/1/exe' 2>/dev/null || true)"
+      if [ -n "$bin_path" ]; then
+        docker exec "$CONTAINER" sha256sum "$bin_path" 2>/dev/null | awk '{print "binary_sha256=" $1 " path=" $2}'
+      fi
+      docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER" | grep -E 'GOMEMLIMIT|GOMAXPROCS|GOGC' || true
+      echo "kernel=$(uname -r)"
+      [ -n "${SLOWMEET_CAPTURE_NOTE:-}" ] && echo "workload_note=$SLOWMEET_CAPTURE_NOTE"
+    } >"$OUT/metadata.txt"
+
+    finalize_capture() {
+      end_iso="$(date -Iseconds)"
+      {
+        echo "capture_end=$end_iso epoch=$(date +%s)"
+        echo "actual_duration=$(( $(date +%s) - start_epoch ))s"
+      } >>"$OUT/metadata.txt"
+      docker logs -t --since "$(( DURATION + 10 ))s" "$CONTAINER" 2>&1 \
+        | grep -E "$EVENT_RE" >"$OUT/logs-capture.txt" || true
+      echo "capture complete: $OUT (logs-capture.txt: $(wc -l < "$OUT/logs-capture.txt" 2>/dev/null || echo 0) event lines)"
+    }
+    trap 'finalize_capture; exit 0' INT TERM
+
+    echo "== capturing $CONTAINER for ${DURATION}s (interval ${CAPTURE_INTERVAL}s) — start/keep the five-device call NOW =="
+    echo "outputs: $OUT (stop early with Ctrl-C; metadata records the actual window)"
+
+    # Optional binary CPU profile, taken mid-window so it overlaps the load.
+    if [ "${SLOWMEET_CAPTURE_PROFILE:-0}" = "1" ]; then
+      if [ -z "$ADMIN_PASSWORD" ]; then
+        echo "warn: SLOWMEET_CAPTURE_PROFILE=1 but SLOWMEET_ADMIN_PASSWORD is unset — skipping the CPU profile" >&2
+      elif [ "$DURATION" -lt $(( PROFILE_SECONDS + 10 )) ]; then
+        echo "warn: duration ${DURATION}s too short for a ${PROFILE_SECONDS}s profile — skipping (raise the duration or lower SLOWMEET_CAPTURE_PROFILE_SECONDS)" >&2
+      else
+        (
+          sleep "$(( DURATION / 3 ))"
+          curl -s -H "X-Admin-Password: $ADMIN_PASSWORD" \
+            "http://127.0.0.1:${HTTP_PORT}/debug/pprof/profile?seconds=$PROFILE_SECONDS" -o "$OUT/cpu-pprof.pb" \
+            && echo "cpu profile captured at $(date -Iseconds) -> cpu-pprof.pb"
+        ) &
+      fi
+    fi
+
+    while [ "$(date +%s)" -lt "$end_epoch" ]; do
+      now_epoch="$(date +%s)"
+      now_iso="$(date -Iseconds)"
+      # cgroup CPU with the user/system split the handoff asks for.
+      cgroup_cpu_stat | awk -v ts="$now_epoch" -v iso="$now_iso" '
+        $1=="usage_usec"{u=$2} $1=="user_usec"{us=$2} $1=="system_usec"{sy=$2}
+        $1=="nr_periods"{np=$2} $1=="nr_throttled"{nt=$2} $1=="throttled_usec"{tu=$2}
+        END { if (u != "") printf "%s\t%s\tusage_usec=%s user_usec=%s system_usec=%s nr_periods=%s nr_throttled=%s throttled_usec=%s\n", ts, iso, u, us, sy, np, nt, tu }' \
+        >>"$OUT/cpu-interval.log" 2>/dev/null
+      { printf '%s\t%s\t' "$now_epoch" "$now_iso"; cgroup_cpu_pressure 2>/dev/null | tr '\n' ' '; echo; } \
+        >>"$OUT/pressure-interval.log"
+      # True process-level user/system split (the app is PID 1 in the container).
+      docker exec "$CONTAINER" sh -c 'awk "{print \$14, \$15}" /proc/1/stat 2>/dev/null' 2>/dev/null \
+        | awk -v ts="$now_epoch" -v iso="$now_iso" '{ printf "%s\t%s\tutime_ticks=%s stime_ticks=%s\n", ts, iso, $1, $2 }' \
+        >>"$OUT/process-interval.log" 2>/dev/null
+      # Per-interface packet counters (rates are the post-hoc deltas).
+      docker exec "$CONTAINER" sh -c 'cat /proc/net/dev 2>/dev/null' 2>/dev/null \
+        | awk -v ts="$now_epoch" -v iso="$now_iso" 'NR>2 { split($1, a, ":"); iface=a[1]; gsub(/[ \t]/, "", iface);
+            printf "%s\t%s\t%s rx_bytes=%s rx_packets=%s tx_bytes=%s tx_packets=%s\n", ts, iso, iface, $2, $3, $10, $11 }' \
+        >>"$OUT/packets-interval.log" 2>/dev/null
+      # Media-quality indicators (unauthenticated, room-global gauges).
+      curl -s "http://127.0.0.1:${HTTP_PORT}/metrics" 2>/dev/null \
+        | grep -E "^slowmeet_" | awk -v ts="$now_epoch" -v iso="$now_iso" '{ printf "%s\t%s\t%s\n", ts, iso, $0 }' \
+        >>"$OUT/metrics-interval.log"
+      docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' 2>/dev/null \
+        | grep -iE 'slowmeet|coturn' | awk -v ts="$now_epoch" -v iso="$now_iso" '{ printf "%s\t%s\t%s\n", ts, iso, $0 }' \
+        >>"$OUT/docker-stats-interval.log"
+      sleep "$CAPTURE_INTERVAL"
+    done
+    finalize_capture
+    ;;
   summary)
     find_container; outdir
     if [ -z "$BASELINE_DIR" ] && [ -r /tmp/slowmeet-diag-baseline-dir ]; then
@@ -159,6 +256,6 @@ case "${1:-}" in
     docker inspect --format 'restarts={{.RestartCount}} started_at={{.State.StartedAt}}' "$CONTAINER"
     ;;
   *)
-    sed -n '2,22p' "$0"; exit 2
+    sed -n '2,28p' "$0"; exit 2
     ;;
 esac
