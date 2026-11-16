@@ -82,18 +82,22 @@ function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
 }
 
 // How the ladder accumulates climbing samples from one classified network
-// sample: every transport-healthy sample counts toward the climb. The
-// `good` bar alone cannot gate the climb, because the estimate is starved
-// by the sender itself — each profile below the bar sends less than the bar
-// demands (very-slow ~114 kbps, slow ~200 kbps vs the 350 kbps bar), and
-// once the estimate dips under the 220 kbps *poor* bar the sample reads
-// poor forever (observed: 102 consecutive poor samples on a fully healed
-// link, BWE 191 kbps, level frozen at 0). `transportHealthy` — clean
-// RTT/loss/jitter, ignoring the starved estimate — is the decidable signal
-// for exactly that state (mirroring the video-resume allowance); samples
-// with real transport damage or no measurable signal count as nothing, and
-// a congesting upgrade steps back down through the existing hysteresis.
-function countLadderRecoverySamples(goodSamples, { transportHealthy }) {
+// sample: every transport-healthy sample without a degraded uplink counts
+// toward the climb. The `good` bar alone cannot gate the climb, because the
+// estimate is starved by the sender itself — each profile below the bar
+// sends less than the bar demands (very-slow ~114 kbps, slow ~200 kbps vs
+// the 350 kbps bar), and once the estimate dips under the 220 kbps *poor*
+// bar the sample reads poor forever (observed: 102 consecutive poor samples
+// on a fully healed link, BWE 191 kbps, level frozen at 0).
+// `transportHealthy` — clean RTT/loss/jitter, ignoring the starved estimate
+// — is the decidable signal for exactly that state (mirroring the
+// video-resume allowance). A degraded uplink counts as nothing: the sender
+// is saturating its own path and the climb must wait for the back-off to
+// take effect. Samples with real transport damage or no measurable signal
+// also count as nothing, and a congesting upgrade steps back down through
+// the existing hysteresis.
+function countLadderRecoverySamples(goodSamples, { transportHealthy, uplinkPoor }) {
+  if (uplinkPoor) return 0;
   if (transportHealthy) return goodSamples + 1;
   return 0;
 }

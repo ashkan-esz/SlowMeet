@@ -2168,6 +2168,11 @@ const participantElements = new Map();
 const participantRemovalTimers = new Map();
 const remoteAudioElements = new Set();
 const participantQualitySamples = new Map();
+// The camera sender's cumulative outbound packet counters, keyed by the
+// outbound-rtp stat id: the previous sample each diagnostics tick deltas
+// against to measure the sender's own uplink loss (inbound-rtp cannot see
+// it — the classifier's loss inputs are receive-side only).
+const cameraUplinkSamples = new Map();
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
@@ -4540,11 +4545,51 @@ async function updateDiagnostics() {
   }
 }
 
+// The sender's own saturated uplink is invisible to the classifier's
+// inbound-only loss inputs: the camera's packets are dropped before they
+// ever reach an inbound counter. Sample the camera sender's cumulative
+// outbound packet counters instead and delta them per tick — the same
+// reset-safe windowing the inbound counters use (a counter reset or a
+// replaced sender re-baselines without fabricating loss). Simulcast caveat:
+// per-layer encodings each report their own loss; SlowMeet sends a single
+// camera encoding by default, so the camera sender's video outbound entry
+// is the uplink signal.
+async function sampleCameraUplinkLoss() {
+  if (!cameraSender || typeof cameraSender.getStats !== "function") return null;
+  let report;
+  try {
+    report = await cameraSender.getStats();
+  } catch (_) {
+    return null;
+  }
+  let outbound;
+  report.forEach((stat) => {
+    if (stat.type === "outbound-rtp" && (stat.kind === "video" || stat.mediaType === "video") &&
+        Number.isFinite(stat.timestamp)) {
+      outbound = stat;
+    }
+  });
+  if (!outbound) return null;
+  const sent = Number.isFinite(outbound.packetsSent) ? outbound.packetsSent : null;
+  const lost = Number.isFinite(outbound.packetsLost) ? outbound.packetsLost : null;
+  const previous = cameraUplinkSamples.get(outbound.id);
+  cameraUplinkSamples.set(outbound.id, { sent, lost });
+  if (!previous || previous.sent == null || previous.lost == null ||
+      sent == null || lost == null) return null;
+  const sentDelta = sent - previous.sent;
+  const lostDelta = lost - previous.lost;
+  // A sender that paused (or counters that reset) provides no signal; the
+  // next sample re-baselines instead of fabricating loss.
+  if (sentDelta <= 0 || lostDelta < 0) return null;
+  return packetLossPercentFromDeltas(lostDelta, sentDelta);
+}
+
 async function runDiagnosticsUpdate() {
   const currentPeer = peer;
   if (!currentPeer) return;
   const report = await currentPeer.getStats().catch(() => undefined);
   if (!report || peer !== currentPeer) return;
+  const uplinkLossPct = await sampleCameraUplinkLoss();
   const values = {
     rttMs: null,
     jitterMs: null,
@@ -4851,15 +4896,21 @@ async function runDiagnosticsUpdate() {
   const { poor, critical, good, transportHealthy } = networkCondition;
   criticalSamples = critical ? criticalSamples + 1 : 0;
   if (profile.value === "auto") {
-    poorSamples = poor ? poorSamples + 1 : 0;
+    // The sender's own saturated uplink is invisible to inbound-rtp; the
+    // camera's outbound loss is the direct evidence, and the ladder is the
+    // actuator: step the camera's maxBitrate down before the queue starves
+    // everything else sharing the path.
+    const uplinkPoor = uplinkLossPct != null && uplinkLossPct > 5;
+    poorSamples = poor || uplinkPoor ? poorSamples + 1 : 0;
     // The climb counts transport-healthy samples: the sender starves its
     // own bandwidth estimate below the 350 kbps `good` bar at every profile
     // under it — and below the 220 kbps poor bar once the estimate dips low
     // enough — so gating the climb on `good` (or on !poor) strands a healed
-    // link at a degraded level. Samples with no measurable signal or with
-    // real transport damage count as nothing, and a congesting upgrade
-    // steps straight back down through the poor hysteresis.
-    goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy });
+    // link at a degraded level. Samples with no measurable signal, with
+    // real transport damage, or with a degraded uplink count as nothing,
+    // and a congesting upgrade steps straight back down through the poor
+    // hysteresis.
+    goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy, uplinkPoor });
     const transition = chooseAdaptationLevel(
       adaptationLevel,
       poorSamples,
@@ -4922,6 +4973,7 @@ async function runDiagnosticsUpdate() {
       jitterMs: values.jitterMs,
       estimatedOutgoingKbps: values.availableOutgoingKbps,
       outgoingVideoKbps: values.outboundKbps,
+      uplinkLossPct,
       poor,
       critical,
       good

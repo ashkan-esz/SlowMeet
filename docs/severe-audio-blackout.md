@@ -66,9 +66,16 @@ resumption; permanent silence still fails it.
    see its own uplink loss (`outbound-rtp.packetsLost` is never read; loss
    inputs are inbound-only; only RTT excursions and the candidate-pair BWE
    carry uplink evidence, and BWE feeds `poor`, never `critical`). The
-   sender-side actuator exists; the signal does not. Recorded as a needs-decision
-   ledger entry (docs/project-review.md §8) — making the client uplink-aware is
-   a product change deferred out of this pass.
+   sender-side actuator exists; the signal does not. **Implemented
+   2026-11-16** (docs/project-review.md §8): `sampleCameraUplinkLoss()` deltas
+   the camera sender's cumulative outbound packet counters per diagnostics
+   tick, and `uplinkPoor` (> 5%) drives poor samples into the ladder so the
+   actuator steps the camera's `maxBitrate` down; the climb counter keys on
+   `transportHealthy`. Measured with the instrumented soak (auto-profile
+   participants): inbound-audio dark stretches total 3.0–4.0 s per
+   participant over the 300 s run (longest 2.0 s) versus the ~20–30 s
+   blackouts recorded before — the resumption-through-starved-queue failure
+   mode no longer dominates.
 
 Any of these is a behavior change to the impairment tiers/scenarios and needs
 the network-first review; the instrumentation now in place will measure

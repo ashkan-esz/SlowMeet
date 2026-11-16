@@ -288,8 +288,9 @@ if (floorWalk.level !== 0) {
 // congesting upgrade steps back down through the poor hysteresis.
 if (countLadderRecoverySamples(0, { transportHealthy: true }) !== 1 ||
     countLadderRecoverySamples(4, { transportHealthy: true }) !== 5 ||
-    countLadderRecoverySamples(3, { transportHealthy: false }) !== 0) {
-  throw new Error("the ladder climb must count transport-healthy samples while transport-damaged and signal-less samples reset it");
+    countLadderRecoverySamples(3, { transportHealthy: false }) !== 0 ||
+    countLadderRecoverySamples(3, { transportHealthy: true, uplinkPoor: true }) !== 0) {
+  throw new Error("the ladder climb must count transport-healthy samples while transport-damaged, signal-less, and uplink-degraded samples reset it");
 }
 // Deep starvation, end to end: a fully healed link whose estimate sits at
 // 191 kbps classifies poor (below the 220 kbps bar) yet transport-healthy —
@@ -704,8 +705,18 @@ if (!appSource.includes("const selectedPair = selectedCandidatePair(report);") |
   throw new Error("connection metrics must derive RTT and capacity from selected ICE pair stats only");
 }
 if (!appSource.includes("countLadderRecoverySamples(goodSamples") ||
-    !appSource.includes("{ transportHealthy })")) {
-  throw new Error("the ladder climb must count transport-healthy samples: a starved bandwidth estimate would otherwise strand users at a degraded level");
+    !appSource.includes("{ transportHealthy, uplinkPoor }")) {
+  throw new Error("the ladder climb must count transport-healthy samples and hold during uplink degradation: a starved bandwidth estimate would otherwise strand users at a degraded level, and a saturated uplink would otherwise never step the camera down");
+}
+// The sender's own uplink loss must be sampled from the camera sender's
+// outbound packet counters (delta-windowed, reset-safe) — inbound-rtp
+// cannot see it, and without it a saturated-uplink sender pushes its
+// camera at full bitrate into a queue dropping most of its packets
+// (measured: ~90% drops on the severe tier, amplifying the audio blackout).
+if (!appSource.includes("async function sampleCameraUplinkLoss()") ||
+    !appSource.includes("cameraUplinkSamples.get(outbound.id)") ||
+    !appSource.includes("packetLossPercentFromDeltas(lostDelta, sentDelta)")) {
+  throw new Error("the camera sender's outbound packet counters must feed the uplink loss signal (inbound-rtp is blind to the sender's own uplink)");
 }
 if (!appSource.includes("function enqueuePeerNegotiation(operation)") ||
     !appSource.includes("return renegotiationQueue.request();") ||

@@ -1372,3 +1372,51 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-57TVa9`
+
+## 2026-11-16T20:52:38.904Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: protect-audio paused video during the latency window (the tier must never reach the critical bar)
+
+true !== false
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-TOP5hk`
+
+## 2026-11-16T20:57:09.878Z — mixed-quality-room
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Four participants on three different link qualities: audio survives everywhere, degradation stays per-participant, and recovery is prompt.
+- Actual: P3 inbound audio did not advance under the mixed profiles
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-MQ1UPP`
+
+## 2026-11-16T20:57:44.270Z — fluctuating-link
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: The moderate tier arrives, lifts, and returns: each impaired window degrades the impaired camera while the clean pair stays live and every lift recovers.
+- Actual: P3 inbound audio did not advance under the impaired window
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-CsSIMj`
+
+## 2026-11-16T20:58:02.908Z — slow-bandwidth-room
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A rate-only cap with no injected loss: audio survives the standing queue, the capped participant's video trails the clean pair, and recovery is prompt.
+- Actual: P3 inbound audio did not advance under the rate cap
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-qS7eJJ`
+
+## 2026-11-16T20:58:48.663Z — reconnect-under-impairment
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Closing an impaired participant's signaling socket mid-impairment resumes the seat and restores media while the link stays degraded and the room keeps flowing.
+- Actual: P3 receiving audio while P2 reconnects under impairment: inbound audio never resumed (0 -> 0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-AyFnUP`

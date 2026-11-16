@@ -179,6 +179,26 @@ loss to the local sender — outbound counters are the local sender's own path,
 so attribution is structurally correct. The full-simulcast case (per-layer
 loss) is unverified.
 
+**Decision (implemented 2026-11-16):** the delta-based outbound-loss signal is
+folded into the ladder — `sampleCameraUplinkLoss()` deltas the camera sender's
+cumulative outbound packet counters per diagnostics tick (reset-safe, same
+windowing as inbound), and `uplinkPoor` (> 5% camera uplink loss) drives poor
+samples into the ladder alongside the connection sample, so the existing
+actuator steps the camera's `maxBitrate` down. The climb counter
+(`countLadderRecoverySamples`) now keys on `transportHealthy` — clean
+RTT/loss/jitter regardless of the starved estimate — and holds during uplink
+degradation; this also fixed the ladder floor-recovery starvation the
+latency/jitter scenarios surfaced (a healed link no longer strands the
+participant at very-slow: each degraded profile starves the sender's own
+estimate below the `good` bar). Protect-audio stays driven by connection
+criticals. Measured with the instrumented soak (auto-profile participants,
+300 s, two impaired+clean cycles): inbound-audio dark stretches per
+participant total 3.0–4.0 s (longest single stretch 2.0 s) versus the ~20–30 s
+blackouts recorded before — the sender-side back-off plus the ladder's
+transport-healthy climb removed the resumption-through-starved-queue failure
+mode. The full-simulcast per-layer loss case remains unverified (single
+camera encoding by default).
+
 ## Further improvements
 
 - Extract browser signaling/reconnect, media lifecycle, and participant/chat

@@ -204,6 +204,17 @@ async function enableMedia(page) {
   await page.waitForFunction(() =>
     document.querySelector("#camera")?.getAttribute("aria-pressed") === "true" &&
     document.querySelector("#mic")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
+  // The weak-network soak measures the adaptation machinery under
+  // impairment — the ladder and the uplink-loss signal only actuate on the
+  // "Automatic" profile selection, so every participant opts into auto the
+  // way a real user would (fresh browsers carry the server's fixed
+  // DEFAULT_VIDEO_QUALITY).
+  if (!(await page.locator("#profile").isVisible().catch(() => false))) {
+    await page.locator("#more").click();
+  }
+  await page.locator("#profile").selectOption("auto");
+  await page.waitForFunction(() =>
+    document.querySelector("#profile")?.value === "auto", null, { timeout: 10000 });
 }
 
 // Sum of decoded video frames across this participant's inbound streams —
