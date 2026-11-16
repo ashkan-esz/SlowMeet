@@ -146,6 +146,39 @@ Call out the binding change if adopted.
 **Tests:** Check resolved Compose configuration with defaults and explicit
 overrides, plus parity between the supported container definitions.
 
+### 8. Known limitation: the adaptation classifier is blind to its own uplink congestion (evidence recorded 2026-11-16; needs decision)
+
+**Verified in source; measured in the impaired soak** (docs/severe-audio-blackout.md).
+The network classifier's loss and jitter inputs come exclusively from
+`inbound-rtp` (web/js/app.js:4673/:4711) — `outbound-rtp.packetsLost` is never
+read anywhere — and the own-link attribution takes the minimum across inbound
+streams while explicitly refusing local-tile loss attribution
+(web/js/app.js:4821-4827). Uplink congestion therefore reaches the classifier
+only indirectly: candidate-pair `currentRoundTripTime` excursions and the
+candidate-pair `availableOutgoingBitrate` sender-side BWE (which can contribute
+`poor`, never `critical`).
+
+**Consequence (measured):** a sender on a saturated uplink pushes its camera at
+full configured bitrate (~300 kbps) into a queue dropping ~90% of packets for
+entire impaired windows — the sender-side actuator exists (`doApplyProfile`
+steps per-layer `encodings[].maxBitrate`/`maxFramerate` via `setParameters`,
+web/js/app.js:5062-5092, and protect-audio can pause the own camera at the
+auto floor) but the signal never arrives. This amplifies the severe-tier
+blackout: the wasted uplink traffic deepens the sender's own inbound trickle
+starvation and lengthens post-rebuild resumption.
+
+**Decision needed (not implemented here — coordination constraint:
+scripts/test-adaptation.js has WIP in flight from another session):** fold a
+delta-based outbound-loss uplink signal (and/or lean on the BWE estimate) into
+the sender-side ladder so the existing actuator can step a congested camera
+down, versus accepting the blindness and mitigating tier-side. Design cautions:
+Chrome's outbound-rtp `packetsLost` reporting is cumulative and can reset on
+simulcast layer switches (delta windows handle both, mirroring the inbound
+counter deltas), and the new signal must not misattribute remote-sender uplink
+loss to the local sender — outbound counters are the local sender's own path,
+so attribution is structurally correct. The full-simulcast case (per-layer
+loss) is unverified.
+
 ## Further improvements
 
 - Extract browser signaling/reconnect, media lifecycle, and participant/chat

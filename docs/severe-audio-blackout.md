@@ -61,9 +61,14 @@ resumption; permanent silence still fails it.
 2. **Exempt consent/DTLS from shaping**: a `tc filter` priority for small
    packets (ICE checks, DTLS records) keeps resumption fast while the media
    queue stays saturated — closest to how real radios treat control traffic.
-3. **Cap the severe participant's own camera** client-side (the adaptation
-   ladder already steps down under sustained poor samples; verifying it bites
-   on the uplink is a product-side check).
+3. **Cap the severe participant's own camera** client-side: resolved as
+   **uplink blindness** — code-verified that the adaptation classifier cannot
+   see its own uplink loss (`outbound-rtp.packetsLost` is never read; loss
+   inputs are inbound-only; only RTT excursions and the candidate-pair BWE
+   carry uplink evidence, and BWE feeds `poor`, never `critical`). The
+   sender-side actuator exists; the signal does not. Recorded as a needs-decision
+   ledger entry (docs/project-review.md §8) — making the client uplink-aware is
+   a product change deferred out of this pass.
 
 Any of these is a behavior change to the impairment tiers/scenarios and needs
 the network-first review; the instrumentation now in place will measure
