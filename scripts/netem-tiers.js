@@ -64,13 +64,14 @@ const tiers = {
   // interactivity, not capacity — and delay-only shaping never accumulates a
   // queue, so ICE consent cannot starve.
   latency: { classID: "1:60", handle: "60:", rate: "10gbit", delay: "175ms", loss: "0%" },
-  // Jitter-only: a small base delay with ±160 ms of per-packet variation
+  // Jitter-only: a small base delay with ±180 ms of per-packet variation
   // (explicit zero correlation). Measured reality: the excursions cross the
-  // client's poor bar in bursts — mostly through RTT excursions, since the
-  // RFC-3550-smoothed jitter stat stays modest — so the ladder steps down
-  // without the 500 ms critical bar ever being reached. No rate cap, no
-  // loss: audio and video keep flowing throughout.
-  jitter: { classID: "1:70", handle: "70:", rate: "10gbit", delay: "30ms 160ms 0", loss: "0%" }
+  // client's poor bar (250 ms RTT) in regular bursts — mostly through RTT
+  // excursions, since the RFC-3550-smoothed jitter stat stays modest — so
+  // the ladder steps down in bursts without the 500 ms critical bar ever
+  // being reached (worst-case RTT ≈ 420 ms). No rate cap, no loss: audio
+  // and video keep flowing throughout.
+  jitter: { classID: "1:70", handle: "70:", rate: "10gbit", delay: "30ms 180ms 0", loss: "0%" }
 };
 
 function tcRun(args) {

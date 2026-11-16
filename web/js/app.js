@@ -4852,7 +4852,14 @@ async function runDiagnosticsUpdate() {
   criticalSamples = critical ? criticalSamples + 1 : 0;
   if (profile.value === "auto") {
     poorSamples = poor ? poorSamples + 1 : 0;
-    goodSamples = good ? goodSamples + 1 : 0;
+    // The climb counts transport-healthy samples: the sender starves its
+    // own bandwidth estimate below the 350 kbps `good` bar at every profile
+    // under it — and below the 220 kbps poor bar once the estimate dips low
+    // enough — so gating the climb on `good` (or on !poor) strands a healed
+    // link at a degraded level. Samples with no measurable signal or with
+    // real transport damage count as nothing, and a congesting upgrade
+    // steps straight back down through the poor hysteresis.
+    goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy });
     const transition = chooseAdaptationLevel(
       adaptationLevel,
       poorSamples,

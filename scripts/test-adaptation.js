@@ -7,6 +7,7 @@ const {
   classifyParticipantQuality,
   stabilizeParticipantQuality,
   chooseAdaptationLevel,
+  countLadderRecoverySamples,
   shouldRecoverVideo,
   chooseCameraLayer,
   applyServerDefaults,
@@ -220,7 +221,11 @@ if (!shouldRecoverVideo(5, true) || shouldRecoverVideo(4, true) || shouldRecover
 // per sample and chooseAdaptationLevel consumes a satisfied streak once.
 function stepAdaptationLadder(state, sample) {
   let poorSamples = sample.poor || sample.critical ? state.poorSamples + 1 : 0;
-  let goodSamples = sample.good ? state.goodSamples + 1 : 0;
+  let goodSamples = countLadderRecoverySamples(state.goodSamples, {
+    poor: Boolean(sample.poor),
+    critical: Boolean(sample.critical),
+    transportHealthy: Boolean(sample.transportHealthy)
+  });
   const next = chooseAdaptationLevel(state.level, poorSamples, goodSamples, 4);
   if (next.reset === "poor") poorSamples = 0;
   if (next.reset === "good") goodSamples = 0;
@@ -233,7 +238,9 @@ function stepAdaptationLadder(state, sample) {
 // without ever double-stepping.
 let fluctuating = { level: 2, poorSamples: 0, goodSamples: 0 };
 const fluctuationPoorSample = { poor: true };
-const fluctuationGoodSample = { good: true };
+// A real good sample carries healthy transport metrics (good ⇒
+// transportHealthy), which the ladder's recovery counter now requires.
+const fluctuationGoodSample = { good: true, transportHealthy: true };
 fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
 fluctuating = stepAdaptationLadder(fluctuating, fluctuationPoorSample);
 if (fluctuating.level !== 1) {
@@ -266,6 +273,65 @@ for (let sample = 0; sample < 10; sample += 1) {
 }
 if (floorWalk.level !== 0) {
   throw new Error("sustained poor samples must hold the ladder at the very-slow floor");
+}
+
+// Ladder-recovery allowance: every transport-healthy sample counts toward
+// the climb, because the sender starves its own bandwidth estimate below
+// the 350 kbps `good` bar at every degraded profile (very-slow sends
+// ~114 kbps, slow ~200 kbps) — and below the 220 kbps poor bar once the
+// estimate dips low enough — so a participant who walked down on a bad link
+// could otherwise never climb back even after the link fully heals
+// (observed: 102 consecutive poor samples, BWE 191 kbps, level frozen at 0
+// on a clean link). `transportHealthy` is the decidable signal for the
+// starved state (mirroring the video-resume allowance); samples with real
+// transport damage or no measurable signal count as nothing, and a
+// congesting upgrade steps back down through the poor hysteresis.
+if (countLadderRecoverySamples(0, { transportHealthy: true }) !== 1 ||
+    countLadderRecoverySamples(4, { transportHealthy: true }) !== 5 ||
+    countLadderRecoverySamples(3, { transportHealthy: false }) !== 0) {
+  throw new Error("the ladder climb must count transport-healthy samples while transport-damaged and signal-less samples reset it");
+}
+// Deep starvation, end to end: a fully healed link whose estimate sits at
+// 191 kbps classifies poor (below the 220 kbps bar) yet transport-healthy —
+// the ladder must still climb on it. This is the state that previously froze
+// the ladder at the floor forever.
+const starvedSample = classifyNetworkSample({
+  rttMs: 30, packetLoss: 0, jitterMs: 5, availableOutgoingKbps: 191
+});
+if (!starvedSample.poor || !starvedSample.transportHealthy ||
+    countLadderRecoverySamples(0, starvedSample) !== 1) {
+  throw new Error(`a transport-healthy sample must climb even when the chip reads poor through a starved estimate (${JSON.stringify(starvedSample)})`);
+}
+let floorClimb = { level: 0, poorSamples: 0, goodSamples: 0 };
+const neutralHealthySample = { transportHealthy: true };
+for (let sample = 0; sample < 15; sample += 1) {
+  floorClimb = stepAdaptationLadder(floorClimb, neutralHealthySample);
+}
+if (floorClimb.level !== 3) {
+  throw new Error(`sustained transport-healthy samples must climb the healed ladder to the ceiling (level=${floorClimb.level})`);
+}
+floorClimb = stepAdaptationLadder(floorClimb, fluctuationPoorSample);
+floorClimb = stepAdaptationLadder(floorClimb, fluctuationPoorSample);
+if (floorClimb.level !== 2) {
+  throw new Error(`a poor excursion should step the ceiling ladder down one level (level=${floorClimb.level})`);
+}
+for (let sample = 0; sample < 4; sample += 1) {
+  floorClimb = stepAdaptationLadder(floorClimb, neutralHealthySample);
+}
+if (floorClimb.level !== 2) {
+  throw new Error(`four neutral samples must not complete the climb back (level=${floorClimb.level})`);
+}
+floorClimb = stepAdaptationLadder(floorClimb, neutralHealthySample);
+if (floorClimb.level !== 3) {
+  throw new Error(`the fifth neutral sample should complete the climb back to the ceiling (level=${floorClimb.level})`);
+}
+const signalLessSample = { transportHealthy: false };
+let signalLessWalk = { level: 2, poorSamples: 0, goodSamples: 0 };
+for (let sample = 0; sample < 8; sample += 1) {
+  signalLessWalk = stepAdaptationLadder(signalLessWalk, signalLessSample);
+}
+if (signalLessWalk.level !== 2 || signalLessWalk.goodSamples !== 0) {
+  throw new Error("signal-less samples must neither climb the ladder nor count as recovery");
 }
 const profile = { name: "slow", fps: 10, audioBitrate: 32000 };
 const configured = applyServerDefaults(profile, { videoFPS: 15, audioBitrate: 48000 }, true);
@@ -636,6 +702,10 @@ if (!appSource.includes("const selectedPair = selectedCandidatePair(report);") |
     !appSource.includes("values.rttMs = selectedCandidatePairRTT(report);") ||
     appSource.includes("!selectedCandidatePair")) {
   throw new Error("connection metrics must derive RTT and capacity from selected ICE pair stats only");
+}
+if (!appSource.includes("countLadderRecoverySamples(goodSamples") ||
+    !appSource.includes("{ transportHealthy })")) {
+  throw new Error("the ladder climb must count transport-healthy samples: a starved bandwidth estimate would otherwise strand users at a degraded level");
 }
 if (!appSource.includes("function enqueuePeerNegotiation(operation)") ||
     !appSource.includes("return renegotiationQueue.request();") ||

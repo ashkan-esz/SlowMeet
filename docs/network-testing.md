@@ -68,11 +68,20 @@ host interface:
     the share owner's own uplink is impaired while every viewer is clean; the
     lease survives a starving owner, the sharer keeps sending, and every
     viewer decodes the share again once the window lifts.
+  - `delay-and-jitter-links` — the two degradation shapes no rate/loss tier
+    covers, both as own-path contracts (each participant's media rides one
+    client↔SFU connection, so remote tiles only see per-stream loss): a
+    pure-latency link (RTT ≈ 350 ms, poor but not critical) turns the
+    participant's own chip poor and steps the ladder while video keeps
+    decoding at full rate, and a jitter-only link crosses the 50 ms jitter
+    bar and steps the ladder without suspending video; the clean pair's
+    chips stay unaffected, and the ladder climbs back from the floor on
+    transport health once the tiers lift.
 
   Run the whole gated set the way CI does:
 
   ```sh
-  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share" make test-media-e2e-four-netns
+  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links" make test-media-e2e-four-netns
   ```
 
 - `make test-soak-netns` runs the sustained weak-network soak: the same

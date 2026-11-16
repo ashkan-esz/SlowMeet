@@ -1230,3 +1230,145 @@ Call log:
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-JqAlUU`
+
+## 2026-11-15T20:56:10.867Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: participant 42723bf0-c66a-4dfe-b6da-1ce2abd1c09a never showed a degraded camera on its observers
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-8fgcbH`
+
+## 2026-11-15T20:58:53.765Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: the latency link's poor samples never stepped the ladder down (profileLevel=2)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-x8SSk9`
+
+## 2026-11-15T21:00:40.237Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: page.selectOption: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#profile')
+    - locator resolved to <select id="profile" aria-describedby="profile-help">…</select>
+  - attempting select option action
+    2 × waiting for element to be visible and enabled
+      - element is not visible
+    - retrying select option action
+    - waiting 20ms
+    2 × waiting for element to be visible and enabled
+      - element is not visible
+    - retrying select option action
+      - waiting 100ms
+    60 × waiting for element to be visible and enabled
+       - element is not visible
+     - retrying select option action
+       - waiting 500ms
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-SrQZFJ`
+
+## 2026-11-15T21:03:18.300Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: Command failed: tc qdisc add dev lo parent 1:70 handle 70: netem delay 30ms 160ms distribution uniform loss 0%
+No distribution data for uniform (/usr/lib/x86_64-linux-gnu/tc//uniform.dist: No such file or directory)
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-qO0Kt9`
+
+## 2026-11-15T21:06:20.298Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: page.waitForFunction: Timeout 90000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-IKRBSH`
+
+## 2026-11-15T21:27:59.513Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: P3 outbound audio did not advance under the four distinct tiers
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-GsVPnE`
+
+## 2026-11-15T21:28:43.905Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: P3 inbound audio did not advance under the delay/jitter tiers
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-rquoRg`
+
+## 2026-11-15T21:34:53.240Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: page.waitForFunction: Timeout 90000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-umCPFE`
+
+## 2026-11-15T21:38:18.652Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: the latency link must read poor-not-critical on its own path (rttMs=null poor=false critical=false)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-jSSGdr`
+
+## 2026-11-16T19:22:04.081Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: the jitter link never registered as degraded in the poll window (poorSeen=false minLevel=2 jitterMs=7)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ycq5z4`
+
+## 2026-11-16T19:26:04.349Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: page.waitForFunction: Timeout 90000ms exceeded.
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-7Dny7z`
+
+## 2026-11-16T19:36:12.772Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: protect-audio paused video under a poor-but-not-critical latency link
+
+true !== false
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-fX2pVn`
+
+## 2026-11-16T19:46:20.624Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: protect-audio paused video under a poor-but-not-critical latency link
+
+true !== false
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-57TVa9`

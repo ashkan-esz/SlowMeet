@@ -190,9 +190,9 @@ Knobs:
   `ice-restart-under-impairment`,
   `reconnect-after-expiry-under-impairment`, `cold-join-under-impairment`,
   `blackout-and-recovery`, `all-distinct-qualities`,
-  `impaired-sharer-screen-share`). Set automatically by
-  `make test-media-e2e-four-netns`; without it those scenarios are skipped
-  because shaping the host loopback is forbidden.
+  `impaired-sharer-screen-share`, `delay-and-jitter-links`). Set
+  automatically by `make test-media-e2e-four-netns`; without it those
+  scenarios are skipped because shaping the host loopback is forbidden.
 - `MEDIA_E2E_HEADED`, `MEDIA_E2E_ARTIFACT_DIR` — shared with the two-person
   runner.
 
