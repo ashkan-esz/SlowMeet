@@ -61,6 +61,35 @@ the STUN probe reports CLEAR, the transient cycle disappears on its own and
 direct carries all traffic. The client's per-user connection-method switcher
 (auto / direct / turn-udp / turn-tcp / turn-tls) remains available.
 
+## Regression and fix (Nov 17): the failover handoff stopped firing
+
+After deploying master `c3ce35b`, the automatic direct-UDP → TURN/TCP
+handoff stopped switching. The deployed server posture was verified correct
+(`GET /ice-config`: `ice_transport_policy=all`, TCP 3478 + TURNS 5349 URLs,
+`turn-tcp`/`turn-tls` enabled+available), and the served client bundle was
+the new build (`/js/path-memory.js` present) — the break was client-side.
+
+Root cause: commit `32a6d4b` ("reset TURN/TCP failover strikes when a peer
+connects") cleared the strike latch unconditionally in the ICE-connected
+branch. On this path every ICE restart *briefly connects the dying direct
+pair* (see Resolution), so the latch was washed back to zero each cycle and
+never reached its limit of 2 — the session cycled restarts forever without
+rebuilding the peer as TURN/TCP. The same momentary-connect flaw cleared the
+24h direct-UDP failure memory in the stats loop (3d4981d), so the second
+fallback trigger was wiped too. This is the same bug class `ecb1edf` fixed
+for the restart-attempt counter.
+
+Fix (client-only): a momentary `connected` transition is no longer treated
+as proof. The latch and the remembered failure now clear only after a live
+non-relay pair has held on a connected peer for 30 consecutive diagnostics
+samples (`directPathStableResetSeconds`); flapping cycles are far shorter,
+so the latch survives to reach the handoff. To keep `32a6d4b`'s protection
+(stale strikes must not strand a deployment with **no** TURN configured at
+the "Method unavailable" dead end), `effectiveConnectionMethod` only diverts
+to `turn-tcp` when the server actually enables that method. Tripwires:
+`scripts/test-renegotiation-queue.js` (latch shape + guard) and
+`scripts/test-connection-methods.js` (gated memory clear).
+
 ## Original diagnosis notes (Nov 13)
 
 - The deployed binary is committed `d759b35` — confirmed by rebuilding that

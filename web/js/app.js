@@ -1910,6 +1910,13 @@ let autoTurnFailoverStrikes = 0;
 const directPathPromptDelayMs = 8000;
 const directPathMemoryTtlMs = 86400000;
 const directUdpFailureStorageKey = "meeting.directUdpFailAt";
+// A momentary ICE "connected" transition proves nothing on a path that
+// flaps: every restart briefly connected the dying direct pair, which kept
+// washing the failover latch clean before it could reach the handoff. Only
+// a direct pair that stays live this long proves the path recovered, so
+// only that clears the strike latch and the remembered direct-UDP failure.
+const directPathStableResetSeconds = 30;
+let directPathStableSamples = 0;
 let directPathWatchdogTimer;
 let reconnectAttempts = 0;
 let wasReconnectResume = false;
@@ -4246,11 +4253,11 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     clearTimeout(directPathWatchdogTimer);
     directPathWatchdogTimer = undefined;
     hidePathFallbackBanner();
-    // A connected peer proves the current method works. Stale strikes from
-    // an earlier impaired window must not divert the NEXT reconnect into
-    // TURN/TCP — with no TURN configured that strands the call offline
-    // (the "Method unavailable" dead end) instead of retrying direct.
-    autoTurnFailoverStrikes = 0;
+    // A "connected" transition is not proof the path recovered (see
+    // directPathStableResetSeconds): the failover latch and the remembered
+    // direct-UDP failure clear only after a sustained live direct pair,
+    // sampled by the stats loop. A no-TURN deployment stays safe because
+    // the handoff only diverts when TURN/TCP is actually enabled.
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
     clearTimeout(exhaustedReconnectTimer);
@@ -4340,6 +4347,19 @@ function clearDirectUdpFailure() {
   }
 }
 
+// The stats loop calls this once per second while a live non-relay pair
+// exists on a connected peer. Sustained direct health proves the path
+// recovered, so only then are the failover latch and the remembered
+// direct-UDP failure cleared; a momentary connect on a flapping path
+// resets the counter instead of washing the latch.
+function noteStableDirectPath() {
+  directPathStableSamples += 1;
+  if (directPathStableSamples < directPathStableResetSeconds) return;
+  directPathStableSamples = 0;
+  autoTurnFailoverStrikes = 0;
+  clearDirectUdpFailure();
+}
+
 function hasFreshDirectUdpFailure() {
   const timestamp = window.SlowMeetPathMemory.parseStoredTimestamp(
     readStoredValue(directUdpFailureStorageKey)
@@ -4379,7 +4399,10 @@ function armDirectPathWatchdog(targetPeer, targetSocket, generation) {
 // method choice always wins over this fallback.
 function effectiveConnectionMethod() {
   if (connectionMethod === "auto") {
-    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
+    // Guard on enablement: stale strikes must never divert a deployment
+    // that has no TURN/TCP configured — that stranded calls offline at
+    // the "Method unavailable" dead end instead of retrying direct.
+    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && turnTcpMethodEnabled()) {
       return "turn-tcp";
     }
     // The same browser recorded a direct-UDP failure within the TTL and the
@@ -4775,12 +4798,26 @@ async function runDiagnosticsUpdate() {
       const relayProtocol = localCandidate?.relayProtocol || remoteCandidate?.relayProtocol ||
         localCandidate?.protocol || remoteCandidate?.protocol;
       values.icePath = relayProtocol ? `TURN/${relayProtocol.toUpperCase()}` : "TURN";
+      // Only sustained direct health proves the path recovered; a relay
+      // pair says nothing about direct, so the stability counter resets.
+      directPathStableSamples = 0;
     } else if (values.iceTransport) {
       values.icePath = `Direct/${values.iceTransport.toUpperCase()}`;
-      // A live non-relay pair proves direct UDP works here; a remembered
-      // failure must not shortcut future joins into TURN/TCP.
-      clearDirectUdpFailure();
+      // A live non-relay pair on a connected peer is direct working here —
+      // but a momentary one on a flapping path must not clear the
+      // remembered failure and the failover latch, so require the pair to
+      // stay live for directPathStableResetSeconds first.
+      if (isPeerConnectionConnected(currentPeer)) {
+        noteStableDirectPath();
+      } else {
+        directPathStableSamples = 0;
+      }
+    } else {
+      directPathStableSamples = 0;
     }
+  } else {
+    // No nominated pair (connecting or flapping): direct health unproven.
+    directPathStableSamples = 0;
   }
   if (previousStats && timestamp > previousStats.timestamp && hasInboundVideo) {
     const seconds = (timestamp - previousStats.timestamp) / 1000;

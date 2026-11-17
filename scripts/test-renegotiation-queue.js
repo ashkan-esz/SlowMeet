@@ -316,8 +316,20 @@ async function run() {
   // the contract is the same either way.
   assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto"[\s\S]*?autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return "turn-tcp";/,
     "an Automatic session that cycled direct-led restarts must reconnect as TURN/TCP");
-  assert.match(appSource, /if \(isPeerConnectionConnected\(targetPeer\)\) \{[\s\S]*?autoTurnFailoverStrikes = 0;/,
-    "a connected peer must clear stale TURN/TCP failover strikes so the next reconnect tries direct again (stale strikes strand the call offline when no TURN is configured)");
+  assert.match(appSource, /autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && turnTcpMethodEnabled\(\)/,
+    "stale strikes must never divert a deployment with no TURN/TCP configured (that stranded calls offline at the Method unavailable dead end)");
+  const connectedBranch = appSource.match(
+    /if \(isPeerConnectionConnected\(targetPeer\)\) \{[\s\S]*?\n  \}\n\n  if \(targetPeer\.connectionState === "failed"/
+  );
+  assert.ok(connectedBranch, "updatePeerConnectionUI must have a connected branch");
+  assert.doesNotMatch(connectedBranch[0], /autoTurnFailoverStrikes = 0;/,
+    "a momentary connect must NOT clear the failover latch: on a flapping path every restart briefly connects the dying direct pair, which kept washing the latch before the TURN/TCP handoff");
+  assert.match(appSource, /const directPathStableResetSeconds = \d+;/,
+    "the failover latch clears only after sustained direct health, not a momentary connect");
+  assert.match(appSource, /function noteStableDirectPath\(\) \{[\s\S]*?directPathStableSamples \+= 1;[\s\S]*?autoTurnFailoverStrikes = 0;[\s\S]*?clearDirectUdpFailure\(\);/,
+    "sustained direct health clears both the strike latch and the remembered direct-UDP failure");
+  assert.match(appSource, /if \(isPeerConnectionConnected\(currentPeer\)\) \{\s*noteStableDirectPath\(\);\s*\} else \{\s*directPathStableSamples = 0;/,
+    "only a live non-relay pair on a connected peer accumulates direct-path stability");
   assert.match(appSource, /if \(connectionMethod === "auto"\) \{\s*autoTurnFailoverStrikes \+= 1;\s*if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
     "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP)");
   assert.match(appSource, /const effectiveMethod = effectiveConnectionMethod\(\);\s*const selectedICEServers = filteredICEServers\(effectiveMethod\);/,

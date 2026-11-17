@@ -1420,3 +1420,66 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-AyFnUP`
+
+## 2026-11-16T22:39:31.021Z — mixed-quality-room
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Four participants on three different link qualities: audio survives everywhere, degradation stays per-participant, and recovery is prompt.
+- Actual: P2 receiving audio under the mixed profiles: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-V9wHRT`
+
+## 2026-11-16T22:40:51.343Z — fluctuating-link
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: The moderate tier arrives, lifts, and returns: each impaired window degrades the impaired camera while the clean pair stays live and every lift recovers.
+- Actual: P2 receiving audio under the impaired window: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-FeFwnq`
+
+## 2026-11-16T22:41:45.811Z — slow-bandwidth-room
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A rate-only cap with no injected loss: audio survives the standing queue, the capped participant's video trails the clean pair, and recovery is prompt.
+- Actual: page.evaluate: Target page, context or browser has been closed
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-dJwl4D`
+
+## 2026-11-17T19:06:37.269Z — chat-dom-cap
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A four-sender flood cannot grow the chat rail past its 300-node cap.
+- Actual: page.evaluate: Target page, context or browser has been closed
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-sVAPfM`
+
+## 2026-11-17T19:06:37.270Z — congestion-adaptation
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: Injected packet loss drives automatic video pause room-wide and recovery restores it.
+- Actual: locator.getAttribute: Target page, context or browser has been closed
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-FnqVGi`
+
+## 2026-11-17T19:06:37.271Z — axe-accessibility
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: The meeting surface has no axe critical or serious accessibility violations.
+- Actual: locator.getAttribute: Target page, context or browser has been closed
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-yERbtc`
+
+## 2026-11-17T19:06:37.272Z — fifth-participant-capacity
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: The room rejects a fifth browser with a clear full-room message and every present participant sees the room-full notice.
+- Actual: locator.getAttribute: Target page, context or browser has been closed
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-JF7Ut8`

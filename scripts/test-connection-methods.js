@@ -65,8 +65,10 @@ assert.match(appSource, /if \(turnTcpMethodEnabled\(\) && hasFreshDirectUdpFailu
   "a fresh remembered failure shortcuts \"Automatic\" joins onto TURN/TCP");
 assert.match(appSource, /recordDirectUdpFailure\(\);\s*hidePathFallbackBanner\(\);\s*selectConnectionMethod\("turn-tcp"\);/,
   "the banner switch button records the failure and reconnects as TURN/TCP");
-assert.match(appSource, /values\.icePath = `Direct\/\$\{values\.iceTransport\.toUpperCase\(\)\}`;[\s\S]*?clearDirectUdpFailure\(\);/,
-  "a live direct pair clears the remembered failure");
+assert.match(appSource, /values\.icePath = `Direct\/\$\{values\.iceTransport\.toUpperCase\(\)\}`;[\s\S]*?noteStableDirectPath\(\);/,
+  "a live direct pair on a connected peer feeds the sustained-health gate");
+assert.match(appSource, /function noteStableDirectPath\(\) \{[\s\S]*?directPathStableSamples < directPathStableResetSeconds[\s\S]*?clearDirectUdpFailure\(\);/,
+  "the remembered failure clears only after sustained direct health (a momentary connect on a flapping path must not)");
 assert.match(appSource, /const directUdpFailureStorageKey = "meeting\.directUdpFailAt";/,
   "the remembered failure is stored under the meeting.directUdpFailAt key");
 
