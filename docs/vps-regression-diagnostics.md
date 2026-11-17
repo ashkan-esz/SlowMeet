@@ -90,6 +90,32 @@ to `turn-tcp` when the server actually enables that method. Tripwires:
 `scripts/test-renegotiation-queue.js` (latch shape + guard) and
 `scripts/test-connection-methods.js` (gated memory clear).
 
+### Completion (Nov 17, later): the latch also stopped *filling*
+
+Keeping the latch from being washed was necessary but not sufficient on the
+live path. Wire evidence from a fresh repro (server logs + coturn RSTs
+correlated per cycle; two headless fake-media participants reproduced the
+exact metronomic `connected → disconnected` churn in ~5s cycles): the
+transport dies ~5-7s after each connect with **no TCP teardown at that
+moment** — coturn only sees the client's clean FIN ~10s later, when the
+client rebuilds. Each doomed direct pair *self-recovers* into `connected`
+(a fresh flow gets the path's small packet allowance again), and that
+recovery cancels the pending ICE-restart timer (`iceRestartRelayGraceDelayMs`
+= 12s never elapses), so `requestIceRestart` — the only strike source —
+never ran. Strikes stayed at zero not because they were washed but because
+nothing accrued them; the handoff still never fired.
+
+Completion (client-only): every direct-led disconnect **episode** now counts
+one strike (`noteDirectLedDisconnectEpisode`, deduped per episode, called
+from both the `disconnected` and `failed` branches), and once the latch is
+full the session hands off to the reconnect state machine directly — no
+dependence on a restart actually firing. Relay-led blips do not count; the
+restart-driven path remains for attempts that do fire; `requestIceRestart`
+keeps the handoff check but no longer increments (one episode = one strike,
+never double-counted). Convergence contract restored: ~2 doomed episodes
+(~20-30s) → peer rebuilt as TURN/TCP, which the wire probes show holds
+indefinitely (120s forced-`turn-tcp` session: zero ICE transitions).
+
 ## Original diagnosis notes (Nov 13)
 
 - The deployed binary is committed `d759b35` — confirmed by rebuilding that

@@ -324,14 +324,22 @@ async function run() {
   assert.ok(connectedBranch, "updatePeerConnectionUI must have a connected branch");
   assert.doesNotMatch(connectedBranch[0], /autoTurnFailoverStrikes = 0;/,
     "a momentary connect must NOT clear the failover latch: on a flapping path every restart briefly connects the dying direct pair, which kept washing the latch before the TURN/TCP handoff");
+  assert.match(appSource, /directDisconnectCounted = false;\s*clearTimeout\(iceDisconnectRestartTimer\);/,
+    "a recovery opens a new disconnect episode (the latch itself clears only via sustained stability)");
+  assert.match(appSource, /function noteDirectLedDisconnectEpisode\(targetPeer, targetSocket, generation\) \{[\s\S]*?if \(directDisconnectCounted\) return;\s*directDisconnectCounted = true;[\s\S]*?autoTurnFailoverStrikes \+= 1;/,
+    "each direct-led disconnect episode counts one strike: Chrome can briefly self-recover every doomed pair on a UDP-policing path, cancelling the restart timer before it fires, so restart-driven counting alone never fills the latch");
+  assert.match(appSource, /noteDirectLedDisconnectEpisode\(targetPeer, targetSocket, generation\);\s*scheduleIceRestartRetry\(targetPeer, targetSocket, generation\);/,
+    "the disconnected branch counts the doomed episode before scheduling the (grace-cancellable) restart");
+  assert.match(appSource, /if \(targetPeer\.connectionState === "failed"[\s\S]*?noteDirectLedDisconnectEpisode\(targetPeer, targetSocket, generation\);/,
+    "a failed attempt without a disconnected transition still counts as a doomed direct episode");
   assert.match(appSource, /const directPathStableResetSeconds = \d+;/,
     "the failover latch clears only after sustained direct health, not a momentary connect");
   assert.match(appSource, /function noteStableDirectPath\(\) \{[\s\S]*?directPathStableSamples \+= 1;[\s\S]*?autoTurnFailoverStrikes = 0;[\s\S]*?clearDirectUdpFailure\(\);/,
     "sustained direct health clears both the strike latch and the remembered direct-UDP failure");
   assert.match(appSource, /if \(isPeerConnectionConnected\(currentPeer\)\) \{\s*noteStableDirectPath\(\);\s*\} else \{\s*directPathStableSamples = 0;/,
     "only a live non-relay pair on a connected peer accumulates direct-path stability");
-  assert.match(appSource, /if \(connectionMethod === "auto"\) \{\s*autoTurnFailoverStrikes \+= 1;\s*if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
-    "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP)");
+  assert.match(appSource, /if \(connectionMethod === "auto"\) \{[\s\S]*?if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
+    "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP); strikes accrue per episode, not per restart");
   assert.match(appSource, /const effectiveMethod = effectiveConnectionMethod\(\);\s*const selectedICEServers = filteredICEServers\(effectiveMethod\);/,
     "the peer must be built from the effective (possibly fallback) method");
   assert.match(appSource, /function requestIceRestart\(targetPeer, targetSocket, generation\)[\s\S]*?type: "ice_restart"/,

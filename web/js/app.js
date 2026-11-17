@@ -1609,6 +1609,7 @@ connectionPopoverRetry?.addEventListener("click", () => {
     exhaustedReconnectTimer = undefined;
     iceRestartAttempts = 0;
     restartRequested = false;
+    directDisconnectCounted = false;
     showStatus("Restarting media...");
     requestIceRestart(peer, socket, socketGeneration);
     return;
@@ -1903,6 +1904,14 @@ const iceRestartRelayGraceDelayMs = 12000;
 // overridden; the strike count resets on page load.
 const autoTurnFailoverStrikesLimit = 2;
 let autoTurnFailoverStrikes = 0;
+// Chrome can self-recover a cut direct pair for a few seconds: on paths that
+// police valid-STUN UDP, every fresh flow briefly works, so ICE oscillates
+// disconnected → connected → disconnected and each recovery cancels the
+// pending ICE-restart timer (updatePeerConnectionUI) before it can fire —
+// the restart-driven strike counting below never runs and the latch never
+// fills. Each direct-led disconnect episode therefore counts a strike too
+// (noteDirectLedDisconnectEpisode), deduped per episode with this flag.
+let directDisconnectCounted = false;
 // A direct-led connection that never establishes within this window gets a
 // user-facing prompt offering the TURN/TCP method (only when the server
 // enables it). Confirmed direct failures are remembered per browser so the
@@ -3593,6 +3602,7 @@ function connectSocket(name, password) {
     if (message.type === "error") {
       if (restartRequested && peer && socket) {
         restartRequested = false;
+        directDisconnectCounted = false;
         scheduleIceRestartRetry(peer, socket, generation);
       }
       if (screenShareRequest) {
@@ -3815,6 +3825,7 @@ function resetMediaConnection() {
   hidePathFallbackBanner();
   restartRequested = false;
   iceRestartAttempts = 0;
+  directDisconnectCounted = false;
   previousStats = undefined;
   cameraLayerPoorSamples = 0;
   cameraLayerGoodSamples = 0;
@@ -3869,6 +3880,7 @@ async function startWebRTC() {
   const currentPeer = new RTCPeerConnection({ iceServers: selectedICEServers, iceTransportPolicy: selectedICEPolicy });
   restartRequested = false;
   iceRestartAttempts = 0;
+  directDisconnectCounted = false;
   peer = currentPeer;
   armDirectPathWatchdog(currentPeer, currentSocket, generation);
   renegotiationChain = Promise.resolve();
@@ -4258,6 +4270,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     // direct-UDP failure clear only after a sustained live direct pair,
     // sampled by the stats loop. A no-TURN deployment stays safe because
     // the handoff only diverts when TURN/TCP is actually enabled.
+    directDisconnectCounted = false;
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
     clearTimeout(exhaustedReconnectTimer);
@@ -4273,6 +4286,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
   if (targetPeer.connectionState === "failed" || targetPeer.iceConnectionState === "failed") {
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
+    noteDirectLedDisconnectEpisode(targetPeer, targetSocket, generation);
     setConnection("poor", iceRestartAttempts >= maxIceRestartAttempts ? "Offline" : "Reconnecting");
     setParticipantConnectionState("disconnected");
     status.textContent = iceRestartAttempts >= maxIceRestartAttempts
@@ -4296,6 +4310,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
       scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
       return;
     }
+    noteDirectLedDisconnectEpisode(targetPeer, targetSocket, generation);
     scheduleIceRestartRetry(targetPeer, targetSocket, generation);
     return;
   }
@@ -4304,13 +4319,43 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
   status.textContent = restartRequested ? "Restarting media..." : "Connecting media...";
 }
 
+// Counts one direct-led disconnect episode toward the TURN/TCP handoff.
+// The restart-driven counting in requestIceRestart alone cannot fill the
+// latch on paths that cut direct UDP: Chrome briefly self-recovers every
+// doomed pair (a fresh flow gets the path's small packet allowance again),
+// and that recovery cancels the pending ICE-restart timer before it can
+// fire — so the session would cycle "Reconnecting" forever. A relay-led
+// blip does not count (transient by nature; sustained direct stability
+// still clears the latch via noteStableDirectPath). Once the latch fills,
+// hand this connection to the reconnect state machine directly — its next
+// peer is built as TURN/TCP (see effectiveConnectionMethod), and the close
+// stays cancellable if ICE recovers during the grace window.
+function noteDirectLedDisconnectEpisode(targetPeer, targetSocket, generation) {
+  if (directDisconnectCounted) return;
+  directDisconnectCounted = true;
+  if (connectionMethod !== "auto") return;
+  const measuredPath = connectionMetrics.icePath;
+  // An unmeasured path counts as direct-led: a relay pair is visible to the
+  // stats loop within a second of a blip that lasts several seconds.
+  if (measuredPath && !measuredPath.startsWith("Direct/")) return;
+  autoTurnFailoverStrikes += 1;
+  if (autoTurnFailoverStrikes < autoTurnFailoverStrikesLimit) return;
+  recordDirectUdpFailure();
+  restartRequested = true;
+  status.textContent = "Reconnecting media...";
+  scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
+}
+
 function requestIceRestart(targetPeer, targetSocket, generation) {
   if (restartRequested || iceRestartAttempts >= maxIceRestartAttempts ||
       !isCurrentWebRTC(generation, targetPeer, targetSocket) || targetSocket.readyState !== WebSocket.OPEN) {
     return false;
   }
   if (connectionMethod === "auto") {
-    autoTurnFailoverStrikes += 1;
+    // Strikes accrue per direct-led disconnect episode (see
+    // noteDirectLedDisconnectEpisode), not per restart — a doomed episode
+    // may recover before its restart timer fires, and the latch must fill
+    // either way.
     if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
       // Another ice_restart would just reset the agent into the same dying
       // direct path. Hand this connection to the reconnect state machine: its
@@ -5818,6 +5863,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
       }));
       if (iceRestartOffer) {
         restartRequested = false;
+        directDisconnectCounted = false;
         updatePeerConnectionUI(currentPeer, currentSocket, generation);
         scheduleIceRestartRetry(currentPeer, currentSocket, generation);
       }
@@ -5829,6 +5875,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
       renegotiationQueue?.resume();
       if (iceRestartOffer && isCurrentWebRTC(generation, currentPeer, currentSocket)) {
         restartRequested = false;
+        directDisconnectCounted = false;
         updatePeerConnectionUI(currentPeer, currentSocket, generation);
         scheduleIceRestartRetry(currentPeer, currentSocket, generation);
       }
