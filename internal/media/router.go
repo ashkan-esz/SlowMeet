@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"SlowMeet/internal/metrics"
 	"SlowMeet/internal/webrtc"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
@@ -79,6 +80,7 @@ type publication struct {
 type publicationTarget struct {
 	track       *pion.TrackLocalStaticRTP
 	pending     chan *rtp.Packet
+	audio       *audioMailbox
 	done        chan struct{}
 	videoLosses atomic.Pointer[targetVideoLosses]
 	// lastSentLayer tracks the camera layer most recently forwarded to this
@@ -119,6 +121,9 @@ func newPublicationTarget(track *pion.TrackLocalStaticRTP, queueDepth int) *publ
 // never mutate the caller's packet. If the pinned pion version is upgraded,
 // re-verify that behavior before removing the copy-once note below.
 func (t *publicationTarget) enqueue(packet *rtp.Packet) bool {
+	if t.audio != nil {
+		return t.audio.enqueue(packet)
+	}
 	if len(t.pending) >= cap(t.pending) {
 		// The receiver's mailbox is full because its egress is slow; drop the
 		// packet. RTP receivers recover loss through NACK and PLI feedback.
@@ -144,6 +149,10 @@ func (t *publicationTarget) stop() {
 // writePackets drains the mailbox until the target or its publication is
 // removed. WriteRTP failures (receiver left, track removed) are dropped.
 func (t *publicationTarget) writePackets(stopped <-chan struct{}) {
+	if t.audio != nil {
+		t.audio.writePackets(t.track.WriteRTP, t.done, stopped)
+		return
+	}
 	for {
 		select {
 		case <-t.done:
@@ -236,6 +245,7 @@ type Router struct {
 	// always targets the current source track.
 	senderSourceSSRC map[*pion.RTPSender]*atomic.Uint32
 	limits           Limits
+	audioDrops       metrics.AudioDrops
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -254,6 +264,18 @@ func NewRouter(config ...Limits) *Router {
 		senderSourceSSRC:      make(map[*pion.RTPSender]*atomic.Uint32),
 		limits:                limits,
 	}
+}
+
+func (r *Router) AudioDrops() metrics.AudioDropSnapshot {
+	return r.audioDrops.Snapshot()
+}
+
+func (r *Router) newTarget(track *pion.TrackLocalStaticRTP, pub *publication) *publicationTarget {
+	target := newPublicationTarget(track, targetQueueDepth(pub.remote))
+	if pub.remote != nil && pub.remote.Kind() == pion.RTPCodecTypeAudio {
+		target.audio = newAudioMailbox(&r.audioDrops, time.Now)
+	}
+	return target
 }
 
 // SetLimits updates the hard server-side caps. Existing publications use the
@@ -397,7 +419,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		tracks:      make(map[string]*publicationTarget),
 		senders:     make(map[string]*pion.RTPSender),
 		readBuf:     make([]byte, receiveMTU),
-		limiter:     newBitrateLimiter(rateForKind(remote.Kind(), r.currentLimits())),
+		limiter:     newPublicationBitrateLimiter(remote.Kind(), rateForKind(remote.Kind(), r.currentLimits())),
 		stopped:     make(chan struct{}),
 		forwardDone: make(chan struct{}),
 	}
@@ -797,7 +819,7 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 		if err := sender.ReplaceTrack(local); err != nil {
 			continue
 		}
-		target := newPublicationTarget(local, targetQueueDepth(replacement.remote))
+		target := r.newTarget(local, replacement)
 		replacement.tracks[targetID] = target
 		replacement.senders[targetID] = sender
 		if holder := r.senderSourceSSRC[sender]; holder != nil {
@@ -860,7 +882,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 			op.pub.tracks[op.targetID] == nil &&
 			r.shouldSubscribeLocked(op.pub, op.targetID)
 		if valid {
-			target := newPublicationTarget(local, targetQueueDepth(op.pub.remote))
+			target := r.newTarget(local, op.pub)
 			op.pub.tracks[op.targetID] = target
 			op.pub.senders[op.targetID] = sender
 			if op.pub.source != nil && op.pub.remote != nil {
@@ -1069,6 +1091,7 @@ func (r *Router) forwardAudio(pub *publication) {
 			continue
 		}
 		if !pub.limiter.allow(packet.MarshalSize()) {
+			r.audioDrops.Admission.Add(1)
 			continue
 		}
 		r.forwardAudioPacket(pub, packet)
@@ -1420,6 +1443,9 @@ type bitrateLimiter struct {
 	tokens float64
 	last   time.Time
 	now    func() time.Time
+	// Audio retains bounded catch-up credit while video keeps its short burst.
+	burstWindow time.Duration
+	initialized bool
 	// pacerTimer is owned by the publication's single pacer goroutine and
 	// reused across waitForBytes calls instead of allocating one per packet.
 	pacerTimer          *time.Timer
@@ -1441,6 +1467,13 @@ func newBitrateLimiterAt(rate int, now func() time.Time) *bitrateLimiter {
 	return limiter
 }
 
+func (l *bitrateLimiter) burstLocked() float64 {
+	if l.burstWindow > 0 {
+		return l.rate * l.burstWindow.Seconds()
+	}
+	return max(l.rate/10, 1200)
+}
+
 func (l *bitrateLimiter) setRate(rate int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1448,19 +1481,18 @@ func (l *bitrateLimiter) setRate(rate int) {
 	if rate <= 0 {
 		l.rate = 0
 		l.tokens = 0
+		l.initialized = true
 		return
 	}
 	l.rate = float64(rate)
-	burst := l.rate / 10
-	if burst < 1200 {
-		burst = 1200
-	}
+	burst := l.burstLocked()
 	if l.tokens > burst {
 		l.tokens = burst
 	}
-	if l.tokens == 0 {
+	if !l.initialized || (l.burstWindow == 0 && l.tokens == 0) {
 		l.tokens = burst
 	}
+	l.initialized = true
 }
 
 func (l *bitrateLimiter) allow(bytes int) bool {
@@ -1578,14 +1610,13 @@ func (l *bitrateLimiter) allowFrame(timestamp uint32) bool {
 func (l *bitrateLimiter) refillLocked() {
 	current := l.now()
 	if current.Before(l.last) {
-		l.last = current
+		if l.burstWindow == 0 {
+			l.last = current
+		}
 		return
 	}
 	if l.rate > 0 {
-		burst := l.rate / 10
-		if burst < 1200 {
-			burst = 1200
-		}
+		burst := l.burstLocked()
 		l.tokens += current.Sub(l.last).Seconds() * l.rate
 		if l.tokens > burst {
 			l.tokens = burst

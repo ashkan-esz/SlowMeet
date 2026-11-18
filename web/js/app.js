@@ -1967,6 +1967,7 @@ let lastPauseCriticalSamples = 0;
 let recoverySamples = 0;
 let videoSuspended = false;
 let videoSuspendedAutomatically = false;
+let microphoneRequested = false;
 let cameraRequested = false;
 let receiveVideoEnabled = true;
 let selfViewVisible = readStoredValue("meeting.showSelfView") !== "false";
@@ -2345,6 +2346,7 @@ async function replaceLocalDevice(kind, deviceID) {
     }
     const nextTrack = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
     if (!nextTrack) throw new Error(`${kind} device is unavailable`);
+    if (kind === "audio") nextTrack.enabled = microphoneRequested;
     const previousTrack = kind === "audio"
       ? localStream.getAudioTracks()[0]
       : localStream.getVideoTracks()[0];
@@ -2372,7 +2374,7 @@ async function replaceLocalDevice(kind, deviceID) {
     }
     localStream.addTrack(nextTrack);
     nextTrack.enabled = kind === "audio"
-      ? localStream.getAudioTracks()[0] === nextTrack && previousTrack?.enabled !== false
+      ? microphoneRequested
       : cameraRequested && !videoSuspended && !audioOnly?.checked;
     if (kind === "audio") {
       if (!sender && audioTransceiver && peer?.getTransceivers().includes(audioTransceiver) &&
@@ -4034,10 +4036,9 @@ async function startWebRTC() {
         audioCaptureConstraints()
       );
       audioStream.getAudioTracks().forEach((track) => {
-        // Joining starts muted, but a reconnect must not silently mute a user
-        // who was talking; restore the pre-drop mic state, mirroring the
-        // camera restore below.
-        track.enabled = mic.getAttribute("aria-pressed") === "true";
+        // Capture disappears during peer reset, so the rendered mic control
+        // is not a reliable source of the user's pre-drop microphone intent.
+        track.enabled = microphoneRequested;
         setupStream.addTrack(track);
       });
       if (abortIfStale()) return;
@@ -5926,7 +5927,8 @@ mic.addEventListener("click", () => {
   audioContext?.resume().catch(() => {});
   const track = localStream?.getAudioTracks()[0];
   if (!track) return;
-  track.enabled = !track.enabled;
+  microphoneRequested = !track.enabled;
+  track.enabled = microphoneRequested;
   setLocalMediaControls();
   sendMediaState();
 });
@@ -6022,6 +6024,7 @@ leave.addEventListener("click", () => {
   criticalSamples = 0;
   videoSuspended = false;
   videoSuspendedAutomatically = false;
+  microphoneRequested = false;
   cameraRequested = false;
   remoteTrackOwners.clear();
   remoteTrackRoles.clear();

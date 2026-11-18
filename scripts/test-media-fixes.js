@@ -51,8 +51,24 @@ assert.match(attachSpeakerAnalyzer, /if \(!sourceNode\) \{[\s\S]*?createMediaEle
 // Reconnects restore the pre-drop microphone state instead of forcing mute.
 const startWebRTCAudio = slice(appSource, "audioStream.getAudioTracks().forEach((track) => {",
   "setupStream.addTrack(track);");
-assert.match(startWebRTCAudio, /track\.enabled = mic\.getAttribute\("aria-pressed"\) === "true";/,
-  "reconnect should restore the previous microphone state");
+assert.match(startWebRTCAudio, /track\.enabled = microphoneRequested;/,
+  "reconnect should restore microphone intent independently of the cleared UI");
+assert.match(appSource, /let microphoneRequested = false;/,
+  "new meetings must start muted");
+const resetMediaConnection = slice(appSource, "function resetMediaConnection() {",
+  "\nasync function startWebRTC()");
+assert.doesNotMatch(resetMediaConnection, /microphoneRequested\s*=/,
+  "temporarily clearing capture must not clear microphone intent");
+const restoreMicrophone = new Function("track", "microphoneRequested", "mic",
+  startWebRTCAudio.slice(startWebRTCAudio.indexOf("{") + 1));
+for (const requested of [true, false]) {
+  const track = { enabled: !requested };
+  restoreMicrophone(track, requested, { getAttribute: () => "false" });
+  assert.equal(track.enabled, requested,
+    "reconnect must preserve intent even after the UI reports no microphone");
+}
+assert.match(replaceLocalDevice, /nextTrack\.enabled = microphoneRequested;/,
+  "device replacement must preserve microphone intent before attaching the track");
 
 // One unusable queued ICE candidate must not abort the offer/answer flush.
 assert.match(appSource, /await Promise\.allSettled\(pendingCandidates\.splice\(0\)\.map\(\(candidate\) =>[\s\S]*?addIceCandidate\(candidate\)\.catch/,
@@ -69,6 +85,12 @@ assert.match(appSource, /for \(const trackID of element\?\.trackIDs \|\| \[\]\) 
   "forgotten participants must prune their remote track roles");
 const leaveHandler = slice(appSource, "leave.addEventListener(\"click\", () => {",
   "\nrejoin?.addEventListener");
+assert.match(leaveHandler, /microphoneRequested = false;/,
+  "intentional leave must reset microphone intent for a muted new join");
+const microphoneHandler = slice(appSource, 'mic.addEventListener("click", () => {',
+  '\nraiseHand?.addEventListener');
+assert.match(microphoneHandler, /microphoneRequested = !track\.enabled;\s*track\.enabled = microphoneRequested;/,
+  "a genuine microphone action must update capture and durable reconnect intent together");
 assert.match(leaveHandler, /unreadMessages = 0;/,
   "leaving must reset the unread badge for the next meeting");
 assert.match(leaveHandler, /chatHistoryTracker\?\.reset\(\);/,

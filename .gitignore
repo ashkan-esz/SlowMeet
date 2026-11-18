@@ -14,6 +14,7 @@ slowmeet
 .playwright-mcp
 .serena
 .codex
+.zcode
 
 node_modules
 coverage.out

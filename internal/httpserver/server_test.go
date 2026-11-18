@@ -81,6 +81,17 @@ func TestHealthAndPublicConfig(t *testing.T) {
 		t.Fatalf("unexpected metrics response: %s", metrics.Body.String())
 	}
 
+	for _, metric := range []string{
+		"slowmeet_audio_admission_drops_total 0",
+		"slowmeet_audio_queue_overflow_drops_total 0",
+		"slowmeet_audio_queue_expired_drops_total 0",
+		"slowmeet_audio_write_failures_total 0",
+	} {
+		if !strings.Contains(metrics.Body.String(), metric) {
+			t.Fatalf("metrics response omitted %q", metric)
+		}
+	}
+
 	handler.hub.Metrics().ObserveNetwork(84, 4, 8, 521, 32)
 	withSample := httptest.NewRecorder()
 	handler.ServeHTTP(withSample, httptest.NewRequest(http.MethodGet, "/metrics", nil))

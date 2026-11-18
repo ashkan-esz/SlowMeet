@@ -196,6 +196,11 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "slowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
 		_, _ = fmt.Fprintf(w, "slowmeet_reconnects_total %d\n", snapshot.Reconnects)
 		_, _ = fmt.Fprintf(w, "slowmeet_network_samples_total %d\n", snapshot.NetworkSamples)
+		audioDrops := hub.AudioDrops()
+		_, _ = fmt.Fprintf(w, "slowmeet_audio_admission_drops_total %d\n", audioDrops.Admission)
+		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_overflow_drops_total %d\n", audioDrops.QueueOverflow)
+		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_expired_drops_total %d\n", audioDrops.QueueExpired)
+		_, _ = fmt.Fprintf(w, "slowmeet_audio_write_failures_total %d\n", audioDrops.WriteFailures)
 		_, _ = fmt.Fprintf(w, "slowmeet_network_sample_available %d\n", boolMetric(snapshot.HasNetworkSample))
 		if snapshot.HasNetworkSample {
 			_, _ = fmt.Fprintf(w, "slowmeet_last_network_sample_timestamp_seconds %d\n", snapshot.LastNetworkSample)

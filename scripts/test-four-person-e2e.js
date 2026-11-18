@@ -2332,12 +2332,12 @@ async function scenarioBlackoutAndRecovery() {
   for (const page of pages.values()) await roster(page, names);
   const p2IDForP4 = await participantIDFor(pages.get("P4"), names[1]);
   await waitForTileState(pages.get("P4"), p2IDForP4, "camera", "on", 90000);
-  const beforeRecovery = await pageMediaSnapshot(p2Page);
-  await delay(2000);
-  const afterRecovery = await pageMediaSnapshot(p2Page);
-  assert.ok(afterRecovery.audioSent > beforeRecovery.audioSent &&
-    afterRecovery.audioReceived > beforeRecovery.audioReceived,
-    "P2's media never resumed on its own after the blackout lifted");
+  // The recovery check must poll for flow instead of comparing raw counters:
+  // the churn above replaces P2's peer (CI at 1129c18 flaked here with a
+  // negative frame delta proving the reset), and a rebuilt peer restarts its
+  // RTP counters at zero, so a 2s before/after delta can fail while audio
+  // actually flows. waitForAudioFlow proves bytes are moving NOW.
+  await waitForAudioFlow(p2Page, "P2's media after the blackout lifted");
   console.log("[blackout] media recovered without a reload after the blackout lifted");
   await assertMedia();
 }

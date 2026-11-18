@@ -26,14 +26,13 @@ func TestWeakNetworkLimitsConvertToByteBudgets(t *testing.T) {
 
 func TestAudioBudgetDropsInsteadOfQueueingAtFloor(t *testing.T) {
 	now := time.Unix(0, 0)
-	limiter := newBitrateLimiterAt(3_000, func() time.Time { return now })
+	limiter := newAudioBitrateLimiterAt(3_000, func() time.Time { return now })
 
-	// The burst absorbs 12 consecutive 100-byte Opus packets (20ms frames at
-	// 24kbps carry ~60 bytes plus RTP overhead); the 13th exceeds the bucket
-	// and must be dropped outright — never queued, never awaited.
-	for i := 0; i < 12; i++ {
+	// Audio retains two seconds of bounded catch-up credit. Excess still drops
+	// outright: it must never be paced or block the ingress read loop.
+	for i := 0; i < 60; i++ {
 		if !limiter.allow(100) {
-			t.Fatalf("packet %d should fit the initial 1200-byte burst", i+1)
+			t.Fatalf("packet %d should fit the initial 6000-byte audio burst", i+1)
 		}
 	}
 	if limiter.allow(100) {

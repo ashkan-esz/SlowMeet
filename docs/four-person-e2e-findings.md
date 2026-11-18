@@ -1483,3 +1483,21 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-JF7Ut8`
+
+## 2026-11-18T08:45:13.135Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media never resumed on its own after the blackout lifted
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ioIqog`
+
+## 2026-11-18T08:48:47.347Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media never resumed on its own after the blackout lifted
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-jYOxqZ`

@@ -193,6 +193,10 @@ func (h *Hub) Metrics() *metrics.Metrics {
 	return h.metrics
 }
 
+func (h *Hub) AudioDrops() metrics.AudioDropSnapshot {
+	return h.router.AudioDrops()
+}
+
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true
