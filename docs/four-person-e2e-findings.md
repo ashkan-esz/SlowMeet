@@ -1501,3 +1501,93 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-jYOxqZ`
+
+## 2026-11-18T19:17:05.149Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-bVuiRq`
+
+## 2026-11-18T19:19:31.529Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-C8zBxQ`
+
+## 2026-11-18T19:22:44.719Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-9Nk1BW`
+
+## 2026-11-18T19:25:31.457Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ysxOR8`
+
+## 2026-11-18T19:27:25.231Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-bfCyud`
+
+## 2026-11-18T19:43:13.047Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-d1bh33`
+
+## 2026-11-18T19:44:17.489Z — all-distinct-qualities
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.
+- Actual: P2 receiving audio under the four distinct tiers: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-AG1QYa`
+
+## 2026-11-18T19:45:23.308Z — delay-and-jitter-links
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.
+- Actual: P2 receiving audio under the delay/jitter tiers: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-hBlGRI`
+
+## 2026-11-18T19:49:13.995Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-QlgQAq`
+
+## 2026-11-18T19:56:36.396Z — blackout-and-recovery
+
+- Reproduction: `make test-media-e2e-four`
+- Expected: A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.
+- Actual: P2's media after the blackout lifted: inbound audio never flowed (last=0)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-hwkhTx`

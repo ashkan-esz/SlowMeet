@@ -340,3 +340,45 @@ spikes (RTT median 550–680 ms, max ~4.8 s during the Nov 18 trials), which
 still trigger protect-audio video suspension. The repairs remove the SFU's
 self-inflicted audio loss and the reconnect mute; they cannot fix the route.
 Real-device and different-ISP comparisons remain pending user-side checks.
+
+## Nov 18, 2026 (later): a resumed participant received no audio after a grace reconnect
+
+The four-person netns CI job failed deterministically on
+`blackout-and-recovery`, `all-distinct-qualities`, and `delay-and-jitter-links`
+with "P2 inbound audio never flowed (last=0)" — the impaired participant is
+the only one that rebuilds its peer, and only its inbound audio was zero while
+ICE stayed connected and its outbound media flowed.
+
+Instrumented router traces (temporary debug logging, since reverted) captured
+the exact sequence on a pinned 2-core reproduction of the CI environment:
+
+1. The impaired client disconnects; the reconnect-grace path arms a pending
+   reconnect and **defers** the superseded client's teardown
+   (`teardownClientMedia`), so the dead peer's receiver targets stay
+   registered under the participant ID in every publication.
+2. The client resumes; `Register` re-queues subscriptions — but
+   `queueSubscriptionLocked` sees the stale target and skips every one.
+3. Camera publications self-heal only because the resume churn replaces them
+   (the swap removes the stale target and re-queues); **audio publications
+   are long-lived and never swap while their publisher keeps flowing**, so
+   the rebuilt peer never gains an audio receiver: zero inbound audio for the
+   rest of the meeting. The standalone uclient and burst probes could not see
+   this because it only manifests across a peer rebuild on an impaired
+   participant.
+
+Fix: `Register` now purges any target still registered under the incoming
+participant ID before queueing subscriptions — at registration the ID always
+belongs to a brand-new peer, so such targets can only be the dead
+predecessor's (`internal/media/router.go`). Regression test
+`TestRouterRegisterReplacesSupersededReceiverTargets` fails on the unfixed
+router (no offer is ever dispatched to the rebuilt peer) and passes with the
+fix. The four-person harness also lightens the netns media profile (240p
+captures, smaller viewport) so the 2-core CI runner can feed four encoders in
+real time, and failure artifacts now record per-peer transceivers and
+inbound-RTP state for this class of diagnosis.
+
+Pinned 2-core verification after the fix: all three previously failing
+scenarios plus `ice-restart-under-impairment` and `cold-join-under-impairment`
+pass; the same three pass unpinned; `make check` green. The CI failures on
+unmodified `1129c18` had the same signature — they were this defect, not
+environment starvation alone.

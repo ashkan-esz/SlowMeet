@@ -105,11 +105,23 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
             `--unsafely-treat-insecure-origin-as-secure=${server.url}`] : [])] })
   });
   browsers.push(browser);
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ viewport: netnsRoom
+    ? { width: 1024, height: 700 }
+    : { width: 1440, height: 900 } });
   contexts.push(context);
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   traces.add(context);
   if (browserName === "chromium") await context.grantPermissions(["camera", "microphone"], { origin: server.url });
+  if (netnsRoom) {
+    // The 2-core CI runner cannot feed four 360p encoders plus 1440x900
+    // compositing in real time: receivers stop draining their sockets, the
+    // SFU correctly drops audio for the starved receiver, and the
+    // audio-guarantee scenarios fail on runner size instead of product
+    // behavior. The netns profile captures at 240p and renders a smaller
+    // viewport; every scenario guarantee (frames advance, tiers degrade in
+    // order, audio flows) is resolution-independent.
+    await context.addInitScript(() => localStorage.setItem("meeting.cameraQuality", "240p"));
+  }
   await context.addInitScript(() => {
     const nativePeer = window.RTCPeerConnection;
     const nativeSocket = window.WebSocket;
@@ -2682,9 +2694,9 @@ async function saveFailure(error) {
   const report = { scenario: activeScenario, reproduction: "make test-media-e2e-four",
     expected: expectedByScenario.get(activeScenario) || "Four participants join, synchronize room state, exchange media, and reject a fifth join.",
     actual: error.message, failureType: /launch|executable doesn't exist|permission|eperm|eacces|address already in use|did not become ready/i.test(error.message) ? "environment-or-browser" : "application-or-assertion",
-    participants: names.map((name, index) => ({ role: roles[index], name })), artifactDirectory: directory, serverLogs: server?.output.slice(-300), pages: [] };
+    participants: names.map((name, index) => ({ role: roles[index], name })), artifactDirectory: directory, serverLogs: server?.output.slice(-1500), pages: [] };
   for (const [role, page] of pages) {
-    const diagnostics = await page.evaluate(() => ({ url: location.href, status: document.querySelector("#status")?.textContent,
+    const diagnostics = await page.evaluate(async () => ({ url: location.href, status: document.querySelector("#status")?.textContent,
       meetingStatus: document.querySelector("#meeting-status")?.textContent,
       roster: [...document.querySelectorAll("#participants > li")].map((item) => item.textContent),
       sharing: { owner: document.querySelector("#participants")?.dataset.sharingOwner,
@@ -2694,10 +2706,16 @@ async function saveFailure(error) {
       localScreenPressed: document.querySelector("#screen")?.getAttribute("aria-pressed"),
       screenDisabled: document.querySelector("#screen")?.disabled,
       visibleStatus: document.body.innerText.slice(-1200),
-      media: [...(window.__slowMeetTest?.peerConnections || [])].map((pc) => ({
+      media: await Promise.all([...(window.__slowMeetTest?.peerConnections || [])].map(async (pc) => ({
         connectionState: pc.connectionState, iceConnectionState: pc.iceConnectionState,
-        signalingState: pc.signalingState, iceGatheringState: pc.iceGatheringState
-      })),
+        signalingState: pc.signalingState, iceGatheringState: pc.iceGatheringState,
+        transceivers: pc.getTransceivers().map((item) => ({ kind: item.receiver?.track?.kind || item.sender?.track?.kind || null,
+          direction: item.direction, currentDirection: item.currentDirection, senderTrack: item.sender?.track?.kind || null })),
+        inboundRtp: await pc.getStats().then((report) => [...report.values()]
+          .filter((item) => item.type === "inbound-rtp").map((item) => ({ kind: item.kind || item.mediaType,
+            bytesReceived: item.bytesReceived, packetsReceived: item.packetsReceived, packetsLost: item.packetsLost,
+            framesDecoded: item.framesDecoded })))
+      }))),
 
       networkQuality: window.__slowMeetTest?.networkQuality || null,
       adaptationState: window.__slowMeetTest?.adaptationState || null,

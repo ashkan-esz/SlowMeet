@@ -322,6 +322,21 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 	r.mu.Lock()
 	r.peers[id] = peer
 	r.offerers[id] = offerer
+	// A resumed client reclaims its participant ID with a brand-new peer
+	// while the reconnect-grace path deliberately skips the superseded
+	// client's teardown (publications are kept alive for the publication-swap
+	// re-bind). Any target still registered under this ID therefore belongs
+	// to the dead predecessor: left in place, queueSubscriptionLocked would
+	// treat it as an existing subscription and suppress every re-subscription
+	// for the rebuilt peer. Camera publications self-heal because the resume
+	// churn replaces them; long-lived audio publications never swap, so the
+	// rebuilt peer would otherwise receive zero audio for the rest of the
+	// meeting while ICE stays connected.
+	for _, pub := range r.pubs {
+		if pub.tracks[id] != nil {
+			r.removeTargetLocked(pub, id)
+		}
+	}
 	for _, pub := range r.pubs {
 		if r.shouldSubscribeLocked(pub, id) && r.queueSubscriptionLocked(pub, id, &ops) && offerer != nil {
 			offers[id] = offerer
