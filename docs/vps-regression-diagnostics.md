@@ -285,3 +285,58 @@ During the same repro:
 The diagnostic logging build (limiter-drop and `invalid_message` warnings,
 plus a `runtime_info` startup line reporting GOMAXPROCS/NumCPU/mem limit) can
 be deployed for a second capture pass if the first pass is inconclusive.
+
+## Nov 18, 2026: SFU audio loss on relayed calls and the reconnect mute
+
+Two-person browser trials with generated media (120 s, forced TURN/TCP and
+TURN/TLS, with and without a verified Xray proxy route) reproduced the
+"Connected but unusable" complaint and separated two application defects from
+the degraded client↔VPS path:
+
+1. **The SFU discarded compliant audio catch-up bursts.** Header-only tcpdump
+   inside the SFU namespace showed inbound Opus arriving with **zero sequence
+   gaps** while the forwarded stream lost 360–465 packets. TCP head-of-line
+   blocking releases ~1 s of audio at once; the audio admission bucket allowed
+   only max(rate/10, 1200 B) ≈ 100 ms of burst, and each receiver's audio
+   mailbox was 4 packets deep with no age limit — together they dropped
+   21–28% of inbound audio while ICE stayed connected.
+2. **The Automatic handoff muted the microphone.** `resetMediaConnection`
+   cleared the capture stream and refreshed controls (washing
+   `aria-pressed`), and `startWebRTC` restored `track.enabled` from that
+   washed attribute, so both clients went silent after every peer rebuild.
+
+Fixes (commit `857e1dd`): `internal/media/audio.go` adds a bounded 2-second
+byte-credit window at the configured cap and a 256-packet audio mailbox with
+80 ms expiry and immediate drain (no pacing, video path unchanged), plus
+aggregate drop counters (`slowmeet_audio_{admission,queue_overflow,queue_expired}_drops_total`,
+`slowmeet_audio_write_failures_total`). `web/js/app.js` adds a
+`microphoneRequested` intent state that survives peer rebuilds, honors device
+replacement, and resets on intentional leave.
+
+Gates: full `make check`; focused burst tests (race) and a real-peer burst
+integration test (zero drops, 3 runs); replay of the captured bursts (3361 /
+3361 admitted); the Go weaknet netns suite 9/9; impaired four-person browser
+scenarios. `blackout-and-recovery` also had a pre-existing flaky assertion —
+raw 2 s counter deltas fail when a peer replacement resets counters (CI on
+unmodified `1129c18` reproduced it with a negative frame delta); the scenario
+now polls with `waitForAudioFlow`.
+
+Live verification after deploying the patched image (rollback retained):
+
+| Check | Before | After |
+|---|---|---|
+| Inbound audio loss (forced TURN/TCP, direct route) | 1,066–1,709 packets (21–28%) | 0 on both participants |
+| SFU wire gaps (header capture) | 360–465 output gaps on 0-gap input | 0 in → 0 out |
+| Inbound audio bitrate | 23–25 kbps vs 32 kbps outbound | ≈32 kbps, matches outbound |
+| Proxy route (TURN/TCP via verified Xray) | 21–26% loss | 0 loss, 0 wire gaps |
+| Mic after two Automatic rebuilds onto relay/TCP | muted | enabled preserved |
+| Drop counters | invisible | 0/0/0 across all trials |
+
+The 717 counted egress write failures are transport errors during the
+trials' RTT spikes — previously invisible, now observable.
+
+Still unresolved and environmental: the client↔VPS path has severe delay
+spikes (RTT median 550–680 ms, max ~4.8 s during the Nov 18 trials), which
+still trigger protect-audio video suspension. The repairs remove the SFU's
+self-inflicted audio loss and the reconnect mute; they cannot fix the route.
+Real-device and different-ISP comparisons remain pending user-side checks.
