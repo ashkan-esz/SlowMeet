@@ -156,6 +156,14 @@ downlink carries. Listeners hear generated comfort noise during the gaps. Set
 it to `false` to rule it out while debugging an audio problem; the change
 applies to participants who join afterwards.
 
+That setting is the default. Each participant can switch it for their own
+outgoing audio with **Silence suppression** in the meeting's Settings; the
+choice is remembered in their browser and overrides the server default in
+either direction. A browser takes this parameter from the description it
+receives, so the page rewrites the server's SDP before applying it and
+renegotiates once when the switch changes, which applies it to the live call
+(`/ice-config` reports the default as `opus_dtx_enabled`).
+
 Signaling uses WebSocket per-message compression when the browser offers it
 (all current browsers do). SDP offers and answers are 5-25 KB of repetitive
 text and shrink to about a tenth, which matters most with the rotating

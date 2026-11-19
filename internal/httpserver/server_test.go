@@ -195,6 +195,7 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	var values struct {
 		ICETransportPolicy string `json:"ice_transport_policy"`
 		SimulcastEnabled   bool   `json:"simulcast_enabled"`
+		OpusDTXEnabled     *bool  `json:"opus_dtx_enabled"`
 		TURNTCPRotate      *int   `json:"turn_tcp_rotate_seconds"`
 		ConnectionMethods  []struct {
 			ID           string `json:"id"`
@@ -217,6 +218,11 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	}
 	if values.ICETransportPolicy != "relay" || !values.SimulcastEnabled {
 		t.Fatalf("ICE/simulcast settings were not returned: policy=%q simulcast=%t", values.ICETransportPolicy, values.SimulcastEnabled)
+	}
+	// The browser's Settings switch shows this default until the participant
+	// chooses for themselves; it must be present even when false.
+	if values.OpusDTXEnabled == nil || *values.OpusDTXEnabled != cfg.OpusDTXEnabled {
+		t.Fatalf("opus_dtx_enabled = %v, want %t", values.OpusDTXEnabled, cfg.OpusDTXEnabled)
 	}
 	if values.TURNTCPRotate == nil || *values.TURNTCPRotate != 20 {
 		t.Fatalf("turn_tcp_rotate_seconds = %v, want 20", values.TURNTCPRotate)

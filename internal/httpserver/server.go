@@ -649,7 +649,10 @@ func writeICEConfig(w http.ResponseWriter, cfg config.Config, iceServers []brows
 		"ice_servers":          iceServers,
 		"ice_transport_policy": iceTransportPolicy,
 		"simulcast_enabled":    cfg.SimulcastEnabled,
-		"connection_methods":   browserConnectionMethods(cfg, iceServers),
+		// The server's default for Opus DTX; each participant can override
+		// it for their own audio in Settings.
+		"opus_dtx_enabled":   cfg.OpusDTXEnabled,
+		"connection_methods": browserConnectionMethods(cfg, iceServers),
 		// Whole seconds between relay-rotation ICE restarts on TURN/TCP and
 		// TURN/TLS paths; 0 disables rotation in the browser.
 		"turn_tcp_rotate_seconds": int(cfg.TURNTCPRotateInterval / time.Second),

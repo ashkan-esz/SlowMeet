@@ -110,6 +110,7 @@ const chatEmojiPicker = document.querySelector("#chat-emoji-picker");
 const participantCount = document.querySelector("#participant-count");
 const participantCountBadge = document.querySelector("#participant-count-badge");
 const audioOnly = document.querySelector("#audio-only");
+const opusDTXSwitch = document.querySelector("#opus-dtx");
 let audioOnlyPreference = readStoredValue("meeting.audioOnly") === "true";
 if (audioOnly) audioOnly.checked = audioOnlyPreference;
 const toastRegion = document.querySelector("#toast-region");
@@ -1684,6 +1685,17 @@ audioOnly?.addEventListener("change", () => {
   updateConnectionSummary(lastConnectionLevel || "connecting", networkLabel?.textContent || "Connecting");
 });
 
+opusDTXSwitch?.addEventListener("change", () => {
+  opusDTXStored = String(opusDTXSwitch.checked);
+  writeStoredValue("meeting.opusDtx", opusDTXStored);
+  showToast(opusDTXSwitch.checked ? "Silence suppression on" : "Silence suppression off");
+  // The choice reaches the encoder through the next remote description (see
+  // applyOpusDTXChoice), so a live call renegotiates once to apply it now.
+  // Without a call, or if this renegotiation fails, the stored choice is
+  // applied by the next one anyway.
+  if (peer && renegotiationQueue) renegotiateLocalMedia().catch(() => {});
+});
+
 function setSelfViewVisibility(visible, notify = true) {
   selfViewVisible = Boolean(visible);
   meetingViewState.showSelfView = selfViewVisible;
@@ -2073,6 +2085,24 @@ const hostDefaults = {
 let iceServers = [];
 let iceTransportPolicy = "all";
 let simulcastEnabled = false;
+// Opus DTX (silence suppression) for this participant's outgoing audio: the
+// participant's stored choice, else the server default from the ICE
+// configuration. See opus-dtx.js for how the choice reaches the encoder.
+let opusDTXStored = readStoredValue("meeting.opusDtx");
+let opusDTXServerDefault = null;
+
+function opusDTXEffective() {
+  return window.SlowMeetOpusDTX.effectivePreference(opusDTXStored, opusDTXServerDefault);
+}
+
+function applyOpusDTXChoice(sdp) {
+  return window.SlowMeetOpusDTX.applyOpusDTX(sdp, opusDTXEffective());
+}
+
+function refreshOpusDTXSwitch() {
+  if (opusDTXSwitch) opusDTXSwitch.checked = opusDTXEffective() === true;
+}
+refreshOpusDTXSwitch();
 const connectionMethodOptions = new Map();
 let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
 let iceConfigRequest;
@@ -2099,6 +2129,8 @@ async function refreshICEConfig(sessionToken) {
         iceTransportPolicy = config.ice_transport_policy;
       }
       simulcastEnabled = config.simulcast_enabled === true;
+      opusDTXServerDefault = typeof config.opus_dtx_enabled === "boolean" ? config.opus_dtx_enabled : null;
+      refreshOpusDTXSwitch();
       relayRotation?.setIntervalSeconds(Number(config.turn_tcp_rotate_seconds));
       connectionMethodOptions.clear();
       if (Array.isArray(config.connection_methods)) {
@@ -6298,7 +6330,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         await currentPeer.setLocalDescription({ type: "rollback" });
         renegotiationQueue?.rollback();
       }
-      await currentPeer.setRemoteDescription({ type: "offer", sdp: message.sdp });
+      await currentPeer.setRemoteDescription({ type: "offer", sdp: applyOpusDTXChoice(message.sdp) });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
       // One unusable queued candidate must not abort the whole flush: a
@@ -6349,7 +6381,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         renegotiationQueue?.fail(new Error("received an answer without a local offer"));
         return;
       }
-      await currentPeer.setRemoteDescription({ type: "answer", sdp: message.sdp });
+      await currentPeer.setRemoteDescription({ type: "answer", sdp: applyOpusDTXChoice(message.sdp) });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
       await Promise.allSettled(pendingCandidates.splice(0).map((candidate) =>
