@@ -66,9 +66,17 @@ The installer proceeds through these steps:
    records the container engine and proxy choice, and saves progress under
    `/var/lib/slowmeet-installer`. These state files allow safe resumption and
    make later updates use the same engine and proxy.
+   With Docker (Compose v2.24+) on a host whose public IPv4 is one of its own
+   addresses, it also runs SlowMeet on the host network by recording
+   `COMPOSE_FILE=docker-compose.yml:deploy/compose.host-network.yml` in `.env`
+   (no `docker-proxy` process per media port, no NAT on the media path). Later
+   updates and plain `docker compose` commands reuse that line. Set
+   `COMPOSE_FILE=docker-compose.yml` to stay on the bridge network; an existing
+   `COMPOSE_FILE` is never changed. With TURN enabled it gives coturn 0.50 CPU
+   unless `TURN_CPUS` is already set.
 4. **Configure UFW.** It allows the detected SSH port (or TCP 22), TCP 80, the
    WebRTC UDP range `50000:50100`, and TCP 443 when HTTPS is enabled. TURN adds
-   UDP/TCP 3478, TCP 5349, and UDP relay ports `49152:49251`. It then enables
+   UDP/TCP 3478, TCP 5349, and UDP relay ports `49152:49999`. It then enables
    UFW. These are host firewall rules; the script cannot change a cloud
    provider's separate firewall.
 5. **Set up the web proxy and HTTPS.** If Nginx is already active, the script

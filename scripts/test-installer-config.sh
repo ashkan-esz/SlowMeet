@@ -361,4 +361,52 @@ assert_contains "$DOCKER_ARGS_FILE" 'compose up -d --build'
 grep -Fq 'HTTP_ADDR##*:' "$INSTALLER" \
     || fail 'the readiness check must use the port the app listens on, not a fixed 8080'
 
+# The installer chooses host networking by itself only where it is safe, and
+# records it as COMPOSE_FILE so later runs keep it.
+# shellcheck source=/dev/null
+source <(sed -n '/^read_env_value() {/,/^set_admin_password() {/p' "$INSTALLER" | sed '$d')
+log() { :; }
+for supported in 2.24.0 v2.24.5 2.39.1 5.0.2 v3.0.0; do
+    compose_version_supports_reset "$supported" || fail "Compose $supported should support the override file"
+done
+for unsupported in 2.23.3 v2.9.0 1.29.2 '' unknown; do
+    if compose_version_supports_reset "$unsupported"; then
+        fail "Compose '$unsupported' must not be treated as supporting the override file"
+    fi
+done
+ENV_FILE="$INSTALL_DIR/.env"
+mkdir -p "$INSTALL_DIR/deploy"
+: > "$INSTALL_DIR/deploy/compose.host-network.yml"
+cat > "$TEMP_DIR/bin/ip" <<'IP'
+#!/usr/bin/env bash
+printf '2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0\n'
+printf '3: docker0    inet 172.17.0.1/16 scope global docker0\n'
+IP
+cat > "$TEMP_DIR/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+if [[ "$*" == "compose version --short" ]]; then printf '%s\n' "${FAKE_COMPOSE_VERSION:-2.39.1}"; fi
+DOCKER
+chmod +x "$TEMP_DIR/bin/ip" "$TEMP_DIR/bin/docker"
+host_network_choice() {
+    # $1: .env contents, $2: container engine, $3: Compose version
+    printf '%b' "$1" > "$ENV_FILE"
+    container_engine=$2
+    PATH="$TEMP_DIR/bin:$PATH" FAKE_COMPOSE_VERSION=$3 enable_host_network_if_supported
+    read_env_value COMPOSE_FILE
+}
+[[ "$(host_network_choice 'ICE_PUBLIC_IP=203.0.113.7\n' docker 2.39.1)" == docker-compose.yml:deploy/compose.host-network.yml ]] \
+    || fail 'a Docker host that owns its public IPv4 should get host networking'
+[[ -z "$(host_network_choice 'ICE_PUBLIC_IP=198.51.100.9\n' docker 2.39.1)" ]] \
+    || fail 'a host behind NAT (public IPv4 not on an interface) must keep the bridge network'
+[[ -z "$(host_network_choice 'ICE_PUBLIC_IP=203.0.113.7\n' docker 2.20.0)" ]] \
+    || fail 'an old Docker Compose must keep the bridge network'
+[[ -z "$(host_network_choice 'ICE_PUBLIC_IP=203.0.113.7\n' podman 2.39.1)" ]] \
+    || fail 'Podman installs must keep their network setup'
+[[ "$(host_network_choice 'ICE_PUBLIC_IP=203.0.113.7\nCOMPOSE_FILE=docker-compose.yml\n' docker 2.39.1)" == docker-compose.yml ]] \
+    || fail "an operator's COMPOSE_FILE must never be overridden"
+[[ -z "$(host_network_choice 'ICE_PUBLIC_IP=\n' docker 2.39.1)" ]] \
+    || fail 'without a public IPv4 the bridge network stays'
+grep -Fq 'max-port=49999' "$INSTALLER" && grep -Fq 'ufw allow 49152:49999/udp' "$INSTALLER" \
+    || fail 'the coturn relay range and its firewall rule must match'
+
 printf 'Installer configuration checks passed.\n'

@@ -832,6 +832,44 @@ set_env_if_empty() {
     [[ -n "$(read_env_value "$key")" ]] || set_env "$key" "$value"
 }
 
+# compose_version_supports_reset reports whether a Docker Compose version
+# (e.g. 2.24.0 or v5.0.2) understands the `!reset` tag used by
+# deploy/compose.host-network.yml, which needs v2.24 or newer.
+compose_version_supports_reset() {
+    local version=${1#v} major minor
+    [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    (( major > 2 || (major == 2 && minor >= 24) ))
+}
+
+# Runs the SlowMeet container on the host network when that is safe to choose
+# automatically: no docker-proxy process per media port and no NAT on the
+# media path. It records the choice as COMPOSE_FILE in .env, which every later
+# Compose command and installer update reuses, and never overrides a
+# COMPOSE_FILE the operator already set (COMPOSE_FILE=docker-compose.yml keeps
+# the bridge network). Conditions: Docker engine, a Compose new enough for the
+# override file, and a public IPv4 that is one of this host's own addresses,
+# because the server then gathers ICE candidates only on that interface.
+enable_host_network_if_supported() {
+    local public_ip compose_version override=deploy/compose.host-network.yml
+    [[ "$container_engine" == docker ]] || return 0
+    [[ -z "$(read_env_value COMPOSE_FILE)" ]] || return 0
+    [[ -f "$INSTALL_DIR/$override" ]] || return 0
+    public_ip=$(read_env_value ICE_PUBLIC_IP)
+    if [[ -z "$public_ip" ]] || ! ip -4 -o addr show 2>/dev/null | grep -Fq " $public_ip/"; then
+        log 'Keeping the Docker bridge network: the public IPv4 is not assigned to a local interface.'
+        return 0
+    fi
+    compose_version=$(docker compose version --short 2>/dev/null || true)
+    if ! compose_version_supports_reset "$compose_version"; then
+        log "Keeping the Docker bridge network: Docker Compose ${compose_version:-unknown} is older than v2.24."
+        return 0
+    fi
+    set_env COMPOSE_FILE "docker-compose.yml:$override"
+    log 'Running SlowMeet on the host network (COMPOSE_FILE in .env; set it to docker-compose.yml to use the bridge network).'
+}
+
 set_admin_password() {
     local value=$1 encoded='' char i
     for ((i = 0; i < ${#value}; i++)); do
@@ -1000,6 +1038,7 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     if [[ -z "$existing_ice" ]]; then
         set_env ICE_PUBLIC_IP "$public_ipv4"
     fi
+    enable_host_network_if_supported
     write_podman_service
 
     cd "$INSTALL_DIR"
@@ -2508,7 +2547,10 @@ if [[ "$enable_turn" == yes ]]; then
     ufw allow 3478/udp comment 'SlowMeet TURN UDP'
     ufw allow 3478/tcp comment 'SlowMeet TURN TCP'
     ufw allow 5349/tcp comment 'SlowMeet TURN TLS'
-    ufw allow 49152:49251/udp comment 'SlowMeet TURN relay'
+    # Rotating TURN methods hold several allocations per participant for
+    # about 90 seconds each, so the relay range is the whole block below the
+    # WebRTC media range.
+    ufw allow 49152:49999/udp comment 'SlowMeet TURN relay'
 fi
 ufw --force enable
 
@@ -2577,7 +2619,11 @@ set_env MEETING_PASSWORD "$meeting_password"
 set_env HTTP_PUBLISH_ADDRESS 127.0.0.1
 set_env HTTP_PUBLISH_PORT "$app_port"
 set_env ICE_PUBLIC_IP "$public_ipv4"
+enable_host_network_if_supported
 if [[ "$enable_turn" == yes ]]; then
+    # Relayed calls put every media packet through coturn; the Compose default
+    # of 0.20 CPU is sized for occasional relay use.
+    set_env_if_empty TURN_CPUS 0.50
     set_env TURN_URLS "turn:$domain:3478?transport=udp,turn:$domain:3478?transport=tcp,turns:$domain:5349?transport=tcp"
     set_env TURN_SHARED_SECRET "$turn_secret"
     set_env TURN_CONFIG_FILE "$INSTALL_DIR/deploy/coturn/turnserver.conf"
@@ -2592,7 +2638,7 @@ realm=$domain
 cert=/etc/letsencrypt/fullchain.pem
 pkey=/etc/letsencrypt/privkey.pem
 min-port=49152
-max-port=49251
+max-port=49999
 EOF
     if [[ -n "$private_ipv4" && "$private_ipv4" != "$public_ipv4" ]]; then
         printf 'external-ip=%s/%s\n' "$public_ipv4" "$private_ipv4" >> "$INSTALL_DIR/deploy/coturn/turnserver.conf"
