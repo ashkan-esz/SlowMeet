@@ -1624,7 +1624,7 @@ pathFallbackSwitch?.addEventListener("click", () => {
   // "Automatic" joins start on the relay, then switch immediately.
   recordDirectUdpFailure();
   hidePathFallbackBanner();
-  selectConnectionMethod("turn-tcp");
+  selectConnectionMethod(autoRelayFallbackMethod() || "turn-tcp");
 });
 pathFallbackDismiss?.addEventListener("click", hidePathFallbackBanner);
 chatMessages?.addEventListener("scroll", () => {
@@ -1882,6 +1882,40 @@ let intentionalClose = false;
 let restartRequested = false;
 let iceRestartAttempts = 0;
 let iceDisconnectRestartTimer;
+// Periodic make-before-break ICE restarts while media rides a TURN/TCP or
+// TURN/TLS relay (see relay-rotation.js): some access networks degrade a
+// real-time TCP flow ~20 s after it starts, and fresh TURN connections reset
+// that window. The check runs on its own timer because updateDiagnostics
+// skips hidden tabs, and a backgrounded meeting must keep rotating.
+const relayRotation = window.SlowMeetRelayRotation?.createRelayRotation() || null;
+let relayRotationTimer;
+let relayRotationCheckRunning = false;
+// Whether the last rotation check found rotation in effect (shown in the
+// active-path label).
+let relayRotationActive = false;
+// The connection method the current peer's ICE configuration was built for.
+// It differs from connectionMethod when "Automatic" resolved to a relay.
+let appliedConnectionMethod = "auto";
+// A connection-method change is applied to the live peer (setConfiguration +
+// ICE restart) instead of rejoining. If the restart offer has not arrived and
+// connected within this window, the old rejoin path takes over.
+const methodSwitchFallbackMs = 8000;
+let methodSwitchTimer;
+let methodSwitchSettled = false;
+// A direct-led connection that dies this soon after first connecting matches
+// a path that polices WebRTC UDP (a fresh flow passes briefly, then is cut):
+// "Automatic" hands off to a relay at once instead of spending more cycles.
+const earlyDirectDeathWindowMs = 20000;
+let peerFirstConnectedAtMs = null;
+// Plain-relay probe (plain-relay-probe.js): while "Automatic" is on a rotating
+// relay, test in the background whether a plain relay holds up; if it does,
+// rotation is suspended, guarded by the live call's round-trip time.
+const plainRelayProbe = window.SlowMeetPlainRelayProbe || null;
+const plainRelayGuard = plainRelayProbe?.createSuspensionGuard() || null;
+let plainRelaySuspended = false;
+let plainRelayProbeChecked = false;
+let plainRelayProbeRun = null;
+let relayConnectedSinceMs = null;
 // After ICE-restart attempts are exhausted, one delayed full reconnect is
 // scheduled: closing the socket drives the ordinary reconnect state machine
 // (token resume inside the server grace window) instead of stranding the
@@ -2037,6 +2071,7 @@ async function refreshICEConfig(sessionToken) {
         iceTransportPolicy = config.ice_transport_policy;
       }
       simulcastEnabled = config.simulcast_enabled === true;
+      relayRotation?.setIntervalSeconds(Number(config.turn_tcp_rotate_seconds));
       connectionMethodOptions.clear();
       if (Array.isArray(config.connection_methods)) {
         config.connection_methods.forEach((method) => {
@@ -2132,7 +2167,8 @@ function describeActivePath(icePath) {
 
 function updateConnectionActivePath() {
   if (connectionActivePath) {
-    connectionActivePath.textContent = `Using: ${describeActivePath(connectionMetrics.icePath)}`;
+    const rotating = relayRotationActive && connectionMetrics.icePath?.startsWith("TURN") ? " (rotating)" : "";
+    connectionActivePath.textContent = `Using: ${describeActivePath(connectionMetrics.icePath)}${rotating}`;
   }
 }
 
@@ -2163,6 +2199,10 @@ function selectConnectionMethod(methodID) {
   writeStoredValue("meeting.connectionMethod", methodID);
   refreshConnectionMethodSelectors();
   if (!meeting.hidden) {
+    if (switchConnectionMethodInPlace()) {
+      showStatus(`Switched to ${method.label}.`);
+      return true;
+    }
     connectionMethodSwitchRequested = true;
     clearTimeout(reconnectTimer);
     const readyState = socket?.readyState;
@@ -3602,6 +3642,9 @@ function connectSocket(name, password) {
       return;
     }
     if (message.type === "error") {
+      if (relayRotation?.isPending() && message.code === "ice_restart_rate_limited") {
+        relayRotation.rotationFailed(Date.now());
+      }
       if (restartRequested && peer && socket) {
         restartRequested = false;
         directDisconnectCounted = false;
@@ -3793,6 +3836,7 @@ function resetMediaConnection() {
   audioTransceiver = undefined;
   clearInterval(statsTimer);
   statsTimer = undefined;
+  stopRelayRotation();
   localStream?.getTracks().forEach((track) => track.stop());
   screenStream?.getTracks().forEach((track) => track.stop());
   screenShareAdaptation?.stop();
@@ -3863,13 +3907,12 @@ async function startWebRTC() {
   renegotiationQueue?.close(new Error("WebRTC connection replaced"));
   const effectiveMethod = effectiveConnectionMethod();
   const selectedICEServers = filteredICEServers(effectiveMethod);
-  const selectedICEPolicy = effectiveMethod.startsWith("turn-")
-    ? "relay"
-    : effectiveMethod === "direct" ? "all" : iceTransportPolicy;
-  if (effectiveMethod === "turn-tcp" && connectionMethod === "auto" &&
+  const selectedICEPolicy = icePolicyForMethod(effectiveMethod);
+  if (effectiveMethod.startsWith("turn-") && connectionMethod === "auto" &&
       autoTurnFailoverStrikes < autoTurnFailoverStrikesLimit) {
     // The memory shortcut (not the strike-based failover) picked the relay.
-    showToast("Connecting via TURN/TCP — direct UDP failed recently.", "warning");
+    const relayLabel = connectionMethodOptions.get(effectiveMethod)?.label || "a relay";
+    showToast(`Connecting via ${relayLabel} — direct UDP failed recently.`, "warning");
   }
   if (window.SlowMeetConnectionMethods.requiresConfiguredICEServers(effectiveMethod) &&
       selectedICEServers.length === 0) {
@@ -3883,6 +3926,12 @@ async function startWebRTC() {
   restartRequested = false;
   iceRestartAttempts = 0;
   directDisconnectCounted = false;
+  relayRotation?.reset();
+  appliedConnectionMethod = effectiveMethod;
+  peerFirstConnectedAtMs = null;
+  clearTimeout(methodSwitchTimer);
+  methodSwitchTimer = undefined;
+  resetPlainRelayProbe();
   peer = currentPeer;
   armDirectPathWatchdog(currentPeer, currentSocket, generation);
   renegotiationChain = Promise.resolve();
@@ -4106,6 +4155,7 @@ async function startWebRTC() {
       }
     }
     if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
+    startRelayRotation();
     clearInterval(statsTimer);
     previousStats = undefined;
     statsTimer = setInterval(updateDiagnostics, 1000);
@@ -4271,6 +4321,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     // direct-UDP failure clear only after a sustained live direct pair,
     // sampled by the stats loop. A no-TURN deployment stays safe because
     // the handoff only diverts when TURN/TCP is actually enabled.
+    if (peerFirstConnectedAtMs === null) peerFirstConnectedAtMs = Date.now();
     directDisconnectCounted = false;
     clearTimeout(iceDisconnectRestartTimer);
     iceDisconnectRestartTimer = undefined;
@@ -4340,11 +4391,301 @@ function noteDirectLedDisconnectEpisode(targetPeer, targetSocket, generation) {
   // stats loop within a second of a blip that lasts several seconds.
   if (measuredPath && !measuredPath.startsWith("Direct/")) return;
   autoTurnFailoverStrikes += 1;
+  if (peerFirstConnectedAtMs !== null && Date.now() - peerFirstConnectedAtMs <= earlyDirectDeathWindowMs &&
+      autoRelayFallbackMethod()) {
+    // Connected, then cut within seconds: the policed-UDP signature. Waiting
+    // for a second episode only costs the user another reconnect cycle.
+    autoTurnFailoverStrikes = Math.max(autoTurnFailoverStrikes, autoTurnFailoverStrikesLimit);
+  }
   if (autoTurnFailoverStrikes < autoTurnFailoverStrikesLimit) return;
+  handOffAutomaticToRelay(targetPeer, targetSocket, generation);
+}
+
+// "Automatic" gives up on direct UDP for this session: remember the failure
+// and move the live peer onto the relay fallback in place. When no in-place
+// switch is possible, the reconnect state machine rebuilds the peer on the
+// relay instead (see effectiveConnectionMethod); that close stays cancellable
+// if ICE recovers during the grace window. Returns false when the peer is
+// already on the fallback, so the caller's ordinary recovery must run.
+function handOffAutomaticToRelay(targetPeer, targetSocket, generation) {
   recordDirectUdpFailure();
+  if (effectiveConnectionMethod() === appliedConnectionMethod) return false;
+  if (isCurrentWebRTC(generation, targetPeer, targetSocket) && switchConnectionMethodInPlace()) {
+    status.textContent = "Switching to relay...";
+    return true;
+  }
   restartRequested = true;
   status.textContent = "Reconnecting media...";
   scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
+  return true;
+}
+
+function icePolicyForMethod(methodID) {
+  if (methodID.startsWith("turn-")) return "relay";
+  return methodID === "direct" ? "all" : iceTransportPolicy;
+}
+
+// Applies the effective connection method to the live peer without rejoining:
+// the signaling socket, room seat, tracks and senders all stay. Plain and
+// rotating variants of one transport share a peer configuration, so that
+// change only starts or stops rotation; any other change swaps the ICE
+// servers/policy and asks the server for an ICE restart, which makes the
+// browser gather on the new configuration. Returns false when the switch
+// cannot be done in place and the caller must fall back to a rejoin.
+function switchConnectionMethodInPlace() {
+  const targetPeer = peer;
+  const targetSocket = socket;
+  const generation = socketGeneration;
+  if (!targetPeer || targetPeer.connectionState === "closed" ||
+      targetSocket?.readyState !== WebSocket.OPEN || typeof targetPeer.setConfiguration !== "function") {
+    return false;
+  }
+  const nextMethod = effectiveConnectionMethod();
+  if (nextMethod === appliedConnectionMethod) return true;
+  const methods = window.SlowMeetConnectionMethods;
+  if (!methods.sharesPeerConfiguration(appliedConnectionMethod, nextMethod)) {
+    const servers = filteredICEServers(nextMethod);
+    if (methods.requiresConfiguredICEServers(nextMethod) && servers.length === 0) return false;
+    try {
+      targetPeer.setConfiguration({ iceServers: servers, iceTransportPolicy: icePolicyForMethod(nextMethod) });
+      targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart", reason: "switch" }));
+    } catch (_) {
+      return false;
+    }
+    // Hold off recovery restarts and rotation until the switch offer lands;
+    // this restart is planned, so it does not count as a recovery attempt.
+    restartRequested = true;
+    clearTimeout(iceDisconnectRestartTimer);
+    iceDisconnectRestartTimer = undefined;
+    clearTimeout(exhaustedReconnectTimer);
+    exhaustedReconnectTimer = undefined;
+    methodSwitchSettled = false;
+    clearTimeout(methodSwitchTimer);
+    methodSwitchTimer = setTimeout(() => {
+      methodSwitchTimer = undefined;
+      if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+      if (methodSwitchSettled && isPeerConnectionConnected(targetPeer)) return;
+      connectionMethodSwitchRequested = true;
+      showStatus("Switching connection method. Reconnecting…");
+      targetSocket.close();
+    }, methodSwitchFallbackMs);
+  }
+  appliedConnectionMethod = nextMethod;
+  relayRotation?.reset();
+  resetPlainRelayProbe();
+  hidePathFallbackBanner();
+  clearTimeout(directPathWatchdogTimer);
+  directPathWatchdogTimer = undefined;
+  return true;
+}
+
+function startRelayRotation() {
+  clearInterval(relayRotationTimer);
+  relayRotation?.reset();
+  relayRotationTimer = relayRotation ? setInterval(checkRelayRotation, 1000) : undefined;
+}
+
+function stopRelayRotation() {
+  clearInterval(relayRotationTimer);
+  relayRotationTimer = undefined;
+  relayRotation?.reset();
+  resetPlainRelayProbe();
+  setRelayRotationActive(false);
+}
+
+function setRelayRotationActive(active) {
+  if (relayRotationActive === active) return;
+  relayRotationActive = active;
+  updateConnectionActivePath();
+}
+
+// Rotation applies to the rotating connection methods. "Automatic" that ended
+// up on a TCP/TLS relay by ICE's own choice (no handoff yet) rotates too when
+// the server enables the matching rotating method.
+function relayRotationWanted(relayProtocol) {
+  const methods = window.SlowMeetConnectionMethods;
+  if (methods.isRotatingMethod(appliedConnectionMethod)) return true;
+  if (appliedConnectionMethod !== "auto") return false;
+  const rotatingMethod = methods.rotatingMethodForProtocol(relayProtocol);
+  return rotatingMethod !== null && connectionMethodOptions.get(rotatingMethod)?.enabled === true;
+}
+
+function plainRelayVerdictKey(relayProtocol) {
+  return `meeting.plainRelayProbe.${relayProtocol}`;
+}
+
+function resetPlainRelayProbe() {
+  plainRelayProbeRun?.cancel();
+  plainRelayProbeRun = null;
+  plainRelaySuspended = false;
+  plainRelayProbeChecked = false;
+  relayConnectedSinceMs = null;
+  plainRelayGuard?.reset();
+}
+
+function applyPlainRelayVerdict(relayProtocol, verdict, nowMs) {
+  if (verdict !== "pass" && verdict !== "fail") return;
+  writeStoredValue(plainRelayVerdictKey(relayProtocol), plainRelayProbe.encodeVerdict(verdict, nowMs));
+  if (verdict === "pass" && connectionMethod === "auto") {
+    plainRelayGuard.reset();
+    plainRelaySuspended = true;
+  }
+}
+
+// Only "Automatic" second-guesses rotation; an explicit rotating choice always
+// rotates. Called once per rotation check with the live relay protocol,
+// whether rotation is wanted, and the selected pair's round-trip time.
+function managePlainRelayProbe(relayProtocol, wanted, rttMs, nowMs, targetPeer) {
+  if (!plainRelayProbe || !wanted || connectionMethod !== "auto") {
+    relayConnectedSinceMs = null;
+    return;
+  }
+  if (plainRelaySuspended) {
+    if (plainRelayGuard.observe(rttMs)) {
+      // The plain relay started degrading after all: rotate now and remember.
+      plainRelaySuspended = false;
+      plainRelayGuard.reset();
+      writeStoredValue(plainRelayVerdictKey(relayProtocol), plainRelayProbe.encodeVerdict("fail", nowMs));
+      relayRotation.expedite(nowMs);
+    }
+    return;
+  }
+  if (relayConnectedSinceMs === null) relayConnectedSinceMs = nowMs;
+  if (plainRelayProbeChecked || plainRelayProbeRun || document.hidden ||
+      nowMs - relayConnectedSinceMs < plainRelayProbe.probe.startDelayMs) {
+    return;
+  }
+  plainRelayProbeChecked = true;
+  const remembered = plainRelayProbe.freshVerdict(readStoredValue(plainRelayVerdictKey(relayProtocol)), nowMs);
+  if (remembered === "fail") return;
+  if (remembered === "pass") {
+    plainRelayGuard.reset();
+    plainRelaySuspended = true;
+    return;
+  }
+  startPlainRelayProbe(relayProtocol, targetPeer);
+}
+
+// Echoes a steady low-rate stream between two throwaway peers through the
+// plain relay (no rotation) and hands the samples to plain-relay-probe.js.
+// The verdict only applies while forPeer is still the meeting's peer.
+function startPlainRelayProbe(relayProtocol, forPeer) {
+  const servers = filteredICEServers(`turn-${relayProtocol}`);
+  if (servers.length === 0) return;
+  const settings = plainRelayProbe.probe;
+  const configuration = { iceServers: servers, iceTransportPolicy: "relay" };
+  const sender = new RTCPeerConnection(configuration);
+  const echo = new RTCPeerConnection(configuration);
+  const samples = [];
+  const awaitingEcho = new Map();
+  let sendTimer;
+  let verdictTimer;
+  let finished = false;
+  const finish = (verdict) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(sendTimer);
+    clearTimeout(verdictTimer);
+    clearTimeout(setupTimer);
+    sender.close();
+    echo.close();
+    if (plainRelayProbeRun === run) plainRelayProbeRun = null;
+    if (verdict && peer === forPeer) applyPlainRelayVerdict(relayProtocol, verdict, Date.now());
+  };
+  const run = { cancel: () => finish(null) };
+  plainRelayProbeRun = run;
+  const setupTimer = setTimeout(() => finish(null), 15000);
+  sender.onicecandidate = (event) => { if (event.candidate) echo.addIceCandidate(event.candidate).catch(() => {}); };
+  echo.onicecandidate = (event) => { if (event.candidate) sender.addIceCandidate(event.candidate).catch(() => {}); };
+  const channel = sender.createDataChannel("plain-relay-probe", { ordered: false, maxRetransmits: 0 });
+  channel.binaryType = "arraybuffer";
+  echo.ondatachannel = (event) => {
+    event.channel.binaryType = "arraybuffer";
+    event.channel.onmessage = (message) => {
+      try {
+        event.channel.send(message.data.slice(0, 4));
+      } catch (_) {
+        // A closing probe channel only loses echoes, which the verdict counts.
+      }
+    };
+  };
+  channel.onmessage = (message) => {
+    const sequence = new Uint32Array(message.data.slice(0, 4))[0];
+    const sample = awaitingEcho.get(sequence);
+    if (!sample) return;
+    awaitingEcho.delete(sequence);
+    sample.echoMs = performance.now() - sample.sentAt;
+  };
+  channel.onopen = () => {
+    clearTimeout(setupTimer);
+    const startedAt = performance.now();
+    let sequence = 0;
+    sendTimer = setInterval(() => {
+      const now = performance.now();
+      if (now - startedAt >= settings.durationMs) {
+        clearInterval(sendTimer);
+        // Late echoes get a short grace period; anything slower is a loss.
+        verdictTimer = setTimeout(() => finish(plainRelayProbe.evaluateProbe(samples)), 1500);
+        return;
+      }
+      const packet = new ArrayBuffer(settings.packetBytes);
+      new Uint32Array(packet, 0, 1)[0] = sequence;
+      const sample = { sentAtMs: now - startedAt, echoMs: null, sentAt: now };
+      try {
+        channel.send(packet);
+      } catch (_) {
+        return;
+      }
+      samples.push(sample);
+      awaitingEcho.set(sequence, sample);
+      sequence += 1;
+    }, settings.packetIntervalMs);
+  };
+  (async () => {
+    await sender.setLocalDescription(await sender.createOffer());
+    await echo.setRemoteDescription(sender.localDescription);
+    await echo.setLocalDescription(await echo.createAnswer());
+    await sender.setRemoteDescription(echo.localDescription);
+  })().catch(() => finish(null));
+}
+
+// Once per second: while rotation is in effect and the selected pair is a
+// TURN/TCP or TURN/TLS relay, ask the server for an ICE restart every
+// rotation interval. Unlike requestIceRestart this is not recovery: it
+// neither counts toward maxIceRestartAttempts nor changes the visible
+// connection status.
+async function checkRelayRotation() {
+  if (!relayRotation || relayRotationCheckRunning) return;
+  const targetPeer = peer;
+  const targetSocket = socket;
+  const generation = socketGeneration;
+  if (!targetPeer || !targetSocket) return;
+  relayRotationCheckRunning = true;
+  try {
+    const connected = isPeerConnectionConnected(targetPeer);
+    let relayProtocol = null;
+    let rttMs = null;
+    if (connected) {
+      const report = await targetPeer.getStats();
+      if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
+      relayProtocol = window.SlowMeetRelayRotation.rotatableRelayProtocol(report);
+      rttMs = selectedCandidatePairRTT(report);
+    }
+    const nowMs = Date.now();
+    const wanted = relayProtocol !== null && relayRotationWanted(relayProtocol);
+    managePlainRelayProbe(relayProtocol, wanted, rttMs, nowMs, targetPeer);
+    const rotatable = wanted && !plainRelaySuspended;
+    if (connected) setRelayRotationActive(rotatable);
+    const busy = restartRequested || targetSocket.readyState !== WebSocket.OPEN;
+    if (!relayRotation.observe({ rotatable, connected, busy, nowMs })) return;
+    targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart", reason: "rotate" }));
+    relayRotation.rotationSent(nowMs);
+  } catch (_) {
+    // Rotation is an optimization: a stats or send failure must not disturb
+    // the call; the next tick tries again.
+  } finally {
+    relayRotationCheckRunning = false;
+  }
 }
 
 function requestIceRestart(targetPeer, targetSocket, generation) {
@@ -4357,16 +4698,12 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
     // noteDirectLedDisconnectEpisode), not per restart — a doomed episode
     // may recover before its restart timer fires, and the latch must fill
     // either way.
-    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit) {
+    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit &&
+        handOffAutomaticToRelay(targetPeer, targetSocket, generation)) {
       // Another ice_restart would just reset the agent into the same dying
-      // direct path. Hand this connection to the reconnect state machine: its
-      // next peer is built as TURN/TCP (see effectiveConnectionMethod), which
-      // gets a clean relay allocation. The close is cancelled if ICE recovers
-      // during the grace window.
-      recordDirectUdpFailure();
-      restartRequested = true;
-      status.textContent = "Reconnecting media...";
-      scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
+      // direct path, so the peer moves to the relay fallback instead (see
+      // effectiveConnectionMethod). Once it is on the fallback, relay
+      // trouble gets ordinary ICE-restart recovery below.
       return true;
     }
   }
@@ -4413,8 +4750,12 @@ function hasFreshDirectUdpFailure() {
   return window.SlowMeetPathMemory.isFreshFailure(timestamp, Date.now(), directPathMemoryTtlMs);
 }
 
-function turnTcpMethodEnabled() {
-  return connectionMethodOptions.get("turn-tcp")?.enabled === true;
+// The relay "Automatic" falls back to when direct UDP is unusable: the first
+// method the server enables of rotating TCP, rotating TLS, TCP, TLS. Null
+// when the deployment offers no TCP/TLS relay.
+function autoRelayFallbackMethod() {
+  return window.SlowMeetConnectionMethods.autoRelayFallback(
+    (methodID) => connectionMethodOptions.get(methodID)?.enabled === true);
 }
 
 function showPathFallbackBanner() {
@@ -4431,7 +4772,7 @@ function hidePathFallbackBanner() {
 function armDirectPathWatchdog(targetPeer, targetSocket, generation) {
   clearTimeout(directPathWatchdogTimer);
   directPathWatchdogTimer = undefined;
-  if (effectiveConnectionMethod().startsWith("turn-") || !turnTcpMethodEnabled()) return;
+  if (effectiveConnectionMethod().startsWith("turn-") || !autoRelayFallbackMethod()) return;
   directPathWatchdogTimer = setTimeout(() => {
     directPathWatchdogTimer = undefined;
     if (!isCurrentWebRTC(generation, targetPeer, targetSocket) || isPeerConnectionConnected(targetPeer)) return;
@@ -4448,15 +4789,16 @@ function effectiveConnectionMethod() {
     // Guard on enablement: stale strikes must never divert a deployment
     // that has no TURN/TCP configured — that stranded calls offline at
     // the "Method unavailable" dead end instead of retrying direct.
-    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && turnTcpMethodEnabled()) {
-      return "turn-tcp";
+    const relayFallback = autoRelayFallbackMethod();
+    if (autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && relayFallback) {
+      return relayFallback;
     }
     // The same browser recorded a direct-UDP failure within the TTL and the
     // server still enables TURN/TCP: skip the doomed direct attempt. A live
     // direct pair clears the memory, so this only shortcuts joins on
     // networks that keep killing direct UDP.
-    if (turnTcpMethodEnabled() && hasFreshDirectUdpFailure()) {
-      return "turn-tcp";
+    if (relayFallback && hasFreshDirectUdpFailure()) {
+      return relayFallback;
     }
   }
   return connectionMethod;
@@ -5863,6 +6205,8 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
       }));
       if (iceRestartOffer) {
+        methodSwitchSettled = true;
+        relayRotation?.rotationSettled(Date.now());
         restartRequested = false;
         directDisconnectCounted = false;
         updatePeerConnectionUI(currentPeer, currentSocket, generation);
@@ -5875,6 +6219,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
     }).catch(() => {
       renegotiationQueue?.resume();
       if (iceRestartOffer && isCurrentWebRTC(generation, currentPeer, currentSocket)) {
+        relayRotation?.rotationFailed(Date.now());
         restartRequested = false;
         directDisconnectCounted = false;
         updatePeerConnectionUI(currentPeer, currentSocket, generation);
@@ -5975,6 +6320,7 @@ leave.addEventListener("click", () => {
   exhaustedReconnectTimer = undefined;
   clearTimeout(reconnectTimer);
   clearInterval(statsTimer);
+  stopRelayRotation();
   if (socket?.readyState === WebSocket.OPEN && localParticipantID) {
     socket.send(JSON.stringify({
       version: 1, type: "leave", participant_id: localParticipantID

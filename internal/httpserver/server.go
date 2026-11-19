@@ -195,6 +195,9 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "slowmeet_peer_connections %d\n", snapshot.PeerConnections)
 		_, _ = fmt.Fprintf(w, "slowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
 		_, _ = fmt.Fprintf(w, "slowmeet_reconnects_total %d\n", snapshot.Reconnects)
+		_, _ = fmt.Fprintf(w, "slowmeet_ice_restarts_total{reason=\"recovery\"} %d\n", snapshot.ICERestartsRecovery)
+		_, _ = fmt.Fprintf(w, "slowmeet_ice_restarts_total{reason=\"rotate\"} %d\n", snapshot.ICERestartsRotate)
+		_, _ = fmt.Fprintf(w, "slowmeet_ice_restarts_total{reason=\"switch\"} %d\n", snapshot.ICERestartsSwitch)
 		_, _ = fmt.Fprintf(w, "slowmeet_network_samples_total %d\n", snapshot.NetworkSamples)
 		audioDrops := hub.AudioDrops()
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_admission_drops_total %d\n", audioDrops.Admission)
@@ -525,6 +528,21 @@ func browserConnectionMethods(cfg config.Config, servers []browserICEServer) []b
 		{ID: "turn-udp", Label: "TURN over UDP", Available: available["turn-udp"], AdminEnabled: enabled["turn-udp"]},
 		{ID: "turn-tcp", Label: "TURN over TCP", Available: available["turn-tcp"], AdminEnabled: enabled["turn-tcp"]},
 		{ID: "turn-tls", Label: "TURN over TLS", Available: available["turn-tls"], AdminEnabled: enabled["turn-tls"]},
+		{ID: "turn-tcp-rotate", Label: "TURN over TCP (rotating)", AdminEnabled: enabled["turn-tcp-rotate"]},
+		{ID: "turn-tls-rotate", Label: "TURN over TLS (rotating)", AdminEnabled: enabled["turn-tls-rotate"]},
+	}
+	// A rotating method is its base TURN method plus periodic relay rotation
+	// in the browser, so it needs both the base URLs and a rotation interval.
+	rotationEnabled := cfg.TURNTCPRotateInterval > 0
+	rotationOff := make(map[string]bool)
+	for i := range methods {
+		base := config.RotatingConnectionMethodBase(methods[i].ID)
+		if base == "" {
+			continue
+		}
+		methods[i].Available = available[base] && rotationEnabled
+		configuredTURN[methods[i].ID] = configuredTURN[base]
+		rotationOff[methods[i].ID] = available[base] && !rotationEnabled
 	}
 	for i := range methods {
 		method := &methods[i]
@@ -537,6 +555,9 @@ func browserConnectionMethods(cfg config.Config, servers []browserICEServer) []b
 			method.Reason = "Not configured on this server"
 			if configuredTURN[method.ID] {
 				method.Reason = "TURN credentials are unavailable"
+			}
+			if rotationOff[method.ID] {
+				method.Reason = "Relay rotation is disabled on this server"
 			}
 			if method.ID == "direct" && cfg.ICETransportPolicy == "relay" {
 				method.Reason = "Disabled by the server ICE policy"
@@ -615,6 +636,9 @@ func writeICEConfig(w http.ResponseWriter, cfg config.Config, iceServers []brows
 		"ice_transport_policy": iceTransportPolicy,
 		"simulcast_enabled":    cfg.SimulcastEnabled,
 		"connection_methods":   browserConnectionMethods(cfg, iceServers),
+		// Whole seconds between relay-rotation ICE restarts on TURN/TCP and
+		// TURN/TLS paths; 0 disables rotation in the browser.
+		"turn_tcp_rotate_seconds": int(cfg.TURNTCPRotateInterval / time.Second),
 	})
 }
 

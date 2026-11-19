@@ -167,6 +167,8 @@
               <label class="checkbox-row" for="connection-turn-udp"><input id="connection-turn-udp" type="checkbox" checked> <span><strong>TURN over UDP</strong><small>Allow configured TURN URLs using UDP.</small></span></label>
               <label class="checkbox-row" for="connection-turn-tcp"><input id="connection-turn-tcp" type="checkbox" checked> <span><strong>TURN over TCP</strong><small>Allow configured TURN URLs using TCP.</small></span></label>
               <label class="checkbox-row" for="connection-turn-tls"><input id="connection-turn-tls" type="checkbox" checked> <span><strong>TURN over TLS</strong><small>Allow configured secure TURN URLs.</small></span></label>
+              <label class="checkbox-row" for="connection-turn-tcp-rotate"><input id="connection-turn-tcp-rotate" type="checkbox" checked> <span><strong>TURN over TCP (rotating)</strong><small>TURN over TCP that moves media to fresh connections every few seconds, for networks that degrade long-lived connections. Automatic prefers this when direct connections fail.</small></span></label>
+              <label class="checkbox-row" for="connection-turn-tls-rotate"><input id="connection-turn-tls-rotate" type="checkbox" checked> <span><strong>TURN over TLS (rotating)</strong><small>Secure TURN that moves media to fresh connections every few seconds.</small></span></label>
             </fieldset>
             <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>

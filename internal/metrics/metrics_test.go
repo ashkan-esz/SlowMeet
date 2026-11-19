@@ -51,3 +51,15 @@ func TestMissingNetworkValuesDoNotCreateSamplesOrDefaults(t *testing.T) {
 		t.Fatalf("missing metric fields received invented values: %+v", snapshot)
 	}
 }
+
+func TestICERestartRequestsAreCountedByReason(t *testing.T) {
+	var m Metrics
+	for _, reason := range []string{"", "", "rotate", "rotate", "rotate", "switch", "unknown"} {
+		m.ICERestartRequested(reason)
+	}
+	snapshot := m.Snapshot()
+	if snapshot.ICERestartsRecovery != 3 || snapshot.ICERestartsRotate != 3 || snapshot.ICERestartsSwitch != 1 {
+		t.Fatalf("restart counts = recovery %d, rotate %d, switch %d; want 3, 3, 1",
+			snapshot.ICERestartsRecovery, snapshot.ICERestartsRotate, snapshot.ICERestartsSwitch)
+	}
+}

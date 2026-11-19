@@ -173,7 +173,7 @@ func TestEnabledConnectionMethodsDefaultAndPersist(t *testing.T) {
 	cfg := Config{HTTPAddr: ":8080", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
 		DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
 		DefaultVideoQuality: "low"}
-	if got := cfg.EffectiveEnabledConnectionMethods(); strings.Join(got, ",") != "direct,turn-udp,turn-tcp,turn-tls" {
+	if got := cfg.EffectiveEnabledConnectionMethods(); strings.Join(got, ",") != "direct,turn-udp,turn-tcp,turn-tls,turn-tcp-rotate,turn-tls-rotate" {
 		t.Fatalf("default enabled methods = %v", got)
 	}
 
@@ -236,5 +236,56 @@ func TestStoreUpdateDoesNotMutateWhenPersistenceFails(t *testing.T) {
 	}
 	if got := store.Snapshot().MaxParticipants; got != 5 {
 		t.Fatalf("MaxParticipants = %d after failed persistence, want 5", got)
+	}
+}
+
+func TestLoadStoreMigratesConnectionMethodsToRotatingVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		want string
+	}{
+		{name: "legacy list gains rotating variants of enabled bases",
+			file: `{"enabled_connection_methods":["direct","turn-tcp","turn-tls"]}`,
+			want: "direct,turn-tcp,turn-tls,turn-tcp-rotate,turn-tls-rotate"},
+		{name: "legacy list without a base gains nothing for it",
+			file: `{"enabled_connection_methods":["direct","turn-tls"]}`,
+			want: "direct,turn-tls,turn-tls-rotate"},
+		{name: "legacy empty list stays empty",
+			file: `{"enabled_connection_methods":[]}`,
+			want: ""},
+		{name: "current file keeps an administrator's disabled rotating methods",
+			file: `{"enabled_connection_methods":["direct","turn-tcp","turn-tls"],"connection_methods_version":2}`,
+			want: "direct,turn-tcp,turn-tls"},
+		{name: "current file keeps an explicit rotating choice",
+			file: `{"enabled_connection_methods":["turn-tls-rotate"],"connection_methods_version":2}`,
+			want: "turn-tls-rotate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{HTTPAddr: ":8080", MaxParticipants: 5, DefaultVideoFPS: 15, MaxVideoFPS: 30,
+				DefaultAudioBitrate: 32000, MaxAudioBitrate: 64000, MaxVideoBitrate: 500000,
+				DefaultVideoQuality: "low"}
+			cfg.ConfigFile = filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(cfg.ConfigFile, []byte(tt.file), 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			store, err := LoadStore(cfg, nil)
+			if err != nil {
+				t.Fatalf("LoadStore() error = %v", err)
+			}
+			if got := strings.Join(store.Snapshot().EffectiveEnabledConnectionMethods(), ","); got != tt.want {
+				t.Fatalf("enabled methods = %q, want %q", got, tt.want)
+			}
+			// The next persist stamps the version, so the migration runs once.
+			methods := store.Snapshot().EffectiveEnabledConnectionMethods()
+			if err := store.Update(AdminUpdate{EnabledConnectionMethods: &methods}); err != nil {
+				t.Fatalf("Update() error = %v", err)
+			}
+			data, err := os.ReadFile(cfg.ConfigFile)
+			if err != nil || !strings.Contains(string(data), `"connection_methods_version": 2`) {
+				t.Fatalf("persisted file lacks the version stamp: %s (err %v)", data, err)
+			}
+		})
 	}
 }

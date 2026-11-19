@@ -382,3 +382,116 @@ scenarios plus `ice-restart-under-impairment` and `cold-join-under-impairment`
 pass; the same three pass unpinned; `make check` green. The CI failures on
 unmodified `1129c18` had the same signature — they were this defect, not
 environment starvation alone.
+
+## Nov 19, 2026: TCP relay flows degrade ~20 s in; relay rotation
+
+TURN over TLS on 443 (HAProxy SNI split: `turn.<domain>` to coturn's TLS
+listener, everything else to Caddy with PROXY v2; coturn needs
+`relay-ip=<public IP>` because HAProxy reaches it over loopback) did not
+improve calls. Proxy-free headless Chrome trials from the affected access
+network isolated the cause:
+
+| Path (same moment) | Result |
+|---|---|
+| Plain SSH echo stream, 400 kbps both ways, 90 s | ~75 ms, no stalls |
+| Generated audio+video over TURN/TLS 443 or TURN/TCP 3478 | clean (RTT ~155 ms, 20 fps) for ~20 s, then RTT 1–3 s, 10–17 freezes |
+| Same, TURN tunneled through SSH | 60 s clean |
+| Same over TURN/TLS 443 with an ICE restart every 15 s | 90 s clean: 0 freezes, RTT 150–165 ms |
+
+Client-side `ss` showed the sender's own TURN socket retransmitting
+continuously from second ~19 while the server-side socket stayed at ~80 ms
+with almost no retransmits: the access network drops uplink packets on a
+long-lived real-time TCP flow, independent of port, TLS, and SNI, and a new
+connection is clean again. Video was ~200 kbps, so this is not a bandwidth cap.
+
+Fix: relay rotation (`web/js/relay-rotation.js`, `TURN_TCP_ROTATE_SECONDS`,
+default 12). Verified locally with two browsers forced onto TURN/TCP through a
+throwaway coturn: rotations every interval + ~1 s with no drift, one peer
+connection throughout, never leaves `connected`, no status flicker, inbound
+audio advances in every 3-second window, and each rotation moves media to new
+TCP connections (old ones close after ~90 s, so the count plateaus).
+
+First live deploy found one more defect: Chrome reports the selected pair as
+`in-progress` while a connectivity check is outstanding, and the shared
+`selectedCandidatePair()` only accepts `succeeded` pairs, so the rotation
+clock reset every few seconds and rotations stopped (throttle returned with
+RTT spikes to 4.5 s). Rotation now reads the transport's selected pair in any
+check state and only restarts its clock after 3 s off the relay. Live
+verification over the affected ISP path (two headless participants, TURN/TLS
+443, production coturn):
+
+| Rotation | Duration | RTT median | RTT max | Samples > 500 ms |
+|---|---|---|---|---|
+| on (12 s) | 120 s | 77–79 ms | 103–105 ms | 0 |
+| off (control) | 90 s | 115–180 ms | 0.9–1.5 s | 8 per participant |
+
+## Nov 19, 2026 (later): rotation as explicit methods, in-place switching, faster Automatic
+
+Rotation is no longer implicit on every TCP/TLS relay. It is now two
+connection methods (`turn-tcp-rotate`, `turn-tls-rotate`); the plain methods
+never rotate. `Automatic` falls back in the order rotating TCP, rotating TLS,
+TCP, TLS (TCP first since real calls on this path ran better over TURN/TCP) and, on a rotating relay, probes the plain relay in the background
+(see `docs/configuration.md`).
+
+Two latency fixes for networks like this one:
+
+- A method change (and the Automatic handoff) used to close the socket, rejoin
+  and restart capture. It is now `setConfiguration` plus a planned ICE restart
+  on the live peer. `make test-relay-rotation-e2e` (loopback TURN/TCP, two
+  Chromium participants) measured 0.2-0.5 s for relay to direct or plain to
+  rotating and about 3 s for direct to relay, with the same WebSocket and
+  RTCPeerConnection throughout and the other participant's audio never
+  stalling.
+- Automatic needed two direct-led disconnect episodes plus a rejoin before it
+  used a relay. A direct path that dies within 20 s of first connecting now
+  hands off immediately and in place.
+
+Review fixes to the first rotation change: the rate-limit refusal is matched
+by a stable error `code` instead of message text; `ice_restart` carries a
+`reason` (`rotate`/`switch`) that the server validates, logs at debug level,
+and counts in `slowmeet_ice_restarts_total{reason}`.
+
+## Nov 19, 2026 (evening): video froze ~2 s at every rotation; make-before-break ICE restart
+
+A real call on the rotating method showed the remote video stopping for about
+2 s every rotation. Cause: `pion/ice` `Agent.Restart` is break-before-make. It
+clears the selected pair and closes all candidates when the server creates the
+restart offer, so the SFU can neither send nor receive until the restarted
+session selects a pair (answer round trip, the browser's new TURN/TCP
+allocation, connectivity checks). Chrome keeps its old pair until the new one
+works, which is why the browser-to-browser trials never showed it, and the
+earlier rotation checks only looked at RTT and coarse audio progress.
+
+`internal/webrtc/restart_continuity_test.go` reproduces it without a browser:
+with the client's answer held for 1 s, a 50 packets/s stream went silent for
+1.22 s in both directions on upstream pion.
+
+Fix: a vendored, patched `pion/ice` (`third_party/`, see its README) keeps the
+previously selected pair carrying media until the new pair is selected, and
+keeps receiving on it while the browser still sends there. Results in
+`make test-relay-rotation-e2e` (camera and microphone on, 100 ms sampling):
+
+| | Longest audio gap | Longest video gap | Video freezes |
+|---|---|---|---|
+| Across two rotations per participant | 100 ms | 100-200 ms | 0 |
+| Direct -> rotating relay switch, both directions | 100 ms | 100-200 ms | 0 |
+
+(100 ms is the sampling interval.)
+
+Live, over the affected ISP path (two headless participants, camera and
+microphone on, TURN over TLS rotating through the production coturn, 73 s
+measured, 100 ms sampling):
+
+| Image | Longest audio gap | Audio gaps > 500 ms | Longest video gap | Video gaps > 700 ms | Freezes |
+|---|---|---|---|---|---|
+| upstream pion/ice | 2.2 s | 6-7 | 3.3-3.4 s | 7-11 | 10-11 |
+| patched pion/ice | 101 ms | 0 | 200 ms | 0 | 0 |
+
+One side effect to know: when a relay
+replaces a direct pair, Chrome keeps the old direct pair selected until its own
+5 s connectivity timeout, so the reported path changes about 5 s after the
+switch although media flows throughout.
+
+During a restart the server holds one extra UDP port per restarting
+participant for up to 10 s; keep `ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX` larger
+than twice the room size.

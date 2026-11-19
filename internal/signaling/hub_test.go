@@ -998,7 +998,8 @@ func TestICERestartRateLimitReportsErrorWithoutQueueingOffer(t *testing.T) {
 
 	select {
 	case response := <-c.outbound:
-		if response.Type != TypeError || response.Error != "ice restart rate limit exceeded" {
+		if response.Type != TypeError || response.Error != "ice restart rate limit exceeded" ||
+			response.Code != ErrorCodeICERestartRateLimited {
 			t.Fatalf("rate-limit response = %+v", response)
 		}
 	default:

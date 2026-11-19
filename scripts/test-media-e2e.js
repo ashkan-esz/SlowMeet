@@ -3377,24 +3377,28 @@ async function main() {
         let config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
         assert.ok(Array.isArray(config.iceServers), "automatic mode should apply the server ICE configuration");
         await fixture.assertPeersConnected("initial automatic connection");
-        const peerCountBeforeDirectSwitch = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length);
-        await pageA.locator('#settings-connection-method').selectOption('direct', { force: true });
-        try {
-          await pageA.waitForFunction((previousCount) =>
-            window.__slowMeetTest.peerConnections.length > previousCount,
-          peerCountBeforeDirectSwitch, { timeout: 5000 });
-        } catch (_) {
+        // A method change is applied to the live peer (setConfiguration + ICE
+        // restart): the signaling socket and RTCPeerConnection must survive it.
+        const sessionCounts = () => pageA.evaluate(() => ({
+          peers: window.__slowMeetTest.peerConnections.length,
+          sockets: window.__slowMeetTest.sockets.length
+        }));
+        /* global appliedConnectionMethod */
+        const waitForAppliedMethod = (method, label) => pageA.waitForFunction((expected) =>
+          appliedConnectionMethod === expected, method, { timeout: 10000 }).catch(async () => {
           const switchFailure = await pageA.evaluate(() => ({
-            joinMethod: document.querySelector('#join-connection-method')?.value,
+            applied: appliedConnectionMethod,
             settingsMethod: document.querySelector('#settings-connection-method')?.value,
-            settingsDisabled: document.querySelector('#settings-connection-method option:checked')?.disabled,
             settingsHelp: document.querySelector('#settings-connection-method-help')?.textContent,
             sockets: window.__slowMeetTest.sockets.map((socket) => socket.readyState),
             peerCount: window.__slowMeetTest.peerConnections.length,
             status: document.querySelector('#status')?.textContent
           }));
-          assert.fail(`connection method selection did not create a new peer: ${JSON.stringify(switchFailure)}`);
-        }
+          assert.fail(`${label}: ${JSON.stringify(switchFailure)}`);
+        });
+        const countsBeforeDirectSwitch = await sessionCounts();
+        await pageA.locator('#settings-connection-method').selectOption('direct', { force: true });
+        await waitForAppliedMethod('direct', 'connection method selection was not applied');
         await waitForPeerConnection(pageA, "connected", 20000);
         config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
         assert.ok(!config.iceServers.some((server) =>
@@ -3411,25 +3415,27 @@ async function main() {
         ]);
         const gridBeforeRapidSwitch = await participantLayoutSnapshot();
         await assertParticipantLayoutStable(gridBeforeRapidSwitch, "direct connection method switch");
-        const peerCountBeforeRapidSwitch = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length);
+        assert.deepEqual(await sessionCounts(), countsBeforeDirectSwitch,
+          "switching to direct must keep the signaling socket and the peer connection");
+        // Two changes in one task: the second must win, still without a rejoin.
         await pageA.evaluate(() => {
           const selector = document.querySelector('#settings-connection-method');
           selector.value = 'auto';
           selector.dispatchEvent(new Event('change', { bubbles: true }));
-          if (window.__slowMeetTest.sockets.at(-1)?.readyState !== WebSocket.CLOSING) {
-            throw new Error('first method change did not put the signaling socket into CLOSING');
+          if (window.__slowMeetTest.sockets.at(-1)?.readyState !== WebSocket.OPEN) {
+            throw new Error('an in-place method change must leave the signaling socket open');
           }
           selector.value = 'direct';
           selector.dispatchEvent(new Event('change', { bubbles: true }));
         });
-        await pageA.waitForFunction((previousCount) =>
-          window.__slowMeetTest.peerConnections.length > previousCount,
-        peerCountBeforeRapidSwitch, { timeout: 10000 });
+        await waitForAppliedMethod('direct', 'rapid connection method changes did not settle on the last choice');
         await Promise.all([
           waitForPeerConnection(pageA, "connected", 20000),
           waitForPeerConnection(pageB, "connected", 20000)
         ]);
         await assertParticipantLayoutStable(gridBeforeRapidSwitch, "rapid connection method switch");
+        assert.deepEqual(await sessionCounts(), countsBeforeDirectSwitch,
+          "rapid method changes must keep the signaling socket and the peer connection");
         const staleJoinPage = await fixture.newPage("B");
         await staleJoinPage.waitForFunction(() => {
           const option = document.querySelector('#join-connection-method option[value="direct"]');
@@ -3453,9 +3459,9 @@ async function main() {
         await pageA.waitForFunction(() =>
           document.querySelector('#settings-connection-method option[value="direct"]')?.disabled === true,
         null, { timeout: 10000 });
-        await pageA.waitForFunction((previousCount) =>
-          window.__slowMeetTest.peerConnections.length > previousCount,
-        peerCountBeforeSwitch, { timeout: 20000 });
+        await waitForAppliedMethod('auto', 'revoking the active method did not move the call to automatic');
+        assert.equal(await pageA.evaluate(() => window.__slowMeetTest.peerConnections.length), peerCountBeforeSwitch,
+          "an admin-triggered method fallback must keep the peer connection");
         await waitForPeerConnection(pageA, "connected", 20000);
         config = await pageA.evaluate(() => window.__slowMeetTest.peerConnections.at(-1).getConfiguration());
         assert.ok(Array.isArray(config.iceServers),

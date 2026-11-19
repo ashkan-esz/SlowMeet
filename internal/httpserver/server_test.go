@@ -184,6 +184,7 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	cfg.TURNCredentialTTL = time.Hour
 	cfg.ICETransportPolicy = "relay"
 	cfg.SimulcastEnabled = true
+	cfg.TURNTCPRotateInterval = 20 * time.Second
 	handler := New(cfg, NewLogger("error"))
 
 	response := httptest.NewRecorder()
@@ -194,6 +195,7 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	var values struct {
 		ICETransportPolicy string `json:"ice_transport_policy"`
 		SimulcastEnabled   bool   `json:"simulcast_enabled"`
+		TURNTCPRotate      *int   `json:"turn_tcp_rotate_seconds"`
 		ConnectionMethods  []struct {
 			ID           string `json:"id"`
 			Enabled      bool   `json:"enabled"`
@@ -216,6 +218,9 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	if values.ICETransportPolicy != "relay" || !values.SimulcastEnabled {
 		t.Fatalf("ICE/simulcast settings were not returned: policy=%q simulcast=%t", values.ICETransportPolicy, values.SimulcastEnabled)
 	}
+	if values.TURNTCPRotate == nil || *values.TURNTCPRotate != 20 {
+		t.Fatalf("turn_tcp_rotate_seconds = %v, want 20", values.TURNTCPRotate)
+	}
 	methods := make(map[string]struct {
 		Enabled      bool
 		Available    bool
@@ -233,7 +238,10 @@ func TestICEConfigPublicMetadataRedactsTURNSecrets(t *testing.T) {
 	if !methods["auto"].Enabled || methods["direct"].Enabled || methods["direct"].Available ||
 		!methods["turn-udp"].Enabled || !methods["turn-udp"].Available ||
 		!methods["turn-tls"].Enabled || !methods["turn-tls"].Available ||
-		methods["turn-tcp"].Enabled || methods["turn-tcp"].Available {
+		methods["turn-tcp"].Enabled || methods["turn-tcp"].Available ||
+		!methods["turn-tls-rotate"].Enabled || !methods["turn-tls-rotate"].Available ||
+		methods["turn-tcp-rotate"].Enabled || methods["turn-tcp-rotate"].Available ||
+		methods["turn-tcp-rotate"].Reason != "Not configured on this server" {
 		t.Fatalf("unexpected connection method availability: %#v", methods)
 	}
 	if values.ICEServers[0].URLs[0] != "stun:stun.example.com:3478" {
@@ -559,7 +567,7 @@ func TestICEConfigDisablesUnconfiguredTURNMethods(t *testing.T) {
 			Reason    string
 		}{method.Enabled, method.Available, method.Reason}
 	}
-	for _, id := range []string{"turn-udp", "turn-tcp", "turn-tls"} {
+	for _, id := range []string{"turn-udp", "turn-tcp", "turn-tls", "turn-tcp-rotate", "turn-tls-rotate"} {
 		if methods[id].Enabled || methods[id].Available || methods[id].Reason != "Not configured on this server" {
 			t.Errorf("unconfigured method %q details = %#v", id, methods[id])
 		}
@@ -1209,5 +1217,45 @@ func TestBrandedHTMLRejectsNonGETMethods(t *testing.T) {
 		if allow := response.Header().Get("Allow"); !strings.Contains(allow, http.MethodGet) {
 			t.Fatalf("%s / Allow = %q, want it to include GET", method, allow)
 		}
+	}
+}
+
+func TestICEConfigRotatingMethodsNeedARotationInterval(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TURNURLs = []string{"turn:turn.example.com:3478?transport=tcp", "turns:turn.example.com:443?transport=tcp"}
+	cfg.TURNSharedSecret = "shared-secret"
+	cfg.TURNCredentialTTL = time.Hour
+	cfg.TURNTCPRotateInterval = 0
+	handler := New(cfg, NewLogger("error"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ice-config", nil))
+	var values struct {
+		Methods []struct {
+			ID        string `json:"id"`
+			Enabled   bool   `json:"enabled"`
+			Available bool   `json:"available"`
+			Reason    string `json:"reason"`
+		} `json:"connection_methods"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatalf("decode ICE config: %v", err)
+	}
+	seen := 0
+	for _, method := range values.Methods {
+		switch method.ID {
+		case "turn-tcp", "turn-tls":
+			seen++
+			if !method.Enabled || !method.Available {
+				t.Errorf("plain method %q should stay usable without rotation: %#v", method.ID, method)
+			}
+		case "turn-tcp-rotate", "turn-tls-rotate":
+			seen++
+			if method.Enabled || method.Available || method.Reason != "Relay rotation is disabled on this server" {
+				t.Errorf("rotating method %q details = %#v", method.ID, method)
+			}
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("expected plain and rotating TCP/TLS methods, saw %d of 4", seen)
 	}
 }

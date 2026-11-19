@@ -34,7 +34,9 @@ const connectionMethodFields = {
   direct: document.querySelector("#connection-direct"),
   "turn-udp": document.querySelector("#connection-turn-udp"),
   "turn-tcp": document.querySelector("#connection-turn-tcp"),
-  "turn-tls": document.querySelector("#connection-turn-tls")
+  "turn-tls": document.querySelector("#connection-turn-tls"),
+  "turn-tcp-rotate": document.querySelector("#connection-turn-tcp-rotate"),
+  "turn-tls-rotate": document.querySelector("#connection-turn-tls-rotate")
 };
 
 const metricFields = {

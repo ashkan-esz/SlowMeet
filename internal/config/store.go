@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,7 @@ func LoadStore(cfg Config, logger *slog.Logger) (*Store, error) {
 			"decode_error", err.Error())
 		update = lenient
 	}
+	migrateConnectionMethods(&update)
 	if err := store.apply(update); err != nil {
 		return nil, err
 	}
@@ -88,6 +90,7 @@ func unknownJSONKeys(data []byte) []string {
 		"screen_share_enabled":       {},
 		"retain_chat_history":        {},
 		"enabled_connection_methods": {},
+		"connection_methods_version": {},
 	}
 	var unknown []string
 	for key := range raw {
@@ -126,6 +129,29 @@ type AdminUpdate struct {
 	ScreenShare              *bool     `json:"screen_share_enabled"`
 	RetainChatHistory        *bool     `json:"retain_chat_history"`
 	EnabledConnectionMethods *[]string `json:"enabled_connection_methods"`
+	// ConnectionMethodsVersion marks which connection-method ids a persisted
+	// file knows about; see migrateConnectionMethods. Ignored on admin updates.
+	ConnectionMethodsVersion *int `json:"connection_methods_version,omitempty"`
+}
+
+// connectionMethodsVersion 2 added the rotating TURN methods.
+const connectionMethodsVersion = 2
+
+// migrateConnectionMethods upgrades a list persisted before the rotating TURN
+// methods existed: that file could not have disabled them, so each one follows
+// its base method instead of silently starting out administrator-disabled.
+func migrateConnectionMethods(update *AdminUpdate) {
+	if update.EnabledConnectionMethods == nil ||
+		(update.ConnectionMethodsVersion != nil && *update.ConnectionMethodsVersion >= connectionMethodsVersion) {
+		return
+	}
+	methods := append([]string(nil), *update.EnabledConnectionMethods...)
+	for _, rotating := range []string{"turn-tcp-rotate", "turn-tls-rotate"} {
+		if !slices.Contains(methods, rotating) && slices.Contains(methods, RotatingConnectionMethodBase(rotating)) {
+			methods = append(methods, rotating)
+		}
+	}
+	update.EnabledConnectionMethods = &methods
 }
 
 // Update applies an admin change. The configuration is computed and persisted
@@ -205,6 +231,7 @@ func persist(cfg Config, path string) error {
 		ScreenShare:              boolPointer(cfg.EnableScreenShare),
 		RetainChatHistory:        boolPointer(cfg.RetainChatHistory),
 		EnabledConnectionMethods: stringSlicePointer(cfg.EffectiveEnabledConnectionMethods()),
+		ConnectionMethodsVersion: intPointer(connectionMethodsVersion),
 	}, "", "  ")
 	if err != nil {
 		return err

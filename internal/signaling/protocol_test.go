@@ -315,3 +315,14 @@ func TestReadMessageRejectsUnknownAndTrailingJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateICERestartReason(t *testing.T) {
+	for _, reason := range []string{"", ICERestartReasonRotate, ICERestartReasonSwitch} {
+		if err := (Message{Version: ProtocolVersion, Type: TypeICERestart, Reason: reason}).Validate(); err != nil {
+			t.Errorf("reason %q rejected: %v", reason, err)
+		}
+	}
+	if err := (Message{Version: ProtocolVersion, Type: TypeICERestart, Reason: "because"}).Validate(); err == nil {
+		t.Error("unknown ice_restart reason was accepted")
+	}
+}

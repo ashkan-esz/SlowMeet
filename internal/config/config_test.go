@@ -312,3 +312,40 @@ func TestValidateRejectsUnboundedBitratesAndMalformedICEServers(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadFromEnvTURNTCPRotateInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "default", value: "", want: 12 * time.Second},
+		{name: "disabled", value: "0", want: 0},
+		{name: "custom", value: "45", want: 45 * time.Second},
+		{name: "minimum", value: "10", want: 10 * time.Second},
+		{name: "too short", value: "5", wantErr: true},
+		{name: "too long", value: "601", wantErr: true},
+		{name: "negative", value: "-1", wantErr: true},
+		{name: "not a number", value: "often", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// An empty value falls back to the default, like an unset one.
+			t.Setenv("TURN_TCP_ROTATE_SECONDS", tt.value)
+			cfg, err := LoadFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("LoadFromEnv() accepted TURN_TCP_ROTATE_SECONDS=%q", tt.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadFromEnv() error = %v", err)
+			}
+			if cfg.TURNTCPRotateInterval != tt.want {
+				t.Fatalf("TURNTCPRotateInterval = %v, want %v", cfg.TURNTCPRotateInterval, tt.want)
+			}
+		})
+	}
+}

@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test cover vet fmt fmt-check tidy \
-	test-js test-js-syntax test-admin test-protocol test-connection-methods test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+	test-js test-js-syntax test-admin test-protocol test-connection-methods test-relay-rotation test-plain-relay-probe test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -58,7 +58,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-path-memory test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
+	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-relay-rotation test-plain-relay-probe test-path-memory test-adaptation test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
 
 test-js-syntax: ## Syntax-check every browser JavaScript file
 	@status=0; \
@@ -75,6 +75,16 @@ test-protocol: ## Test the signaling protocol
 
 test-connection-methods: ## Test strict ICE server selection by connection method
 	$(NODE) scripts/test-connection-methods.js
+
+test-relay-rotation: ## Test TURN/TCP and TURN/TLS relay rotation scheduling
+	$(NODE) scripts/test-relay-rotation.js
+
+test-plain-relay-probe: ## Test the plain-relay probe verdict, memory, and suspension guard
+	$(NODE) scripts/test-plain-relay-probe.js
+
+.PHONY: test-relay-rotation-e2e
+test-relay-rotation-e2e: ## Verify rotating TURN methods, in-place method switching, and the Automatic relay handoff in Chromium
+	$(NODE) scripts/test-relay-rotation-e2e.js
 
 test-path-memory: ## Test remembered direct-UDP failure freshness rules
 	$(NODE) scripts/test-path-memory.js

@@ -48,6 +48,64 @@ must match coturn's `static-auth-secret` when `use-auth-secret` is enabled.
 `TURN_URL`, `TURN_USERNAME`, and `TURN_PASSWORD` settings remain supported for
 server-side use; static credentials are not sent to browsers.
 
+### Rotating TURN methods
+
+Besides `Direct`, `TURN over UDP`, `TURN over TCP`, and `TURN over TLS`, the
+connection-method list offers `TURN over TCP (rotating)` and
+`TURN over TLS (rotating)` (`turn-tcp-rotate`, `turn-tls-rotate`). A rotating
+method uses the same TURN URLs as its plain counterpart; in addition, the
+browser asks the server for an ICE restart every `TURN_TCP_ROTATE_SECONDS`
+(default `12`, `0` disables the rotating methods, otherwise 10–600). Chrome
+allocates fresh TURN connections, moves media onto them before releasing the
+old pair, and closes the old connections about 90 seconds later.
+
+Some access networks start dropping uplink packets on a long-lived real-time
+TCP flow about 20 seconds after it starts, which turns into multi-second
+freezes; a fresh connection is clean again, so rotation keeps every flow inside
+that window. Rotation is separate from recovery restarts: it does not count
+toward the client's restart attempts or change the connection status. Expect
+about `90 / interval + 1` TURN allocations per rotating participant at any
+time, so keep coturn's relay port range comfortably larger than that times the
+room size. Plain TURN methods, Direct, and TURN/UDP never rotate.
+
+Rotation does not interrupt media: the server keeps the previous ICE pair
+carrying audio and video until the restarted one is selected (a patched
+`pion/ice`, see `third_party/README.md`). During each restart the server holds
+one extra UDP port per rotating participant for a few seconds, so keep the
+`ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX` range larger than twice the room size.
+
+Administrators enable or disable each method on the admin page. A settings
+file saved before the rotating methods existed enables each rotating method
+whose plain counterpart was enabled.
+
+### Automatic
+
+`Automatic` starts direct. When the direct path dies it moves the call to the
+first enabled relay of: rotating TCP, rotating TLS, TCP, TLS. A direct path
+that dies within 20 seconds of first connecting (the signature of a network
+that polices WebRTC UDP) triggers the move at once; otherwise two failed
+episodes do. The failure is remembered in the browser for 24 hours so later
+joins start on the relay.
+
+While `Automatic` is on a rotating relay, the browser tests once whether a
+plain relay would hold up: about 10 seconds into the call it echoes a 64 kbps
+stream through the plain relay for 40 seconds on throwaway connections and
+judges the part after the 20-second mark. On a pass it stops rotating (fewer
+restarts and TURN allocations) and keeps watching the call's round-trip time;
+three samples over 500 ms within ten resume rotation immediately. A pass is
+remembered for 1 hour and a fail for 6 hours. An explicitly chosen rotating
+method always rotates.
+
+### Changing the method during a call
+
+A method change is applied to the live connection: the browser swaps its ICE
+servers and policy and the server restarts ICE, so the signaling socket, room
+seat, camera, and microphone all stay. Switching between a plain method and
+its rotating variant needs no restart at all. If the new path has not
+connected within 8 seconds the client falls back to a full rejoin.
+
+`/metrics` exports `slowmeet_ice_restarts_total{reason="recovery"|"rotate"|"switch"}`.
+
 `ICE_IPV4_ONLY=true` is the default. Set it to `false` only after testing IPv6
 on the target networks. `ICE_PUBLIC_IP` can rewrite host ICE candidates for a
 server behind 1:1 NAT; the VPS installer detects and sets the public IPv4

@@ -14,6 +14,9 @@ type Metrics struct {
 	peerConnections    atomic.Int64
 	connectionFailures atomic.Uint64
 	reconnects         atomic.Uint64
+	iceRestartsRecover atomic.Uint64
+	iceRestartsRotate  atomic.Uint64
+	iceRestartsSwitch  atomic.Uint64
 	networkSamples     atomic.Uint64
 	rttSamples         atomic.Uint64
 	// rttEwmaMilli holds math.Float64bits of the windowed RTT average; a
@@ -36,14 +39,19 @@ type Snapshot struct {
 	PeerConnections    int64
 	ConnectionFailures uint64
 	Reconnects         uint64
-	NetworkSamples     uint64
-	HasNetworkSample   bool
-	HasRTT             bool
-	HasPacketLoss      bool
-	HasJitter          bool
-	HasVideo           bool
-	HasAudio           bool
-	LastNetworkSample  int64
+	// ICE restarts requested by browsers, split by why: recovery from a
+	// failed path, a planned relay rotation, or a connection-method switch.
+	ICERestartsRecovery uint64
+	ICERestartsRotate   uint64
+	ICERestartsSwitch   uint64
+	NetworkSamples      uint64
+	HasNetworkSample    bool
+	HasRTT              bool
+	HasPacketLoss       bool
+	HasJitter           bool
+	HasVideo            bool
+	HasAudio            bool
+	LastNetworkSample   int64
 	// AverageRTTMs is an exponentially weighted window over reported RTT
 	// samples, not a lifetime mean.
 	AverageRTTMs     float64
@@ -68,6 +76,19 @@ func (m *Metrics) ConnectionFailed() {
 
 func (m *Metrics) Reconnected() {
 	m.reconnects.Add(1)
+}
+
+// ICERestartRequested counts one accepted browser ice_restart request by its
+// reason ("" is recovery; see signaling.ICERestartReason*).
+func (m *Metrics) ICERestartRequested(reason string) {
+	switch reason {
+	case "rotate":
+		m.iceRestartsRotate.Add(1)
+	case "switch":
+		m.iceRestartsSwitch.Add(1)
+	default:
+		m.iceRestartsRecover.Add(1)
+	}
 }
 
 func (m *Metrics) ObserveNetwork(rttMs, packetLoss10, jitterMs, videoKbps, audioKbps int) {
@@ -121,21 +142,24 @@ func (m *Metrics) recordRTT(rttMs float64) {
 
 func (m *Metrics) Snapshot() Snapshot {
 	snapshot := Snapshot{
-		PeerConnections:    m.peerConnections.Load(),
-		ConnectionFailures: m.connectionFailures.Load(),
-		Reconnects:         m.reconnects.Load(),
-		NetworkSamples:     m.networkSamples.Load(),
-		LastRTTMs:          m.lastRTTMs.Load(),
-		LastPacketLoss10:   m.lastPacketLoss10.Load(),
-		LastJitterMs:       m.lastJitterMs.Load(),
-		LastVideoKbps:      m.lastVideoKbps.Load(),
-		LastAudioKbps:      m.lastAudioKbps.Load(),
-		LastNetworkSample:  m.lastNetworkSample.Load(),
-		HasRTT:             m.hasRTT.Load(),
-		HasPacketLoss:      m.hasPacketLoss.Load(),
-		HasJitter:          m.hasJitter.Load(),
-		HasVideo:           m.hasVideo.Load(),
-		HasAudio:           m.hasAudio.Load(),
+		PeerConnections:     m.peerConnections.Load(),
+		ConnectionFailures:  m.connectionFailures.Load(),
+		Reconnects:          m.reconnects.Load(),
+		ICERestartsRecovery: m.iceRestartsRecover.Load(),
+		ICERestartsRotate:   m.iceRestartsRotate.Load(),
+		ICERestartsSwitch:   m.iceRestartsSwitch.Load(),
+		NetworkSamples:      m.networkSamples.Load(),
+		LastRTTMs:           m.lastRTTMs.Load(),
+		LastPacketLoss10:    m.lastPacketLoss10.Load(),
+		LastJitterMs:        m.lastJitterMs.Load(),
+		LastVideoKbps:       m.lastVideoKbps.Load(),
+		LastAudioKbps:       m.lastAudioKbps.Load(),
+		LastNetworkSample:   m.lastNetworkSample.Load(),
+		HasRTT:              m.hasRTT.Load(),
+		HasPacketLoss:       m.hasPacketLoss.Load(),
+		HasJitter:           m.hasJitter.Load(),
+		HasVideo:            m.hasVideo.Load(),
+		HasAudio:            m.hasAudio.Load(),
 	}
 	snapshot.HasNetworkSample = snapshot.NetworkSamples > 0
 	if bits := m.rttEwmaMilli.Load(); bits != 0 {

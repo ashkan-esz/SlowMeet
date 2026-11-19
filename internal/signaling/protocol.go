@@ -50,45 +50,61 @@ var approvedReactionEmojis = map[string]struct{}{
 	"👏": {}, "🙌": {}, "🔥": {}, "💯": {}, "😢": {}, "🤔": {},
 }
 
+// Planned ICE restarts, as opposed to recovery from a failed path: a relay
+// rotation onto fresh TURN connections, or a connection-method switch.
+const (
+	ICERestartReasonRotate = "rotate"
+	ICERestartReasonSwitch = "switch"
+
+	// ErrorCodeICERestartRateLimited marks the error sent when an ice_restart
+	// request exceeds the per-client burst limit.
+	ErrorCodeICERestartRateLimited = "ice_restart_rate_limited"
+)
+
 type Message struct {
-	Version              int                  `json:"version"`
-	Type                 string               `json:"type"`
-	Name                 string               `json:"name,omitempty"`
-	Password             string               `json:"password,omitempty"`
-	ReconnectToken       string               `json:"reconnect_token,omitempty"`
-	ParticipantID        string               `json:"participant_id,omitempty"`
-	CameraParticipantIDs []string             `json:"camera_participant_ids,omitempty"`
-	CameraLayer          string               `json:"camera_layer,omitempty"`
-	MediaStreamID        string               `json:"media_stream_id,omitempty"`
-	MediaTrackID         string               `json:"media_track_id,omitempty"`
-	Error                string               `json:"error,omitempty"`
-	Participant          *meeting.Participant `json:"participant,omitempty"`
-	TargetID             string               `json:"target_id,omitempty"`
-	SDP                  string               `json:"sdp,omitempty"`
-	Candidate            string               `json:"candidate,omitempty"`
-	SDPMid               *string              `json:"sdp_mid,omitempty"`
-	SDPMLineIndex        *uint16              `json:"sdp_mline_index,omitempty"`
-	AudioEnabled         *bool                `json:"audio_enabled,omitempty"`
-	VideoEnabled         *bool                `json:"video_enabled,omitempty"`
-	VideoPaused          *bool                `json:"video_paused,omitempty"`
-	HandRaised           *bool                `json:"hand_raised,omitempty"`
-	HandOrder            int                  `json:"hand_order,omitempty"`
-	MaxVideoBitrate      int                  `json:"max_video_bitrate,omitempty"`
-	MaxVideoFPS          int                  `json:"max_video_fps,omitempty"`
-	MaxAudioBitrate      int                  `json:"max_audio_bitrate,omitempty"`
-	MaxVideoQuality      string               `json:"max_video_quality,omitempty"`
-	ScreenShareEnabled   *bool                `json:"screen_share_enabled,omitempty"`
-	RetainChatHistory    *bool                `json:"retain_chat_history,omitempty"`
-	RTTMs                int                  `json:"rtt_ms,omitempty"`
-	PacketLoss10         int                  `json:"packet_loss10,omitempty"`
-	JitterMs             int                  `json:"jitter_ms,omitempty"`
-	VideoKbps            int                  `json:"video_kbps,omitempty"`
-	AudioKbps            int                  `json:"audio_kbps,omitempty"`
-	ScreenShareActive    *bool                `json:"screen_share_active,omitempty"`
-	ScreenShareOwner     string               `json:"screen_share_owner,omitempty"`
-	ChatText             string               `json:"text,omitempty"`
-	Emoji                string               `json:"emoji,omitempty"`
-	ChatHistory          []ChatHistoryEntry   `json:"chat_history,omitempty"`
+	Version              int      `json:"version"`
+	Type                 string   `json:"type"`
+	Name                 string   `json:"name,omitempty"`
+	Password             string   `json:"password,omitempty"`
+	ReconnectToken       string   `json:"reconnect_token,omitempty"`
+	ParticipantID        string   `json:"participant_id,omitempty"`
+	CameraParticipantIDs []string `json:"camera_participant_ids,omitempty"`
+	CameraLayer          string   `json:"camera_layer,omitempty"`
+	MediaStreamID        string   `json:"media_stream_id,omitempty"`
+	MediaTrackID         string   `json:"media_track_id,omitempty"`
+	Error                string   `json:"error,omitempty"`
+	// Code is a stable machine-readable identifier for selected errors.
+	Code string `json:"code,omitempty"`
+	// Reason qualifies an ice_restart request: empty for recovery, or one of
+	// the ICERestartReason values for planned restarts.
+	Reason             string               `json:"reason,omitempty"`
+	Participant        *meeting.Participant `json:"participant,omitempty"`
+	TargetID           string               `json:"target_id,omitempty"`
+	SDP                string               `json:"sdp,omitempty"`
+	Candidate          string               `json:"candidate,omitempty"`
+	SDPMid             *string              `json:"sdp_mid,omitempty"`
+	SDPMLineIndex      *uint16              `json:"sdp_mline_index,omitempty"`
+	AudioEnabled       *bool                `json:"audio_enabled,omitempty"`
+	VideoEnabled       *bool                `json:"video_enabled,omitempty"`
+	VideoPaused        *bool                `json:"video_paused,omitempty"`
+	HandRaised         *bool                `json:"hand_raised,omitempty"`
+	HandOrder          int                  `json:"hand_order,omitempty"`
+	MaxVideoBitrate    int                  `json:"max_video_bitrate,omitempty"`
+	MaxVideoFPS        int                  `json:"max_video_fps,omitempty"`
+	MaxAudioBitrate    int                  `json:"max_audio_bitrate,omitempty"`
+	MaxVideoQuality    string               `json:"max_video_quality,omitempty"`
+	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
+	RetainChatHistory  *bool                `json:"retain_chat_history,omitempty"`
+	RTTMs              int                  `json:"rtt_ms,omitempty"`
+	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
+	JitterMs           int                  `json:"jitter_ms,omitempty"`
+	VideoKbps          int                  `json:"video_kbps,omitempty"`
+	AudioKbps          int                  `json:"audio_kbps,omitempty"`
+	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
+	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
+	ChatText           string               `json:"text,omitempty"`
+	Emoji              string               `json:"emoji,omitempty"`
+	ChatHistory        []ChatHistoryEntry   `json:"chat_history,omitempty"`
 
 	// flush is an internal sentinel that is never serialized: the writer
 	// goroutine closes it after every queued message before it has been
@@ -145,6 +161,11 @@ func (m Message) Validate() error {
 			return fmt.Errorf("candidate is required")
 		}
 	case TypeICERestart:
+		switch m.Reason {
+		case "", ICERestartReasonRotate, ICERestartReasonSwitch:
+		default:
+			return fmt.Errorf("ice_restart reason is invalid")
+		}
 	case TypeMediaState:
 		if m.ParticipantID == "" || (m.AudioEnabled == nil && m.VideoEnabled == nil) {
 			return fmt.Errorf("media state requires participant_id and a state")

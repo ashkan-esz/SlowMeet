@@ -1289,8 +1289,13 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			// The browser's generic error path rearms its bounded recovery retry;
 			// silently dropping would leave restartRequested latched.
 			h.Logger.Warn("ice_restart_rate_limited", "participant_id", c.participant.ID)
-			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: "ice restart rate limit exceeded"})
+			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError,
+				Error: "ice restart rate limit exceeded", Code: ErrorCodeICERestartRateLimited})
 			return
+		}
+		h.metrics.ICERestartRequested(msg.Reason)
+		if msg.Reason != "" {
+			h.Logger.Debug("ice_restart_planned", "participant_id", c.participant.ID, "reason", msg.Reason)
 		}
 		if err := h.sendOffer(c, true); err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})

@@ -243,8 +243,10 @@ assert.match(adaptationTick,
 // the client in Offline until a manual retry.
 assert.match(appSource, /function scheduleExhaustedMediaReconnect\(/,
   "exhaustion must schedule a full reconnect");
-assert.equal((appSource.match(/scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/g) || []).length, 4,
-  "the failed and disconnected exhaustion sites, the Automatic strike handoff, and the direct-episode strike handoff must schedule the reconnect");
+assert.equal((appSource.match(/scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/g) || []).length, 3,
+  "the failed and disconnected exhaustion sites and the shared Automatic relay handoff (its fallback when an in-place switch is impossible) must schedule the reconnect");
+assert.equal((appSource.match(/handOffAutomaticToRelay\(targetPeer, targetSocket, generation\)/g) || []).length, 3,
+  "the handoff helper is defined once and used by the Automatic strike handoff and the direct-episode strike handoff");
 assert.match(appSource, /clearTimeout\(exhaustedReconnectTimer\);\s*\n\s*exhaustedReconnectTimer = undefined;\s*\n\s*clearTimeout\(reconnectTimer\);/,
   "an intentional leave must cancel the exhausted reconnect");
 

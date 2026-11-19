@@ -68,6 +68,8 @@
             <option value="turn-udp">TURN over UDP</option>
             <option value="turn-tcp">TURN over TCP</option>
             <option value="turn-tls">TURN over TLS</option>
+            <option value="turn-tcp-rotate">TURN over TCP (rotating)</option>
+            <option value="turn-tls-rotate">TURN over TLS (rotating)</option>
           </select>
           <span id="join-connection-method-help" class="field-help">Choose a network path for this meeting.</span>
         </div>
@@ -162,6 +164,8 @@
                 <option value="turn-udp">TURN over UDP</option>
                 <option value="turn-tcp">TURN over TCP</option>
                 <option value="turn-tls">TURN over TLS</option>
+                <option value="turn-tcp-rotate">TURN over TCP (rotating)</option>
+                <option value="turn-tls-rotate">TURN over TLS (rotating)</option>
               </select>
             </div>
             <p id="settings-connection-method-help" class="setting-note" role="status">Choose a network path for this meeting.</p>
@@ -190,7 +194,7 @@
           <div id="meeting-alert" class="meeting-alert" role="status" aria-live="polite" hidden></div>
           <div id="path-fallback-banner" class="meeting-alert path-fallback-banner" role="status" aria-live="polite" hidden>
             <span>Direct connection is taking a while.</span>
-            <button id="path-fallback-switch" class="text-button" type="button">Use TURN/TCP</button>
+            <button id="path-fallback-switch" class="text-button" type="button">Use relay</button>
             <button id="path-fallback-dismiss" class="text-button" type="button">Keep waiting</button>
           </div>
           <p id="meeting-status" class="meeting-status" role="status" aria-live="polite" hidden></p>
@@ -287,6 +291,8 @@
   <script defer src="/js/screen-share-adaptation.js"></script>
   <script defer src="/js/muted-speech-warning.js"></script>
   <script defer src="/js/connection-methods.js"></script>
+  <script defer src="/js/relay-rotation.js"></script>
+  <script defer src="/js/plain-relay-probe.js"></script>
   <script defer src="/js/path-memory.js"></script>
   <script defer src="/js/connection-history.js"></script>
   <script defer src="/js/participant-identity.js"></script>

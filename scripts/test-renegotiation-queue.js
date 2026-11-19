@@ -314,9 +314,9 @@ async function run() {
   // The auto guard may be written as one compound condition or as a nested
   // branch (the nested form also carries the direct-UDP path-memory skip);
   // the contract is the same either way.
-  assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto"[\s\S]*?autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return "turn-tcp";/,
-    "an Automatic session that cycled direct-led restarts must reconnect as TURN/TCP");
-  assert.match(appSource, /autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && turnTcpMethodEnabled\(\)/,
+  assert.match(appSource, /function effectiveConnectionMethod\(\) \{[\s\S]*?connectionMethod === "auto"[\s\S]*?autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit[\s\S]*?return relayFallback;/,
+    "an Automatic session that cycled direct-led restarts must move to the relay fallback");
+  assert.match(appSource, /autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit && relayFallback\)/,
     "stale strikes must never divert a deployment with no TURN/TCP configured (that stranded calls offline at the Method unavailable dead end)");
   const connectedBranch = appSource.match(
     /if \(isPeerConnectionConnected\(targetPeer\)\) \{[\s\S]*?\n  \}\n\n  if \(targetPeer\.connectionState === "failed"/
@@ -338,8 +338,10 @@ async function run() {
     "sustained direct health clears both the strike latch and the remembered direct-UDP failure");
   assert.match(appSource, /if \(isPeerConnectionConnected\(currentPeer\)\) \{\s*noteStableDirectPath\(\);\s*\} else \{\s*directPathStableSamples = 0;/,
     "only a live non-relay pair on a connected peer accumulates direct-path stability");
-  assert.match(appSource, /if \(connectionMethod === "auto"\) \{[\s\S]*?if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit\) \{[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
-    "when the strike limit is hit the session stops restarting and hands off to the reconnect state machine (rebuild as TURN/TCP); strikes accrue per episode, not per restart");
+  assert.match(appSource, /if \(connectionMethod === "auto"\) \{[\s\S]*?if \(autoTurnFailoverStrikes >= autoTurnFailoverStrikesLimit &&\s*handOffAutomaticToRelay\(targetPeer, targetSocket, generation\)\) \{[\s\S]*?return true;/,
+    "when the strike limit is hit the session stops restarting the dying direct path and hands off to the relay fallback; strikes accrue per episode, not per restart");
+  assert.match(appSource, /function handOffAutomaticToRelay\(targetPeer, targetSocket, generation\) \{\s*recordDirectUdpFailure\(\);\s*if \(effectiveConnectionMethod\(\) === appliedConnectionMethod\) return false;[\s\S]*?switchConnectionMethodInPlace\(\)[\s\S]*?restartRequested = true;[\s\S]*?scheduleExhaustedMediaReconnect\(targetPeer, targetSocket, generation\);/,
+    "the handoff switches the live peer in place, falls back to the reconnect state machine, and leaves a peer already on the relay to ordinary recovery");
   assert.match(appSource, /const effectiveMethod = effectiveConnectionMethod\(\);\s*const selectedICEServers = filteredICEServers\(effectiveMethod\);/,
     "the peer must be built from the effective (possibly fallback) method");
   assert.match(appSource, /function requestIceRestart\(targetPeer, targetSocket, generation\)[\s\S]*?type: "ice_restart"/,

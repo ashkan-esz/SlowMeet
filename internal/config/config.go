@@ -16,19 +16,24 @@ import (
 )
 
 type Config struct {
-	AppName                  string
-	AppEnv                   string
-	HTTPAddr                 string
-	ConfigFile               string
-	MeetingPassword          string
-	AdminPassword            string
-	STUNServers              []string
-	TURNURL                  string
-	TURNURLs                 []string
-	TURNUsername             string
-	TURNPassword             string
-	TURNSharedSecret         string
-	TURNCredentialTTL        time.Duration
+	AppName           string
+	AppEnv            string
+	HTTPAddr          string
+	ConfigFile        string
+	MeetingPassword   string
+	AdminPassword     string
+	STUNServers       []string
+	TURNURL           string
+	TURNURLs          []string
+	TURNUsername      string
+	TURNPassword      string
+	TURNSharedSecret  string
+	TURNCredentialTTL time.Duration
+	// TURNTCPRotateInterval is how often browsers on a TURN/TCP or TURN/TLS
+	// relay request an ICE restart to move media onto fresh TCP connections.
+	// Some access networks degrade long-lived real-time TCP flows (~20 s in);
+	// zero disables rotation.
+	TURNTCPRotateInterval    time.Duration
 	ICEIPv4Only              bool
 	ICETransportPolicy       string
 	EnabledConnectionMethods []string
@@ -145,6 +150,10 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	turnTCPRotateSeconds, err := envInt("TURN_TCP_ROTATE_SECONDS", 12)
+	if err != nil {
+		return Config{}, err
+	}
 	iceIPv4Only, err := envBool("ICE_IPV4_ONLY", true)
 	if err != nil {
 		return Config{}, err
@@ -157,37 +166,38 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		AppName:             envString("APP_NAME", "SlowMeet"),
-		AppEnv:              envString("APP_ENV", "production"),
-		HTTPAddr:            envString("HTTP_ADDR", ":8080"),
-		ConfigFile:          envString("CONFIG_FILE", "config.json"),
-		MeetingPassword:     os.Getenv("MEETING_PASSWORD"),
-		AdminPassword:       os.Getenv("ADMIN_PASSWORD"),
-		STUNServers:         splitCSV(os.Getenv("STUN_SERVERS")),
-		TURNURL:             os.Getenv("TURN_URL"),
-		TURNURLs:            splitCSV(os.Getenv("TURN_URLS")),
-		TURNUsername:        os.Getenv("TURN_USERNAME"),
-		TURNPassword:        os.Getenv("TURN_PASSWORD"),
-		TURNSharedSecret:    os.Getenv("TURN_SHARED_SECRET"),
-		TURNCredentialTTL:   time.Duration(turnCredentialTTLSeconds) * time.Second,
-		ICEIPv4Only:         iceIPv4Only,
-		ICETransportPolicy:  iceTransportPolicy,
-		SimulcastEnabled:    simulcastEnabled,
-		ICEUDPPortMin:       iceUDPPortMin,
-		ICEUDPPortMax:       iceUDPPortMax,
-		ICEPublicIP:         icePublicIP,
-		TrustedProxyCIDRs:   trustedProxyCIDRs,
-		MaxParticipants:     maxParticipants,
-		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
-		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
-		DefaultVideoFPS:     defaultVideoFPS,
-		MaxVideoFPS:         maxVideoFPS,
-		DefaultAudioBitrate: defaultAudioBitrate,
-		MaxVideoBitrate:     maxVideoBitrate,
-		MaxAudioBitrate:     maxAudioBitrate,
-		EnableScreenShare:   enableScreenShare,
-		ReconnectTimeout:    time.Duration(reconnectSeconds) * time.Second,
-		LogLevel:            envString("LOG_LEVEL", "info"),
+		AppName:               envString("APP_NAME", "SlowMeet"),
+		AppEnv:                envString("APP_ENV", "production"),
+		HTTPAddr:              envString("HTTP_ADDR", ":8080"),
+		ConfigFile:            envString("CONFIG_FILE", "config.json"),
+		MeetingPassword:       os.Getenv("MEETING_PASSWORD"),
+		AdminPassword:         os.Getenv("ADMIN_PASSWORD"),
+		STUNServers:           splitCSV(os.Getenv("STUN_SERVERS")),
+		TURNURL:               os.Getenv("TURN_URL"),
+		TURNURLs:              splitCSV(os.Getenv("TURN_URLS")),
+		TURNUsername:          os.Getenv("TURN_USERNAME"),
+		TURNPassword:          os.Getenv("TURN_PASSWORD"),
+		TURNSharedSecret:      os.Getenv("TURN_SHARED_SECRET"),
+		TURNCredentialTTL:     time.Duration(turnCredentialTTLSeconds) * time.Second,
+		TURNTCPRotateInterval: time.Duration(turnTCPRotateSeconds) * time.Second,
+		ICEIPv4Only:           iceIPv4Only,
+		ICETransportPolicy:    iceTransportPolicy,
+		SimulcastEnabled:      simulcastEnabled,
+		ICEUDPPortMin:         iceUDPPortMin,
+		ICEUDPPortMax:         iceUDPPortMax,
+		ICEPublicIP:           icePublicIP,
+		TrustedProxyCIDRs:     trustedProxyCIDRs,
+		MaxParticipants:       maxParticipants,
+		DefaultVideoQuality:   envString("DEFAULT_VIDEO_QUALITY", "low"),
+		MaxVideoQuality:       envString("MAX_VIDEO_QUALITY", "ultra"),
+		DefaultVideoFPS:       defaultVideoFPS,
+		MaxVideoFPS:           maxVideoFPS,
+		DefaultAudioBitrate:   defaultAudioBitrate,
+		MaxVideoBitrate:       maxVideoBitrate,
+		MaxAudioBitrate:       maxAudioBitrate,
+		EnableScreenShare:     enableScreenShare,
+		ReconnectTimeout:      time.Duration(reconnectSeconds) * time.Second,
+		LogLevel:              envString("LOG_LEVEL", "info"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -213,7 +223,7 @@ func (c Config) Validate() error {
 	seenConnectionMethods := make(map[string]struct{}, len(c.EnabledConnectionMethods))
 	for _, method := range c.EnabledConnectionMethods {
 		switch method {
-		case "direct", "turn-udp", "turn-tcp", "turn-tls":
+		case "direct", "turn-udp", "turn-tcp", "turn-tls", "turn-tcp-rotate", "turn-tls-rotate":
 		default:
 			return fmt.Errorf("enabled connection method %q is invalid", method)
 		}
@@ -265,6 +275,10 @@ func (c Config) Validate() error {
 		(c.TURNCredentialTTL < time.Minute || c.TURNCredentialTTL > 7*24*time.Hour) {
 		return fmt.Errorf("TURN_CREDENTIAL_TTL_SECONDS must be between 60 and 604800")
 	}
+	if c.TURNTCPRotateInterval != 0 &&
+		(c.TURNTCPRotateInterval < 10*time.Second || c.TURNTCPRotateInterval > 10*time.Minute) {
+		return fmt.Errorf("TURN_TCP_ROTATE_SECONDS must be 0 or between 10 and 600")
+	}
 	if c.DefaultVideoQuality == "" {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not be empty")
 	}
@@ -314,7 +328,20 @@ func (c Config) EffectiveEnabledConnectionMethods() []string {
 		copy(methods, c.EnabledConnectionMethods)
 		return methods
 	}
-	return []string{"direct", "turn-udp", "turn-tcp", "turn-tls"}
+	return []string{"direct", "turn-udp", "turn-tcp", "turn-tls", "turn-tcp-rotate", "turn-tls-rotate"}
+}
+
+// RotatingConnectionMethodBase maps a rotating connection method to the TURN
+// method whose URLs it uses, or returns "" for any other method. A rotating
+// method is its base method plus periodic relay rotation in the browser.
+func RotatingConnectionMethodBase(method string) string {
+	switch method {
+	case "turn-tcp-rotate":
+		return "turn-tcp"
+	case "turn-tls-rotate":
+		return "turn-tls"
+	}
+	return ""
 }
 
 // TURNCredentials returns coturn REST API credentials when a shared secret is
