@@ -1209,10 +1209,14 @@ const statusRouter = window.SlowMeetMeetingStatus
 
 // showStatus surfaces a message on the join form while it is visible and on
 // the in-meeting banner afterwards, so mid-meeting errors are never written
-// to the hidden join-form status line.
-function showStatus(message) {
+// to the hidden join-form status line. The banner has no close control, so
+// confirmations pass statusConfirmationOptions to dismiss themselves and
+// media-recovery messages pass kind "recovery" so a reconnected peer clears
+// them.
+const statusConfirmationOptions = Object.freeze({ duration: 4000 });
+function showStatus(message, options) {
   if (statusRouter) {
-    statusRouter.show(message);
+    statusRouter.show(message, options);
     return;
   }
   status.textContent = message;
@@ -1614,7 +1618,9 @@ connectionPopoverRetry?.addEventListener("click", () => {
     iceRestartAttempts = 0;
     restartRequested = false;
     directDisconnectCounted = false;
-    showStatus("Restarting media...");
+    // A restart on a peer that never leaves "connected" fires no state
+    // change to clear this, so it also times out on its own.
+    showStatus("Restarting media...", { kind: "recovery", duration: 8000 });
     requestIceRestart(peer, socket, socketGeneration);
     return;
   }
@@ -2285,7 +2291,7 @@ function selectConnectionMethod(methodID) {
   refreshConnectionMethodSelectors();
   if (!meeting.hidden) {
     if (switchConnectionMethodInPlace()) {
-      showStatus(`Switched to ${method.label}.`);
+      showStatus(`Switched to ${method.label}.`, statusConfirmationOptions);
       return true;
     }
     connectionMethodSwitchRequested = true;
@@ -3392,7 +3398,7 @@ enableAudio.addEventListener("click", async () => {
     }
   }
   enableAudio.hidden = blocked || remoteAudioElements.size === 0;
-  if (!blocked) showStatus("Remote audio enabled.");
+  if (!blocked) showStatus("Remote audio enabled.", statusConfirmationOptions);
 });
 fetch("/config").then((response) => response.json()).then((config) => {
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
@@ -4425,6 +4431,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     setConnection("good", "Connected");
     setParticipantConnectionState("connected");
     status.textContent = "Connected";
+    statusRouter?.clear("recovery");
     return;
   }
 
@@ -4438,7 +4445,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
       ? connectionMethodFailureMessage()
       : "Restarting media...";
     if (iceRestartAttempts >= maxIceRestartAttempts) {
-      showStatus(connectionMethodFailureMessage());
+      showStatus(connectionMethodFailureMessage(), { kind: "recovery" });
       scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
     }
     requestIceRestart(targetPeer, targetSocket, generation);
@@ -4451,7 +4458,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     status.textContent = restartRequested ? "Restarting media..." : "Reconnecting media...";
     if (!restartRequested && iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
-      showStatus(connectionMethodFailureMessage());
+      showStatus(connectionMethodFailureMessage(), { kind: "recovery" });
       scheduleExhaustedMediaReconnect(targetPeer, targetSocket, generation);
       return;
     }
@@ -5008,7 +5015,7 @@ function scheduleIceRestartRetry(targetPeer, targetSocket, generation) {
     if (requestIceRestart(targetPeer, targetSocket, generation)) return;
     if (iceRestartAttempts >= maxIceRestartAttempts) {
       setConnection("poor", "Offline");
-      showStatus("Media connection failed. Retry to reconnect.");
+      showStatus("Media connection failed. Retry to reconnect.", { kind: "recovery" });
     }
   }, iceRestartDelayMs(targetPeer));
 }
