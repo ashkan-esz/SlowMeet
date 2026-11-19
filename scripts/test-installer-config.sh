@@ -334,4 +334,31 @@ if (HTTPS_CONFLICTS=; activate_caddy_site final "$caddyfile") >/dev/null 2>&1; t
 fi
 unset FAIL_CADDY_RELOAD_ONCE RELOAD_COUNT_FILE
 
+# COMPOSE_FILE in the install directory's .env makes every installer Compose
+# call use the operator's override files (e.g. host networking) without -f.
+# shellcheck source=/dev/null
+source <(sed -n '/^compose_file_is_configured() {/,/^wait_for_updated_service() {/p' "$INSTALLER" | sed '$d' \
+    | awk '/^compose_file_is_configured\(\) \{/ { copying=1 } copying { print } copying && /^\)$/ { exit }')
+INSTALL_DIR="$TEMP_DIR/install"
+mkdir -p "$INSTALL_DIR"
+cat > "$TEMP_DIR/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$DOCKER_ARGS_FILE"
+DOCKER
+chmod +x "$TEMP_DIR/bin/docker"
+export DOCKER_ARGS_FILE="$TEMP_DIR/docker-args"
+container_engine=docker
+: > "$INSTALL_DIR/.env"
+PATH="$TEMP_DIR/bin:$PATH" compose up -d
+assert_contains "$DOCKER_ARGS_FILE" "compose -f $INSTALL_DIR/docker-compose.yml up -d"
+printf 'COMPOSE_FILE=\n' > "$INSTALL_DIR/.env"
+PATH="$TEMP_DIR/bin:$PATH" compose up -d
+assert_contains "$DOCKER_ARGS_FILE" "compose -f $INSTALL_DIR/docker-compose.yml up -d"
+printf 'HTTP_PUBLISH_PORT=1111\nCOMPOSE_FILE=docker-compose.yml:deploy/compose.host-network.yml\n' > "$INSTALL_DIR/.env"
+PATH="$TEMP_DIR/bin:$PATH" compose up -d --build
+assert_not_contains "$DOCKER_ARGS_FILE" ' -f '
+assert_contains "$DOCKER_ARGS_FILE" 'compose up -d --build'
+grep -Fq 'HTTP_ADDR##*:' "$INSTALLER" \
+    || fail 'the readiness check must use the port the app listens on, not a fixed 8080'
+
 printf 'Installer configuration checks passed.\n'

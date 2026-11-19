@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"net"
 	"sort"
 	"strings"
 	"testing"
@@ -241,5 +242,15 @@ func TestNewPeerWithRelayPolicyAndPublicIPSetsLocalDescription(t *testing.T) {
 	}
 	if sdp := peer.Connection().LocalDescription().SDP; strings.Contains(sdp, "typ host") {
 		t.Fatalf("relay-only peer gathered a host candidate:\n%s", sdp)
+	}
+}
+
+func TestLocalInterfaceHasIP(t *testing.T) {
+	if !localInterfaceHasIP(net.ParseIP("127.0.0.1")) {
+		t.Fatal("loopback is a local interface address")
+	}
+	// TEST-NET-3 is reserved for documentation and never assigned.
+	if localInterfaceHasIP(net.ParseIP("203.0.113.250")) {
+		t.Fatal("a documentation address must not be reported as local")
 	}
 }

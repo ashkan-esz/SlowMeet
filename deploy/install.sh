@@ -53,10 +53,26 @@ report_unexpected_error() {
 
 trap report_unexpected_error ERR
 
+# Operators can add Compose override files (for example
+# deploy/compose.host-network.yml) once, by setting COMPOSE_FILE in
+# $INSTALL_DIR/.env. Docker Compose reads it from there when no -f is given, so
+# the installer, updates, and plain `docker compose` commands run in the
+# install directory all use the same set of files without anyone having to
+# remember extra flags.
+compose_file_is_configured() {
+    [[ -f "$INSTALL_DIR/.env" ]] && grep -Eq '^COMPOSE_FILE=.+' "$INSTALL_DIR/.env"
+}
+
 compose() (
     cd "$INSTALL_DIR"
     case "$container_engine" in
-        docker) docker compose -f "$INSTALL_DIR/docker-compose.yml" "$@" ;;
+        docker)
+            if compose_file_is_configured; then
+                docker compose "$@"
+            else
+                docker compose -f "$INSTALL_DIR/docker-compose.yml" "$@"
+            fi
+            ;;
         podman) podman-compose -f "$INSTALL_DIR/podman-compose.yml" "$@" ;;
         *) fail "Unsupported container engine: ${container_engine:-unset}." ;;
     esac
@@ -909,7 +925,10 @@ wait_for_updated_service() {
     local healthy=no
     log 'Waiting for SlowMeet to become healthy.'
     for _ in $(seq 1 60); do
-        if compose exec -T slowmeet wget -qO- http://127.0.0.1:8080/ready >/dev/null 2>&1; then
+        # The app's port is 8080 on the bridge network and whatever HTTP_ADDR
+        # says with the host-network override; read it inside the container.
+        # shellcheck disable=SC2016
+        if compose exec -T slowmeet sh -c 'wget -qO- "http://127.0.0.1:${HTTP_ADDR##*:}/ready"' >/dev/null 2>&1; then
             healthy=yes
             break
         fi

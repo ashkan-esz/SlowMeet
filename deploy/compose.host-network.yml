@@ -1,0 +1,40 @@
+# Optional override: run the SlowMeet container on the host network.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.host-network.yml up -d
+#
+# or, to keep it for every later `docker compose` command and installer update,
+# set this once in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:deploy/compose.host-network.yml
+#
+# Why: with the default bridge network Docker publishes the ICE UDP range
+# through one userland `docker-proxy` process per port (101 processes for the
+# default 50000-50100 range, about 100 MB on a small VPS) and every media
+# packet crosses Docker NAT and connection tracking, including the packets
+# coturn relays to the SFU on the same host. On the host network the SFU binds
+# its UDP ports directly: no proxy processes and no NAT.
+#
+# What changes:
+# - The app listens on HTTP_PUBLISH_ADDRESS:HTTP_PUBLISH_PORT itself (default
+#   127.0.0.1:8080), so it stays reachable only through the reverse proxy
+#   unless you publish it on another address. HTTP_ADDR from .env is ignored.
+# - Nothing is published by Docker; the host firewall must allow
+#   ICE_UDP_PORT_MIN-ICE_UDP_PORT_MAX/udp (the installer's UFW rules already do).
+# - The container shares the host's network namespace, so Docker's network
+#   isolation no longer applies to it. The other hardening in
+#   docker-compose.yml (read-only root, dropped capabilities, non-root user,
+#   resource limits) is unchanged.
+#
+# Set ICE_PUBLIC_IP to the host's public address: the SFU then gathers only on
+# that interface. Without it, container bridges and tunnels on the host are
+# gathered too.
+#
+# Requires Docker Compose v2.24 or newer (for `!reset`).
+services:
+  slowmeet:
+    network_mode: host
+    ports: !reset []
+    environment:
+      HTTP_ADDR: "${HTTP_PUBLISH_ADDRESS:-127.0.0.1}:${HTTP_PUBLISH_PORT:-8080}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${HTTP_PUBLISH_PORT:-8080}/health"]

@@ -154,6 +154,16 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 			settingEngine.SetIPFilter(func(candidateIP net.IP) bool {
 				return candidateIP.IsLoopback()
 			})
+		} else if localInterfaceHasIP(publicAddress) {
+			// The public address is one of this host's own interfaces (host
+			// networking or bare metal). Every other interface (container
+			// bridges, VPN tunnels) would also be advertised under the public
+			// address by the 1:1 rewrite, on ports nothing can reach, and ICE
+			// restarts then stall on those dead pairs. Gather only on the
+			// public interface.
+			settingEngine.SetIPFilter(func(candidateIP net.IP) bool {
+				return candidateIP.Equal(publicAddress)
+			})
 		}
 	}
 	mediaEngine, registry, err := newMediaEngineAndRegistry(&settingEngine)
@@ -167,6 +177,20 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
 	return &Peer{connection: connection}, nil
+}
+
+// localInterfaceHasIP reports whether ip is assigned to a local interface.
+func localInterfaceHasIP(ip net.IP) bool {
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		if network, ok := address.(*net.IPNet); ok && network.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Peer) Connection() *pion.PeerConnection {

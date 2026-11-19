@@ -495,3 +495,69 @@ switch although media flows throughout.
 During a restart the server holds one extra UDP port per restarting
 participant for up to 10 s; keep `ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX` larger
 than twice the room size.
+
+## Nov 20, 2026: rotation overhead removed; RTCP relay mix measured
+
+Two costs paid on every rotation bought nothing once restarts became
+make-before-break:
+
+- The answer handler requested video keyframes after every answer, including
+  rotation restarts. A pure `rotate` restart now requests none (recovery and
+  `switch` restarts, and a rotation merged with queued renegotiation, still do).
+- The server's own peer connections were given the TURN URLs, so every ICE
+  gathering, and every rotation, made the SFU allocate relays on coturn that
+  were never used. With `ICE_PUBLIC_IP` set and a non-`relay` policy the
+  server peer now gets no TURN servers.
+
+Live, over the affected ISP path (two headless participants, camera and
+microphone on, TURN over TCP rotating, 73 s, 11 rotations in total):
+
+| Per participant | Before | After |
+|---|---|---|
+| Keyframes encoded | 22 | 0 |
+| PLIs received | 33 | 0 |
+| Relay candidates offered by the server | 4-6 | 0 |
+| Longest audio / video gap | 200 ms / 200 ms | 200 ms / 200 ms |
+| Video freezes | 0 | 0 |
+
+SFU CPU time for the run was the same within noise (3.35 s both), and the
+generated 160 kbps test video is too small for the keyframe saving to show in
+bitrate; the saving grows with real camera resolution and with room size
+(one forced keyframe per viewer per rotation, per publisher).
+
+RTCP relay mix from the same run (`slowmeet_rtcp_relayed_total`): 2,576
+forwarded batches in about 80 s for two participants, of which 2,573 (99.9%)
+carried no PLI/FIR/NACK: 2,394 transport-cc feedback packets, 179 receiver
+reports, 3 PLIs. Almost everything the SFU encrypts and sends to publishers on
+this path is subscriber transport-cc feedback. Whether to stop forwarding it
+is an open decision (it needs an A/B on publisher bitrate adaptation); the
+counters are in place for it.
+
+Also added: an optional host-network compose override
+(`deploy/compose.host-network.yml`). On this VPS Docker's userland proxy runs
+101 processes (106 MB) for the ICE UDP range.
+
+### Host networking applied on the VPS (Nov 20)
+
+A/B with temporary instances over the affected ISP path (same image, two
+headless participants on rotating TURN/TCP, 75 s per run):
+
+- Host networking as first written produced one 2-5 s audio/video gap per run
+  (5 of 5 runs) while bridge runs were clean. Cause: on the host network the
+  SFU also sees `docker0` and the compose bridge, and the 1:1 public-IP
+  rewrite advertised candidates on those interfaces under the public address;
+  ICE restarts stalled on them. `internal/webrtc/peer.go` now gathers only on
+  the public interface when `ICE_PUBLIC_IP` is one of the host's own
+  addresses. With that fix: 3 of 3 host runs with no gap above 200 ms.
+- CPU per 75 s run (after the fix; 3 host runs, 2 bridge runs): SFU 2.53 s vs
+  2.65 s, coturn 2.82 s vs 3.05 s, whole host 28.9 s vs 30.5 s busy. A 5-8%
+  reduction, close to run-to-run noise.
+
+Live container switched to `deploy/compose.host-network.yml`:
+
+| | Bridge | Host network |
+|---|---|---|
+| `docker-proxy` processes | 102 | 0 |
+| Memory used by them | 105 MB | 0 |
+| Available memory | 645 MB | 781 MB |
+| Processes on the VPS | 147 | 45 |

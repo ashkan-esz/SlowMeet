@@ -97,6 +97,33 @@ To start the optional coturn profile, first copy
 docker compose --profile turn up -d --build
 ```
 
+### Host networking for the SlowMeet container (optional)
+
+On the default bridge network Docker starts one `docker-proxy` process per
+published UDP port (101 for the default ICE range, roughly 100 MB on a small
+VPS) and NATs every media packet. To avoid both, add the override file:
+
+```sh
+docker compose -f docker-compose.yml -f deploy/compose.host-network.yml up -d
+```
+
+To make it permanent, list the files once in `.env`:
+
+```text
+COMPOSE_FILE=docker-compose.yml:deploy/compose.host-network.yml
+```
+
+Docker Compose reads `COMPOSE_FILE` from `.env` whenever it runs in that
+directory without `-f`, and `deploy/install.sh` (install, update, removal)
+uses the same list, so later deploys keep the override without extra flags.
+Set `ICE_PUBLIC_IP` to the host's public address so the server gathers only on
+that interface.
+
+The app then binds `HTTP_PUBLISH_ADDRESS:HTTP_PUBLISH_PORT` and the ICE UDP
+range directly on the host; the host firewall must allow the UDP range, and
+Docker's network isolation no longer applies to this container. See the
+comments in `deploy/compose.host-network.yml`. It needs Docker Compose v2.24+.
+
 The TURN profile uses host networking so coturn can expose its relay range.
 Open its configured UDP/TCP 3478 and TLS/TCP 5349 listeners, plus its UDP relay
 range. If HTTPS already uses TCP 443 on the same address, TURN over TCP 443
