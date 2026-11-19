@@ -416,6 +416,12 @@ func (c Config) validateTURNServer() error {
 	if c.TURNServerPort >= relayMin && c.TURNServerPort <= relayMax {
 		return fmt.Errorf("TURN_SERVER_PORT must be outside the TURN relay port range %d-%d", relayMin, relayMax)
 	}
+	// The relay forwards to the ICE UDP ports; its own listener must not be
+	// among them, and the SFU must not find one of its ports taken.
+	if c.ICEUDPPortMin != 0 && c.TURNServerPort >= c.ICEUDPPortMin && c.TURNServerPort <= c.ICEUDPPortMax {
+		return fmt.Errorf("TURN_SERVER_PORT must be outside the ICE UDP port range %d-%d",
+			c.ICEUDPPortMin, c.ICEUDPPortMax)
+	}
 	if c.TURNServerRelayIP != "" {
 		if ip := net.ParseIP(c.TURNServerRelayIP); ip == nil || ip.To4() == nil {
 			return fmt.Errorf("TURN_SERVER_RELAY_IP must be a valid IPv4 address")

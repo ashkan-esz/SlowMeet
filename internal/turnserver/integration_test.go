@@ -48,6 +48,9 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 			}
 			cfg := testConfig(t, 8)
 			cfg.ICEPublicIP = test.publicIP
+			// The relay lets relay sockets reach each other only when the
+			// configuration makes the SFU allocate on it.
+			cfg.ICETransportPolicy = test.policy
 			// The SFU's media ports stay outside the relay range, as the
 			// configuration requires in production.
 			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax = freeRelayRange(t, 8)

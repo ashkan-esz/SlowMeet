@@ -132,8 +132,9 @@ socket on the same host.
 Two rules keep it from being an open relay or a network hazard:
 
 - It forwards only to this server's own addresses (`ICE_PUBLIC_IP` and the
-  local relay address), there only to the SFU's media port range and to other
-  relay sockets, and offers UDP relay addresses only.
+  local relay address), there only to the SFU's media port range (and to
+  other relay sockets when the SFU itself allocates on the relay), and offers
+  UDP relay addresses only.
 - When `ICE_PUBLIC_IP` is not a local address (a container on a bridge
   network, or a VM behind 1:1 NAT), it translates that address to the local
   one on the relay sockets, so relayed media never leaves the network

@@ -150,6 +150,10 @@ type relayAddressGenerator struct {
 	// relayPacketConn for what they restrict.
 	sfuPortMin int
 	sfuPortMax int
+	// relayToRelay is set when the SFU itself allocates on this relay (a
+	// relay-only ICE policy, or no public address), so one relay socket must
+	// be able to reach another.
+	relayToRelay bool
 }
 
 func (g *relayAddressGenerator) Validate() error {
@@ -215,6 +219,7 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 		relayPortMax: g.portMax,
 		sfuPortMin:   g.sfuPortMin,
 		sfuPortMax:   g.sfuPortMax,
+		relayToRelay: g.relayToRelay,
 	}, relayAddress, nil
 }
 
@@ -225,9 +230,11 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 // services may listen on it. A TURN credential, which every meeting
 // participant receives, must not be a way to send them datagrams from this
 // host, past its firewall. So a datagram is forwarded only to a port the SFU
-// can be on (its media port range) or to another relay socket. Without a
-// configured media port range the SFU may be on any port and nothing is
-// refused.
+// can be on: its media port range, and another relay socket only when the SFU
+// itself allocates on this relay (relayToRelay). Otherwise relay sockets
+// belong to participants alone, and one participant has no business sending
+// to another's. Without a configured media port range the SFU may be on any
+// port, relay range included, and nothing is refused.
 //
 // Addresses. On a host whose public address is not local (addresses.translate)
 // browsers address the SFU by that public address, while the SFU's sockets
@@ -247,16 +254,23 @@ type relayPacketConn struct {
 	relayPortMax int
 	sfuPortMin   int
 	sfuPortMax   int
+	relayToRelay bool
 }
 
 func (c *relayPacketConn) isRelayPort(port int) bool {
 	return port >= c.relayPortMin && port <= c.relayPortMax
 }
 
-// permitsPort reports whether a peer on port can be the SFU or another relay
-// socket.
+// permitsPort reports whether a peer on port can be the SFU: on one of its
+// media ports, or behind a relay socket of its own.
 func (c *relayPacketConn) permitsPort(port int) bool {
-	return c.sfuPortMin == 0 || (port >= c.sfuPortMin && port <= c.sfuPortMax) || c.isRelayPort(port)
+	if c.sfuPortMin == 0 {
+		return true
+	}
+	if port >= c.sfuPortMin && port <= c.sfuPortMax {
+		return true
+	}
+	return c.relayToRelay && c.isRelayPort(port)
 }
 
 func (c *relayPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {

@@ -72,12 +72,17 @@ What to expect from it:
 - **It relays only to this server's media ports.** The only permitted peers
   are `ICE_PUBLIC_IP` and the relay's own address, and only UDP relay
   addresses are offered. On those addresses it forwards only to the SFU's
-  port range (`ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX`) and to other relay
-  sockets. A TURN credential, which anyone who can join a meeting receives,
-  therefore cannot be used to reach other hosts, private networks, or other
-  UDP services on this server. If you set the ICE port range to `0` (any
-  port), the port check is off and every UDP port on the server's own address
-  is reachable through the relay; keep a range configured.
+  port range (`ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX`). Another relay socket is
+  reachable only when the SFU itself allocates on the relay
+  (`ICE_TRANSPORT_POLICY=relay`, or no `ICE_PUBLIC_IP`); otherwise relay
+  sockets belong to participants alone and one cannot send to another's. A
+  TURN credential, which anyone who can join a meeting receives, therefore
+  cannot be used to reach other hosts, private networks, other UDP services on
+  this server, or other participants. If you set the ICE port range to `0`
+  (any port), the port check is off: every UDP port on the server's own
+  address is reachable through the relay, and a relayed call can fail when the
+  SFU picks a port inside the relay port range. Keep a range configured; the
+  relay warns at startup when there is none.
 - **Only the listen ports face the network.** Clients must reach
   `TURN_SERVER_PORT` over UDP and TCP and `TURN_SERVER_TLS_PORT` over TCP. The
   relay port range carries traffic only between the relay and the SFU on the
@@ -108,7 +113,10 @@ What to expect from it:
 - **Stream connections are capped.** TURN over TCP and TURN over TLS each
   hold at most 1024 connections at a time, so connections that are opened and
   left idle cannot take the memory the meeting needs. Further connections wait
-  until one closes. The cap is far above what a full room needs.
+  until one closes. The cap is far above what a full room needs. A connection
+  whose TLS handshake fails, or does not finish within 10 seconds, is closed
+  at once and does not count. After a transient error while accepting (for
+  example no free file descriptor) the listeners retry instead of stopping.
 
 The log line `turn_server_started` lists the bound addresses, the relay
 address, the SFU ports it forwards to, and whether the public address is

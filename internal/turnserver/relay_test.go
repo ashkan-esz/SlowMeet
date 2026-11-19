@@ -255,8 +255,14 @@ func TestRelaySocketForwardsOnlyToSFUAndRelayPorts(t *testing.T) {
 	if payload, source := readDatagram(t, sfu); payload != "to sfu" || source.String() != relayAddress.String() {
 		t.Fatalf("SFU received %q from %v", payload, source)
 	}
+	// Relay sockets belong to participants alone unless the SFU allocates on
+	// the relay as well; only then may one reach another.
+	if _, err := relay.WriteTo([]byte("to a participant"), otherAddress); !errors.Is(err, errPeerPortNotAllowed) {
+		t.Fatalf("WriteTo another participant's relay socket = %v, want errPeerPortNotAllowed", err)
+	}
+	relay.(*relayPacketConn).relayToRelay = true
 	if _, err := relay.WriteTo([]byte("to relay"), otherAddress); err != nil {
-		t.Fatalf("another relay socket must be reachable: %v", err)
+		t.Fatalf("the SFU's relay socket must be reachable when it uses the relay: %v", err)
 	}
 	if payload, _ := readDatagram(t, otherRelay); payload != "to relay" {
 		t.Fatalf("other relay received %q", payload)

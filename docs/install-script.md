@@ -185,7 +185,12 @@ in `/opt/slowmeet`:
    else is left but `docker-compose.yml`).
 4. Give coturn its certificate copy back:
    `chown -R 65534:65533 /etc/slowmeet/turn-certs`.
-5. Start both containers: `docker compose --profile turn up -d --build`
+5. Make the renewal hook do the same from now on, or coturn loses TURN over
+   TLS at the next renewal:
+   `sed -i 's/-o 10001 -g 10001/-o 65534 -g 65533/g' /etc/letsencrypt/renewal-hooks/deploy/slowmeet`.
+   The hook no longer tells coturn to re-read its certificate; after a renewal
+   run `docker compose --profile turn kill -s SIGUSR2 coturn` (or restart it).
+6. Start both containers: `docker compose --profile turn up -d --build`
    (Podman: `podman-compose -f podman-compose.yml --profile turn up -d --build`).
 
 Do not run the installer's update afterwards until you want to move again: it

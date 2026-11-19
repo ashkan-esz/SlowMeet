@@ -146,6 +146,7 @@ func TestLoadFromEnvRejectsInvalidBuiltInRelaySettings(t *testing.T) {
 			"TURN_SERVER_RELAY_PORT_MIN": "40000", "TURN_SERVER_RELAY_PORT_MAX": "60000",
 		}, wantError: "must not overlap"},
 		{name: "listen port inside relay range", env: map[string]string{"TURN_SERVER_PORT": "49500"}, wantError: "outside the TURN relay port range"},
+		{name: "listen port inside ICE range", env: map[string]string{"TURN_SERVER_PORT": "50050"}, wantError: "outside the ICE UDP port range"},
 		{name: "relay IP not an address", env: map[string]string{"TURN_SERVER_RELAY_IP": "relay.example.com"}, wantError: "TURN_SERVER_RELAY_IP"},
 		{name: "relay IP is IPv6", env: map[string]string{"TURN_SERVER_RELAY_IP": "2001:db8::1"}, wantError: "TURN_SERVER_RELAY_IP"},
 		{name: "enabled flag not boolean", env: map[string]string{"TURN_SERVER_ENABLED": "maybe"}, wantError: "TURN_SERVER_ENABLED"},

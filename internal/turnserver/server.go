@@ -88,7 +88,7 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 	if server.tcp, err = net.Listen("tcp", plainAddress); err != nil {
 		return nil, fmt.Errorf("listen for TURN on TCP %s: %w", plainAddress, err)
 	}
-	server.tcp = netutil.LimitListener(server.tcp, streamClients)
+	server.tcp = &retryListener{Listener: netutil.LimitListener(server.tcp, streamClients), name: "tcp", logger: logger}
 	listeners := []net.Listener{server.tcp}
 	if cfg.TURNServerTLSEnabled() {
 		tlsAddress := net.JoinHostPort(listenHost, strconv.Itoa(cfg.TURNServerTLSPort))
@@ -97,11 +97,13 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 			return nil, fmt.Errorf("listen for TURN over TLS on TCP %s: %w", tlsAddress, listenErr)
 		}
 		certificates := newCertReloader(cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile, logger)
-		// The cap sits under TLS so the TURN library still sees a *tls.Conn.
-		server.tls = tls.NewListener(netutil.LimitListener(inner, streamClients), &tls.Config{
+		// The cap sits under TLS, and tlsListener closes a connection whose
+		// handshake fails, which is what gives its slot back.
+		capped := &retryListener{Listener: netutil.LimitListener(inner, streamClients), name: "tls", logger: logger}
+		server.tls = newTLSListener(capped, &tls.Config{
 			MinVersion:     tls.VersionTLS12,
 			GetCertificate: certificates.GetCertificate,
-		})
+		}, tlsHandshakeTimeout, logger)
 		listeners = append(listeners, server.tls)
 	}
 
@@ -111,6 +113,9 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		portMax:    cfg.TURNServerRelayPortMax,
 		sfuPortMin: cfg.ICEUDPPortMin,
 		sfuPortMax: cfg.ICEUDPPortMax,
+		// The same rule internal/signaling uses to give the SFU's own peer
+		// connections TURN servers.
+		relayToRelay: len(cfg.ServerTURNURLs()) > 0,
 	}
 	permit := func(_ net.Addr, peerIP net.IP) bool {
 		if addresses.permits(peerIP) {
@@ -167,6 +172,13 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		"relay_ports", fmt.Sprintf("%d-%d", cfg.TURNServerRelayPortMin, cfg.TURNServerRelayPortMax),
 		"sfu_ports", sfuPorts,
 		"translates_public_ip", addresses.translates())
+	if cfg.ICEUDPPortMin == 0 {
+		// The relay tells the SFU's sockets from everything else by port.
+		logger.Warn("turn_server_any_peer_port",
+			"hint", "set ICE_UDP_PORT_MIN and ICE_UDP_PORT_MAX: without a media port range the relay "+
+				"forwards to any UDP port on this server's own address, and a relayed call can fail "+
+				"when the SFU picks a port inside the relay port range")
+	}
 	if len(cfg.EffectiveTURNURLs()) == 0 {
 		logger.Warn("turn_server_without_urls",
 			"hint", "set TURN_URLS so browsers are told where to reach the built-in relay")
