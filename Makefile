@@ -89,6 +89,10 @@ test-plain-relay-probe: ## Test the plain-relay probe verdict, memory, and suspe
 test-relay-rotation-e2e: ## Verify rotating TURN methods, in-place method switching, and the Automatic relay handoff in Chromium
 	$(NODE) scripts/test-relay-rotation-e2e.js
 
+.PHONY: test-builtin-turn-e2e
+test-builtin-turn-e2e: ## Verify TURN over UDP and TCP through the built-in relay in Chromium
+	$(NODE) scripts/test-builtin-turn-e2e.js
+
 test-path-memory: ## Test remembered direct-UDP failure freshness rules
 	$(NODE) scripts/test-path-memory.js
 
@@ -192,8 +196,8 @@ docker-build: ## Build the container image
 docker-up: ## Build and start the Compose stack
 	$(DOCKER_COMPOSE) up -d --build
 
-docker-turn-up: ## Build and start Docker Compose with coturn
-	$(DOCKER_COMPOSE) --profile turn up -d --build
+docker-turn-up: ## Build and start Docker Compose with the built-in TURN relay
+	$(DOCKER_COMPOSE) -f deploy/compose.turn.yml up -d --build
 
 docker-down: ## Stop the Compose stack
 	$(DOCKER_COMPOSE) down
@@ -231,8 +235,8 @@ podman-build: ## Build the Podman image
 podman-up: ## Build and start the Podman Compose stack
 	$(PODMAN_COMPOSE) up -d --build
 
-podman-turn-up: ## Build and start Podman Compose with coturn
-	$(PODMAN_COMPOSE) --profile turn up -d --build
+podman-turn-up: ## Build and start Podman Compose with the built-in TURN relay
+	$(PODMAN_COMPOSE) -f deploy/podman-compose.turn.yml up -d --build
 
 podman-down: ## Stop the Podman Compose stack
 	$(PODMAN_COMPOSE) down
@@ -242,9 +246,10 @@ podman-logs: ## Follow Podman Compose service logs
 
 container-config: podman-check ## Validate Docker and Podman Compose manifests
 	$(DOCKER_COMPOSE) config --quiet
-	$(DOCKER_COMPOSE) --profile turn config --quiet
+	$(DOCKER_COMPOSE) -f deploy/compose.turn.yml config --quiet
+	$(DOCKER_COMPOSE) -f deploy/compose.turn.yml -f deploy/compose.host-network.yml config --quiet
 	$(PODMAN_COMPOSE) config --quiet
-	$(PODMAN_COMPOSE) --profile turn config --quiet
+	$(PODMAN_COMPOSE) -f deploy/podman-compose.turn.yml config --quiet
 
 container-parity: ## Verify Docker and Podman build definitions stay synchronized
 	@cmp -s Dockerfile Containerfile || { \

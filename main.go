@@ -15,6 +15,7 @@ import (
 
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/httpserver"
+	"SlowMeet/internal/turnserver"
 )
 
 func main() {
@@ -30,6 +31,13 @@ func run() error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	logger := httpserver.NewLogger(cfg.LogLevel)
+	// The built-in TURN relay binds its ports before anything else starts, so
+	// an enabled relay that cannot serve stops the process here instead of
+	// leaving calls to fail later. It is inert when TURN_SERVER_ENABLED is off.
+	relay, err := turnserver.Start(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("start TURN relay: %w", err)
+	}
 	app := httpserver.New(cfg, logger)
 	// Package-level code that logs through slog.Default() (for example the
 	// offer-send debug record in internal/signaling) must honor LOG_LEVEL too.
@@ -52,7 +60,13 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := runHTTPServer(ctx, server, app.Close); err != nil {
+	closeApp := func() {
+		app.Close()
+		if err := relay.Close(); err != nil {
+			logger.Warn("turn_server_close_failed", "error", err)
+		}
+	}
+	if err := runHTTPServer(ctx, server, closeApp); err != nil {
 		return err
 	}
 	logger.Info("server_stopped")

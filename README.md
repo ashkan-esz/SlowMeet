@@ -9,7 +9,7 @@ and graceful degradation on unstable connections.
 - One active screen-share lease with disconnect cleanup
 - SFU media forwarding without server-side transcoding or media buffering
 - Automatic video quality reduction, audio continuity controls, and diagnostics
-- Optional meeting password, runtime admin controls, and TURN relay support
+- Optional meeting password, runtime admin controls, and a built-in TURN relay
 
 ## How SlowMeet handles weak connections
 
@@ -24,9 +24,10 @@ connection struggles. If conditions become critical, SlowMeet can pause video
 to help audio remain usable. These steps manage the available bandwidth; they
 cannot create more of it or guarantee call quality.
 
-When a network blocks direct UDP, an operator-configured TURN relay can provide
-another connection path. Relaying can add latency. Simulcast layer switching
-is also available, but disabled by default.
+When a network blocks direct UDP, the TURN relay built into SlowMeet can provide
+another connection path over UDP, TCP, or TLS once an operator enables it; an
+external TURN server works too. Relaying can add latency. Simulcast layer
+switching is also available, but disabled by default.
 
 These features are not an Iran-specific optimization. Results depend on each
 participant's access network and routing, as well as the location and quality
@@ -37,13 +38,12 @@ networks before making regional performance claims.
 flowchart LR
     Browsers[Participant browsers]
     Proxy[Optional TLS reverse proxy]
-    App[SlowMeet Go SFU]
-    TURN[Optional TURN relay]
+    App[SlowMeet Go SFU<br/>with optional built-in TURN relay]
 
     Browsers -->|HTTPS and WebSocket signaling| Proxy
     Proxy -->|HTTP and WebSocket upgrade| App
     Browsers <-->|ICE and RTP media| App
-    Browsers <-->|Relayed media when needed| TURN
+    Browsers <-->|Relayed media when needed| App
     App -->|Short-lived TURN credentials| Browsers
 ```
 
@@ -103,12 +103,14 @@ behavior, including supported TLS port-conflict handling, is covered in the
 ### Host resources
 
 For one room of up to five participants, allow at least **1 vCPU and 1 GiB RAM**
-for SlowMeet with its HTTPS proxy, or **2 vCPU and 2 GiB RAM** if coturn also
-runs on that host. Treat these as practical minimum starting sizes, not
+for SlowMeet with its HTTPS proxy, or **2 vCPU and 2 GiB RAM** if it also
+relays TURN. Treat these as practical minimum starting sizes, not
 benchmarked hard requirements; allow more for heavier media use or more load.
-The Compose defaults cap the app container at 0.75 CPU and 256 MiB, with coturn
-adding 0.20 CPU and 128 MiB when enabled. Those container limits do not include
-the host operating system or other services.
+The Compose defaults cap the app container at 0.75 CPU and 256 MiB. The
+built-in TURN relay runs in that same container and shares both limits; the
+installer raises the memory limit to 384 MiB when TURN is enabled and keeps
+the CPU limit at 0.75. Those container limits do not include the host
+operating system or other services.
 
 ## Configuration and operations
 

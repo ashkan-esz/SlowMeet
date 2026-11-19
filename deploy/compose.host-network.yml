@@ -10,9 +10,11 @@
 # Why: with the default bridge network Docker publishes the ICE UDP range
 # through one userland `docker-proxy` process per port (101 processes for the
 # default 50000-50100 range, about 100 MB on a small VPS) and every media
-# packet crosses Docker NAT and connection tracking, including the packets
-# coturn relays to the SFU on the same host. On the host network the SFU binds
-# its UDP ports directly: no proxy processes and no NAT.
+# packet crosses Docker NAT and connection tracking. On the host network the
+# SFU binds its UDP ports directly: no proxy processes and no NAT. The same
+# goes for the built-in TURN relay's listen ports when deploy/compose.turn.yml
+# is used; list that file before this one, so the `!reset` below also drops the
+# ports it publishes.
 #
 # What changes:
 # - The app listens on HTTP_PUBLISH_ADDRESS:HTTP_PUBLISH_PORT itself (default

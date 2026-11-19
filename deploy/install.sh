@@ -6,7 +6,8 @@ readonly ENV_FILE="$INSTALL_DIR/.env"
 readonly STATE_DIR=/var/lib/slowmeet-installer
 readonly STATE_FILE="$STATE_DIR/state"
 readonly CERT_DIR=/etc/slowmeet/certs
-# coturn's own copy of the certificate, readable by the user its image runs as.
+# The built-in TURN relay's own copy of the certificate, readable by the user
+# the SlowMeet container runs as.
 readonly TURN_CERT_DIR=/etc/slowmeet/turn-certs
 readonly CERT_HOOK=/etc/letsencrypt/renewal-hooks/deploy/slowmeet
 readonly REPOSITORY=https://github.com/ashkan-esz/SlowMeet.git
@@ -60,7 +61,9 @@ trap report_unexpected_error ERR
 # $INSTALL_DIR/.env. Docker Compose reads it from there when no -f is given, so
 # the installer, updates, and plain `docker compose` commands run in the
 # install directory all use the same set of files without anyone having to
-# remember extra flags.
+# remember extra flags. podman-compose does not read COMPOSE_FILE, so the one
+# override the installer itself manages there, the built-in TURN relay's, is
+# passed with -f whenever TURN is enabled for this installation.
 compose_file_is_configured() {
     [[ -f "$INSTALL_DIR/.env" ]] && grep -Eq '^COMPOSE_FILE=.+' "$INSTALL_DIR/.env"
 }
@@ -75,7 +78,14 @@ compose() (
                 docker compose -f "$INSTALL_DIR/docker-compose.yml" "$@"
             fi
             ;;
-        podman) podman-compose -f "$INSTALL_DIR/podman-compose.yml" "$@" ;;
+        podman)
+            if [[ -f "$INSTALL_DIR/.turn-enabled" && -f "$INSTALL_DIR/deploy/podman-compose.turn.yml" ]]; then
+                podman-compose -f "$INSTALL_DIR/podman-compose.yml" \
+                    -f "$INSTALL_DIR/deploy/podman-compose.turn.yml" "$@"
+            else
+                podman-compose -f "$INSTALL_DIR/podman-compose.yml" "$@"
+            fi
+            ;;
         *) fail "Unsupported container engine: ${container_engine:-unset}." ;;
     esac
 )
@@ -471,10 +481,11 @@ enable_container_engine() {
 
 write_podman_service() {
     [[ "$container_engine" == podman ]] || return 0
-    local compose_bin profile_args=
+    local compose_bin compose_files="-f $INSTALL_DIR/podman-compose.yml"
     compose_bin=$(command -v podman-compose) || fail 'podman-compose is required for the selected Podman engine.'
     if [[ "$enable_turn" == yes ]]; then
-        profile_args='--profile turn'
+        # The built-in TURN relay: its published ports and certificate mount.
+        compose_files+=" -f $INSTALL_DIR/deploy/podman-compose.turn.yml"
     fi
     cat > "$PODMAN_SERVICE_FILE" <<EOF
 [Unit]
@@ -486,8 +497,8 @@ After=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$compose_bin -f $INSTALL_DIR/podman-compose.yml $profile_args up -d
-ExecStop=$compose_bin -f $INSTALL_DIR/podman-compose.yml $profile_args down
+ExecStart=$compose_bin $compose_files up -d
+ExecStop=$compose_bin $compose_files down
 TimeoutStartSec=0
 TimeoutStopSec=120
 
@@ -872,73 +883,152 @@ enable_host_network_if_supported() {
     log 'Running SlowMeet on the host network (COMPOSE_FILE in .env; set it to docker-compose.yml to use the bridge network).'
 }
 
-# Relayed calls put every media packet through coturn, and the shipped limit
-# (0.20 CPU in .env.example and docker-compose.yml) is sized for occasional
-# relay use: past it coturn is throttled for the rest of each 100 ms period,
-# which every relayed participant hears at once. The shipped value counts as
+# The TURN relay is built into SlowMeet, so every relay allocation lives in
+# the SlowMeet container's own memory limit, which is shipped (in .env.example
+# and the Compose files) sized for the SFU alone. A shipped value counts as
 # unset because .env starts as a copy of .env.example; any other value is the
-# operator's and is kept.
-raise_turn_cpu_limit() {
+# operator's and is kept. The Go heap limit follows the memory limit only when
+# the installer raised that one, so it never ends up above an operator's own
+# memory limit. The CPU limit (SLOWMEET_CPUS) is deliberately left alone: the
+# relay shares the app's shipped 0.75 CPU unless the operator raises it.
+raise_relay_memory_limit() {
     local current
-    current=$(read_env_value TURN_CPUS)
-    if [[ -z "$current" || "$current" == 0.20 ]]; then
-        set_env TURN_CPUS 0.50
+    current=$(read_env_value SLOWMEET_MEMORY_LIMIT)
+    if [[ -z "$current" || "$current" == 256m ]]; then
+        set_env SLOWMEET_MEMORY_LIMIT 384m
+        current=$(read_env_value SLOWMEET_GOMEMLIMIT)
+        if [[ -z "$current" || "$current" == 200MiB ]]; then
+            set_env SLOWMEET_GOMEMLIMIT 300MiB
+        fi
     fi
 }
 
-# The coturn image runs as nobody (65534:65533) with every capability dropped,
-# so it cannot read the reverse proxy's root-owned certificate copy; without a
-# readable certificate coturn starts without its TLS listener and TURN over
-# TLS silently never works. Give it a private copy it owns.
+# The SlowMeet container runs as 10001:10001 with every capability dropped, so
+# its built-in TURN relay cannot read the reverse proxy's root-owned
+# certificate copy; without a readable certificate TURN over TLS handshakes
+# fail. Give it a private copy it owns. The relay notices replaced files by
+# itself, so nothing has to be restarted afterwards.
 install_turn_certs() {
     local source_dir=$1
-    install -d -o 65534 -g 65533 -m 0700 "$TURN_CERT_DIR"
-    install -o 65534 -g 65533 -m 0400 "$source_dir/fullchain.pem" "$TURN_CERT_DIR/fullchain.pem"
-    install -o 65534 -g 65533 -m 0400 "$source_dir/privkey.pem" "$TURN_CERT_DIR/privkey.pem"
+    install -d -o 10001 -g 10001 -m 0700 "$TURN_CERT_DIR"
+    install -o 10001 -g 10001 -m 0400 "$source_dir/fullchain.pem" "$TURN_CERT_DIR/fullchain.pem"
+    install -o 10001 -g 10001 -m 0400 "$source_dir/privkey.pem" "$TURN_CERT_DIR/privkey.pem"
 }
 
-# Writes coturn's configuration. Arguments: shared secret, realm (the domain),
-# public IPv4, private IPv4 (may be empty or equal to the public one).
-#
-# The only peer a SlowMeet browser ever needs to reach through the relay is
-# the SFU on this host, so every other peer address is denied: a TURN
-# credential (handed to anyone who can join a meeting) must not be usable to
-# relay traffic to arbitrary hosts or to reach services on private networks
-# behind the firewall. coturn checks allowed-peer-ip before denied-peer-ip.
-write_coturn_config() {
-    local secret=$1 realm=$2 public_ip=$3 private_ip=$4
-    local config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
-    cat > "$config" <<EOF
-listening-port=3478
-tls-listening-port=5349
-fingerprint
-use-auth-secret
-static-auth-secret=$secret
-realm=$realm
-cert=/etc/letsencrypt/fullchain.pem
-pkey=/etc/letsencrypt/privkey.pem
-min-port=49152
-max-port=49999
-no-multicast-peers
-no-tcp-relay
-denied-peer-ip=0.0.0.0-255.255.255.255
-denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-allowed-peer-ip=$public_ip
-EOF
-    if [[ -n "$private_ip" && "$private_ip" != "$public_ip" ]]; then
-        printf 'allowed-peer-ip=%s\nexternal-ip=%s/%s\n' "$private_ip" "$public_ip" "$private_ip" >> "$config"
+# Adds the built-in TURN relay's Compose override (the published TURN ports,
+# the certificate mount, and the switch that turns the relay on) to
+# COMPOSE_FILE in .env, which every later Compose command and installer update
+# reuses. It goes right after the first file, so deploy/compose.host-network.yml,
+# when it is there, stays behind it and drops the published ports again.
+# Podman does not read COMPOSE_FILE: compose() and the systemd unit pass its
+# override with -f instead.
+enable_relay_compose_override() {
+    local current first override=deploy/compose.turn.yml
+    [[ "$container_engine" == docker ]] || return 0
+    [[ -f "$INSTALL_DIR/$override" ]] \
+        || fail "This checkout has no $override; the built-in TURN relay cannot be enabled."
+    current=$(read_env_value COMPOSE_FILE)
+    if [[ -z "$current" ]]; then
+        set_env COMPOSE_FILE "docker-compose.yml:$override"
+        return 0
     fi
-    chmod 0644 "$config"
+    case ":$current:" in
+        *":$override:"*) return 0 ;;
+    esac
+    first=${current%%:*}
+    set_env COMPOSE_FILE "$first:$override${current#"$first"}"
 }
 
-# Installs the certbot deploy hook that refreshes the proxy's and coturn's
-# certificate copies after every renewal.
+# Removes the container of the former coturn service. It is no longer part of
+# the Compose project, so Compose would leave it running on the host network,
+# holding the TURN ports the built-in relay now binds.
+remove_coturn_container() {
+    local project
+    local -a containers
+    project=$(read_env_value COMPOSE_PROJECT_NAME)
+    [[ -n "$project" ]] || project=$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')
+    mapfile -t containers < <("$container_engine" ps -aq \
+        --filter 'label=com.docker.compose.service=coturn' \
+        --filter "label=com.docker.compose.project=$project" 2>/dev/null || true)
+    [[ "${#containers[@]}" -gt 0 ]] || return 0
+    "$container_engine" rm -f "${containers[@]}" >/dev/null
+    log 'Removed the former coturn container; SlowMeet now relays TURN itself.'
+}
+
+# Moves an installation from the former coturn container to the TURN relay
+# built into SlowMeet, and keeps an already moved one current. TURN_URLS and
+# the shared secret stay as they are, so browsers see the same relay
+# addresses and credentials. Safe to run on every update.
+#
+# What coturn read from turnserver.conf the relay reads from .env. Only listen
+# ports an operator changed are carried over (the URLs handed to browsers name
+# them). The relay port range is not: nothing outside this host reaches it any
+# more, so the full default range is always right. A port below 1024 cannot be
+# carried, because the container has no capability to bind it.
+migrate_coturn_relay() {
+    local config key value cert_dir
+    config=$(read_env_value TURN_CONFIG_FILE)
+    [[ -n "$config" ]] || config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
+    [[ "$config" == /* ]] || config="$INSTALL_DIR/${config#./}"
+    if [[ -f "$config" ]]; then
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            # Tolerate "key = value" and a trailing comment.
+            key=${key//[[:space:]]/}
+            value=${value#"${value%%[![:space:]]*}"}
+            value=${value%%[[:space:]]*}
+            case "$key" in
+                listening-port|tls-listening-port) ;;
+                realm)
+                    [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] && set_env_if_empty TURN_SERVER_REALM "$value"
+                    continue
+                    ;;
+                *) continue ;;
+            esac
+            [[ "$value" =~ ^[0-9]{1,5}$ ]] || continue
+            if ((10#$value < 1024)); then
+                log "WARNING: coturn's $key=$value is a privileged port the built-in TURN relay cannot bind. It keeps its default port; update TURN_URLS or the proxy in front of it."
+                continue
+            fi
+            if [[ "$key" == listening-port && "$value" != 3478 ]]; then
+                set_env_if_empty TURN_SERVER_PORT "$value"
+            elif [[ "$key" == tls-listening-port && "$value" != 5349 ]]; then
+                set_env_if_empty TURN_SERVER_TLS_PORT "$value"
+            fi
+        done < "$config"
+        # The file holds the shared secret and nothing reads it any more.
+        rm -f "$config"
+    fi
+    set_env TURN_SERVER_ENABLED true
+    set_env_if_empty TURN_SERVER_REALM "$domain"
+
+    # coturn's CPU limit (TURN_CPUS) is not moved over: SLOWMEET_CPUS stays
+    # whatever it is, and the relay shares it.
+    raise_relay_memory_limit
+
+    # coturn's certificate copy belonged to its own user (65534:65533). Only
+    # the installer's directories are touched; an operator's own TURN_CERT_DIR
+    # must be made readable by 10001 by hand.
+    cert_dir=$(read_env_value TURN_CERT_DIR)
+    if [[ -z "$cert_dir" || "$cert_dir" == "$TURN_CERT_DIR" || "$cert_dir" == "$CERT_DIR" \
+        || "$cert_dir" == ./deploy/coturn/certs ]]; then
+        if [[ -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
+            install_turn_certs "$CERT_DIR"
+        else
+            install -d -o 10001 -g 10001 -m 0700 "$TURN_CERT_DIR"
+        fi
+        set_env TURN_CERT_DIR "$TURN_CERT_DIR"
+    else
+        log "TURN_CERT_DIR=$cert_dir is kept; its certificate files must be readable by user 10001 for TURN over TLS."
+    fi
+}
+
+# Installs the certbot deploy hook that refreshes the proxy's and the built-in
+# TURN relay's certificate copies after every renewal.
 write_cert_hook() {
     cat > "$CERT_HOOK" <<'HOOK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 proxy_mode=$(cat /etc/slowmeet/proxy-mode)
-container_engine=$(cat /etc/slowmeet/container-engine)
 if [[ "$proxy_mode" == caddy ]]; then
     install -d -o root -g caddy -m 0750 /etc/slowmeet/certs
     install -o root -g caddy -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/certs/fullchain.pem
@@ -950,22 +1040,12 @@ else
 fi
 systemctl reload "$proxy_mode"
 if [[ -f /opt/slowmeet/.turn-enabled ]]; then
-    # coturn runs as nobody (65534:65533) and needs its own readable copy.
-    install -d -o 65534 -g 65533 -m 0700 /etc/slowmeet/turn-certs
-    install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/turn-certs/fullchain.pem
-    install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem
-    cd /opt/slowmeet
-    # coturn re-reads its certificate on SIGUSR2 and keeps every relayed call;
-    # a restart drops them all. Restart only if the signal cannot be delivered.
-    case "$container_engine" in
-        docker)
-            docker compose -f docker-compose.yml --profile turn kill -s SIGUSR2 coturn \
-                || docker compose -f docker-compose.yml --profile turn restart coturn ;;
-        podman)
-            podman-compose -f podman-compose.yml --profile turn kill -s SIGUSR2 coturn \
-                || podman-compose -f podman-compose.yml --profile turn restart coturn ;;
-        *) printf '[slowmeet] ERROR: Unknown saved container engine.\n' >&2; exit 1 ;;
-    esac
+    # The built-in TURN relay runs as the SlowMeet container user (10001) and
+    # needs its own readable copy. It picks up the new files by itself: no
+    # container is signalled or restarted, so relayed calls stay up.
+    install -d -o 10001 -g 10001 -m 0700 /etc/slowmeet/turn-certs
+    install -o 10001 -g 10001 -m 0400 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/turn-certs/fullchain.pem
+    install -o 10001 -g 10001 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem
 fi
 HOOK
     chmod 0750 "$CERT_HOOK"
@@ -1034,9 +1114,10 @@ load_legacy_install_settings() {
     fi
 
     enable_turn=no
-    if [[ -f "$INSTALL_DIR/.turn-enabled" ]]; then
+    if [[ -f "$INSTALL_DIR/.turn-enabled" || "$(read_env_value TURN_SERVER_ENABLED)" == true ]]; then
         enable_turn=yes
     else
+        # An installation older than the marker file that ran coturn.
         turn_config=$(read_env_value TURN_CONFIG_FILE)
         if [[ -n "$turn_config" ]]; then
             [[ "$turn_config" == /* ]] || turn_config="$INSTALL_DIR/${turn_config#./}"
@@ -1141,30 +1222,23 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     fi
     enable_host_network_if_supported
     if [[ "$enable_turn" == yes ]]; then
-        raise_turn_cpu_limit
-        # Installs made before coturn had its own certificate copy mounted the
-        # proxy's root-owned one, which coturn cannot read (no TURN over TLS).
-        # Only that installer-set value is migrated; an operator's own
-        # TURN_CERT_DIR and turnserver.conf are left alone.
-        if [[ "$(read_env_value TURN_CERT_DIR)" == "$CERT_DIR" \
-            && -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
-            install_turn_certs "$CERT_DIR"
-            set_env TURN_CERT_DIR "$TURN_CERT_DIR"
-        fi
+        # TURN is served by SlowMeet itself; an installation that still runs
+        # the former coturn container is moved over here.
+        migrate_coturn_relay
+        enable_relay_compose_override
+        touch "$INSTALL_DIR/.turn-enabled"
     fi
-    # Keep an existing renewal hook current (coturn certificate copy, reload
-    # by signal instead of a restart).
+    # Keep an existing renewal hook current (the TURN relay's certificate copy
+    # and its owner).
     if [[ -f "$CERT_HOOK" ]]; then
         write_cert_hook
     fi
     write_podman_service
 
     cd "$INSTALL_DIR"
-    if [[ "$enable_turn" == yes ]]; then
-        compose --profile turn up -d --build
-    else
-        compose up -d --build
-    fi
+    # The former coturn container would keep the TURN ports; it goes first.
+    remove_coturn_container
+    compose up -d --build
     if [[ "$container_engine" == podman ]]; then
         systemctl enable --now slowmeet-podman.service
     fi
@@ -1650,13 +1724,9 @@ uninstall_existing_install() {
         systemctl disable --now slowmeet-podman.service
     fi
     if [[ "$compose_available" == yes ]]; then
-        if [[ "$enable_turn" == yes ]]; then
-            if [[ "$remove_data" == yes ]]; then
-                compose --profile turn down --volumes
-            else
-                compose --profile turn down
-            fi
-        elif [[ "$remove_data" == yes ]]; then
+        # An installation that was never updated may still run coturn.
+        remove_coturn_container
+        if [[ "$remove_data" == yes ]]; then
             compose down --volumes
         else
             compose down
@@ -2591,7 +2661,6 @@ if [[ "$install_mode" == fresh ]]; then
 fi
 
 prepare_install_apt_sources
-private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' || true)
 
 apt_update_with_caddy_fallback
 runtime_packages=()
@@ -2640,7 +2709,6 @@ if [[ "$enable_turn" == yes ]]; then
     fi
     [[ "$turn_secret" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not generate a secure TURN secret.'
 fi
-private_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}') || true
 
 if [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
     fail "$INSTALL_DIR exists and is not a SlowMeet checkout; move it before installing."
@@ -2667,10 +2735,8 @@ if [[ "$enable_turn" == yes ]]; then
     ufw allow 3478/udp comment 'SlowMeet TURN UDP'
     ufw allow 3478/tcp comment 'SlowMeet TURN TCP'
     ufw allow 5349/tcp comment 'SlowMeet TURN TLS'
-    # Rotating TURN methods hold several allocations per participant for
-    # about 90 seconds each, so the relay range is the whole block below the
-    # WebRTC media range.
-    ufw allow 49152:49999/udp comment 'SlowMeet TURN relay'
+    # The relay port range (49152-49999) needs no rule: the TURN relay runs
+    # inside SlowMeet, and only its own SFU ever sends to those ports.
 fi
 ufw --force enable
 
@@ -2741,19 +2807,23 @@ set_env HTTP_PUBLISH_PORT "$app_port"
 set_env ICE_PUBLIC_IP "$public_ipv4"
 enable_host_network_if_supported
 if [[ "$enable_turn" == yes ]]; then
-    raise_turn_cpu_limit
+    # The TURN relay is built into SlowMeet: these settings, the Compose
+    # override below, and a readable certificate copy are all it needs.
+    raise_relay_memory_limit
     set_env TURN_URLS "turn:$domain:3478?transport=udp,turn:$domain:3478?transport=tcp,turns:$domain:5349?transport=tcp"
     set_env TURN_SHARED_SECRET "$turn_secret"
-    set_env TURN_CONFIG_FILE "$INSTALL_DIR/deploy/coturn/turnserver.conf"
+    set_env TURN_SERVER_ENABLED true
+    set_env TURN_SERVER_REALM "$domain"
     set_env TURN_CERT_DIR "$TURN_CERT_DIR"
     if [[ "$https_required" == yes ]]; then
         install_turn_certs "/etc/letsencrypt/live/$domain"
     else
-        # No certificate yet: coturn runs without its TLS listener. Create the
-        # directory so the bind mount does not make a root-owned one.
-        install -d -o 65534 -g 65533 -m 0700 "$TURN_CERT_DIR"
+        # No certificate yet: the relay serves TURN over UDP and TCP, and TLS
+        # handshakes fail until one is installed. Create the directory so the
+        # bind mount has a source the container user owns.
+        install -d -o 10001 -g 10001 -m 0700 "$TURN_CERT_DIR"
     fi
-    write_coturn_config "$turn_secret" "$domain" "$public_ipv4" "$private_ipv4"
+    enable_relay_compose_override
     touch "$INSTALL_DIR/.turn-enabled"
 fi
 chmod 0600 "$ENV_FILE"
@@ -2778,11 +2848,10 @@ else
 fi
 systemctl reload "$proxy_mode"
 cd "$INSTALL_DIR"
-if [[ "$enable_turn" == yes ]]; then
-    compose --profile turn up -d --build
-else
-    compose up -d --build
-fi
+# An interrupted installation by an older installer may have left coturn
+# running on the TURN ports.
+remove_coturn_container
+compose up -d --build
 if [[ "$container_engine" == podman ]]; then
     systemctl enable --now slowmeet-podman.service
 fi

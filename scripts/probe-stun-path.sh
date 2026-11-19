@@ -11,7 +11,7 @@
 #   responses = 0                     -> UDP to this host:port fully blocked
 #
 # Usage: ./scripts/probe-stun-path.sh [host] [port] [seconds]
-#   host    default meet.g69.lol (the VPS's coturn answers STUN always)
+#   host    default meet.g69.lol (the VPS's TURN relay answers STUN always)
 #   port    default 3478
 #   seconds default 15
 

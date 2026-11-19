@@ -10,6 +10,7 @@ server packages live in `internal/`:
 - `signaling/` implements WebSocket signaling and protocol validation.
 - `meeting/` manages meeting and participant state.
 - `webrtc/` and `media/` manage peer connections and RTP forwarding.
+- `turnserver/` runs the optional built-in TURN relay.
 
 Browser pages and client code are in `web/` (`web/js/`, `web/css/`). Deployment
 examples are in `deploy/`; operational and network-testing notes are in

@@ -49,8 +49,12 @@ untouched and prints the network ports the operator may need to allow. Public
 browser use requires the operator to provide an appropriate secure web entry
 point separately.
 
-TURN URLs, credentials, and STUN servers can be entered during installation.
-The script does not install or configure a local TURN server.
+TURN URLs, credentials, and STUN servers can be entered during installation
+for an external TURN server. The script does not set up the TURN relay built
+into SlowMeet; to use it, add `TURN_SERVER_ENABLED=true`, `TURN_SHARED_SECRET`,
+and `TURN_URLS` to the generated `.env` and publish the relay's ports yourself
+(see the [container deployment guide](container-deployment.md)), or use the
+[VPS installer](install-script.md), which does all of it.
 
 ## Update and resume
 

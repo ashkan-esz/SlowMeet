@@ -181,6 +181,15 @@ the configured range automatically; if you change `ICE_UDP_PORT_MIN` or
 `ICE_UDP_PORT_MAX`, allow the resulting range through the host firewall. Use
 TURN when direct UDP is blocked by the network or NAT.
 
+The TURN relay built into SlowMeet listens on UDP and TCP `3478` and, for TURN
+over TLS, TCP `5349`. `deploy/compose.turn.yml` (or its Podman twin) publishes
+those three ports; allow them through the host and provider firewalls. The
+relay's own UDP port range (`49152-49999` by default) carries traffic only
+between the relay and the SFU in the same container or host: do not publish it
+and do not open it in a firewall. `scripts/probe-stun-path.sh` tests the UDP
+path to port 3478 with plain STUN requests, which the relay answers without
+credentials.
+
 ## ICE path and simulcast staging
 
 Keep production on `ICE_TRANSPORT_POLICY=all` and

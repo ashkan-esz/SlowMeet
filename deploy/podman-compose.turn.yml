@@ -1,0 +1,18 @@
+# Optional override: run the TURN relay built into SlowMeet under Podman.
+#
+#   podman compose -f podman-compose.yml -f deploy/podman-compose.turn.yml up -d
+#
+# This is deploy/compose.turn.yml with the SELinux relabel suffix (:Z) on the
+# certificate mount; see that file for what the override does and needs.
+services:
+  slowmeet:
+    environment:
+      TURN_SERVER_ENABLED: "true"
+      TURN_SERVER_TLS_CERT_FILE: /etc/slowmeet/turn-certs/fullchain.pem
+      TURN_SERVER_TLS_KEY_FILE: /etc/slowmeet/turn-certs/privkey.pem
+    ports:
+      - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/udp"
+      - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/tcp"
+      - "${TURN_SERVER_TLS_PORT:-5349}:${TURN_SERVER_TLS_PORT:-5349}/tcp"
+    volumes:
+      - "${TURN_CERT_DIR:-./deploy/turn-certs}:/etc/slowmeet/turn-certs:ro,Z"

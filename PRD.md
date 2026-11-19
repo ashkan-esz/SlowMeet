@@ -92,7 +92,7 @@ or external control plane.
 | Collaboration | Chat history retention setting, hand raising, and approved emoji reactions |
 | Recovery | Reconnect tokens, ICE restart, connection state handling, and participant cleanup |
 | Operations | `/health`, `/ready`, `/metrics`, protected admin settings, and a browser operations cockpit |
-| Deployment | Embedded frontend assets, container examples, optional coturn, reverse-proxy examples, and systemd service template |
+| Deployment | Embedded frontend assets, container examples, optional built-in TURN relay, reverse-proxy examples, and systemd service template |
 
 ## Primary user journeys
 

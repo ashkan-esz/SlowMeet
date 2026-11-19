@@ -71,12 +71,14 @@ jobs:
         run: |
           bash -n deploy/install.sh
           bash -n scripts/test-installer-config.sh
+          bash -n scripts/test-installer-turn-relay.sh
           bash -n scripts/test-docker-lxc-runtime-fallback.sh
           bash -n scripts/test-caddy-install-fallback.sh
           bash -n scripts/test-xray-fallback.sh
           bash -n scripts/test-container-bindings.sh
-          shellcheck -S style deploy/install.sh scripts/test-installer-config.sh scripts/test-docker-lxc-runtime-fallback.sh scripts/test-caddy-install-fallback.sh scripts/test-xray-fallback.sh scripts/test-container-bindings.sh
+          shellcheck -S style deploy/install.sh scripts/test-installer-config.sh scripts/test-installer-turn-relay.sh scripts/test-docker-lxc-runtime-fallback.sh scripts/test-caddy-install-fallback.sh scripts/test-xray-fallback.sh scripts/test-container-bindings.sh
           bash scripts/test-installer-config.sh
+          bash scripts/test-installer-turn-relay.sh
           bash scripts/test-docker-lxc-runtime-fallback.sh
           bash scripts/test-caddy-install-fallback.sh
           bash scripts/test-xray-fallback.sh

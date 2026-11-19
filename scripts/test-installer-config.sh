@@ -406,76 +406,30 @@ host_network_choice() {
     || fail "an operator's COMPOSE_FILE must never be overridden"
 [[ -z "$(host_network_choice 'ICE_PUBLIC_IP=\n' docker 2.39.1)" ]] \
     || fail 'without a public IPv4 the bridge network stays'
-grep -Fq 'max-port=49999' "$INSTALLER" && grep -Fq 'ufw allow 49152:49999/udp' "$INSTALLER" \
-    || fail 'the coturn relay range and its firewall rule must match'
-
-# coturn's CPU limit: .env starts as a copy of .env.example, whose shipped
-# value must count as unset, while an operator's own value is kept.
-turn_cpus_after() {
+# The relay override is added after the network choice and keeps it: the
+# host-network file stays last, so its `!reset` drops the relay's published
+# ports. (scripts/test-installer-turn-relay.sh covers the TURN relay setup.)
+relay_after_host_network() {
+    # $1: .env contents, $2: Compose version
     printf '%b' "$1" > "$ENV_FILE"
-    raise_turn_cpu_limit
-    read_env_value TURN_CPUS
+    # Read by the installer functions sourced above.
+    # shellcheck disable=SC2034
+    container_engine=docker
+    PATH="$TEMP_DIR/bin:$PATH" FAKE_COMPOSE_VERSION=$2 enable_host_network_if_supported
+    : > "$INSTALL_DIR/deploy/compose.turn.yml"
+    enable_relay_compose_override
+    read_env_value COMPOSE_FILE
 }
-shipped_turn_cpus=$(sed -n 's/^TURN_CPUS=//p' .env.example)
-[[ "$shipped_turn_cpus" == 0.20 ]] \
-    || fail "the installer treats TURN_CPUS=0.20 as the shipped default, but .env.example ships '$shipped_turn_cpus'"
-[[ "$(turn_cpus_after 'TURN_CPUS=0.20\n')" == 0.50 ]] || fail 'the shipped coturn CPU limit must be raised'
-[[ "$(turn_cpus_after 'TURN_CPUS=\n')" == 0.50 ]] || fail 'an empty coturn CPU limit must be set'
-[[ "$(turn_cpus_after 'OTHER=1\n')" == 0.50 ]] || fail 'a missing coturn CPU limit must be set'
-[[ "$(turn_cpus_after 'TURN_CPUS=1.0\n')" == 1.0 ]] || fail "an operator's coturn CPU limit must be kept"
-[[ "$(turn_cpus_after 'TURN_CPUS=0.10\n')" == 0.10 ]] || fail "an operator's lower coturn CPU limit must be kept"
+[[ "$(relay_after_host_network 'ICE_PUBLIC_IP=203.0.113.7\n' 2.39.1)" \
+    == docker-compose.yml:deploy/compose.turn.yml:deploy/compose.host-network.yml ]] \
+    || fail 'a host-network installation with TURN must list the relay override before the host-network one'
+[[ "$(relay_after_host_network 'ICE_PUBLIC_IP=198.51.100.9\n' 2.39.1)" == docker-compose.yml:deploy/compose.turn.yml ]] \
+    || fail 'a bridge-network installation with TURN must publish the relay ports through its override'
+[[ "$(relay_after_host_network 'ICE_PUBLIC_IP=203.0.113.7\n' 2.20.0)" == docker-compose.yml:deploy/compose.turn.yml ]] \
+    || fail 'an old Docker Compose must keep the bridge network and still get the relay override'
 
-# coturn may relay only to the SFU on this host.
-mkdir -p "$INSTALL_DIR/deploy/coturn"
-coturn_config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
-write_coturn_config 0123abcd meet.example.com 203.0.113.7 203.0.113.7
-for expected in 'static-auth-secret=0123abcd' 'realm=meet.example.com' 'no-multicast-peers' 'no-tcp-relay' \
-    'denied-peer-ip=0.0.0.0-255.255.255.255' 'denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' \
-    'allowed-peer-ip=203.0.113.7' 'min-port=49152'; do
-    assert_contains "$coturn_config" "$expected"
-done
-assert_not_contains "$coturn_config" 'external-ip='
-[[ "$(grep -c '^allowed-peer-ip=' "$coturn_config")" == 1 ]] \
-    || fail 'a directly addressed host allows exactly one relay peer'
-write_coturn_config 0123abcd meet.example.com 203.0.113.7 10.0.0.5
-assert_contains "$coturn_config" 'allowed-peer-ip=203.0.113.7'
-assert_contains "$coturn_config" 'allowed-peer-ip=10.0.0.5'
-assert_contains "$coturn_config" 'external-ip=203.0.113.7/10.0.0.5'
-write_coturn_config 0123abcd meet.example.com 203.0.113.7 ''
-assert_not_contains "$coturn_config" 'external-ip='
-
-# coturn runs as nobody and needs its own readable certificate copy, on a
-# fresh install, on an update of an older install, and after every renewal.
-# The patterns are literal installer source text.
-# shellcheck disable=SC2016
-{
-    grep -Fq 'set_env TURN_CERT_DIR "$TURN_CERT_DIR"' "$INSTALLER" \
-        || fail 'coturn must mount its own certificate directory'
-    if grep -Fq 'set_env TURN_CERT_DIR "$CERT_DIR"' "$INSTALLER"; then
-        fail "coturn must not mount the proxy's root-owned certificate directory"
-    fi
-    grep -Fq 'install_turn_certs "/etc/letsencrypt/live/$domain"' "$INSTALLER" \
-        || fail 'a fresh install must give coturn a readable certificate copy'
-    grep -Fq 'install_turn_certs "$CERT_DIR"' "$INSTALLER" \
-        || fail 'an update must migrate an older install to the coturn certificate copy'
-    grep -Fq 'install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem' "$INSTALLER" \
-        || fail 'the renewal hook must refresh the coturn certificate copy'
-}
-
-# A renewal must not drop relayed calls: coturn reloads its certificate on
-# SIGUSR2, and the hook restarts it only when the signal cannot be delivered.
-# The generated hook must also be valid shell.
-CERT_HOOK="$TEMP_DIR/cert-hook"
-write_cert_hook
-bash -n "$CERT_HOOK" || fail 'the generated renewal hook is not valid shell'
-assert_contains "$CERT_HOOK" 'docker compose -f docker-compose.yml --profile turn kill -s SIGUSR2 coturn'
-assert_contains "$CERT_HOOK" '|| docker compose -f docker-compose.yml --profile turn restart coturn'
-assert_contains "$CERT_HOOK" 'podman-compose -f podman-compose.yml --profile turn kill -s SIGUSR2 coturn'
-assert_contains "$CERT_HOOK" '|| podman-compose -f podman-compose.yml --profile turn restart coturn'
-[[ "$(grep -c 'restart coturn' "$CERT_HOOK")" == 2 ]] \
-    || fail 'coturn may only be restarted as the fallback of a failed reload signal'
-[[ -x "$CERT_HOOK" ]] || fail 'the renewal hook must be executable'
-# An update refreshes an existing hook whether or not TURN certificates move.
+# An update refreshes an existing renewal hook, whose TURN part changes with
+# the relay (certificate owner, nothing to signal).
 update_path=$(sed -n '/Updating the existing SlowMeet checkout/,/write_podman_service/p' "$INSTALLER")
 # shellcheck disable=SC2016
 if ! grep -Fq 'if [[ -f "$CERT_HOOK" ]]; then' <<<"$update_path" || ! grep -Fq 'write_cert_hook' <<<"$update_path"; then

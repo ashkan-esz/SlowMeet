@@ -72,26 +72,37 @@ The installer proceeds through these steps:
    (no `docker-proxy` process per media port, no NAT on the media path). Later
    updates and plain `docker compose` commands reuse that line. Set
    `COMPOSE_FILE=docker-compose.yml` to stay on the bridge network; an existing
-   `COMPOSE_FILE` is never changed. With TURN enabled it gives coturn 0.50 CPU
-   unless `TURN_CPUS` was changed from the shipped `0.20` (fresh installs and
-   updates), and it:
-   - gives coturn its own certificate copy in `/etc/slowmeet/turn-certs`,
-     owned by the user the coturn image runs as (`65534:65533`). coturn cannot
-     read the proxy's root-owned copy and would start without its TLS
-     listener. The renewal hook refreshes both copies; an update migrates an
-     older install that still mounts `/etc/slowmeet/certs`. After a renewal
-     the hook signals coturn to reload its certificate (`SIGUSR2`), which
-     keeps relayed calls connected, and restarts it only if the signal cannot
-     be delivered. An update rewrites an existing hook.
-   - writes a coturn configuration that relays only to this server's own
-     address (`no-tcp-relay`, `no-multicast-peers`, every peer denied except
-     the public IPv4 and, behind NAT, the private one), so a TURN credential
-     cannot be used to relay elsewhere or to reach private services. An
-     existing `turnserver.conf` is not rewritten by an update; add those lines
-     by hand (see `deploy/coturn/turnserver.conf.example`).
+   `COMPOSE_FILE` is never changed by this choice. With TURN enabled it sets
+   up the TURN relay built into SlowMeet (there is no separate TURN
+   container), and it:
+   - switches the relay on and records its settings in `.env`:
+     `TURN_SERVER_ENABLED=true`, `TURN_SERVER_REALM`, a generated
+     `TURN_SHARED_SECRET`, and `TURN_URLS` for UDP and TCP 3478 and TLS 5349
+     on the domain.
+   - adds the relay's Compose override, which publishes those ports and
+     mounts the certificate copy. With Docker it inserts
+     `deploy/compose.turn.yml` into `COMPOSE_FILE` right after the first file
+     (before the host-network override, which then drops the published
+     ports); with Podman it passes `deploy/podman-compose.turn.yml` with `-f`
+     in its own commands and in the systemd unit.
+   - raises the memory limits the relay shares with the app, when they are
+     still the shipped values: `SLOWMEET_MEMORY_LIMIT` 256m to 384m and
+     `SLOWMEET_GOMEMLIMIT` 200MiB to 300MiB. Values you changed are kept. The
+     CPU limit is not changed: `SLOWMEET_CPUS` stays at 0.75 unless you raise
+     it.
+   - gives the relay its own certificate copy in `/etc/slowmeet/turn-certs`,
+     owned by the user the SlowMeet container runs as (`10001:10001`), which
+     cannot read the proxy's root-owned copy. The renewal hook refreshes both
+     copies. The relay notices the new files by itself, so a renewal restarts
+     nothing and relayed calls stay connected. An update rewrites an existing
+     hook.
+
+   The relay forwards only to this server's own address, so a TURN credential
+   cannot be used to relay elsewhere or to reach private services.
 4. **Configure UFW.** It allows the detected SSH port (or TCP 22), TCP 80, the
    WebRTC UDP range `50000:50100`, and TCP 443 when HTTPS is enabled. TURN adds
-   UDP/TCP 3478, TCP 5349, and UDP relay ports `49152:49999`. It then enables
+   UDP/TCP 3478 and TCP 5349. The relay port range (`49152:49999`) gets no
+   rule: only SlowMeet's own SFU sends to it. It then enables
    UFW. These are host firewall rules; the script cannot change a cloud
    provider's separate firewall.
 5. **Set up the web proxy and HTTPS.** If Nginx is already active, the script
@@ -112,7 +123,7 @@ The installer proceeds through these steps:
    unavailable. Browsers may restrict meeting media features over HTTP.
 7. **Start and verify the application.** It writes a Podman systemd unit when
    Podman is selected so the Compose stack starts after reboot, builds and
-   starts SlowMeet (and coturn when TURN is enabled), then checks the app's
+   starts SlowMeet (with its TURN relay when TURN is enabled), then checks the app's
    readiness and the local HTTP or HTTPS health endpoint. Only after checks
    pass does it mark state complete and print the URL and configured
    credentials.
@@ -129,6 +140,40 @@ container engine, proxy choice, certificates, and TURN configuration. Existing
 Nginx or Caddy configuration is validated before activation so an update does
 not silently replace unrelated proxy configuration.
 
+### Updating an installation that ran coturn
+
+Earlier versions ran coturn in its own container. An update moves such an
+installation to the relay built into SlowMeet. Browsers keep the same TURN
+addresses and credentials: `TURN_URLS` and `TURN_SHARED_SECRET` are not
+changed. The update:
+
+- switches the relay on and adds its Compose override, as on a fresh install;
+- keeps listen ports you changed in `turnserver.conf` (as `TURN_SERVER_PORT`
+  and `TURN_SERVER_TLS_PORT`) and its realm. A port below 1024 cannot be kept,
+  because the SlowMeet container may not bind it; the installer prints a
+  warning and the relay uses its default port, so adjust `TURN_URLS` or the
+  router in front of it. coturn's relay port range is not carried over;
+- raises the app container's memory limits as on a fresh install. coturn's
+  CPU limit (`TURN_CPUS`) is not moved over: `SLOWMEET_CPUS` stays as it is,
+  and the relay shares it. If coturn had its own CPU allowance on this host,
+  relayed calls now compete with the SFU for the app's; raise `SLOWMEET_CPUS`
+  if you see throttling;
+- re-owns the certificate copy in `/etc/slowmeet/turn-certs` for the SlowMeet
+  container user. A `TURN_CERT_DIR` of your own is left alone; make its files
+  readable by user `10001` yourself;
+- deletes `turnserver.conf`, which holds the shared secret and is no longer
+  read, and removes the coturn container before starting SlowMeet, so the TURN
+  ports are free.
+
+Relayed calls drop while the containers restart, as on any update. The UFW
+rule for the old relay port range stays in place; it is no longer needed and
+can be removed with `ufw delete allow 49152:49999/udp`.
+
+Once Docker's `COMPOSE_FILE` lists the relay override, a later update no
+longer switches a bridge-network installation to host networking by itself
+(it only makes that choice while `COMPOSE_FILE` is empty). To switch, append
+`:deploy/compose.host-network.yml` to `COMPOSE_FILE`.
+
 The installer writes progress state atomically through a temporary file and
 rename. If provisioning fails, state remains incomplete; rerunning the command
 offers resume with saved choices. This is why the installer does not treat a
@@ -139,7 +184,8 @@ failed run as a clean slate or blindly reclone over the existing directory.
 Uninstall requires typing the installation domain. Before removing anything,
 the script validates the saved domain, checkout, selected container engine, and
 installer-managed proxy configuration. It stops and removes the SlowMeet
-containers, removes the Podman unit if applicable, removes its Nginx site or
+containers (and a coturn container left from an older version), removes the
+Podman unit if applicable, removes its Nginx site or
 only its recognized Caddy managed block, and deletes SlowMeet's local
 certificate copies, renewal hook, state, environment, and `/opt/slowmeet`
 checkout. It leaves shared container and proxy packages, UFW rules, and

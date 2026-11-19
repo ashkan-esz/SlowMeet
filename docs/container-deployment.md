@@ -70,6 +70,13 @@ docker compose up -d
 Use the Podman equivalent when running Podman. Health checks are available at
 `/health` and `/ready`.
 
+The image includes the TURN relay. To use it, add `TURN_SERVER_ENABLED=true`,
+`TURN_SHARED_SECRET`, and `TURN_URLS` naming your host to `.env`, and publish
+the relay's listen ports in `compose.yaml` (`"3478:3478/udp"`,
+`"3478:3478/tcp"`, and `"5349:5349/tcp"` when you mount a certificate for TURN
+over TLS). See the
+[configuration guide](configuration.md#built-in-turn-relay) for the settings.
+
 The alternative [published-image installer](install-container-script.md)
 installs Docker or Podman when needed and can manage install, update, resume,
 and uninstall. It leaves firewall, proxy, and TLS setup to the operator.
@@ -88,17 +95,53 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-To start the optional coturn profile, first copy
-`deploy/coturn/turnserver.conf.example` to
-`deploy/coturn/turnserver.conf` and provide certificates under
-`deploy/coturn/certs`. The coturn image runs as `nobody` (`65534:65533`), so
-the certificate files must be readable by that user, or coturn starts without
-its TLS listener and TURN over TLS never connects. Set `allowed-peer-ip` in the
-copied file to the address SlowMeet advertises (`ICE_PUBLIC_IP`). Then run:
+### Built-in TURN relay (optional)
+
+SlowMeet relays TURN itself. Set `TURN_SHARED_SECRET` and `TURN_URLS` in
+`.env` (see the [configuration guide](configuration.md#built-in-turn-relay)),
+then add the relay's override file:
 
 ```sh
-docker compose --profile turn up -d --build
+docker compose -f docker-compose.yml -f deploy/compose.turn.yml up -d --build
 ```
+
+The override turns the relay on, publishes its listen ports (UDP and TCP 3478,
+TCP 5349), and mounts `TURN_CERT_DIR` (default `deploy/turn-certs`) for TURN
+over TLS. Put `fullchain.pem` and `privkey.pem` there, readable by the
+container user (`10001:10001`); renewed files are picked up without a restart.
+Without a certificate, TURN over UDP and TCP still work. Allow the three listen
+ports in the host and provider firewalls. The relay port range
+(`49152-49999`) is not published and needs no firewall rule: only the SFU in
+the same container sends to it.
+
+To keep the override for every later command, list it once in `.env`:
+
+```text
+COMPOSE_FILE=docker-compose.yml:deploy/compose.turn.yml
+```
+
+#### Moving from the coturn profile
+
+Earlier versions ran coturn as a Compose profile (`--profile turn`). That
+service is gone. `deploy/install.sh` moves an installation it manages when you
+update it; for a deployment you manage by hand:
+
+1. Remove the old container, which still holds the TURN ports:
+   `docker rm -f "$(docker ps -aq --filter label=com.docker.compose.service=coturn)"`.
+2. Keep `TURN_URLS` and `TURN_SHARED_SECRET` as they are: the relay accepts
+   the same credentials on the same ports. If `turnserver.conf` used other
+   listen ports, set `TURN_SERVER_PORT` and `TURN_SERVER_TLS_PORT` to match.
+3. Make the certificate files readable by the container user, for example
+   `chown -R 10001:10001 deploy/coturn/certs`, or move them to
+   `deploy/turn-certs` and update `TURN_CERT_DIR`.
+4. Give the app container the memory coturn had: raise
+   `SLOWMEET_MEMORY_LIMIT` and `SLOWMEET_GOMEMLIMIT`. The relay also shares
+   `SLOWMEET_CPUS`; raise it if relayed calls are throttled.
+5. Start with the override file as shown above.
+6. Delete `turnserver.conf` (it holds the shared secret) and the unused
+   `TURN_CONFIG_FILE`, `TURN_CPUS`, `TURN_MEMORY_LIMIT`, and `TURN_PIDS_LIMIT`
+   lines in `.env`. The firewall rule for the relay port range is no longer
+   needed.
 
 ### Host networking for the SlowMeet container (optional)
 
@@ -127,22 +170,33 @@ range directly on the host; the host firewall must allow the UDP range, and
 Docker's network isolation no longer applies to this container. See the
 comments in `deploy/compose.host-network.yml`. It needs Docker Compose v2.24+.
 
-The TURN profile uses host networking so coturn can expose its relay range.
-Open its configured UDP/TCP 3478 and TLS/TCP 5349 listeners, plus its UDP relay
-range. If HTTPS already uses TCP 443 on the same address, TURN over TCP 443
-needs a separate IP or TCP passthrough routing.
+With host networking and the TURN relay together, list the relay override
+first, so the host-network override drops the ports it publishes and the relay
+binds them on the host itself:
 
-For Podman, use `podman compose -f podman-compose.yml up -d --build`. Podman's
+```text
+COMPOSE_FILE=docker-compose.yml:deploy/compose.turn.yml:deploy/compose.host-network.yml
+```
+
+Open UDP/TCP 3478 and TCP 5349 in the host firewall. If HTTPS already uses TCP
+443 on the same address, TURN over TLS on 443 needs a separate IP or TCP
+passthrough (SNI) routing to port 5349.
+
+For Podman, use `podman compose -f podman-compose.yml up -d --build`, adding
+`-f deploy/podman-compose.turn.yml` for the TURN relay. Podman's
 Compose wrapper requires a provider connected to the Podman API socket; check
 it with `podman compose version` and `make podman-check`. The Makefile also offers
 `make docker-up`, `make docker-turn-up`, `make podman-up`, and
 `make podman-turn-up`.
 
-The default container limits are 0.75 CPU and 256 MiB for SlowMeet, plus 0.20
-CPU and 128 MiB for coturn when enabled. `.env` can raise these limits. As a
+The default container limits are 0.75 CPU and 256 MiB for SlowMeet. The TURN
+relay runs inside the same container and shares them. With it enabled, raise
+`SLOWMEET_MEMORY_LIMIT` and `SLOWMEET_GOMEMLIMIT` in `.env` (the installer
+uses 384m and 300MiB); the CPU limit stays at 0.75 unless you raise
+`SLOWMEET_CPUS` yourself. As a
 host-sizing starting estimate for up to five participants, allow 1 vCPU and
-1 GiB RAM for SlowMeet alone, or 2 vCPU and 2 GiB RAM when co-hosting coturn
-and the HTTPS proxy. These host estimates are not benchmarked minimums; scale
+1 GiB RAM for SlowMeet alone, or 2 vCPU and 2 GiB RAM when it also relays TURN
+and co-hosts the HTTPS proxy. These host estimates are not benchmarked minimums; scale
 for actual media use and load. The Go binary embeds the frontend assets, so
 containers and the systemd service do not need a separate runtime `web/`
 directory. GHCR release images support Linux `amd64` and `arm64`. Stable

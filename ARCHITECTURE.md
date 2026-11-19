@@ -19,8 +19,7 @@ flowchart LR
     BrowserB[Participant browser]
     Operator[Operator browser]
     Proxy[HTTPS reverse proxy<br/>Caddy or Nginx]
-    App[SlowMeet Go process]
-    Turn[(Optional coturn)]
+    App[SlowMeet Go process<br/>SFU + optional built-in TURN relay]
     Data[(Optional config volume)]
     Metrics[Prometheus or compatible scraper]
 
@@ -30,8 +29,8 @@ flowchart LR
     Proxy -->|HTTP + WebSocket upgrade| App
     BrowserA <-->|ICE media / RTP| App
     BrowserB <-->|ICE media / RTP| App
-    BrowserA <-->|ICE candidates| Turn
-    BrowserB <-->|ICE candidates| Turn
+    BrowserA <-->|TURN over UDP, TCP or TLS<br/>when direct media fails| App
+    BrowserB <-->|TURN over UDP, TCP or TLS<br/>when direct media fails| App
     App -->|short-lived TURN credentials| BrowserA
     App -->|short-lived TURN credentials| BrowserB
     App --> Data
@@ -40,7 +39,9 @@ flowchart LR
 
 The reverse proxy terminates TLS and must preserve WebSocket upgrade headers.
 WebRTC media may flow directly to the application over the configured ICE UDP
-range or through TURN when direct connectivity is unavailable.
+range or through TURN when direct connectivity is unavailable. The TURN relay
+is part of the application process (`internal/turnserver`); an external TURN
+server named in `TURN_URLS` can be used instead.
 
 ## Runtime components
 
@@ -54,9 +55,11 @@ flowchart TB
     Peer[internal/webrtc<br/>Pion peer wrapper]
     Media[internal/media<br/>publication/subscription router]
     Metrics[internal/metrics<br/>counters and samples]
+    Relay[internal/turnserver<br/>built-in TURN relay]
     Web[web/<br/>browser UI and client policy]
 
     Main --> Config
+    Main --> Relay
     Main --> HTTP
     HTTP --> Hub
     HTTP --> Web
@@ -70,9 +73,11 @@ flowchart TB
 
 ### `main.go`
 
-Loads configuration, constructs the HTTP application, starts the server, and
-handles SIGINT/SIGTERM. Shutdown closes the application and waits up to ten
-seconds for the HTTP server to stop.
+Loads configuration, starts the built-in TURN relay when it is enabled,
+constructs the HTTP application, starts the server, and handles
+SIGINT/SIGTERM. A relay that cannot bind its ports stops startup. Shutdown
+closes the application and the relay and waits up to ten seconds for the HTTP
+server to stop.
 
 ### `internal/config`
 
@@ -114,6 +119,27 @@ loop reads RTP from the remote track and writes it to subscribed local tracks.
 
 Stores counters and latest network/media samples used by `/metrics` and the
 operations cockpit.
+
+### `internal/turnserver`
+
+Runs the optional TURN relay inside the process (`TURN_SERVER_ENABLED`), on
+Pion's TURN server. It listens for TURN over UDP and TCP and, with a
+certificate, over TLS, and verifies the time-limited shared-secret credentials
+`internal/config` issues. It shares no state with the SFU packages: a relayed
+participant's media reaches the SFU's ordinary ICE UDP ports from a relay
+socket on the same host.
+
+Two rules keep it from being an open relay or a network hazard:
+
+- It forwards only to this server's own addresses (`ICE_PUBLIC_IP` and the
+  local relay address), and offers UDP relay addresses only.
+- When `ICE_PUBLIC_IP` is not a local address (a container on a bridge
+  network, or a VM behind 1:1 NAT), it translates that address to the local
+  one on the relay sockets, so relayed media never leaves the network
+  namespace and needs no hairpin NAT.
+
+The TLS certificate is re-read when its files change, so a renewal does not
+interrupt relayed calls.
 
 ## HTTP surface
 
@@ -269,7 +295,8 @@ Caddy or Nginx
 SlowMeet :8080 ─── optional data volume for persisted settings
   │
   ├── UDP ICE range, 50000-50100 by default in Compose
-  └── optional coturn for restrictive NATs
+  └── optional built-in TURN relay for restrictive NATs:
+      3478 UDP and TCP, 5349 TLS
 ```
 
 The Compose examples use a read-only application filesystem, a temporary
@@ -277,9 +304,12 @@ filesystem for `/tmp`, dropped capabilities, resource limits, health checks,
 and a data volume. The systemd example runs as a dedicated user with
 restricted filesystem access.
 
-TURN can run as a separate optional profile. Its listeners and relay range
-must be reachable from clients, and TCP/TLS listener conflicts with the HTTPS
-proxy must be resolved at deployment time.
+The TURN relay runs inside the application and is enabled with a Compose
+override file (`deploy/compose.turn.yml`) or `TURN_SERVER_ENABLED`. Its listen
+ports must be reachable from clients. Its relay port range is used only
+between the relay and the SFU on the same host, so it is neither published nor
+opened in the firewall. A TLS listener on port 443 would conflict with the
+HTTPS proxy and needs an SNI router in front of both.
 
 ## Failure and shutdown behavior
 
@@ -303,8 +333,8 @@ remain connected and can receive later publications or renegotiation results.
 ### Process shutdown
 
 `main.go` receives SIGINT/SIGTERM, closes the application hub, closes peer and
-WebSocket resources, then calls `http.Server.Shutdown` with a ten-second
-timeout.
+WebSocket resources, closes the built-in TURN relay with its allocations, then
+calls `http.Server.Shutdown` with a ten-second timeout.
 
 ## Security boundaries
 
@@ -317,6 +347,8 @@ timeout.
 - Admin configuration uses a request header and does not display the stored
   password in the UI.
 - TURN shared-secret credentials are short-lived when configured.
+- The built-in TURN relay relays only to this server's own SFU addresses, so
+  a credential cannot be used to reach other hosts or private networks.
 - TLS, certificate handling, and public network exposure belong to the reverse
   proxy/deployment layer.
 
@@ -332,6 +364,8 @@ Tests are colocated with their package and cover:
 - peer wrapper lifecycle;
 - media router publication, subscription, limits, and integration behavior;
 - metrics formatting;
+- the built-in TURN relay: credentials, peer restriction, address translation,
+  certificate reload, and a relay-only peer reaching an SFU peer through it;
 - browser protocol, adaptation, and layout scripts through Node-based checks.
 
 The normal repository gate is `go test ./...`, supplemented by the relevant

@@ -33,7 +33,27 @@ type Config struct {
 	// relay request an ICE restart to move media onto fresh TCP connections.
 	// Some access networks degrade long-lived real-time TCP flows (~20 s in);
 	// zero disables rotation.
-	TURNTCPRotateInterval    time.Duration
+	TURNTCPRotateInterval time.Duration
+	// TURNServerEnabled runs the built-in TURN relay inside this process. It
+	// accepts the shared-secret credentials TURNCredentials issues and relays
+	// only to this server's own SFU addresses. The remaining TURNServer*
+	// settings are read only when it is enabled.
+	TURNServerEnabled bool
+	// TURNServerPort is the UDP and TCP port the relay listens on.
+	TURNServerPort int
+	// TURNServerTLSPort is the TURN-over-TLS port; zero disables the listener,
+	// which also stays off until a certificate and key file are configured.
+	TURNServerTLSPort     int
+	TURNServerTLSCertFile string
+	TURNServerTLSKeyFile  string
+	TURNServerRealm       string
+	// TURNServerRelayPortMin and TURNServerRelayPortMax bound the UDP ports
+	// relay allocations bind. Only the SFU in this process ever sends to them.
+	TURNServerRelayPortMin int
+	TURNServerRelayPortMax int
+	// TURNServerRelayIP overrides the local IPv4 address relay sockets bind;
+	// empty selects it automatically.
+	TURNServerRelayIP        string
 	ICEIPv4Only              bool
 	ICETransportPolicy       string
 	EnabledConnectionMethods []string
@@ -157,6 +177,26 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	turnServerEnabled, err := envBool("TURN_SERVER_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	turnServerPort, err := envInt("TURN_SERVER_PORT", DefaultTURNServerPort)
+	if err != nil {
+		return Config{}, err
+	}
+	turnServerTLSPort, err := envInt("TURN_SERVER_TLS_PORT", DefaultTURNServerTLSPort)
+	if err != nil {
+		return Config{}, err
+	}
+	turnServerRelayPortMin, err := envInt("TURN_SERVER_RELAY_PORT_MIN", DefaultTURNServerRelayPortMin)
+	if err != nil {
+		return Config{}, err
+	}
+	turnServerRelayPortMax, err := envInt("TURN_SERVER_RELAY_PORT_MAX", DefaultTURNServerRelayPortMax)
+	if err != nil {
+		return Config{}, err
+	}
 	iceIPv4Only, err := envBool("ICE_IPV4_ONLY", true)
 	if err != nil {
 		return Config{}, err
@@ -188,24 +228,35 @@ func LoadFromEnv() (Config, error) {
 		TURNSharedSecret:      os.Getenv("TURN_SHARED_SECRET"),
 		TURNCredentialTTL:     time.Duration(turnCredentialTTLSeconds) * time.Second,
 		TURNTCPRotateInterval: time.Duration(turnTCPRotateSeconds) * time.Second,
-		ICEIPv4Only:           iceIPv4Only,
-		ICETransportPolicy:    iceTransportPolicy,
-		SimulcastEnabled:      simulcastEnabled,
-		ICEUDPPortMin:         iceUDPPortMin,
-		ICEUDPPortMax:         iceUDPPortMax,
-		ICEPublicIP:           icePublicIP,
-		TrustedProxyCIDRs:     trustedProxyCIDRs,
-		MaxParticipants:       maxParticipants,
-		DefaultVideoQuality:   envString("DEFAULT_VIDEO_QUALITY", "low"),
-		MaxVideoQuality:       envString("MAX_VIDEO_QUALITY", "ultra"),
-		DefaultVideoFPS:       defaultVideoFPS,
-		MaxVideoFPS:           maxVideoFPS,
-		DefaultAudioBitrate:   defaultAudioBitrate,
-		MaxVideoBitrate:       maxVideoBitrate,
-		MaxAudioBitrate:       maxAudioBitrate,
-		EnableScreenShare:     enableScreenShare,
-		ReconnectTimeout:      time.Duration(reconnectSeconds) * time.Second,
-		LogLevel:              envString("LOG_LEVEL", "info"),
+
+		TURNServerEnabled:      turnServerEnabled,
+		TURNServerPort:         turnServerPort,
+		TURNServerTLSPort:      turnServerTLSPort,
+		TURNServerTLSCertFile:  os.Getenv("TURN_SERVER_TLS_CERT_FILE"),
+		TURNServerTLSKeyFile:   os.Getenv("TURN_SERVER_TLS_KEY_FILE"),
+		TURNServerRealm:        envString("TURN_SERVER_REALM", DefaultTURNServerRealm),
+		TURNServerRelayPortMin: turnServerRelayPortMin,
+		TURNServerRelayPortMax: turnServerRelayPortMax,
+		TURNServerRelayIP:      os.Getenv("TURN_SERVER_RELAY_IP"),
+
+		ICEIPv4Only:         iceIPv4Only,
+		ICETransportPolicy:  iceTransportPolicy,
+		SimulcastEnabled:    simulcastEnabled,
+		ICEUDPPortMin:       iceUDPPortMin,
+		ICEUDPPortMax:       iceUDPPortMax,
+		ICEPublicIP:         icePublicIP,
+		TrustedProxyCIDRs:   trustedProxyCIDRs,
+		MaxParticipants:     maxParticipants,
+		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
+		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
+		DefaultVideoFPS:     defaultVideoFPS,
+		MaxVideoFPS:         maxVideoFPS,
+		DefaultAudioBitrate: defaultAudioBitrate,
+		MaxVideoBitrate:     maxVideoBitrate,
+		MaxAudioBitrate:     maxAudioBitrate,
+		EnableScreenShare:   enableScreenShare,
+		ReconnectTimeout:    time.Duration(reconnectSeconds) * time.Second,
+		LogLevel:            envString("LOG_LEVEL", "info"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -287,6 +338,9 @@ func (c Config) Validate() error {
 		(c.TURNTCPRotateInterval < 10*time.Second || c.TURNTCPRotateInterval > 10*time.Minute) {
 		return fmt.Errorf("TURN_TCP_ROTATE_SECONDS must be 0 or between 10 and 600")
 	}
+	if err := c.validateTURNServer(); err != nil {
+		return err
+	}
 	if c.DefaultVideoQuality == "" {
 		return fmt.Errorf("DEFAULT_VIDEO_QUALITY must not be empty")
 	}
@@ -311,6 +365,70 @@ func (c Config) Validate() error {
 		return fmt.Errorf("LOG_LEVEL must be info or debug")
 	}
 	return nil
+}
+
+// Defaults for the built-in TURN relay. The listen ports are the registered
+// TURN and TURN-over-TLS ports browsers assume when a URL names none, and the
+// relay range sits below the default ICE UDP range (50000-50100).
+const (
+	DefaultTURNServerPort         = 3478
+	DefaultTURNServerTLSPort      = 5349
+	DefaultTURNServerRealm        = "slowmeet"
+	DefaultTURNServerRelayPortMin = 49152
+	DefaultTURNServerRelayPortMax = 49999
+)
+
+// validateTURNServer checks the built-in relay's settings. A disabled relay
+// is never validated, so a deployment that does not use it is unaffected by
+// whatever those variables hold.
+func (c Config) validateTURNServer() error {
+	if !c.TURNServerEnabled {
+		return nil
+	}
+	if c.TURNSharedSecret == "" || c.TURNCredentialTTL <= 0 {
+		return fmt.Errorf("TURN_SERVER_ENABLED requires TURN_SHARED_SECRET and a nonzero TURN_CREDENTIAL_TTL_SECONDS")
+	}
+	if c.TURNServerPort < 1 || c.TURNServerPort > 65535 {
+		return fmt.Errorf("TURN_SERVER_PORT must be between 1 and 65535")
+	}
+	if c.TURNServerTLSPort < 0 || c.TURNServerTLSPort > 65535 {
+		return fmt.Errorf("TURN_SERVER_TLS_PORT must be 0 or between 1 and 65535")
+	}
+	if c.TURNServerTLSPort == c.TURNServerPort {
+		return fmt.Errorf("TURN_SERVER_TLS_PORT must differ from TURN_SERVER_PORT")
+	}
+	if (c.TURNServerTLSCertFile == "") != (c.TURNServerTLSKeyFile == "") {
+		return fmt.Errorf("TURN_SERVER_TLS_CERT_FILE and TURN_SERVER_TLS_KEY_FILE must be set together")
+	}
+	if strings.TrimSpace(c.TURNServerRealm) == "" {
+		return fmt.Errorf("TURN_SERVER_REALM must not be empty")
+	}
+	relayMin, relayMax := c.TURNServerRelayPortMin, c.TURNServerRelayPortMax
+	if relayMin < 1 || relayMin > 65535 || relayMax < 1 || relayMax > 65535 || relayMin > relayMax {
+		return fmt.Errorf("TURN relay port range must be between 1 and 65535 with minimum <= maximum")
+	}
+	// The relay tells its own sockets from the SFU's by port, so the two
+	// ranges must not share one.
+	if c.ICEUDPPortMin != 0 && relayMin <= c.ICEUDPPortMax && c.ICEUDPPortMin <= relayMax {
+		return fmt.Errorf("TURN relay port range %d-%d must not overlap the ICE UDP port range %d-%d",
+			relayMin, relayMax, c.ICEUDPPortMin, c.ICEUDPPortMax)
+	}
+	if c.TURNServerPort >= relayMin && c.TURNServerPort <= relayMax {
+		return fmt.Errorf("TURN_SERVER_PORT must be outside the TURN relay port range %d-%d", relayMin, relayMax)
+	}
+	if c.TURNServerRelayIP != "" {
+		if ip := net.ParseIP(c.TURNServerRelayIP); ip == nil || ip.To4() == nil {
+			return fmt.Errorf("TURN_SERVER_RELAY_IP must be a valid IPv4 address")
+		}
+	}
+	return nil
+}
+
+// TURNServerTLSEnabled reports whether the built-in relay serves TURN over
+// TLS: it needs a port and both certificate files.
+func (c Config) TURNServerTLSEnabled() bool {
+	return c.TURNServerEnabled && c.TURNServerTLSPort != 0 &&
+		c.TURNServerTLSCertFile != "" && c.TURNServerTLSKeyFile != ""
 }
 
 func (c Config) EffectiveMaxVideoQuality() string {
@@ -365,8 +483,10 @@ func RotatingConnectionMethodBase(method string) string {
 	return ""
 }
 
-// TURNCredentials returns coturn REST API credentials when a shared secret is
-// configured. The username contains the expiry timestamp expected by coturn.
+// TURNCredentials returns time-limited TURN REST API credentials when a shared
+// secret is configured. The username carries the expiry timestamp and the
+// password is its HMAC, the format the built-in relay and coturn's
+// use-auth-secret mode both verify.
 func (c Config) TURNCredentials(subject string, now time.Time) (string, string, bool) {
 	if c.TURNSharedSecret == "" || c.TURNCredentialTTL <= 0 {
 		return "", "", false

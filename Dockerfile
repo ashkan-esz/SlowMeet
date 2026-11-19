@@ -30,6 +30,9 @@ LABEL org.opencontainers.image.title="SlowMeet" \
 USER 10001:10001
 EXPOSE 8080
 EXPOSE 50000-50100/udp
+# Built-in TURN relay (only when TURN_SERVER_ENABLED=true): TURN over UDP and
+# TCP, and TURN over TLS.
+EXPOSE 3478/udp 3478/tcp 5349/tcp
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 STOPSIGNAL SIGTERM

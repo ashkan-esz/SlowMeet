@@ -1,0 +1,6 @@
+# Default TURN_CERT_DIR for deploy/compose.turn.yml: put fullchain.pem and
+# privkey.pem here (readable by uid 10001) for TURN over TLS. Certificates and
+# keys are never committed; this file keeps the directory in the repository so
+# the bind mount always has a source.
+*
+!.gitignore

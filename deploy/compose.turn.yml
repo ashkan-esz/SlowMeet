@@ -1,0 +1,42 @@
+# Optional override: run the TURN relay built into SlowMeet.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.turn.yml up -d
+#
+# or, to keep it for every later `docker compose` command and installer update,
+# set this once in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:deploy/compose.turn.yml
+#
+# With host networking, list this file first so the host-network override
+# drops the ports published here (the relay then binds them itself):
+#
+#   COMPOSE_FILE=docker-compose.yml:deploy/compose.turn.yml:deploy/compose.host-network.yml
+#
+# What it does:
+# - Enables the relay in the SlowMeet container (TURN_SERVER_ENABLED). It
+#   needs TURN_SHARED_SECRET in .env, and TURN_URLS naming this host so
+#   browsers are told to use it, for example:
+#     TURN_URLS=turn:meet.example.com:3478?transport=udp,turn:meet.example.com:3478?transport=tcp,turns:meet.example.com:5349?transport=tcp
+# - Publishes the relay's listen ports: TURN over UDP and TCP (3478) and TURN
+#   over TLS (5349). Allow them in the host firewall. The relay port range
+#   (TURN_SERVER_RELAY_PORT_MIN-MAX) is not published and needs no firewall
+#   rule: only the SFU in the same container sends to it.
+# - Mounts TURN_CERT_DIR read-only for TURN over TLS. It must hold
+#   fullchain.pem and privkey.pem readable by the container user (10001); the
+#   relay picks up renewed files without a restart. While they are missing,
+#   TURN over UDP and TCP still work and TLS handshakes fail.
+#
+# TURN_SERVER_PORT and TURN_SERVER_TLS_PORT from .env change both the published
+# and the listening port. Do not set TURN_SERVER_TLS_PORT=0 with this file.
+services:
+  slowmeet:
+    environment:
+      TURN_SERVER_ENABLED: "true"
+      TURN_SERVER_TLS_CERT_FILE: /etc/slowmeet/turn-certs/fullchain.pem
+      TURN_SERVER_TLS_KEY_FILE: /etc/slowmeet/turn-certs/privkey.pem
+    ports:
+      - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/udp"
+      - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/tcp"
+      - "${TURN_SERVER_TLS_PORT:-5349}:${TURN_SERVER_TLS_PORT:-5349}/tcp"
+    volumes:
+      - "${TURN_CERT_DIR:-./deploy/turn-certs}:/etc/slowmeet/turn-certs:ro"

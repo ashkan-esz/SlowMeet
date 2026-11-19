@@ -1,8 +1,10 @@
 // Command e2e-turn-server is a loopback TURN-over-TCP server for browser
-// end-to-end tests (scripts/test-relay-rotation-e2e.js). It accepts the same
-// time-limited shared-secret credentials SlowMeet issues for coturn, so a
-// local SlowMeet started with TURN_SHARED_SECRET set to -secret can hand
-// browsers working TURN/TCP credentials without any external service.
+// end-to-end tests (scripts/test-relay-rotation-e2e.js). It stands in for an
+// external TURN server: it accepts the time-limited shared-secret credentials
+// SlowMeet issues, so a local SlowMeet started with TURN_SHARED_SECRET set to
+// -secret can hand browsers working TURN/TCP credentials for it. The test
+// needs two TURN servers, which is why it does not use the relay built into
+// SlowMeet (internal/turnserver; scripts/test-builtin-turn-e2e.js covers that).
 //
 // It is a test fixture: never expose it beyond loopback.
 package main

@@ -46,6 +46,7 @@ meeting path and no server-side media transcoding.
 | `internal/webrtc` | Pion peer wrapper and SDP/ICE operations | Room policy |
 | `internal/media` | Publications, subscriptions, RTP limits, forwarding | User authorization |
 | `internal/metrics` | Counters and latest samples | Durable observability storage |
+| `internal/turnserver` | Optional built-in TURN relay: listeners, credentials check, relay sockets | Issuing credentials, SFU media |
 | `web/` | Browser UI, protocol parsing, adaptation, layout | Server authority |
 
 ## Rules that must stay true
@@ -97,6 +98,8 @@ than delayed.
 - Application listener: `8080` by default.
 - Direct ICE UDP range in the Compose example: `50000-50100` by default.
 - TURN is optional but recommended for restrictive NATs or UDP-blocked users.
+  The relay is built in (`TURN_SERVER_ENABLED`): 3478 UDP/TCP and 5349 TLS by
+  default. It relays only to this server's own SFU addresses.
 - Production browser media requires HTTPS.
 - Frontend files do not need to be mounted into the container because they are
   embedded into the binary.

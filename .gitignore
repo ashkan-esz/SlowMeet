@@ -2,8 +2,9 @@
 .gitignore
 .idea
 data/
-deploy/coturn/turnserver.conf
-deploy/coturn/certs/
+# Left behind by deployments that ran the former coturn service; they hold a
+# TURN secret and private keys.
+deploy/coturn/
 slowmeet
 
 # AI

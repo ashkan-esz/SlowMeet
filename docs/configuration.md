@@ -33,20 +33,86 @@ previous settings in place.
 ## ICE and TURN
 
 `STUN_SERVERS` and `TURN_URLS` accept comma-separated URLs. For networks that
-block direct UDP, configure coturn and advertise available UDP, TCP, and TLS
-transports, for example:
+block direct UDP, enable the TURN relay built into SlowMeet and advertise its
+UDP, TCP, and TLS transports, for example:
 
 ```text
-turn:turn.example.com:3478?transport=udp
-turn:turn.example.com:3478?transport=tcp
-turns:turn.example.com:5349?transport=tcp
+turn:meet.example.com:3478?transport=udp
+turn:meet.example.com:3478?transport=tcp
+turns:meet.example.com:5349?transport=tcp
 ```
 
-Set `TURN_SHARED_SECRET` to issue short-lived browser credentials; its value
-must match coturn's `static-auth-secret` when `use-auth-secret` is enabled.
-`TURN_CREDENTIAL_TTL_SECONDS` defaults to 24 hours. Legacy
-`TURN_URL`, `TURN_USERNAME`, and `TURN_PASSWORD` settings remain supported for
-server-side use; static credentials are not sent to browsers.
+Set `TURN_SHARED_SECRET` to issue short-lived browser credentials; the relay
+verifies them with the same secret. `TURN_CREDENTIAL_TTL_SECONDS` defaults to
+24 hours. Legacy `TURN_URL`, `TURN_USERNAME`, and `TURN_PASSWORD` settings
+remain supported for server-side use; static credentials are not sent to
+browsers.
+
+### Built-in TURN relay
+
+SlowMeet relays TURN itself; no separate TURN server is needed. Turn it on
+with `TURN_SERVER_ENABLED=true`, or under Docker or Podman Compose by adding
+`deploy/compose.turn.yml` or `deploy/podman-compose.turn.yml` (see the
+[container deployment guide](container-deployment.md)). It needs
+`TURN_SHARED_SECRET`, and `TURN_URLS` naming this host so browsers are told to
+use it. With the relay off, none of the settings below are read.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `TURN_SERVER_ENABLED` | `false` | Run the relay inside the SlowMeet process |
+| `TURN_SERVER_PORT` | `3478` | TURN over UDP and TCP |
+| `TURN_SERVER_TLS_PORT` | `5349` | TURN over TLS; `0` turns it off. The listener starts only when both certificate settings are set |
+| `TURN_SERVER_TLS_CERT_FILE`, `TURN_SERVER_TLS_KEY_FILE` | empty | PEM certificate chain and key the process can read |
+| `TURN_SERVER_REALM` | `slowmeet` | TURN realm; any name works |
+| `TURN_SERVER_RELAY_PORT_MIN`, `TURN_SERVER_RELAY_PORT_MAX` | `49152`, `49999` | UDP ports for relay allocations; must not overlap the ICE UDP range |
+| `TURN_SERVER_RELAY_IP` | automatic | Local IPv4 address relay sockets bind |
+
+What to expect from it:
+
+- **It relays only to this server.** The only permitted peers are
+  `ICE_PUBLIC_IP` and the relay's own address, and only UDP relay addresses
+  are offered. A TURN credential, which anyone who can join a meeting
+  receives, cannot be used to reach other hosts or private networks.
+- **Only the listen ports face the network.** Clients must reach
+  `TURN_SERVER_PORT` over UDP and TCP and `TURN_SERVER_TLS_PORT` over TCP. The
+  relay port range carries traffic only between the relay and the SFU on the
+  same host, so it needs neither a firewall rule nor published container
+  ports.
+- **It works behind NAT without hairpinning.** Relay sockets bind
+  `ICE_PUBLIC_IP` when this host owns that address, otherwise the address of
+  the default route, and then translate the public address to the local one
+  themselves. Set `TURN_SERVER_RELAY_IP` only if that choice is wrong for your
+  host. Browsers may therefore see a private address in their relay
+  candidate; that is expected.
+- **It answers from the address it was asked on.** UDP is bound on each local
+  address separately at startup. After adding an address to the host, restart
+  SlowMeet.
+- **A relay that cannot listen stops startup.** If a listen port is taken, the
+  process exits with an error naming the port instead of running without a
+  relay. A missing certificate is not fatal: TURN over UDP and TCP work, and
+  TLS handshakes fail until the files exist.
+- **Certificates reload by themselves.** Replaced certificate files are picked
+  up within about 30 seconds, without a restart and without dropping calls.
+- **It shares the app's resource limits.** Relayed media passes through the
+  SlowMeet process and counts against `SLOWMEET_CPUS` (0.75 by default, which
+  the installer does not change) and `SLOWMEET_MEMORY_LIMIT`. Raise them
+  yourself if many participants are relayed and the container is throttled.
+
+The log line `turn_server_started` lists the bound addresses, the relay
+address, and whether the public address is translated. Rejected credentials,
+denied peers, and malformed packets are logged only with `LOG_LEVEL=debug`.
+The relay has no per-user quota and no limit on idle TCP connections.
+
+To serve TURN over TLS on port 443 next to the HTTPS proxy, put an SNI router
+in front of both and forward the TURN name to `TURN_SERVER_TLS_PORT`; the
+container cannot bind ports below 1024 itself.
+
+### External TURN server
+
+To use another TURN server instead, leave `TURN_SERVER_ENABLED` off, name the
+server in `TURN_URLS`, and give it the same `TURN_SHARED_SECRET` (for coturn:
+`use-auth-secret` with `static-auth-secret`). Restrict the peers it relays to;
+SlowMeet browsers only ever need to reach this server's media address.
 
 ### Rotating TURN methods
 
@@ -65,8 +131,9 @@ freezes; a fresh connection is clean again, so rotation keeps every flow inside
 that window. Rotation is separate from recovery restarts: it does not count
 toward the client's restart attempts or change the connection status. Expect
 about `90 / interval + 1` TURN allocations per rotating participant at any
-time, so keep coturn's relay port range comfortably larger than that times the
-room size. Plain TURN methods, Direct, and TURN/UDP never rotate.
+time, so keep the relay port range comfortably larger than that times the room
+size (the built-in relay's default range has 848 ports). Plain TURN methods,
+Direct, and TURN/UDP never rotate.
 
 Rotation does not interrupt media: the server keeps the previous ICE pair
 carrying audio and video until the restarted one is selected (a patched
