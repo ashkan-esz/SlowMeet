@@ -927,3 +927,41 @@ func TestListenUDPOnSkipsAnAddressThatIsGone(t *testing.T) {
 		t.Fatal("binding no address at all was not reported")
 	}
 }
+
+func TestRelayTranslatesAnSFUPortInsideTheRelayRange(t *testing.T) {
+	// No ICE port range is configured, the public address is not local, and
+	// the SFU's socket happens to be on a port of the relay range. It must
+	// still be reached and answered as the SFU, end to end.
+	cfg := testConfig(t, 4)
+	cfg.ICEPublicIP = "203.0.113.7"
+	cfg.TURNServerRelayIP = "127.0.0.1"
+	sfu, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.TURNServerRelayPortMin})
+	if err != nil {
+		t.Fatalf("bind the SFU inside the relay range: %v", err)
+	}
+	defer sfu.Close()
+	publicSFU := &net.UDPAddr{IP: net.ParseIP("203.0.113.7"), Port: cfg.TURNServerRelayPortMin}
+
+	server := startRelay(t, cfg)
+	username, password := browserCredentials(t, cfg)
+	relay, err := newTURNClient(t, server, "udp", username, password).Allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	defer relay.Close()
+
+	if _, err := relay.WriteTo([]byte("browser to sfu"), publicSFU); err != nil {
+		t.Fatalf("send to the SFU's public address: %v", err)
+	}
+	payload, source := readDatagram(t, sfu)
+	if payload != "browser to sfu" {
+		t.Fatalf("SFU received %q", payload)
+	}
+	if _, err := sfu.WriteTo([]byte("sfu to browser"), source); err != nil {
+		t.Fatalf("reply to the relay: %v", err)
+	}
+	payload, peer := readDatagram(t, relay)
+	if payload != "sfu to browser" || peer.String() != publicSFU.String() {
+		t.Fatalf("browser received %q from %v, want it from the public address %v", payload, peer, publicSFU)
+	}
+}

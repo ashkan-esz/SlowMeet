@@ -407,8 +407,8 @@ func (c Config) validateTURNServer() error {
 	if relayMin < 1 || relayMin > 65535 || relayMax < 1 || relayMax > 65535 || relayMin > relayMax {
 		return fmt.Errorf("TURN relay port range must be between 1 and 65535 with minimum <= maximum")
 	}
-	// The relay tells its own sockets from the SFU's by port, so the two
-	// ranges must not share one.
+	// Relay sockets and the SFU's media sockets bind the same address, so
+	// with overlapping ranges each would take ports from the other.
 	if c.ICEUDPPortMin != 0 && relayMin <= c.ICEUDPPortMax && c.ICEUDPPortMin <= relayMax {
 		return fmt.Errorf("TURN relay port range %d-%d must not overlap the ICE UDP port range %d-%d",
 			relayMin, relayMax, c.ICEUDPPortMin, c.ICEUDPPortMax)

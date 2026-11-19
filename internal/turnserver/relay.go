@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"sync"
+	"sync/atomic"
 
 	"github.com/pion/turn/v5"
 
@@ -18,6 +20,8 @@ var (
 	errRelayPortsExhausted = errors.New("no free port in the TURN relay port range")
 	errRelayRangeInvalid   = errors.New("TURN relay port range is invalid")
 	errPeerPortNotAllowed  = errors.New("peer port is neither an SFU media port nor a relay port")
+
+	errGeneratorNotValidated = errors.New("relay address generator was used before Validate")
 )
 
 // relayAddresses are the two addresses the relay works with.
@@ -154,14 +158,49 @@ type relayAddressGenerator struct {
 	// relay-only ICE policy, or no public address), so one relay socket must
 	// be able to reach another.
 	relayToRelay bool
+	// openPorts records which relay ports are bound; Validate creates it.
+	openPorts *relayPortSet
 }
 
+// relayPortSet records which ports of the relay range are bound right now.
+// Relay sockets consult it on every datagram, so it is lock-free: one flag
+// per port.
+//
+// It exists because a port number alone does not say what a socket is. With
+// no ICE port range configured the SFU binds any port, including ones inside
+// the relay range; "inside the range" would then take the SFU for a relay
+// socket.
+type relayPortSet struct {
+	min  int
+	open []atomic.Bool
+}
+
+func newRelayPortSet(portMin, portMax int) *relayPortSet {
+	return &relayPortSet{min: portMin, open: make([]atomic.Bool, portMax-portMin+1)}
+}
+
+func (s *relayPortSet) mark(port int, open bool) {
+	if index := port - s.min; index >= 0 && index < len(s.open) {
+		s.open[index].Store(open)
+	}
+}
+
+func (s *relayPortSet) has(port int) bool {
+	index := port - s.min
+	return index >= 0 && index < len(s.open) && s.open[index].Load()
+}
+
+// Validate checks the generator and prepares it for use. The TURN library
+// calls it once per listener, before any allocation.
 func (g *relayAddressGenerator) Validate() error {
 	if g.addresses.relayIP == nil || g.addresses.relayIP.To4() == nil {
 		return errIPv4RelayOnly
 	}
 	if g.portMin < 1 || g.portMax > 65535 || g.portMin > g.portMax {
 		return errRelayRangeInvalid
+	}
+	if g.openPorts == nil {
+		g.openPorts = newRelayPortSet(g.portMin, g.portMax)
 	}
 	return nil
 }
@@ -212,11 +251,18 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 		// Nothing to rewrite and nothing to check: the plain socket.
 		return conn, relayAddress, nil
 	}
+	if g.openPorts == nil {
+		_ = conn.Close()
+		return nil, nil, errGeneratorNotValidated
+	}
+	// Every relay socket of this generator is wrapped or none is, so the set
+	// is complete whenever one of them consults it.
+	g.openPorts.mark(port, true)
 	return &relayPacketConn{
 		PacketConn:   conn,
 		addresses:    g.addresses,
-		relayPortMin: g.portMin,
-		relayPortMax: g.portMax,
+		port:         port,
+		openPorts:    g.openPorts,
 		sfuPortMin:   g.sfuPortMin,
 		sfuPortMax:   g.sfuPortMax,
 		relayToRelay: g.relayToRelay,
@@ -245,20 +291,31 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 //   - a datagram from relayIP:port is reported as coming from publicIP:port,
 //     the address the browser created its TURN permission for.
 //
-// Datagrams from another relay socket (a source port inside the relay range)
-// keep their address: those peers are advertised by relayIP already.
+// Datagrams from another relay socket keep their address: those peers are
+// advertised by relayIP already. Which ports are relay sockets is looked up in
+// the set of open ones, not judged by the range (see relayPortSet).
 type relayPacketConn struct {
 	net.PacketConn
 	addresses    relayAddresses
-	relayPortMin int
-	relayPortMax int
+	port         int
+	openPorts    *relayPortSet
 	sfuPortMin   int
 	sfuPortMax   int
 	relayToRelay bool
+	closeOnce    sync.Once
 }
 
+// isRelayPort reports whether port is a relay socket that is open now.
 func (c *relayPacketConn) isRelayPort(port int) bool {
-	return port >= c.relayPortMin && port <= c.relayPortMax
+	return c.openPorts.has(port)
+}
+
+// Close releases the relay socket. Its port is taken off the open set first,
+// and only by the first Close: once the socket is closed another allocation
+// may bind the same port, and that one's mark must stand.
+func (c *relayPacketConn) Close() error {
+	c.closeOnce.Do(func() { c.openPorts.mark(c.port, false) })
+	return c.PacketConn.Close()
 }
 
 // permitsPort reports whether a peer on port can be the SFU: on one of its

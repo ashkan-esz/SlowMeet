@@ -357,3 +357,88 @@ func TestRelayPacketConnRewritesOnlyTheSFUAddress(t *testing.T) {
 		t.Fatal("translation must not modify the configured public address")
 	}
 }
+
+func TestRelayPacketConnTranslatesAnSFUPortInsideTheRelayRange(t *testing.T) {
+	// With no ICE port range configured the SFU binds any port, and one may
+	// fall inside the relay range. It is still the SFU, not a relay socket:
+	// its datagrams must be reported from the public address, or the
+	// browser's TURN permission does not match and the call fails.
+	publicIP := net.ParseIP("203.0.113.7").To4()
+	generator := newGenerator(t, 4, publicIP)
+	sfu, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: generator.portMin})
+	if err != nil {
+		t.Fatalf("bind the SFU inside the relay range: %v", err)
+	}
+	defer sfu.Close()
+	publicSFU := &net.UDPAddr{IP: publicIP, Port: generator.portMin}
+
+	relay, relayAddress, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("AllocatePacketConn() error = %v", err)
+	}
+	defer relay.Close()
+
+	if _, err := relay.WriteTo([]byte("to sfu"), publicSFU); err != nil {
+		t.Fatalf("write to the public SFU address: %v", err)
+	}
+	if payload, source := readDatagram(t, sfu); payload != "to sfu" || source.String() != relayAddress.String() {
+		t.Fatalf("SFU received %q from %v, want it from %v", payload, source, relayAddress)
+	}
+	if _, err := sfu.WriteTo([]byte("from sfu"), relayAddress); err != nil {
+		t.Fatal(err)
+	}
+	if payload, source := readDatagram(t, relay); payload != "from sfu" || source.String() != publicSFU.String() {
+		t.Fatalf("relay read %q from %v, want it reported as the SFU's public address %v", payload, source, publicSFU)
+	}
+}
+
+func TestRelayPortSetFollowsOpenSockets(t *testing.T) {
+	generator := newGenerator(t, 2, net.ParseIP("203.0.113.7").To4())
+	first, address, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("AllocatePacketConn() error = %v", err)
+	}
+	port := address.(*net.UDPAddr).Port
+	if !generator.openPorts.has(port) {
+		t.Fatalf("relay port %d is not marked open while its socket is", port)
+	}
+	if generator.openPorts.has(generator.portMin-1) || generator.openPorts.has(generator.portMax+1) {
+		t.Fatal("a port outside the relay range can never be a relay socket")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if generator.openPorts.has(port) {
+		t.Fatalf("relay port %d is still marked open after its socket closed", port)
+	}
+
+	// Another allocation takes the port. A late second Close of the old
+	// socket must not clear the mark that now belongs to the new one.
+	second, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4", RequestedPort: port})
+	if err != nil {
+		t.Fatalf("allocate the freed port again: %v", err)
+	}
+	defer second.Close()
+	_ = first.Close()
+	if !generator.openPorts.has(port) {
+		t.Fatal("closing the old socket again cleared the port of the socket that holds it now")
+	}
+}
+
+func TestRelayAddressGeneratorNeedsValidateBeforeItTracksPorts(t *testing.T) {
+	portMin, portMax := freeRelayRange(t, 1)
+	generator := &relayAddressGenerator{
+		addresses: relayAddresses{relayIP: loopback.To4(), publicIP: net.ParseIP("203.0.113.7").To4(), translate: true},
+		portMin:   portMin,
+		portMax:   portMax,
+	}
+	if _, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"}); !errors.Is(err, errGeneratorNotValidated) {
+		t.Fatalf("error = %v, want errGeneratorNotValidated", err)
+	}
+	// The socket bound for the failed attempt was released.
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portMin})
+	if err != nil {
+		t.Fatalf("the relay port was left bound: %v", err)
+	}
+	_ = conn.Close()
+}

@@ -80,9 +80,8 @@ What to expect from it:
   cannot be used to reach other hosts, private networks, other UDP services on
   this server, or other participants. If you set the ICE port range to `0`
   (any port), the port check is off: every UDP port on the server's own
-  address is reachable through the relay, and a relayed call can fail when the
-  SFU picks a port inside the relay port range. Keep a range configured; the
-  relay warns at startup when there is none.
+  address is reachable through the relay. Relayed calls still work. Keep a
+  range configured; the relay warns at startup when there is none.
 - **Only the listen ports face the network.** Clients must reach
   `TURN_SERVER_PORT` over UDP and TCP and `TURN_SERVER_TLS_PORT` over TCP. The
   relay port range carries traffic only between the relay and the SFU on the
@@ -117,6 +116,9 @@ What to expect from it:
   whose TLS handshake fails, or does not finish within 10 seconds, is closed
   at once and does not count. After a transient error while accepting (for
   example no free file descriptor) the listeners retry instead of stopping.
+  Known limit: a connection that completes its handshake but never allocates
+  is not timed out, so idle connections can fill the cap and make new TURN
+  over TCP or TLS clients wait. TURN over UDP and direct calls are unaffected.
 
 The log line `turn_server_started` lists the bound addresses, the relay
 address, the SFU ports it forwards to, and whether the public address is

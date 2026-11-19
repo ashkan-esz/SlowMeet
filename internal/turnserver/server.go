@@ -173,11 +173,11 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		"sfu_ports", sfuPorts,
 		"translates_public_ip", addresses.translates())
 	if cfg.ICEUDPPortMin == 0 {
-		// The relay tells the SFU's sockets from everything else by port.
+		// Only a media port range tells the SFU's sockets from other UDP
+		// services on this server's address.
 		logger.Warn("turn_server_any_peer_port",
 			"hint", "set ICE_UDP_PORT_MIN and ICE_UDP_PORT_MAX: without a media port range the relay "+
-				"forwards to any UDP port on this server's own address, and a relayed call can fail "+
-				"when the SFU picks a port inside the relay port range")
+				"forwards to any UDP port on this server's own address")
 	}
 	if len(cfg.EffectiveTURNURLs()) == 0 {
 		logger.Warn("turn_server_without_urls",
