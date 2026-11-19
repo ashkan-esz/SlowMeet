@@ -17,6 +17,7 @@ var (
 	errRelayPortOutOfRange = errors.New("requested relay port is outside the configured range")
 	errRelayPortsExhausted = errors.New("no free port in the TURN relay port range")
 	errRelayRangeInvalid   = errors.New("TURN relay port range is invalid")
+	errPeerPortNotAllowed  = errors.New("peer port is neither an SFU media port nor a relay port")
 )
 
 // relayAddresses are the two addresses the relay works with.
@@ -25,21 +26,27 @@ var (
 // is ICE_PUBLIC_IP when it is IPv4: the address the SFU puts in the candidates
 // it sends browsers, and so the peer address browsers ask the relay to reach.
 //
-// On a host that owns its public address the two are equal. Behind a Docker or
-// Podman bridge, or a cloud 1:1 NAT, the public address is not local: a packet
-// sent to it would leave this network namespace and come back re-sourced (or
-// not at all), and the relay's per-peer-address permission would never match.
-// As the SFU is in this same process, the relay then translates instead; see
-// translatingPacketConn.
+// On a host that owns its public address the SFU's sockets are bound to it and
+// the relay reaches them there. Behind a Docker or Podman bridge, or a cloud
+// 1:1 NAT, the public address is not local: a packet sent to it would leave
+// this network namespace and come back re-sourced (or not at all), and the
+// relay's per-peer-address permission would never match. As the SFU is in
+// this same process, the relay then translates instead (translate is set);
+// see relayPacketConn.
 type relayAddresses struct {
 	relayIP  net.IP
 	publicIP net.IP
+	// translate is set when publicIP is not an address of this host. It is not
+	// simply "the two addresses differ": with TURN_SERVER_RELAY_IP naming
+	// another address of a host that owns its public one, the SFU still
+	// listens on the public address and must be reached there, untranslated.
+	translate bool
 }
 
 // translates reports whether peer addresses need rewriting between the public
 // address browsers use and the local one the SFU's sockets are bound to.
 func (a relayAddresses) translates() bool {
-	return a.publicIP != nil && !a.publicIP.Equal(a.relayIP)
+	return a.translate
 }
 
 // permits reports whether the relay may forward to peerIP. Only this server's
@@ -78,6 +85,8 @@ func selectRelayAddresses(cfg config.Config) (relayAddresses, error) {
 			addresses.relayIP, err)
 	}
 	_ = probe.Close()
+	addresses.translate = addresses.publicIP != nil && !addresses.publicIP.Equal(addresses.relayIP) &&
+		!localInterfaceHasIP(addresses.publicIP)
 	return addresses, nil
 }
 
@@ -136,6 +145,11 @@ type relayAddressGenerator struct {
 	addresses relayAddresses
 	portMin   int
 	portMax   int
+	// sfuPortMin and sfuPortMax are the SFU's media port range
+	// (ICE_UDP_PORT_MIN-MAX); zero when the SFU is not held to a range. See
+	// relayPacketConn for what they restrict.
+	sfuPortMin int
+	sfuPortMax int
 }
 
 func (g *relayAddressGenerator) Validate() error {
@@ -190,21 +204,35 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 		return nil, nil, err
 	}
 	relayAddress := &net.UDPAddr{IP: g.addresses.relayIP, Port: port}
-	if !g.addresses.translates() {
+	if !g.addresses.translates() && g.sfuPortMin == 0 {
+		// Nothing to rewrite and nothing to check: the plain socket.
 		return conn, relayAddress, nil
 	}
-	return &translatingPacketConn{
-		PacketConn: conn,
-		addresses:  g.addresses,
-		portMin:    g.portMin,
-		portMax:    g.portMax,
+	return &relayPacketConn{
+		PacketConn:   conn,
+		addresses:    g.addresses,
+		relayPortMin: g.portMin,
+		relayPortMax: g.portMax,
+		sfuPortMin:   g.sfuPortMin,
+		sfuPortMax:   g.sfuPortMax,
 	}, relayAddress, nil
 }
 
-// translatingPacketConn is a relay socket on a host whose public address is
-// not local. Browsers address the SFU by that public address, while the SFU's
-// sockets are bound to the local one, so it rewrites the peer address in both
-// directions and the relay-to-SFU leg stays inside this network namespace:
+// relayPacketConn is a relay socket with the two rules the TURN library cannot
+// express, because its permissions name a peer by IP address only.
+//
+// Ports. The permitted peer address is this server's own, and other UDP
+// services may listen on it. A TURN credential, which every meeting
+// participant receives, must not be a way to send them datagrams from this
+// host, past its firewall. So a datagram is forwarded only to a port the SFU
+// can be on (its media port range) or to another relay socket. Without a
+// configured media port range the SFU may be on any port and nothing is
+// refused.
+//
+// Addresses. On a host whose public address is not local (addresses.translate)
+// browsers address the SFU by that public address, while the SFU's sockets
+// are bound to the local one. The peer address is rewritten in both
+// directions, so the relay-to-SFU leg stays inside this network namespace:
 //
 //   - a datagram for publicIP:port is sent to relayIP:port;
 //   - a datagram from relayIP:port is reported as coming from publicIP:port,
@@ -212,30 +240,46 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 //
 // Datagrams from another relay socket (a source port inside the relay range)
 // keep their address: those peers are advertised by relayIP already.
-type translatingPacketConn struct {
+type relayPacketConn struct {
 	net.PacketConn
-	addresses relayAddresses
-	portMin   int
-	portMax   int
+	addresses    relayAddresses
+	relayPortMin int
+	relayPortMax int
+	sfuPortMin   int
+	sfuPortMax   int
 }
 
-func (c *translatingPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+func (c *relayPacketConn) isRelayPort(port int) bool {
+	return port >= c.relayPortMin && port <= c.relayPortMax
+}
+
+// permitsPort reports whether a peer on port can be the SFU or another relay
+// socket.
+func (c *relayPacketConn) permitsPort(port int) bool {
+	return c.sfuPortMin == 0 || (port >= c.sfuPortMin && port <= c.sfuPortMax) || c.isRelayPort(port)
+}
+
+func (c *relayPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
 	n, source, err := c.PacketConn.ReadFrom(buffer)
-	if err != nil {
+	if err != nil || !c.addresses.translate {
 		return n, source, err
 	}
 	// The address is allocated per read by the net package, so it is ours to
 	// rewrite in place.
-	if udp, ok := source.(*net.UDPAddr); ok && udp.IP.Equal(c.addresses.relayIP) &&
-		(udp.Port < c.portMin || udp.Port > c.portMax) {
+	if udp, ok := source.(*net.UDPAddr); ok && udp.IP.Equal(c.addresses.relayIP) && !c.isRelayPort(udp.Port) {
 		udp.IP = c.addresses.publicIP
 	}
 	return n, source, nil
 }
 
-func (c *translatingPacketConn) WriteTo(payload []byte, destination net.Addr) (int, error) {
-	if udp, ok := destination.(*net.UDPAddr); ok && udp.IP.Equal(c.addresses.publicIP) {
-		destination = &net.UDPAddr{IP: c.addresses.relayIP, Port: udp.Port}
+func (c *relayPacketConn) WriteTo(payload []byte, destination net.Addr) (int, error) {
+	if udp, ok := destination.(*net.UDPAddr); ok {
+		if !c.permitsPort(udp.Port) {
+			return 0, errPeerPortNotAllowed
+		}
+		if c.addresses.translate && udp.IP.Equal(c.addresses.publicIP) {
+			destination = &net.UDPAddr{IP: c.addresses.relayIP, Port: udp.Port}
+		}
 	}
 	return c.PacketConn.WriteTo(payload, destination)
 }

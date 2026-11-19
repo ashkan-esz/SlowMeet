@@ -20,6 +20,7 @@
 
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
+const dgram = require("node:dgram");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
@@ -48,16 +49,34 @@ function findChrome() {
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
-// host undefined reserves on every address, which is how the relay binds.
+// host undefined reserves on every address, for TCP and UDP, which is how the
+// relay binds.
 async function reservePort(host) {
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, host, resolve);
-  });
-  const { port } = server.address();
-  await new Promise((resolve) => server.close(resolve));
-  return port;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const server = net.createServer();
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, host, resolve);
+    });
+    const { port } = server.address();
+    await new Promise((resolve) => server.close(resolve));
+    if (host !== undefined) return port;
+    // A wildcard UDP bind fails if any single address holds the port.
+    const udpFree = await new Promise((resolve) => {
+      const socket = dgram.createSocket("udp4");
+      socket.once("error", () => {
+        try {
+          socket.close();
+        } catch (_) {
+          // A socket that never bound may already be closed.
+        }
+        resolve(false);
+      });
+      socket.bind(port, () => socket.close(() => resolve(true)));
+    });
+    if (udpFree) return port;
+  }
+  throw new Error("no port is free for both TCP and UDP on every address");
 }
 
 function startProcess(command, args, env) {

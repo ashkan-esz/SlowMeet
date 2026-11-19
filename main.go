@@ -39,6 +39,9 @@ func run() error {
 		return fmt.Errorf("start TURN relay: %w", err)
 	}
 	app := httpserver.New(cfg, logger)
+	if cfg.TURNServerEnabled {
+		app.SetTURNAllocations(relay.AllocationCount)
+	}
 	// Package-level code that logs through slog.Default() (for example the
 	// offer-send debug record in internal/signaling) must honor LOG_LEVEL too.
 	slog.SetDefault(logger)

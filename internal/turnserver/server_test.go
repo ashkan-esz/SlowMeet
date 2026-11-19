@@ -744,3 +744,186 @@ func TestRelayAnswersFromTheAddressAClientSentTo(t *testing.T) {
 	}
 	_ = relay.Close()
 }
+
+func TestRelayReachesTheSFUOnAPublicAddressThisHostOwns(t *testing.T) {
+	// TURN_SERVER_RELAY_IP names another address of a host that owns its
+	// public one. The SFU listens on the public address, so the relay must
+	// send there as it is; translating it to the relay address would send
+	// relayed media to a port nothing listens on.
+	cfg := testConfig(t, 4)
+	cfg.ICEPublicIP = "127.0.0.1"
+	cfg.TURNServerRelayIP = "127.0.0.2"
+	server, err := start(cfg, quietLogger(), "127.0.0.1")
+	if err != nil {
+		t.Skipf("this host cannot bind a second loopback address: %v", err)
+	}
+	defer server.Close()
+	username, password := browserCredentials(t, cfg)
+	relay, err := newTURNClient(t, server, "udp", username, password).Allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	defer relay.Close()
+	relayAddress := relay.LocalAddr().(*net.UDPAddr)
+	if !relayAddress.IP.Equal(net.IPv4(127, 0, 0, 2)) {
+		t.Fatalf("relayed address = %v, want one on the chosen relay IP", relayAddress)
+	}
+
+	sfu := sfuSocket(t, cfg) // bound to the public address, 127.0.0.1
+	if _, err := relay.WriteTo([]byte("browser to sfu"), sfu.LocalAddr()); err != nil {
+		t.Fatalf("send to the SFU's public address: %v", err)
+	}
+	payload, source := readDatagram(t, sfu)
+	if payload != "browser to sfu" || source.String() != relayAddress.String() {
+		t.Fatalf("SFU received %q from %v, want it from the relay socket %v", payload, source, relayAddress)
+	}
+	if _, err := sfu.WriteTo([]byte("sfu to browser"), source); err != nil {
+		t.Fatalf("reply to the relay: %v", err)
+	}
+	payload, peer := readDatagram(t, relay)
+	if payload != "sfu to browser" || peer.String() != sfu.LocalAddr().String() {
+		t.Fatalf("browser received %q from %v, want it from %v", payload, peer, sfu.LocalAddr())
+	}
+}
+
+func TestRelayForwardsOnlyToTheSFUsPorts(t *testing.T) {
+	// A TURN credential must not reach other UDP services on this server's
+	// own address: with ICE_UDP_PORT_MIN-MAX set, only those ports (and other
+	// relay sockets) are forwarded to.
+	cfg := testConfig(t, 4)
+	sfu := sfuSocket(t, cfg)
+	sfuPort := sfu.LocalAddr().(*net.UDPAddr).Port
+	other := sfuSocket(t, cfg)
+	for other.LocalAddr().(*net.UDPAddr).Port == sfuPort {
+		other = sfuSocket(t, cfg)
+	}
+	cfg.ICEUDPPortMin, cfg.ICEUDPPortMax = sfuPort, sfuPort
+	server := startRelay(t, cfg)
+	username, password := browserCredentials(t, cfg)
+	relay, err := newTURNClient(t, server, "udp", username, password).Allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	defer relay.Close()
+
+	// The address is permitted either way; the port decides.
+	if _, err := relay.WriteTo([]byte("for another service"), other.LocalAddr()); err != nil {
+		t.Fatalf("send indication: %v", err)
+	}
+	if _, err := relay.WriteTo([]byte("for the sfu"), sfu.LocalAddr()); err != nil {
+		t.Fatalf("send indication: %v", err)
+	}
+	if payload, _ := readDatagram(t, sfu); payload != "for the sfu" {
+		t.Fatalf("SFU received %q", payload)
+	}
+	if err := other.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := other.ReadFrom(make([]byte, 64)); err == nil {
+		t.Fatalf("a service outside the SFU's ports received %d bytes through the relay", n)
+	}
+}
+
+// stunBinding sends a STUN binding request over a stream connection and
+// reports whether a binding success response arrived within timeout.
+func stunBinding(t *testing.T, conn net.Conn, timeout time.Duration) bool {
+	t.Helper()
+	request := []byte{
+		0x00, 0x01, 0x00, 0x00, // binding request, no attributes
+		0x21, 0x12, 0xa4, 0x42, // magic cookie
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, // transaction ID
+	}
+	if _, err := conn.Write(request); err != nil {
+		t.Fatalf("send STUN request: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 20)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return false
+	}
+	length := int(header[2])<<8 | int(header[3])
+	if _, err := io.ReadFull(conn, make([]byte, length)); err != nil {
+		return false
+	}
+	return header[0] == 0x01 && header[1] == 0x01
+}
+
+func TestStreamListenersHoldALimitedNumberOfConnections(t *testing.T) {
+	// Connections that are opened and left idle must not pile up without
+	// bound in the process the SFU shares.
+	cfg := testConfig(t, 4)
+	server, err := startWithLimit(cfg, quietLogger(), "127.0.0.1", 2)
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer server.Close()
+	dial := func() net.Conn {
+		conn, err := net.DialTimeout("tcp", server.tcp.Addr().String(), testTimeout)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+
+	first, second := dial(), dial()
+	for _, conn := range []net.Conn{first, second} {
+		if !stunBinding(t, conn, testTimeout) {
+			t.Fatal("a connection within the limit was not served")
+		}
+	}
+	// The third connects (the kernel queues it) but is not served yet.
+	third := dial()
+	if stunBinding(t, third, 300*time.Millisecond) {
+		t.Fatal("a connection beyond the limit was served")
+	}
+	// Closing one frees its slot, and the waiting connection is served,
+	// including the request it already sent.
+	_ = first.Close()
+	if err := third.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 20)
+	if _, err := io.ReadFull(third, header); err != nil || header[0] != 0x01 || header[1] != 0x01 {
+		t.Fatalf("the waiting connection was not served after a slot was freed: %v", err)
+	}
+}
+
+func TestListenUDPOnSkipsAnAddressThatIsGone(t *testing.T) {
+	port, _ := freeRelayRange(t, 1)
+	gone := net.ParseIP("203.0.113.9") // not an address of this host
+	loopbackIP := net.IPv4(127, 0, 0, 1)
+
+	conns, err := listenUDPOn([]net.IP{gone, loopbackIP}, port, quietLogger())
+	if err != nil {
+		t.Fatalf("an address that is gone must be skipped, not stop the relay: %v", err)
+	}
+	if len(conns) == 2 {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		t.Skip("this host binds addresses it does not own (ip_nonlocal_bind)")
+	}
+	if len(conns) != 1 || !conns[0].LocalAddr().(*net.UDPAddr).IP.Equal(loopbackIP) {
+		t.Fatalf("bound %d sockets, want only the loopback one", len(conns))
+	}
+
+	// The port being taken on an address is still an error.
+	if again, err := listenUDPOn([]net.IP{loopbackIP}, port, quietLogger()); err == nil {
+		for _, conn := range again {
+			_ = conn.Close()
+		}
+		t.Fatal("a taken port was not reported")
+	}
+	_ = conns[0].Close()
+
+	// With no address left there is no relay to run.
+	if none, err := listenUDPOn([]net.IP{gone}, port, quietLogger()); err == nil {
+		for _, conn := range none {
+			_ = conn.Close()
+		}
+		t.Fatal("binding no address at all was not reported")
+	}
+}

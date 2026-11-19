@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/pion/turn/v5"
 
@@ -35,6 +36,13 @@ func TestSelectRelayAddresses(t *testing.T) {
 			name:      "explicit relay address",
 			cfg:       config.Config{ICEPublicIP: "203.0.113.7", TURNServerRelayIP: "127.0.0.1"},
 			wantRelay: loopback, wantPublic: publicIP, wantTranslates: true,
+		},
+		{
+			// The SFU listens on the public address this host owns, so the
+			// relay must reach it there, whatever address its own sockets use.
+			name:      "explicit relay address on a host that owns its public address",
+			cfg:       config.Config{ICEPublicIP: "127.0.0.1", TURNServerRelayIP: "127.0.0.2"},
+			wantRelay: net.IPv4(127, 0, 0, 2), wantPublic: loopback, wantTranslates: false,
 		},
 		{
 			name:           "no public address",
@@ -102,9 +110,15 @@ func newGenerator(t *testing.T, ports int, publicIP net.IP) *relayAddressGenerat
 	t.Helper()
 	portMin, portMax := freeRelayRange(t, ports)
 	generator := &relayAddressGenerator{
-		addresses: relayAddresses{relayIP: loopback.To4(), publicIP: publicIP},
-		portMin:   portMin,
-		portMax:   portMax,
+		addresses: relayAddresses{
+			relayIP:  loopback.To4(),
+			publicIP: publicIP,
+			// As selectRelayAddresses decides it: a public address this host
+			// does not own is translated.
+			translate: publicIP != nil && !publicIP.IsLoopback(),
+		},
+		portMin: portMin,
+		portMax: portMax,
 	}
 	if err := generator.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -193,8 +207,9 @@ func TestRelayAddressGeneratorValidate(t *testing.T) {
 	}
 }
 
-func TestRelaySocketIsPlainWhenThePublicAddressIsLocal(t *testing.T) {
-	// The main production topology: no translation layer on the media path.
+func TestRelaySocketIsPlainWhenThereIsNothingToRewriteOrCheck(t *testing.T) {
+	// A host that owns its public address, with the SFU on any port: no layer
+	// on the media path.
 	generator := newGenerator(t, 1, loopback.To4())
 	conn, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
 	if err != nil {
@@ -206,7 +221,68 @@ func TestRelaySocketIsPlainWhenThePublicAddressIsLocal(t *testing.T) {
 	}
 }
 
-func TestTranslatingPacketConnRewritesOnlyTheSFUAddress(t *testing.T) {
+func TestRelaySocketForwardsOnlyToSFUAndRelayPorts(t *testing.T) {
+	// The permitted peer is this server's own address, where other UDP
+	// services may listen too. With the SFU's port range known, nothing else
+	// on that address is reachable through the relay.
+	generator := newGenerator(t, 2, loopback.To4())
+	cfg := config.Config{TURNServerRelayPortMin: generator.portMin, TURNServerRelayPortMax: generator.portMax}
+	sfu := sfuSocket(t, cfg)
+	sfuPort := sfu.LocalAddr().(*net.UDPAddr).Port
+	other := sfuSocket(t, cfg) // some other UDP service on this host
+	for other.LocalAddr().(*net.UDPAddr).Port == sfuPort {
+		other = sfuSocket(t, cfg)
+	}
+	generator.sfuPortMin, generator.sfuPortMax = sfuPort, sfuPort
+
+	relay, relayAddress, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("AllocatePacketConn() error = %v", err)
+	}
+	defer relay.Close()
+	if _, ok := relay.(*relayPacketConn); !ok {
+		t.Fatalf("relay socket is %T, want one that checks peer ports", relay)
+	}
+	otherRelay, otherAddress, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("allocate a second relay socket: %v", err)
+	}
+	defer otherRelay.Close()
+
+	if _, err := relay.WriteTo([]byte("to sfu"), sfu.LocalAddr()); err != nil {
+		t.Fatalf("the SFU's media port must be reachable: %v", err)
+	}
+	if payload, source := readDatagram(t, sfu); payload != "to sfu" || source.String() != relayAddress.String() {
+		t.Fatalf("SFU received %q from %v", payload, source)
+	}
+	if _, err := relay.WriteTo([]byte("to relay"), otherAddress); err != nil {
+		t.Fatalf("another relay socket must be reachable: %v", err)
+	}
+	if payload, _ := readDatagram(t, otherRelay); payload != "to relay" {
+		t.Fatalf("other relay received %q", payload)
+	}
+
+	n, err := relay.WriteTo([]byte("to another service"), other.LocalAddr())
+	if !errors.Is(err, errPeerPortNotAllowed) || n != 0 {
+		t.Fatalf("WriteTo a port that is neither SFU nor relay = %d, %v; want errPeerPortNotAllowed", n, err)
+	}
+	if err := other.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := other.ReadFrom(make([]byte, 64)); err == nil {
+		t.Fatalf("the other service received %d bytes through the relay", n)
+	}
+	// Without translation, what the SFU sends reaches the TURN layer with its
+	// address unchanged.
+	if _, err := sfu.WriteTo([]byte("from sfu"), relayAddress); err != nil {
+		t.Fatal(err)
+	}
+	if payload, source := readDatagram(t, relay); payload != "from sfu" || source.String() != sfu.LocalAddr().String() {
+		t.Fatalf("relay read %q from %v, want the SFU untranslated", payload, source)
+	}
+}
+
+func TestRelayPacketConnRewritesOnlyTheSFUAddress(t *testing.T) {
 	publicIP := net.ParseIP("203.0.113.7").To4()
 	generator := newGenerator(t, 2, publicIP)
 
@@ -215,7 +291,7 @@ func TestTranslatingPacketConnRewritesOnlyTheSFUAddress(t *testing.T) {
 		t.Fatalf("AllocatePacketConn() error = %v", err)
 	}
 	defer relay.Close()
-	if _, ok := relay.(*translatingPacketConn); !ok {
+	if _, ok := relay.(*relayPacketConn); !ok {
 		t.Fatalf("relay socket is %T, want a translating one", relay)
 	}
 	if !relayAddress.(*net.UDPAddr).IP.Equal(loopback) {

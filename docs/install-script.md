@@ -161,13 +161,35 @@ changed. The update:
 - re-owns the certificate copy in `/etc/slowmeet/turn-certs` for the SlowMeet
   container user. A `TURN_CERT_DIR` of your own is left alone; make its files
   readable by user `10001` yourself;
-- deletes `turnserver.conf`, which holds the shared secret and is no longer
-  read, and removes the coturn container before starting SlowMeet, so the TURN
-  ports are free.
+- sets `turnserver.conf` aside as `turnserver.conf.migrated` (readable by root
+  only, as it holds the shared secret); nothing reads it any more;
+- builds the new image while coturn still serves, then removes the coturn
+  container and starts SlowMeet, so TURN is only down for the container swap.
 
 Relayed calls drop while the containers restart, as on any update. The UFW
 rule for the old relay port range stays in place; it is no longer needed and
 can be removed with `ufw delete allow 49152:49999/udp`.
+
+#### Rolling back
+
+To return to coturn if the built-in relay does not work on your host, as root
+in `/opt/slowmeet`:
+
+1. Check out the last commit that shipped coturn:
+   `git checkout <commit>` (the one before "relay TURN inside SlowMeet").
+2. Restore the configuration:
+   `mv deploy/coturn/turnserver.conf.migrated deploy/coturn/turnserver.conf`
+   and `chmod 0644` it.
+3. In `.env`, set `TURN_SERVER_ENABLED=false` and remove
+   `:deploy/compose.turn.yml` from `COMPOSE_FILE` (delete the line if nothing
+   else is left but `docker-compose.yml`).
+4. Give coturn its certificate copy back:
+   `chown -R 65534:65533 /etc/slowmeet/turn-certs`.
+5. Start both containers: `docker compose --profile turn up -d --build`
+   (Podman: `podman-compose -f podman-compose.yml --profile turn up -d --build`).
+
+Do not run the installer's update afterwards until you want to move again: it
+checks out the latest version and migrates.
 
 Once Docker's `COMPOSE_FILE` lists the relay override, a later update no
 longer switches a bridge-network installation to host networking by itself

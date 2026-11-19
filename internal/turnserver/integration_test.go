@@ -22,15 +22,22 @@ import (
 // the public address belongs to no interface, the SFU's sockets are on the
 // local address, and the relay has to translate between the two.
 func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
+	//
+	// With the relay policy (ICE_TRANSPORT_POLICY=relay) the SFU has no host
+	// candidate: it allocates on the same relay, and media goes from one relay
+	// socket to another.
 	tests := []struct {
 		name      string
 		transport string
 		publicIP  string
+		policy    string
 	}{
-		{name: "udp", transport: "udp", publicIP: "127.0.0.1"},
-		{name: "tcp", transport: "tcp", publicIP: "127.0.0.1"},
-		{name: "udp with a public address that is not local", transport: "udp", publicIP: "203.0.113.7"},
-		{name: "tcp with a public address that is not local", transport: "tcp", publicIP: "203.0.113.7"},
+		{name: "udp", transport: "udp", publicIP: "127.0.0.1", policy: "all"},
+		{name: "tcp", transport: "tcp", publicIP: "127.0.0.1", policy: "all"},
+		{name: "udp with a public address that is not local", transport: "udp", publicIP: "203.0.113.7", policy: "all"},
+		{name: "tcp with a public address that is not local", transport: "tcp", publicIP: "203.0.113.7", policy: "all"},
+		{name: "relay-only SFU", transport: "udp", publicIP: "127.0.0.1", policy: "relay"},
+		{name: "relay-only SFU with a public address that is not local", transport: "udp", publicIP: "203.0.113.7", policy: "relay"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -53,9 +60,23 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 					server.addresses.translates(), test.publicIP, server.addresses.relayIP)
 			}
 			username, password := browserCredentials(t, cfg)
+			relayPort := server.udp[0].LocalAddr().(*net.UDPAddr).Port
+			if test.transport == "tcp" {
+				relayPort = server.tcp.Addr().(*net.TCPAddr).Port
+			}
+			relayURL := fmt.Sprintf("turn:127.0.0.1:%d?transport=%s", relayPort, test.transport)
 
+			// As internal/signaling builds it: the SFU's peer is given the
+			// TURN server only when it has no reachable address of its own.
+			var sfuTURNURLs []string
+			sfuUsername, sfuPassword := "", ""
+			if test.policy == "relay" {
+				sfuTURNURLs = []string{relayURL}
+				sfuUsername, sfuPassword, _ = cfg.TURNCredentials("sfu", time.Now())
+			}
 			sfuPeer, err := sfu.NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
-				nil, nil, "", "", cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, true, "all", cfg.ICEPublicIP)
+				nil, sfuTURNURLs, sfuUsername, sfuPassword,
+				cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, true, test.policy, cfg.ICEPublicIP)
 			if err != nil {
 				t.Fatalf("create SFU peer: %v", err)
 			}
@@ -71,17 +92,13 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 				})
 			})
 
-			relayPort := server.udp[0].LocalAddr().(*net.UDPAddr).Port
-			if test.transport == "tcp" {
-				relayPort = server.tcp.Addr().(*net.TCPAddr).Port
-			}
 			var settings pion.SettingEngine
 			settings.SetIncludeLoopbackCandidate(true)
 			settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 			browser, err := pion.NewAPI(pion.WithSettingEngine(settings)).NewPeerConnection(pion.Configuration{
 				ICETransportPolicy: pion.ICETransportPolicyRelay,
 				ICEServers: []pion.ICEServer{{
-					URLs:       []string{fmt.Sprintf("turn:127.0.0.1:%d?transport=%s", relayPort, test.transport)},
+					URLs:       []string{relayURL},
 					Username:   username,
 					Credential: password,
 				}},
@@ -119,7 +136,7 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 			if _, err := sfuPeer.CreateAnswer(); err != nil {
 				t.Fatalf("SFU create answer: %v", err)
 			}
-			waitFor(t, "the SFU gathers its host candidate", sfuGathered)
+			waitFor(t, "the SFU gathers its candidate", sfuGathered)
 			if err := browser.SetRemoteDescription(*sfuPeer.Connection().LocalDescription()); err != nil {
 				t.Fatalf("set browser remote description: %v", err)
 			}
@@ -147,6 +164,19 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 			}
 			if got := net.ParseIP(pair.Local.Address); !got.Equal(server.addresses.relayIP) {
 				t.Fatalf("relay candidate address %s, want the relay address %v", pair.Local.Address, server.addresses.relayIP)
+			}
+			if test.policy == "relay" {
+				// Relay socket to relay socket: both are advertised by the
+				// relay address and neither is translated.
+				if got := net.ParseIP(pair.Remote.Address); pair.Remote.Typ != pion.ICECandidateTypeRelay ||
+					!got.Equal(server.addresses.relayIP) {
+					t.Fatalf("the browser reached the SFU at %s %s, want its relay candidate on %v",
+						pair.Remote.Typ, pair.Remote.Address, server.addresses.relayIP)
+				}
+				if server.AllocationCount() < 2 {
+					t.Fatalf("AllocationCount() = %d, want the browser's and the SFU's", server.AllocationCount())
+				}
+				return
 			}
 			// The browser knows the SFU only by its public address.
 			if got := net.ParseIP(pair.Remote.Address); !got.Equal(publicIP) {

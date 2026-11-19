@@ -69,10 +69,15 @@ use it. With the relay off, none of the settings below are read.
 
 What to expect from it:
 
-- **It relays only to this server.** The only permitted peers are
-  `ICE_PUBLIC_IP` and the relay's own address, and only UDP relay addresses
-  are offered. A TURN credential, which anyone who can join a meeting
-  receives, cannot be used to reach other hosts or private networks.
+- **It relays only to this server's media ports.** The only permitted peers
+  are `ICE_PUBLIC_IP` and the relay's own address, and only UDP relay
+  addresses are offered. On those addresses it forwards only to the SFU's
+  port range (`ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX`) and to other relay
+  sockets. A TURN credential, which anyone who can join a meeting receives,
+  therefore cannot be used to reach other hosts, private networks, or other
+  UDP services on this server. If you set the ICE port range to `0` (any
+  port), the port check is off and every UDP port on the server's own address
+  is reachable through the relay; keep a range configured.
 - **Only the listen ports face the network.** Clients must reach
   `TURN_SERVER_PORT` over UDP and TCP and `TURN_SERVER_TLS_PORT` over TCP. The
   relay port range carries traffic only between the relay and the SFU on the
@@ -83,10 +88,12 @@ What to expect from it:
   the default route, and then translate the public address to the local one
   themselves. Set `TURN_SERVER_RELAY_IP` only if that choice is wrong for your
   host. Browsers may therefore see a private address in their relay
-  candidate; that is expected.
+  candidate; that is expected. On a host that owns its public address nothing
+  is translated, whichever relay address is used.
 - **It answers from the address it was asked on.** UDP is bound on each local
   address separately at startup. After adding an address to the host, restart
-  SlowMeet.
+  SlowMeet. An address that disappears while the relay starts is skipped with
+  a warning.
 - **A relay that cannot listen stops startup.** If a listen port is taken, the
   process exits with an error naming the port instead of running without a
   relay. A missing certificate is not fatal: TURN over UDP and TCP work, and
@@ -98,10 +105,19 @@ What to expect from it:
   the installer does not change) and `SLOWMEET_MEMORY_LIMIT`. Raise them
   yourself if many participants are relayed and the container is throttled.
 
+- **Stream connections are capped.** TURN over TCP and TURN over TLS each
+  hold at most 1024 connections at a time, so connections that are opened and
+  left idle cannot take the memory the meeting needs. Further connections wait
+  until one closes. The cap is far above what a full room needs.
+
 The log line `turn_server_started` lists the bound addresses, the relay
-address, and whether the public address is translated. Rejected credentials,
-denied peers, and malformed packets are logged only with `LOG_LEVEL=debug`.
-The relay has no per-user quota and no limit on idle TCP connections.
+address, the SFU ports it forwards to, and whether the public address is
+translated. Rejected credentials, denied peers, and malformed packets are
+logged only with `LOG_LEVEL=debug`. `/metrics` exports
+`slowmeet_turn_allocations` while the relay runs: one per relay candidate a
+browser currently holds (several per participant on a rotating method), so it
+shows how much of the relay port range is in use. The relay has no per-user
+allocation quota.
 
 To serve TURN over TLS on port 443 next to the HTTPS proxy, put an SNI router
 in front of both and forward the TURN name to `TURN_SERVER_TLS_PORT`; the

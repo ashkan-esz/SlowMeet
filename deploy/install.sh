@@ -995,8 +995,11 @@ migrate_coturn_relay() {
                 set_env_if_empty TURN_SERVER_TLS_PORT "$value"
             fi
         done < "$config"
-        # The file holds the shared secret and nothing reads it any more.
-        rm -f "$config"
+        # Nothing reads the file any more. It is kept under another name,
+        # private because it holds the shared secret, so the previous version
+        # can be brought back (see "Rolling back" in docs/install-script.md).
+        mv -f "$config" "$config.migrated"
+        chmod 0600 "$config.migrated"
     fi
     set_env TURN_SERVER_ENABLED true
     set_env_if_empty TURN_SERVER_REALM "$domain"
@@ -1236,9 +1239,13 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     write_podman_service
 
     cd "$INSTALL_DIR"
-    # The former coturn container would keep the TURN ports; it goes first.
+    # Build while the old containers still serve, so that only the swap below
+    # interrupts calls. The former coturn container would keep the TURN ports
+    # the new SlowMeet container binds, so it goes right before that swap
+    # rather than before the build, which can take minutes.
+    compose build
     remove_coturn_container
-    compose up -d --build
+    compose up -d
     if [[ "$container_engine" == podman ]]; then
         systemctl enable --now slowmeet-podman.service
     fi

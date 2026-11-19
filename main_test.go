@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -101,16 +102,27 @@ func relayChildEnv(t *testing.T, testName, httpAddr string, turnPort int) []stri
 	return env
 }
 
-// freeWildcardTCPPort returns a TCP port free on every address, which is how
-// the relay binds.
-func freeWildcardTCPPort(t *testing.T) int {
+// freeTURNPort returns a port free for TCP and UDP on every address, which is
+// how the relay binds.
+func freeTURNPort(t *testing.T) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", ":0")
-	if err != nil {
-		t.Fatal(err)
+	for range 50 {
+		listener, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		listener.Close()
+		// A wildcard UDP bind fails if any single address holds the port.
+		conn, err := net.ListenPacket("udp", net.JoinHostPort("", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		conn.Close()
+		return port
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
+	t.Fatal("no port is free for both TCP and UDP on every address")
+	return 0
 }
 
 func TestMainExitsNonzeroWhenTheRelayPortIsTaken(t *testing.T) {
@@ -153,7 +165,7 @@ func TestMainServesTheBuiltInRelayAndStopsCleanly(t *testing.T) {
 		return
 	}
 
-	turnPort := freeWildcardTCPPort(t)
+	turnPort := freeTURNPort(t)
 	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +207,17 @@ func TestMainServesTheBuiltInRelayAndStopsCleanly(t *testing.T) {
 	}
 	waitForTCP("the TURN relay", turnAddr)
 	waitForTCP("the HTTP server", httpAddr)
+
+	// The running relay is visible to an operator.
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://" + httpAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("fetch metrics: %v\n%s", err, output.String())
+	}
+	metrics, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || !strings.Contains(string(metrics), "slowmeet_turn_allocations 0\n") {
+		t.Fatalf("metrics do not report the relay's allocations (%v):\n%s", err, metrics)
+	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal child: %v", err)

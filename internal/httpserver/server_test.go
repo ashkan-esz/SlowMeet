@@ -103,6 +103,32 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	}
 }
 
+func TestMetricsReportTURNAllocationsOnlyWhenTheRelayRuns(t *testing.T) {
+	app := New(testConfig(t), NewLogger("error"))
+	defer app.Close()
+	metrics := func() string {
+		response := httptest.NewRecorder()
+		app.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("metrics status = %d, want 200", response.Code)
+		}
+		return response.Body.String()
+	}
+
+	if body := metrics(); strings.Contains(body, "slowmeet_turn_allocations") {
+		t.Fatalf("metrics report TURN allocations without a built-in relay:\n%s", body)
+	}
+	allocations := 0
+	app.SetTURNAllocations(func() int { return allocations })
+	if body := metrics(); !strings.Contains(body, "slowmeet_turn_allocations 0\n") {
+		t.Fatalf("metrics omit the idle relay's allocation count:\n%s", body)
+	}
+	allocations = 7
+	if body := metrics(); !strings.Contains(body, "slowmeet_turn_allocations 7\n") {
+		t.Fatalf("metrics do not follow the relay's allocation count:\n%s", body)
+	}
+}
+
 func TestPublicConfigFlagsMeetingPasswordRequirement(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.MeetingPassword = "room-secret"

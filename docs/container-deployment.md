@@ -138,7 +138,7 @@ update it; for a deployment you manage by hand:
    `SLOWMEET_MEMORY_LIMIT` and `SLOWMEET_GOMEMLIMIT`. The relay also shares
    `SLOWMEET_CPUS`; raise it if relayed calls are throttled.
 5. Start with the override file as shown above.
-6. Delete `turnserver.conf` (it holds the shared secret) and the unused
+6. Once the relay works, delete `turnserver.conf` (it holds the shared secret) and the unused
    `TURN_CONFIG_FILE`, `TURN_CPUS`, `TURN_MEMORY_LIMIT`, and `TURN_PIDS_LIMIT`
    lines in `.env`. The firewall rule for the relay port range is no longer
    needed.

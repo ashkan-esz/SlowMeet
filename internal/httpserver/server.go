@@ -39,6 +39,16 @@ type Server struct {
 	handler http.Handler
 	hub     *signaling.Hub
 	ready   atomic.Bool
+	// turnAllocations reports the built-in TURN relay's current allocation
+	// count for /metrics; nil when the relay is not running.
+	turnAllocations func() int
+}
+
+// SetTURNAllocations makes /metrics report how many allocations the built-in
+// TURN relay holds. Call it before the server starts serving; without it the
+// sample is omitted.
+func (s *Server) SetTURNAllocations(count func() int) {
+	s.turnAllocations = count
 }
 
 type participantPreviewRequest struct {
@@ -193,6 +203,11 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = fmt.Fprintf(w, "slowmeet_active_participants %d\n", meetingState.Count())
 		_, _ = fmt.Fprintf(w, "slowmeet_peer_connections %d\n", snapshot.PeerConnections)
+		if app.turnAllocations != nil {
+			// One per relay candidate a browser (or a relay-only SFU peer)
+			// currently holds; a rotating method holds several at a time.
+			_, _ = fmt.Fprintf(w, "slowmeet_turn_allocations %d\n", app.turnAllocations())
+		}
 		_, _ = fmt.Fprintf(w, "slowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
 		_, _ = fmt.Fprintf(w, "slowmeet_reconnects_total %d\n", snapshot.Reconnects)
 		_, _ = fmt.Fprintf(w, "slowmeet_ice_restarts_total{reason=\"recovery\"} %d\n", snapshot.ICERestartsRecovery)

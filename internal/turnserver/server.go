@@ -18,8 +18,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/pion/turn/v5"
+	"golang.org/x/net/netutil"
 
 	"SlowMeet/internal/config"
 )
@@ -50,9 +52,21 @@ func Start(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	return start(cfg, logger, "")
 }
 
+// maxStreamClients caps the connections each stream listener (TURN over TCP,
+// TURN over TLS) holds open at once. The relay shares its process with the SFU
+// and the HTTP server, so connections that are opened and left idle must not
+// be able to take the memory the meeting needs. The cap is well above the
+// largest legitimate use: 100 participants on a rotating method hold about
+// nine connections each. Beyond it, new connections wait to be accepted.
+const maxStreamClients = 1024
+
 // start binds the listeners on listenHost (empty for every address) and runs
 // the relay. Tests pass a loopback host and port 0.
-func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server, err error) {
+func start(cfg config.Config, logger *slog.Logger, listenHost string) (*Server, error) {
+	return startWithLimit(cfg, logger, listenHost, maxStreamClients)
+}
+
+func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, streamClients int) (_ *Server, err error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -74,6 +88,7 @@ func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server
 	if server.tcp, err = net.Listen("tcp", plainAddress); err != nil {
 		return nil, fmt.Errorf("listen for TURN on TCP %s: %w", plainAddress, err)
 	}
+	server.tcp = netutil.LimitListener(server.tcp, streamClients)
 	listeners := []net.Listener{server.tcp}
 	if cfg.TURNServerTLSEnabled() {
 		tlsAddress := net.JoinHostPort(listenHost, strconv.Itoa(cfg.TURNServerTLSPort))
@@ -82,7 +97,8 @@ func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server
 			return nil, fmt.Errorf("listen for TURN over TLS on TCP %s: %w", tlsAddress, listenErr)
 		}
 		certificates := newCertReloader(cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile, logger)
-		server.tls = tls.NewListener(inner, &tls.Config{
+		// The cap sits under TLS so the TURN library still sees a *tls.Conn.
+		server.tls = tls.NewListener(netutil.LimitListener(inner, streamClients), &tls.Config{
 			MinVersion:     tls.VersionTLS12,
 			GetCertificate: certificates.GetCertificate,
 		})
@@ -90,9 +106,11 @@ func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server
 	}
 
 	generator := &relayAddressGenerator{
-		addresses: addresses,
-		portMin:   cfg.TURNServerRelayPortMin,
-		portMax:   cfg.TURNServerRelayPortMax,
+		addresses:  addresses,
+		portMin:    cfg.TURNServerRelayPortMin,
+		portMax:    cfg.TURNServerRelayPortMax,
+		sfuPortMin: cfg.ICEUDPPortMin,
+		sfuPortMax: cfg.ICEUDPPortMax,
 	}
 	permit := func(_ net.Addr, peerIP net.IP) bool {
 		if addresses.permits(peerIP) {
@@ -136,12 +154,18 @@ func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server
 	for _, conn := range server.udp {
 		udpAddresses = append(udpAddresses, conn.LocalAddr().String())
 	}
+	// The peer ports the relay forwards to besides its own relay ports.
+	sfuPorts := "any"
+	if cfg.ICEUDPPortMin != 0 {
+		sfuPorts = fmt.Sprintf("%d-%d", cfg.ICEUDPPortMin, cfg.ICEUDPPortMax)
+	}
 	logger.Info("turn_server_started",
 		"udp", strings.Join(udpAddresses, ","),
 		"tcp", server.tcp.Addr().String(),
 		"tls", tlsAddress,
 		"relay_ip", addresses.relayIP.String(),
 		"relay_ports", fmt.Sprintf("%d-%d", cfg.TURNServerRelayPortMin, cfg.TURNServerRelayPortMax),
+		"sfu_ports", sfuPorts,
 		"translates_public_ip", addresses.translates())
 	if len(cfg.EffectiveTURNURLs()) == 0 {
 		logger.Warn("turn_server_without_urls",
@@ -159,10 +183,29 @@ func start(cfg config.Config, logger *slog.Logger, listenHost string) (_ *Server
 // wildcard address.) Addresses added after startup are served once the
 // process restarts.
 //
-// A failure on an IPv4 address is an error. IPv6 addresses are best effort,
-// as relayed media is IPv4 either way: one that cannot be bound (for example
+// A port that is taken on an IPv4 address is an error. An address that is no
+// longer there when it is bound (an interface that went away since the list
+// was read) is skipped, and IPv6 addresses are best effort altogether, as
+// relayed media is IPv4 either way: one that cannot be bound (for example
 // while still tentative) is skipped.
-func listenUDP(listenHost string, port int, logger *slog.Logger) (_ []net.PacketConn, err error) {
+func listenUDP(listenHost string, port int, logger *slog.Logger) ([]net.PacketConn, error) {
+	addresses := localUnicastAddresses()
+	if listenHost != "" || len(addresses) == 0 {
+		// A chosen host, or no interface address could be read and the
+		// wildcard address is the only thing left to bind.
+		address := net.JoinHostPort(listenHost, strconv.Itoa(port))
+		conn, err := net.ListenPacket("udp", address)
+		if err != nil {
+			return nil, fmt.Errorf("listen for TURN on UDP %s: %w", address, err)
+		}
+		return []net.PacketConn{conn}, nil
+	}
+	return listenUDPOn(addresses, port, logger)
+}
+
+// listenUDPOn binds one UDP socket per address, with the rules listenUDP
+// describes. It fails if no address at all could be bound.
+func listenUDPOn(addresses []net.IP, port int, logger *slog.Logger) (_ []net.PacketConn, err error) {
 	var conns []net.PacketConn
 	defer func() {
 		if err != nil {
@@ -171,31 +214,20 @@ func listenUDP(listenHost string, port int, logger *slog.Logger) (_ []net.Packet
 			}
 		}
 	}()
-	listen := func(host string) error {
-		address := net.JoinHostPort(host, strconv.Itoa(port))
+	for _, ip := range addresses {
+		address := net.JoinHostPort(ip.String(), strconv.Itoa(port))
 		conn, listenErr := net.ListenPacket("udp", address)
-		if listenErr != nil {
-			return fmt.Errorf("listen for TURN on UDP %s: %w", address, listenErr)
+		if listenErr == nil {
+			conns = append(conns, conn)
+			continue
 		}
-		conns = append(conns, conn)
-		return nil
+		if ip.To4() != nil && !errors.Is(listenErr, syscall.EADDRNOTAVAIL) {
+			return nil, fmt.Errorf("listen for TURN on UDP %s: %w", address, listenErr)
+		}
+		logger.Warn("turn_server_address_skipped", "address", ip.String(), "error", listenErr.Error())
 	}
-	addresses := localUnicastAddresses()
-	if listenHost != "" || len(addresses) == 0 {
-		// A chosen host, or no interface address could be read and the
-		// wildcard address is the only thing left to bind.
-		if err := listen(listenHost); err != nil {
-			return nil, err
-		}
-		return conns, nil
-	}
-	for _, address := range addresses {
-		if listenErr := listen(address.String()); listenErr != nil {
-			if address.To4() != nil {
-				return nil, listenErr
-			}
-			logger.Warn("turn_server_ipv6_address_skipped", "address", address.String(), "error", listenErr.Error())
-		}
+	if len(conns) == 0 {
+		return nil, fmt.Errorf("listen for TURN on UDP port %d: no local address could be bound", port)
 	}
 	return conns, nil
 }

@@ -350,7 +350,11 @@ assert_env TURN_CERT_DIR "$TURN_CERT_DIR" "the installer's certificate directory
 assert_env SLOWMEET_CPUS 0.75 'the app CPU limit is left as it was'
 assert_env SLOWMEET_MEMORY_LIMIT 384m 'the relay shares the app memory limit'
 assert_env SLOWMEET_GOMEMLIMIT 300MiB 'the Go heap limit follows the memory limit'
-[[ ! -e "$coturn_config" ]] || fail 'turnserver.conf holds the shared secret and must be removed'
+# The old configuration is set aside, private, for a rollback.
+[[ ! -e "$coturn_config" ]] || fail 'turnserver.conf is no longer read and must not stay in place'
+assert_contains "$coturn_config.migrated" 'static-auth-secret=0123abcd'
+[[ "$(stat -c '%a' "$coturn_config.migrated")" == 600 ]] \
+    || fail 'the kept coturn configuration holds the shared secret and must be private'
 [[ "$(cat "$TURN_CERT_DIR/privkey.pem")" == key ]] || fail 'the relay must get a certificate copy'
 assert_contains "$INSTALL_LOG" "-o 10001 -g 10001 -m 0400 $CERT_DIR/privkey.pem $TURN_CERT_DIR/privkey.pem"
 assert_not_contains "$LOG_FILE" 'WARNING'
@@ -454,20 +458,26 @@ assert_contains "$ENGINE_LOG" 'podman rm -f abc123'
 # --- Installer flows ---------------------------------------------------------
 
 # An update moves a coturn installation over before it starts the new
-# containers, and frees the TURN ports first.
+# containers. It builds the image while coturn still serves, and removes the
+# coturn container only right before the swap, so TURN is not down for the
+# length of a build.
 update_path=$(sed -n '/Updating the existing SlowMeet checkout/,/wait_for_updated_service$/p' "$INSTALLER")
 for expected in 'migrate_coturn_relay' 'enable_relay_compose_override' 'touch "$INSTALL_DIR/.turn-enabled"' \
-    'if [[ -f "$CERT_HOOK" ]]; then' 'write_cert_hook' 'write_podman_service' 'remove_coturn_container' \
-    'compose up -d --build'; do
+    'if [[ -f "$CERT_HOOK" ]]; then' 'write_cert_hook' 'write_podman_service' 'compose build' \
+    'remove_coturn_container' 'compose up -d'; do
     [[ -n "$(line_of "$update_path" "$expected")" ]] || fail "an update must run: $expected"
 done
+[[ -z "$(line_of "$update_path" 'compose up -d --build')" ]] \
+    || fail 'an update must build before it removes the coturn container, not while starting'
 [[ "$(line_of "$update_path" 'git -C "$INSTALL_DIR" checkout')" -lt "$(line_of "$update_path" 'migrate_coturn_relay')" ]] \
     || fail 'the checkout must be updated before the relay override it ships is used'
 [[ "$(line_of "$update_path" 'enable_host_network_if_supported')" -lt "$(line_of "$update_path" 'enable_relay_compose_override')" ]] \
     || fail 'host networking must be chosen before the relay override is added'
-[[ "$(line_of "$update_path" 'migrate_coturn_relay')" -lt "$(line_of "$update_path" 'compose up -d --build')" ]] \
-    || fail 'the relay must be configured before the containers start'
-[[ "$(line_of "$update_path" 'remove_coturn_container')" -lt "$(line_of "$update_path" 'compose up -d --build')" ]] \
+[[ "$(line_of "$update_path" 'migrate_coturn_relay')" -lt "$(line_of "$update_path" 'compose build')" ]] \
+    || fail 'the relay must be configured before the containers are built and started'
+[[ "$(line_of "$update_path" 'compose build')" -lt "$(line_of "$update_path" 'remove_coturn_container')" ]] \
+    || fail 'the image must be built while the coturn container still serves'
+[[ "$(line_of "$update_path" 'remove_coturn_container')" -lt "$(line_of "$update_path" 'compose up -d')" ]] \
     || fail 'the coturn container must be removed before the relay binds the TURN ports'
 
 # A fresh installation and an uninstall also clear a leftover coturn container.
