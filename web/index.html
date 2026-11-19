@@ -60,8 +60,8 @@
           <label for="password">Meeting password</label>
           <input id="password" name="password" type="password" autocomplete="current-password">
         </div>
-        <div class="form-field" hidden>
-          <label for="join-connection-method">Connection method</label>
+        <div class="form-field" id="join-connection-method-field">
+          <label for="join-connection-method">Connection type</label>
           <select id="join-connection-method" autocomplete="off" aria-describedby="join-connection-method-help">
             <option value="auto">Automatic</option>
             <option value="direct">Direct</option>
@@ -71,7 +71,7 @@
             <option value="turn-tcp-rotate">TURN over TCP (rotating)</option>
             <option value="turn-tls-rotate">TURN over TLS (rotating)</option>
           </select>
-          <span id="join-connection-method-help" class="field-help">Choose a network path for this meeting.</span>
+          <span id="join-connection-method-help" class="field-help">Automatic suits most networks. Choose a relay type if calls keep reconnecting.</span>
         </div>
         <section class="device-test" aria-labelledby="device-test-title">
           <div class="device-test-summary">

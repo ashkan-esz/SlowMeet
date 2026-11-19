@@ -3476,9 +3476,9 @@ async function main() {
         assert.equal(await pageA.locator('#settings-connection-method option[value="direct"]').isDisabled(), true,
           "the refreshed in-meeting selector should disable direct mode");
 
-        // The prejoin method picker is a hidden value-holder since the
-        // in-meeting settings selector became the visible control; request
-        // "direct" the way the hidden field would.
+        // "direct" is now disabled in the join page's connection-type field,
+        // so a user cannot pick it; request it the way a stale page that
+        // still had it selected would.
         await staleJoinPage.evaluate(() => {
           const select = document.querySelector('#join-connection-method');
           select.value = 'direct';

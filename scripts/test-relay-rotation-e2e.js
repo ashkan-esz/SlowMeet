@@ -143,11 +143,8 @@ async function join(browser, baseURL, name, method) {
   }, method, { timeout: 15000 });
   // The selector is re-rendered when the ICE configuration arrives.
   await delay(1000);
-  await page.evaluate((id) => {
-    const select = document.querySelector("#join-connection-method");
-    select.value = id;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  }, method);
+  // The connection type is a visible field on the join form.
+  await page.selectOption("#join-connection-method", method);
   assert.equal(await page.evaluate(() => document.querySelector("#join-connection-method").value), method,
     `${name} could not select ${method} on the join form`);
   await page.evaluate(() => document.querySelector("#join-form").requestSubmit());

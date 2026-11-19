@@ -2147,7 +2147,10 @@ function refreshConnectionMethodSelectors() {
   }
   const reason = connectionMethodOptions.get(connectionMethod)?.reason;
   const help = reason || "Choose a network path for this meeting.";
-  if (joinConnectionMethodHelp) joinConnectionMethodHelp.textContent = help;
+  if (joinConnectionMethodHelp) {
+    joinConnectionMethodHelp.textContent = reason ||
+      "Automatic suits most networks. Choose a relay type if calls keep reconnecting.";
+  }
   if (settingsConnectionMethodHelp) settingsConnectionMethodHelp.textContent = help;
   updateConnectionMethodSummary();
 }

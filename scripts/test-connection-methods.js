@@ -142,4 +142,20 @@ assert.match(appSource, /appliedConnectionMethod = effectiveMethod;\s*peerFirstC
   "a rebuilt peer records the method it was built for and restarts the early-death window");
 assert.match(indexSource, /<option value="turn-tcp-rotate">TURN over TCP \(rotating\)<\/option>\s*<option value="turn-tls-rotate">TURN over TLS \(rotating\)<\/option>/);
 
+// The join page offers the same connection types as in-meeting Settings, as a
+// visible field between the password and the device check.
+const joinField = indexSource.match(/<div class="form-field" id="join-connection-method-field"([^>]*)>([\s\S]*?)<\/div>/);
+assert.ok(joinField, "the join form must contain the connection-type field");
+assert.doesNotMatch(joinField[1], /hidden/, "the join connection-type field must be visible");
+assert.match(joinField[2], /<label for="join-connection-method">Connection type<\/label>/);
+const optionValues = (markup) => [...markup.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]);
+const settingsSelect = indexSource.match(/<select id="settings-connection-method"[\s\S]*?<\/select>/);
+assert.ok(settingsSelect, "the in-meeting settings selector must exist");
+assert.deepEqual(optionValues(joinField[2]), optionValues(settingsSelect[0]),
+  "the join page and Settings must offer the same connection types");
+assert.equal(optionValues(joinField[2]).length, 7);
+assert.ok(indexSource.indexOf('id="password-field"') < indexSource.indexOf('id="join-connection-method-field"') &&
+  indexSource.indexOf('id="join-connection-method-field"') < indexSource.indexOf('class="device-test"'),
+  "the connection type sits after the password and before the device check");
+
 console.log("Connection method tests passed");
