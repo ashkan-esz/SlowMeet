@@ -11,7 +11,7 @@ require (
 require (
 	github.com/pion/stun/v4 v4.0.1 // indirect
 	github.com/pion/transport/v5 v5.1.1 // indirect
-	github.com/pion/turn/v5 v5.1.2 // indirect
+	github.com/pion/turn/v5 v5.1.2
 	golang.org/x/time v0.14.0 // indirect
 )
 
@@ -33,3 +33,5 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
+
+replace github.com/pion/ice/v4 => ./third_party/pion-ice

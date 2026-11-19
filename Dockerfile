@@ -3,6 +3,9 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 ARG TARGETARCH
 COPY go.mod go.sum ./
+# go.mod replaces pion/ice with the patched copy in third_party/ (see
+# third_party/README.md), so it must exist before modules are resolved.
+COPY third_party ./third_party
 RUN go mod download
 COPY . .
 RUN build_arch="${TARGETARCH:-$(go env GOARCH)}" \
