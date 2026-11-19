@@ -117,8 +117,12 @@ assert.match(videoVisibility, /else if \(!element\.cameraVideo\.paused\) element
   "video visibility must not pause already-paused elements");
 const updateDiagnostics = slice(appSource, "async function updateDiagnostics() {",
   "\nasync function runDiagnosticsUpdate()");
-assert.match(updateDiagnostics, /if \(document\.hidden\) return;/,
-  "the stats loop must idle while the tab is hidden");
+// A hidden tab still publishes media, so adaptation keeps sampling there, at
+// a third of the rate; it used to stop entirely.
+assert.match(updateDiagnostics, /if \(document\.hidden\) \{\s*hiddenDiagnosticsTicks \+= 1;\s*if \(hiddenDiagnosticsTicks % hiddenDiagnosticsEveryTicks !== 0\) return;\s*\} else \{\s*hiddenDiagnosticsTicks = 0;\s*\}/,
+  "the stats loop must slow down, not stop, while the tab is hidden");
+assert.match(appSource, /const hiddenDiagnosticsEveryTicks = 3;/,
+  "a hidden tab samples every third tick");
 const runDiagnosticsUpdate = slice(appSource, "async function runDiagnosticsUpdate() {",
   "\nfunction resolveVideoProfile(");
 assert.match(runDiagnosticsUpdate, /cameraLostSincePreviousSample \+= packetDeltas\.lost/,

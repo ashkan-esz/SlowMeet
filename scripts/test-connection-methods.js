@@ -3,9 +3,33 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   filterICEServers, requiresConfiguredICEServers, isRotatingMethod, baseMethod, rotatingMethodForProtocol,
-  rotatingVariant,
+  rotatingVariant, narrowICEServersToURL,
   autoRelayFallback, autoRelayFallbackOrder, sharesPeerConfiguration
 } = require("../web/js/connection-methods.js");
+
+// narrowICEServersToURL: a rotation re-gathers only on the TURN URL that
+// already carries the call. Browsers report that URL in their own spelling.
+{
+  const configured = [
+    {urls: ["stun:stun.example.com:3478"]},
+    {urls: ["turns:turn.example.com:443?transport=tcp", "turn:192.0.2.1:3478?transport=tcp",
+      "turns:meet.example.com?transport=tcp", "turn:192.0.2.1"], username: "user", credential: "secret"}
+  ];
+  assert.deepEqual(narrowICEServersToURL(configured, "turns:turn.example.com:443?transport=tcp"),
+    [{urls: ["turns:turn.example.com:443?transport=tcp"], username: "user", credential: "secret"}],
+    "the matching URL is kept alone, with its credentials");
+  assert.deepEqual(narrowICEServersToURL(configured, "TURNS:Meet.Example.com:5349?transport=TCP")?.[0].urls,
+    ["turns:meet.example.com?transport=tcp"], "the default TURNS port and letter case must not prevent a match");
+  assert.deepEqual(narrowICEServersToURL(configured, "turn:192.0.2.1:3478?transport=udp")?.[0].urls, ["turn:192.0.2.1"],
+    "a URL without port or transport means UDP on 3478");
+  assert.deepEqual(narrowICEServersToURL(configured, "turn:192.0.2.1:3478?transport=tcp")?.[0].urls,
+    ["turn:192.0.2.1:3478?transport=tcp"], "transport distinguishes two URLs on one host and port");
+  for (const unknown of ["turn:198.51.100.9:3478?transport=tcp", "turns:turn.example.com:5349?transport=tcp",
+    "stun:stun.example.com:3478", "", null, undefined, "not a url"]) {
+    assert.equal(narrowICEServersToURL(configured, unknown), null, `${unknown} names no configured TURN URL`);
+  }
+  assert.equal(configured[1].urls.length, 4, "the configured list must not be modified");
+}
 
 const servers = [
   {urls: ["stun:stun.example.com:3478"]},
@@ -140,6 +164,26 @@ assert.match(appSource, /manageRotationSuggestion\(relayProtocol, rttMs\);/,
 // flow dies outright; the RTT guard cannot see a dead pair.
 assert.match(appSource, /if \(!connected && plainRelaySuspended &&[\s\S]{0,160}"disconnected"[\s\S]{0,400}plainRelaySuspended = false;[\s\S]{0,300}encodeVerdict\("fail", nowMs\)/,
   "an ICE disconnect while rotation is suspended must end the suspension and record the failure");
+// One failed /ice-config request must not erase the saved connection type:
+// the fallback shows Automatic without writing storage, and the next server
+// response restores the saved choice before validating it.
+assert.match(appSource, /\} catch \(_\) \{[\s\S]{0,400}refreshConnectionMethodSelectors\(\{ authoritative: false \}\);/,
+  "the failure fallback must refresh the selectors as non-authoritative");
+assert.match(appSource, /if \(!selectedMethod\?\.enabled\) \{\s*connectionMethod = "auto";\s*if \(authoritative\) writeStoredValue\("meeting\.connectionMethod", connectionMethod\);\s*else connectionMethodSetAside = true;/,
+  "only a server-provided method list may replace the saved method in storage");
+assert.match(appSource, /if \(connectionMethodSetAside\) \{\s*connectionMethodSetAside = false;\s*connectionMethod = readStoredValue\("meeting\.connectionMethod"\) \|\| "auto";\s*\}\s*refreshConnectionMethodSelectors\(\);\s*return true;/,
+  "a successful response must bring the set-aside method back before the selectors are validated");
+
+// A rotation gathers only on the selected relay's TURN URL; a recovery
+// restart and a method switch go back to the method's full list.
+assert.match(appSource, /narrowRotationServers\(targetPeer, relayServerURL\);\s*targetSocket\.send\(JSON\.stringify\(\{ version: 1, type: "ice_restart", reason: "rotate" \}\)\);/,
+  "the server list is narrowed just before a rotation restart is requested");
+assert.match(appSource, /function narrowRotationServers\(targetPeer, relayServerURL\) \{[\s\S]{0,400}narrowICEServersToURL\(\s*filteredICEServers\(appliedConnectionMethod\), relayServerURL\);[\s\S]{0,300}rotationNarrowedPeer = targetPeer;/,
+  "narrowing starts from the applied method's servers and is remembered per peer");
+assert.match(appSource, /restoreRotationServers\(targetPeer\);\s*targetSocket\.send\(JSON\.stringify\(\{ version: 1, type: "ice_restart" \}\)\);/,
+  "a recovery restart must gather on every configured server again");
+assert.match(appSource, /type: "ice_restart", reason: "switch" \}\)\);\s*rotationNarrowedPeer = null;/,
+  "a method switch replaces the server list, so the narrowed state is dropped");
 const pathMemoryScriptAt = indexSource.indexOf('<script defer src="/js/path-memory.js"></script>');
 const appScriptAt = indexSource.indexOf('<script defer src="/js/app.js"></script>');
 assert.ok(pathMemoryScriptAt !== -1, "index.html must load path-memory.js");

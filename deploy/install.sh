@@ -955,9 +955,15 @@ if [[ -f /opt/slowmeet/.turn-enabled ]]; then
     install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/turn-certs/fullchain.pem
     install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem
     cd /opt/slowmeet
+    # coturn re-reads its certificate on SIGUSR2 and keeps every relayed call;
+    # a restart drops them all. Restart only if the signal cannot be delivered.
     case "$container_engine" in
-        docker) docker compose -f docker-compose.yml --profile turn restart coturn ;;
-        podman) podman-compose -f podman-compose.yml --profile turn restart coturn ;;
+        docker)
+            docker compose -f docker-compose.yml --profile turn kill -s SIGUSR2 coturn \
+                || docker compose -f docker-compose.yml --profile turn restart coturn ;;
+        podman)
+            podman-compose -f podman-compose.yml --profile turn kill -s SIGUSR2 coturn \
+                || podman-compose -f podman-compose.yml --profile turn restart coturn ;;
         *) printf '[slowmeet] ERROR: Unknown saved container engine.\n' >&2; exit 1 ;;
     esac
 fi
@@ -1144,10 +1150,12 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
             && -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
             install_turn_certs "$CERT_DIR"
             set_env TURN_CERT_DIR "$TURN_CERT_DIR"
-            if [[ -f "$CERT_HOOK" ]]; then
-                write_cert_hook
-            fi
         fi
+    fi
+    # Keep an existing renewal hook current (coturn certificate copy, reload
+    # by signal instead of a restart).
+    if [[ -f "$CERT_HOOK" ]]; then
+        write_cert_hook
     fi
     write_podman_service
 

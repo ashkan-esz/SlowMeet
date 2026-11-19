@@ -79,7 +79,10 @@ The installer proceeds through these steps:
      owned by the user the coturn image runs as (`65534:65533`). coturn cannot
      read the proxy's root-owned copy and would start without its TLS
      listener. The renewal hook refreshes both copies; an update migrates an
-     older install that still mounts `/etc/slowmeet/certs`.
+     older install that still mounts `/etc/slowmeet/certs`. After a renewal
+     the hook signals coturn to reload its certificate (`SIGUSR2`), which
+     keeps relayed calls connected, and restarts it only if the signal cannot
+     be delivered. An update rewrites an existing hook.
    - writes a coturn configuration that relays only to this server's own
      address (`no-tcp-relay`, `no-multicast-peers`, every peer denied except
      the public IPv4 and, behind NAT, the private one), so a TURN credential

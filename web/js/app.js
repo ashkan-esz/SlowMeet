@@ -1919,6 +1919,9 @@ let relayRotationCheckRunning = false;
 // it while fresh instead of walking getStats a second time every second; it
 // only reads its own when diagnostics is not sampling (a hidden tab).
 const sharedStatsMaxAgeMs = 1500;
+// In a hidden tab diagnostics sample every third second; the rotation check
+// accepts a report that old there instead of fetching its own every second.
+const hiddenSharedStatsMaxAgeMs = 3500;
 let lastDiagnosticsStats = null;
 // Whether the last rotation check found rotation in effect (shown in the
 // active-path label).
@@ -2030,6 +2033,10 @@ const connectionMetrics = {
 let adaptationLevel = 2;
 let poorSamples = 0;
 let goodSamples = 0;
+// Lengthens the wait before the next quality climb after a climb that had to
+// be stepped back down, so a link between two levels does not flip every few
+// seconds (see createClimbBackoff).
+const climbBackoff = createClimbBackoff();
 let cameraLayer = "medium";
 let cameraLayerPoorSamples = 0;
 let cameraLayerGoodSamples = 0;
@@ -2105,6 +2112,9 @@ function refreshOpusDTXSwitch() {
 refreshOpusDTXSwitch();
 const connectionMethodOptions = new Map();
 let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
+// True while the saved method is only set aside because the ICE configuration
+// could not be fetched; the next successful response brings it back.
+let connectionMethodSetAside = false;
 let iceConfigRequest;
 let iceCredentialRequest;
 let iceCredentialRequestToken;
@@ -2153,13 +2163,19 @@ async function refreshICEConfig(sessionToken) {
           return normalized;
         }).filter(Boolean);
       }
+      if (connectionMethodSetAside) {
+        connectionMethodSetAside = false;
+        connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
+      }
       refreshConnectionMethodSelectors();
       return true;
     } catch (_) {
       if (requestVersion === iceConfigRequestVersion && connectionMethodOptions.size === 0) {
         connectionMethodOptions.set("auto", {id: "auto", label: "Automatic", enabled: true});
         iceServers = [];
-        refreshConnectionMethodSelectors();
+        // Not the server's answer: fall back to Automatic for now, but do
+        // not overwrite the saved choice because one request failed.
+        refreshConnectionMethodSelectors({ authoritative: false });
       }
       return false;
     }
@@ -2183,7 +2199,9 @@ async function refreshICEConfig(sessionToken) {
 }
 const iceConfigReady = refreshICEConfig(undefined);
 
-function refreshConnectionMethodSelectors() {
+// authoritative: the method list came from the server. Only then is a saved
+// method that is no longer offered replaced in storage.
+function refreshConnectionMethodSelectors({ authoritative = true } = {}) {
   [joinConnectionMethod, settingsConnectionMethod].forEach((select) => {
     if (!select) return;
     [...select.options].forEach((option) => {
@@ -2198,7 +2216,8 @@ function refreshConnectionMethodSelectors() {
   const selectedMethod = connectionMethodOptions.get(connectionMethod);
   if (!selectedMethod?.enabled) {
     connectionMethod = "auto";
-    writeStoredValue("meeting.connectionMethod", connectionMethod);
+    if (authoritative) writeStoredValue("meeting.connectionMethod", connectionMethod);
+    else connectionMethodSetAside = true;
   }
   const reason = connectionMethodOptions.get(connectionMethod)?.reason;
   const help = reason || "Choose a network path for this meeting.";
@@ -2255,6 +2274,7 @@ function selectConnectionMethod(methodID) {
   }
   if (connectionMethod === methodID) return true;
   connectionMethod = methodID;
+  connectionMethodSetAside = false;
   autoTurnFailoverStrikes = 0;
   rotationSuggestDismissed = false;
   hideRotationSuggestBanner();
@@ -4522,6 +4542,7 @@ function switchConnectionMethodInPlace() {
     try {
       targetPeer.setConfiguration({ iceServers: servers, iceTransportPolicy: icePolicyForMethod(nextMethod) });
       targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart", reason: "switch" }));
+      rotationNarrowedPeer = null;
     } catch (_) {
       return false;
     }
@@ -4638,6 +4659,12 @@ function managePlainRelayProbe(relayProtocol, wanted, rttMs, nowMs, targetPeer) 
     plainRelaySuspended = true;
     return;
   }
+  if (!plainRelayProbe.hasHeadroom(connectionMetrics)) {
+    // The probe would compete with the call for a thin link. Rotation simply
+    // continuing is the safe outcome, so look again on a later tick.
+    plainRelayProbeChecked = false;
+    return;
+  }
   startPlainRelayProbe(relayProtocol, targetPeer);
 }
 
@@ -4724,6 +4751,40 @@ function startPlainRelayProbe(relayProtocol, forPeer) {
   })().catch(() => finish(null));
 }
 
+// A rotation gathers on every configured TURN URL of the method, but it only
+// needs a fresh connection to the server that already carries the call: with
+// two TURN/TLS URLs every rotation was two TLS handshakes and two allocations
+// for one used pair. Before a rotation the peer's server list is reduced to
+// the selected relay's URL; a recovery restart puts the full list back first,
+// so a server that stopped working can still be replaced by another one.
+let rotationNarrowedPeer = null;
+
+function narrowRotationServers(targetPeer, relayServerURL) {
+  if (rotationNarrowedPeer === targetPeer || typeof targetPeer.setConfiguration !== "function") return;
+  const servers = window.SlowMeetConnectionMethods.narrowICEServersToURL(
+    filteredICEServers(appliedConnectionMethod), relayServerURL);
+  if (!servers) return;
+  try {
+    targetPeer.setConfiguration({ iceServers: servers, iceTransportPolicy: icePolicyForMethod(appliedConnectionMethod) });
+    rotationNarrowedPeer = targetPeer;
+  } catch (_) {
+    // The full list keeps working; narrowing is only a saving.
+  }
+}
+
+function restoreRotationServers(targetPeer) {
+  if (rotationNarrowedPeer !== targetPeer) return;
+  rotationNarrowedPeer = null;
+  try {
+    targetPeer.setConfiguration({
+      iceServers: filteredICEServers(appliedConnectionMethod),
+      iceTransportPolicy: icePolicyForMethod(appliedConnectionMethod)
+    });
+  } catch (_) {
+    // The restart still runs on the narrowed list.
+  }
+}
+
 // Once per second: while rotation is in effect and the selected pair is a
 // TURN/TCP or TURN/TLS relay, ask the server for an ICE restart every
 // rotation interval. Unlike requestIceRestart this is not recovery: it
@@ -4739,14 +4800,17 @@ async function checkRelayRotation() {
   try {
     const connected = isPeerConnectionConnected(targetPeer);
     let relayProtocol = null;
+    let relayServerURL = null;
     let rttMs = null;
     if (connected) {
       const shared = lastDiagnosticsStats;
-      const report = shared && shared.peer === targetPeer && Date.now() - shared.atMs < sharedStatsMaxAgeMs
+      const sharedMaxAgeMs = document.hidden ? hiddenSharedStatsMaxAgeMs : sharedStatsMaxAgeMs;
+      const report = shared && shared.peer === targetPeer && Date.now() - shared.atMs < sharedMaxAgeMs
         ? shared.report
         : await targetPeer.getStats();
       if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
       relayProtocol = window.SlowMeetRelayRotation.rotatableRelayProtocol(report);
+      relayServerURL = window.SlowMeetRelayRotation.selectedRelayServerURL(report);
       rttMs = selectedCandidatePairRTT(report);
     }
     const nowMs = Date.now();
@@ -4771,6 +4835,7 @@ async function checkRelayRotation() {
     if (connected) setRelayRotationActive(rotatable);
     const busy = restartRequested || targetSocket.readyState !== WebSocket.OPEN;
     if (!relayRotation.observe({ rotatable, connected, busy, nowMs })) return;
+    narrowRotationServers(targetPeer, relayServerURL);
     targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart", reason: "rotate" }));
     relayRotation.rotationSent(nowMs);
   } catch (_) {
@@ -4801,6 +4866,7 @@ function requestIceRestart(targetPeer, targetSocket, generation) {
     }
   }
   try {
+    restoreRotationServers(targetPeer);
     targetSocket.send(JSON.stringify({ version: 1, type: "ice_restart" }));
     restartRequested = true;
     iceRestartAttempts += 1;
@@ -5062,14 +5128,23 @@ function updateConnectionMetrics(values) {
 }
 
 let diagnosticsUpdateRunning = false;
+const hiddenDiagnosticsEveryTicks = 3;
+let hiddenDiagnosticsTicks = 0;
 
 async function updateDiagnostics() {
   // The interval can fire again while an update is still awaiting stats or
   // applying a profile; overlapping runs would double-send network_state.
   if (diagnosticsUpdateRunning) return;
-  // A hidden tab throttles timers anyway; skip the getStats walk entirely so
-  // the one-second loop costs nothing while the meeting is backgrounded.
-  if (document.hidden) return;
+  // A backgrounded meeting still publishes its camera and microphone, so
+  // adaptation (stepping video down, pausing it to protect audio) has to keep
+  // running; it samples every third tick there to keep the cost low. Relay
+  // rotation reuses the same report (see hiddenSharedStatsMaxAgeMs).
+  if (document.hidden) {
+    hiddenDiagnosticsTicks += 1;
+    if (hiddenDiagnosticsTicks % hiddenDiagnosticsEveryTicks !== 0) return;
+  } else {
+    hiddenDiagnosticsTicks = 0;
+  }
   diagnosticsUpdateRunning = true;
   try {
     await runDiagnosticsUpdate();
@@ -5478,19 +5553,28 @@ async function runDiagnosticsUpdate() {
     // and a congesting upgrade steps straight back down through the poor
     // hysteresis.
     goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy, uplinkPoor });
+    climbBackoff.tick();
     const transition = chooseAdaptationLevel(
       adaptationLevel,
       poorSamples,
       goodSamples,
-      automaticProfileCount
+      automaticProfileCount,
+      climbBackoff.threshold()
     );
+    // Every transition starts both streaks over at the new level: a streak
+    // earned at the old level says nothing about the new one, and a stale
+    // poor streak used to step a fresh climb straight back down.
     if (transition.reset === "poor") {
       adaptationLevel = transition.level;
       poorSamples = 0;
+      goodSamples = 0;
+      climbBackoff.noteStepDown();
       await applyProfile(profiles[adaptationLevel].name);
     } else if (transition.reset === "good") {
       adaptationLevel = transition.level;
+      poorSamples = 0;
       goodSamples = 0;
+      climbBackoff.noteClimb();
       await applyProfile(profiles[adaptationLevel].name);
     }
   }
@@ -5723,6 +5807,7 @@ function isCaptureDownStep(videoTrack, targetHeight) {
 profile.addEventListener("change", async () => {
   writeStoredValue("meeting.bandwidthProfile", profile.value);
   serverDefaultProfile = false;
+  climbBackoff.reset();
   if (profile.value === "auto") {
     adaptationLevel = Math.min(adaptationLevel, automaticProfileCount - 1);
     poorSamples = 0;
@@ -6528,6 +6613,7 @@ leave.addEventListener("click", () => {
   adaptationLevel = 2;
   poorSamples = 0;
   goodSamples = 0;
+  climbBackoff.reset();
   cameraLayer = "medium";
   cameraLayerPoorSamples = 0;
   cameraLayerGoodSamples = 0;

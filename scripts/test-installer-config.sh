@@ -462,4 +462,24 @@ assert_not_contains "$coturn_config" 'external-ip='
         || fail 'the renewal hook must refresh the coturn certificate copy'
 }
 
+# A renewal must not drop relayed calls: coturn reloads its certificate on
+# SIGUSR2, and the hook restarts it only when the signal cannot be delivered.
+# The generated hook must also be valid shell.
+CERT_HOOK="$TEMP_DIR/cert-hook"
+write_cert_hook
+bash -n "$CERT_HOOK" || fail 'the generated renewal hook is not valid shell'
+assert_contains "$CERT_HOOK" 'docker compose -f docker-compose.yml --profile turn kill -s SIGUSR2 coturn'
+assert_contains "$CERT_HOOK" '|| docker compose -f docker-compose.yml --profile turn restart coturn'
+assert_contains "$CERT_HOOK" 'podman-compose -f podman-compose.yml --profile turn kill -s SIGUSR2 coturn'
+assert_contains "$CERT_HOOK" '|| podman-compose -f podman-compose.yml --profile turn restart coturn'
+[[ "$(grep -c 'restart coturn' "$CERT_HOOK")" == 2 ]] \
+    || fail 'coturn may only be restarted as the fallback of a failed reload signal'
+[[ -x "$CERT_HOOK" ]] || fail 'the renewal hook must be executable'
+# An update refreshes an existing hook whether or not TURN certificates move.
+update_path=$(sed -n '/Updating the existing SlowMeet checkout/,/write_podman_service/p' "$INSTALLER")
+# shellcheck disable=SC2016
+if ! grep -Fq 'if [[ -f "$CERT_HOOK" ]]; then' <<<"$update_path" || ! grep -Fq 'write_cert_hook' <<<"$update_path"; then
+    fail 'an update must refresh an existing renewal hook'
+fi
+
 printf 'Installer configuration checks passed.\n'

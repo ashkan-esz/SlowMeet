@@ -71,14 +71,56 @@ function stabilizeParticipantQuality(current, candidate, poorSamples = 0, goodSa
   };
 }
 
-function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount) {
+const climbBaseSamples = 5;
+const climbMaxSamples = 60;
+const failedClimbWindowSamples = 15;
+
+function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount, climbSamples = climbBaseSamples) {
   if (poorSamples >= 2 && level > 0) {
     return { level: level - 1, reset: "poor" };
   }
-  if (goodSamples >= 5 && level < profileCount - 1) {
+  if (goodSamples >= climbSamples && level < profileCount - 1) {
     return { level: level + 1, reset: "good" };
   }
   return { level, reset: null };
+}
+
+// How many healthy samples the next climb needs. A link whose real capacity
+// lies between two levels looks healthy at the lower one (the sender is not
+// saturating it) and congested at the higher one, so a fixed threshold flips
+// between them every few seconds, and each flip re-applies sender parameters
+// and capture constraints (a resolution change costs a keyframe). A climb
+// that is stepped back down within failedClimbWindowSamples doubles the
+// threshold for the next attempt, up to climbMaxSamples; a climb that holds
+// past that window restores the base threshold.
+function createClimbBackoff() {
+  let samples = climbBaseSamples;
+  let sinceClimb = null;
+
+  return {
+    threshold: () => samples,
+    // Once per classified network sample.
+    tick() {
+      if (sinceClimb === null) return;
+      sinceClimb += 1;
+      if (sinceClimb > failedClimbWindowSamples) {
+        samples = climbBaseSamples;
+        sinceClimb = null;
+      }
+    },
+    noteClimb() {
+      sinceClimb = 0;
+    },
+    noteStepDown() {
+      if (sinceClimb === null) return;
+      samples = Math.min(climbMaxSamples, samples * 2);
+      sinceClimb = null;
+    },
+    reset() {
+      samples = climbBaseSamples;
+      sinceClimb = null;
+    }
+  };
 }
 
 // How the ladder accumulates climbing samples from one classified network
@@ -420,6 +462,7 @@ if (typeof module !== "undefined") {
     classifyParticipantQuality,
     stabilizeParticipantQuality,
     chooseAdaptationLevel,
+    createClimbBackoff,
     shouldRecoverVideo,
     chooseCameraLayer,
     applyServerDefaults,

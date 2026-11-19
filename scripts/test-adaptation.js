@@ -7,6 +7,7 @@ const {
   classifyParticipantQuality,
   stabilizeParticipantQuality,
   chooseAdaptationLevel,
+  createClimbBackoff,
   countLadderRecoverySamples,
   shouldRecoverVideo,
   chooseCameraLayer,
@@ -232,6 +233,76 @@ function stepAdaptationLadder(state, sample) {
   if (next.reset === "poor") poorSamples = 0;
   if (next.reset === "good") goodSamples = 0;
   return { level: next.level, poorSamples, goodSamples };
+}
+
+// Climb backoff: the threshold doubles after each climb that is stepped back
+// down within the failure window, is capped, and returns to the base once a
+// climb holds.
+{
+  const backoff = createClimbBackoff();
+  if (backoff.threshold() !== 5) throw new Error("the first climb needs the base five healthy samples");
+  backoff.noteStepDown();
+  if (backoff.threshold() !== 5) throw new Error("a step down that does not follow a climb must not lengthen the next climb");
+  const expected = [10, 20, 40, 60, 60];
+  for (const threshold of expected) {
+    backoff.noteClimb();
+    backoff.tick();
+    backoff.tick();
+    backoff.noteStepDown();
+    if (backoff.threshold() !== threshold) {
+      throw new Error(`a failed climb must double the next threshold up to the cap: got ${backoff.threshold()}, want ${threshold}`);
+    }
+  }
+  backoff.noteClimb();
+  for (let sample = 0; sample < 15; sample += 1) backoff.tick();
+  if (backoff.threshold() !== 60) throw new Error("a climb still inside the failure window must not restore the base threshold");
+  backoff.tick();
+  if (backoff.threshold() !== 5) throw new Error("a climb that holds past the failure window must restore the base threshold");
+  backoff.noteStepDown();
+  if (backoff.threshold() !== 5) throw new Error("a step down long after a held climb is not a failed climb");
+  backoff.noteClimb();
+  backoff.noteStepDown();
+  backoff.reset();
+  if (backoff.threshold() !== 5) throw new Error("reset must restore the base threshold");
+  if (chooseAdaptationLevel(0, 0, 9, 4, 10).level !== 0 || chooseAdaptationLevel(0, 0, 10, 4, 10).level !== 1 ||
+      chooseAdaptationLevel(0, 0, 5, 4).level !== 1) {
+    throw new Error("the climb threshold must be honoured, and default to five samples");
+  }
+}
+
+// A link whose capacity sits between the two lowest levels: healthy at level
+// 0 (the sender does not saturate it) and capacity-poor at level 1. The loop
+// mirrors the app's ladder block. Climbs must thin out instead of flipping
+// every few seconds.
+{
+  const backoff = createClimbBackoff();
+  let level = 0;
+  let poorSamples = 0;
+  let goodSamples = 0;
+  const climbTimes = [];
+  for (let second = 1; second <= 240; second += 1) {
+    const poor = level >= 1;
+    poorSamples = poor ? poorSamples + 1 : 0;
+    goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy: !poor, uplinkPoor: false });
+    backoff.tick();
+    const next = chooseAdaptationLevel(level, poorSamples, goodSamples, 4, backoff.threshold());
+    if (next.reset === "poor") {
+      level = next.level;
+      poorSamples = 0;
+      goodSamples = 0;
+      backoff.noteStepDown();
+    } else if (next.reset === "good") {
+      level = next.level;
+      poorSamples = 0;
+      goodSamples = 0;
+      backoff.noteClimb();
+      climbTimes.push(second);
+    }
+  }
+  const gaps = climbTimes.slice(1).map((time, index) => time - climbTimes[index]);
+  if (climbTimes.length > 7 || gaps[0] < 10 || gaps[1] < 20 || gaps[2] < 40 || gaps.slice(3).some((gap) => gap < 60)) {
+    throw new Error(`climbs on a link between two levels must back off, got climbs at ${climbTimes.join(", ")} s`);
+  }
 }
 
 // A fluctuating link: two poor samples step the ladder down one level, a
@@ -778,6 +849,11 @@ if (!appSource.includes('stat.type === "remote-inbound-rtp"') ||
     !appSource.includes("remoteInbound.packetsLost") ||
     appSource.includes("outbound.packetsLost")) {
   throw new Error("uplink loss must come from the remote-inbound-rtp entry paired with the camera's outbound stream");
+}
+if (!/climbBackoff\.tick\(\);\s*const transition = chooseAdaptationLevel\([\s\S]{0,160}climbBackoff\.threshold\(\)\s*\);/.test(appSource) ||
+    !/transition\.reset === "poor"\) \{[\s\S]{0,120}poorSamples = 0;\s*goodSamples = 0;\s*climbBackoff\.noteStepDown\(\);/.test(appSource) ||
+    !/transition\.reset === "good"\) \{[\s\S]{0,120}poorSamples = 0;\s*goodSamples = 0;\s*climbBackoff\.noteClimb\(\);/.test(appSource)) {
+  throw new Error("every ladder transition must clear both streaks and feed the climb backoff");
 }
 if (!appSource.includes("rttBaselineMs: rttBaseline.observe(values.rttMs)") ||
     !appSource.includes("rttBaseline.reset();")) {

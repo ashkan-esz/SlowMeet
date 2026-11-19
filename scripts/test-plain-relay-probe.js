@@ -83,6 +83,26 @@ assert.match(manage, /if \(plainRelayGuard\.observe\(rttMs\)\) \{[\s\S]*?plainRe
   "a degrading plain relay resumes rotation at once and is remembered as failed");
 assert.match(manage, /document\.hidden/, "the probe does not start in a hidden tab (timers are throttled there)");
 assert.match(manage, /if \(remembered === "fail"\) return;/, "a remembered failure skips the probe");
+assert.match(manage, /if \(!plainRelayProbe\.hasHeadroom\(connectionMetrics\)\) \{[\s\S]{0,300}plainRelayProbeChecked = false;\s*return;\s*\}\s*startPlainRelayProbe\(relayProtocol, targetPeer\);/,
+  "the probe waits for bandwidth headroom and is reconsidered on a later tick");
+
+// hasHeadroom: the probe needs room above what the call is already sending.
+{
+  const {hasHeadroom, probe} = require("../web/js/plain-relay-probe.js");
+  assert.equal(probe.headroomKbps, 150);
+  assert.equal(hasHeadroom({availableOutgoingKbps: 600, outgoingVideoKbps: 400, outgoingAudioKbps: 32}), true);
+  assert.equal(hasHeadroom({availableOutgoingKbps: 300, outgoingVideoKbps: 114, outgoingAudioKbps: 32}), true,
+    "a low video profile on a link with room still probes");
+  assert.equal(hasHeadroom({availableOutgoingKbps: 250, outgoingVideoKbps: 114, outgoingAudioKbps: 32}), false,
+    "a thin link must not carry the probe on top of the call");
+  assert.equal(hasHeadroom({availableOutgoingKbps: 180, outgoingVideoKbps: null, outgoingAudioKbps: 32}), false);
+  assert.equal(hasHeadroom({availableOutgoingKbps: 182, outgoingVideoKbps: null, outgoingAudioKbps: 32}), true,
+    "missing or paused video counts as nothing sent");
+  for (const unknown of [{}, undefined, {availableOutgoingKbps: null}, {availableOutgoingKbps: 0},
+    {availableOutgoingKbps: NaN, outgoingAudioKbps: 32}]) {
+    assert.equal(hasHeadroom(unknown), false, "an unknown estimate counts as no headroom");
+  }
+}
 const runner = app.slice(app.indexOf("function startPlainRelayProbe("), app.indexOf("async function checkRelayRotation()"));
 assert.match(runner, /filteredICEServers\(`turn-\$\{relayProtocol\}`\)/, "the probe uses the plain method's servers");
 assert.match(runner, /iceTransportPolicy: "relay"/, "the probe must not leak onto a direct path");

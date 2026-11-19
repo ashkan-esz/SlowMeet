@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const {createRelayRotation, rotatableRelayProtocol} = require("../web/js/relay-rotation.js");
+const {createRelayRotation, rotatableRelayProtocol, selectedRelayServerURL} = require("../web/js/relay-rotation.js");
 
 // rotatableRelayProtocol: only a selected TURN relay over TCP or TLS rotates.
 function report(localCandidate, pairState = "succeeded") {
@@ -20,6 +20,18 @@ assert.equal(rotatableRelayProtocol(report({candidateType: "relay", relayProtoco
 assert.equal(rotatableRelayProtocol(report({candidateType: "host", protocol: "udp"})), null,
   "direct paths never rotate");
 assert.equal(rotatableRelayProtocol(new Map()), null, "no selected pair means no rotation");
+
+// selectedRelayServerURL: the TURN URL behind the selected relay candidate.
+assert.equal(selectedRelayServerURL(report({candidateType: "relay", relayProtocol: "tls",
+  url: "turns:turn.example.com:443?transport=tcp"})), "turns:turn.example.com:443?transport=tcp");
+assert.equal(selectedRelayServerURL(report({candidateType: "relay", relayProtocol: "tcp", url: "turn:192.0.2.1:3478?transport=tcp"},
+  "in-progress")), "turn:192.0.2.1:3478?transport=tcp", "the selected pair counts in any check state");
+assert.equal(selectedRelayServerURL(report({candidateType: "relay", relayProtocol: "tcp"})), null,
+  "a browser that does not report the URL gives nothing to narrow to");
+assert.equal(selectedRelayServerURL(report({candidateType: "relay", relayProtocol: "tcp", url: ""})), null);
+assert.equal(selectedRelayServerURL(report({candidateType: "srflx", url: "stun:stun.example.com:3478"})), null,
+  "only a relay candidate names a TURN server");
+assert.equal(selectedRelayServerURL(new Map()), null);
 assert.equal(rotatableRelayProtocol(new Map([
   ["P1", {id: "P1", type: "candidate-pair", localCandidateId: "L1", state: "succeeded", nominated: true}],
   ["L1", {id: "L1", type: "local-candidate", candidateType: "relay", relayProtocol: "tcp"}]
@@ -172,8 +184,12 @@ const app = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8")
 const check = app.slice(app.indexOf("async function checkRelayRotation()"), app.indexOf("function requestIceRestart("));
 assert.ok(check.includes('type: "ice_restart", reason: "rotate"'),
   "rotation asks the server for an ICE restart and labels it as planned");
-assert.match(check, /shared && shared\.peer === targetPeer && Date\.now\(\) - shared\.atMs < sharedStatsMaxAgeMs\s*\? shared\.report\s*: await targetPeer\.getStats\(\)/,
+assert.match(check, /shared && shared\.peer === targetPeer && Date\.now\(\) - shared\.atMs < sharedMaxAgeMs\s*\? shared\.report\s*: await targetPeer\.getStats\(\)/,
   "the rotation check reuses a fresh diagnostics report for the same peer and reads its own otherwise");
+assert.match(check, /const sharedMaxAgeMs = document\.hidden \? hiddenSharedStatsMaxAgeMs : sharedStatsMaxAgeMs;/,
+  "a hidden tab's slower diagnostics report is still reused instead of a getStats call every second");
+assert.match(app, /const sharedStatsMaxAgeMs = 1500;[\s\S]{0,300}const hiddenSharedStatsMaxAgeMs = 3500;/,
+  "the reuse windows must cover one visible tick and one hidden sampling interval");
 assert.match(app, /lastDiagnosticsStats = \{ report, peer: currentPeer, atMs: Date\.now\(\) \};/,
   "the diagnostics loop publishes its stats report for reuse");
 assert.match(check, /const wanted = relayProtocol !== null && relayRotationWanted\(relayProtocol\);/,

@@ -170,6 +170,9 @@ function state(page) {
       connection: meetingPeer.connectionState,
       path: local ? `${local.candidateType}/${local.relayProtocol || local.protocol}` : null,
       policy: meetingPeer.getConfiguration().iceTransportPolicy,
+      turnURLs: meetingPeer.getConfiguration().iceServers.flatMap((server) => [].concat(server.urls))
+        .filter((url) => /^turns?:/i.test(url)),
+      relayURL: local?.url || null,
       sockets: window.__e2e.sockets.length,
       socketOpen: window.__e2e.sockets.at(-1)?.readyState === WebSocket.OPEN,
       meetingPeers: window.__e2e.peers.filter((candidate) => candidate.getSenders().length > 0).length,
@@ -298,6 +301,13 @@ async function main() {
       "-secret", turnSecret], { GOCACHE: goCache });
     cleanup.push(turn.stop);
     await waitFor(() => turn.output.join("").includes("turn-server listening"), "TURN test server", turn);
+    // A second TURN server for the same method: a rotation must gather only
+    // on the one that carries the call, not on both.
+    const secondTurnPort = await reserveLocalPort();
+    const secondTurn = startProcess("go", ["run", "./scripts/e2e-turn-server", "-listen", `127.0.0.1:${secondTurnPort}`,
+      "-secret", turnSecret], { GOCACHE: goCache });
+    cleanup.push(secondTurn.stop);
+    await waitFor(() => secondTurn.output.join("").includes("turn-server listening"), "second TURN test server", secondTurn);
 
     const httpPort = await reserveLocalPort();
     const configFile = path.join(os.tmpdir(), `slowmeet-relay-rotation-e2e-${process.pid}.json`);
@@ -311,7 +321,7 @@ async function main() {
       MEETING_PASSWORD: meetingPassword,
       MAX_PARTICIPANTS: "2",
       TURN_URL: "",
-      TURN_URLS: `turn:127.0.0.1:${turnPort}?transport=tcp`,
+      TURN_URLS: `turn:127.0.0.1:${turnPort}?transport=tcp,turn:127.0.0.1:${secondTurnPort}?transport=tcp`,
       TURN_SHARED_SECRET: turnSecret,
       TURN_TCP_ROTATE_SECONDS: String(rotateSeconds),
       // Continuity is measured as gaps between inbound audio packets; with
@@ -370,6 +380,12 @@ async function main() {
       bobAudio = next;
     };
 
+    // The first connection gathers on every configured TURN server.
+    const beforeRotation = await state(alice);
+    if (beforeRotation.restarts.length === 0) {
+      assert.equal(beforeRotation.turnURLs.length, 2, "the first connection must use both configured TURN servers");
+    }
+
     // 1. Rotating method rotates on schedule without disturbing the session.
     let [current] = await until(alice, (s) => s.restarts.filter((r) => r.reason === "rotate").length >= 2,
       "two rotations on the rotating method", (rotateSeconds * 2 + 6) * 1000);
@@ -386,6 +402,14 @@ async function main() {
     assert.doesNotMatch(current.statusText, /restart|reconnect|offline/i, "rotation must not change the visible status");
     await assertBobHearsAlice("rotating");
     console.log(`[rotation] 2 rotations, gap ${gapSeconds.toFixed(1)}s, path ${current.path}`);
+    // From the first rotation on, only the TURN server behind the selected
+    // relay candidate is gathered on.
+    assert.equal(current.turnURLs.length, 1,
+      `a rotating peer must keep one TURN server, has ${JSON.stringify(current.turnURLs)}`);
+    assert.ok(current.relayURL, "the browser must report the selected relay candidate's server URL");
+    assert.ok(current.relayURL.includes(current.turnURLs[0].split("?")[0].replace(/^turn:/, "")),
+      `the kept server ${current.turnURLs[0]} must be the one in use (${current.relayURL})`);
+    console.log(`[rotation] servers narrowed to ${current.turnURLs[0]} (selected relay ${current.relayURL})`);
 
     // Both participants rotated at least twice in this window; media must
     // not have paused for either of them.

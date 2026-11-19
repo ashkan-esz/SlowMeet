@@ -46,6 +46,17 @@
     return rotatingRelayProtocols.has(protocol) ? protocol : null;
   }
 
+  // The TURN server URL of the selected local relay candidate, as the browser
+  // reports it, or null. A rotation only needs a fresh connection to the
+  // server that already works, not one to every configured server.
+  function selectedRelayServerURL(report) {
+    const pair = selectedPairAnyState(report);
+    if (!pair) return null;
+    const local = report.get(pair.localCandidateId);
+    if (!local || local.candidateType !== "relay") return null;
+    return typeof local.url === "string" && local.url !== "" ? local.url : null;
+  }
+
   function createRelayRotation() {
     let intervalMs = 0;
     let anchorMs = null;
@@ -135,7 +146,7 @@
     });
   }
 
-  const utilities = Object.freeze({createRelayRotation, rotatableRelayProtocol});
+  const utilities = Object.freeze({createRelayRotation, rotatableRelayProtocol, selectedRelayServerURL});
   root.SlowMeetRelayRotation = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;
 })(globalThis);

@@ -600,3 +600,30 @@ not measured:
 Still open: ICE-TCP on the SFU (would take coturn out of the media path; the
 vendored ICE patch must cover it), `net.ipv4.tcp_notsent_lowat` to bound relay
 queueing on slow downlinks, and one `turns:` URL instead of two per rotation.
+
+## Nov 19, 2026 (audit, second batch): smaller client and installer fixes
+
+- **Rotation gathers on one TURN URL.** With two `turns:` URLs configured,
+  every rotation was two TLS handshakes and two allocations for one used pair.
+  The peer's server list is reduced to the selected relay's URL before a
+  rotation and restored before a recovery restart. Checked in
+  `make test-relay-rotation-e2e` with two loopback TURN servers: both used for
+  the first connection, one kept from the first rotation on, no media gap.
+- **Quality ladder flapping.** A stale poor streak stepped every fresh climb
+  straight back down, so a link between the two lowest levels switched about
+  every 6 s. Both streaks now restart on every transition and a failed climb
+  doubles the wait before the next one (5, 10, 20, 40, 60 samples).
+- **Saved connection type survived a failed `/ice-config`.** One failed fetch
+  used to overwrite the saved type with Automatic. Checked in headless
+  Chromium: with the request blocked the selector shows Automatic and storage
+  keeps `turn-tcp-rotate`; the next normal load selects it again.
+- **Hidden tabs.** Adaptation used to stop entirely in a hidden tab while the
+  rotation check still called `getStats` every second. Measured over 12 s on a
+  local server: 12 calls visible, 4 hidden, with adaptation running.
+- **Plain-relay probe** starts only with 150 kbps of estimated headroom.
+- **Certificate renewal** signals coturn (`SIGUSR2`) instead of restarting it.
+  Checked against the 4.18 image: the served certificate changes after the
+  signal and the process stays up.
+
+Not changed on purpose: the 24-hour expiry of a remembered direct-UDP failure
+is the only moment Automatic re-tests direct UDP.

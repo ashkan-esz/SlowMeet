@@ -19,6 +19,10 @@
     // which is enough to trigger the flow degradation, and cheap next to a call.
     packetIntervalMs: 20,
     packetBytes: 160,
+    // With framing the probe is close to 100 kbps for its whole run. It only
+    // starts when the bandwidth estimate shows at least this much room above
+    // what the call is sending, so it never takes bitrate from a thin link.
+    headroomKbps: 150,
     // Only echoes sent after this point are judged: the degradation starts
     // around 20 s into a flow, and the first seconds are always clean.
     judgeFromMs: 25000,
@@ -78,8 +82,18 @@
     });
   }
 
+  // Whether the link has room for the probe next to the call. An unknown
+  // estimate counts as no room: not probing only means rotation continues.
+  function hasHeadroom({availableOutgoingKbps, outgoingVideoKbps, outgoingAudioKbps} = {}) {
+    if (!Number.isFinite(availableOutgoingKbps) || availableOutgoingKbps <= 0) return false;
+    const sending = [outgoingVideoKbps, outgoingAudioKbps]
+      .reduce((total, kbps) => total + (Number.isFinite(kbps) && kbps > 0 ? kbps : 0), 0);
+    return availableOutgoingKbps - sending >= probe.headroomKbps;
+  }
+
   const utilities = Object.freeze({
-    probe, guard, passTtlMs, failTtlMs, evaluateProbe, encodeVerdict, freshVerdict, createSuspensionGuard
+    probe, guard, passTtlMs, failTtlMs, evaluateProbe, encodeVerdict, freshVerdict, createSuspensionGuard,
+    hasHeadroom
   });
   root.SlowMeetPlainRelayProbe = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;

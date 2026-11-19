@@ -74,6 +74,11 @@ carrying audio and video until the restarted one is selected (a patched
 one extra UDP port per rotating participant for a few seconds, so keep the
 `ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX` range larger than twice the room size.
 
+A rotation gathers only on the TURN URL that already carries the call. The
+first connection and every recovery restart use all configured URLs of the
+method, so listing two `turns:` URLs as fallbacks for each other costs one TLS
+handshake and one allocation per rotation, not two.
+
 Administrators enable or disable each method on the admin page. A settings
 file saved before the rotating methods existed enables each rotating method
 whose plain counterpart was enabled.
@@ -94,7 +99,9 @@ judges the part after the 20-second mark. On a pass it stops rotating (fewer
 restarts and TURN allocations) and keeps watching the call's round-trip time;
 three samples over 500 ms within ten resume rotation immediately. A pass is
 remembered for 1 hour and a fail for 6 hours. An explicitly chosen rotating
-method always rotates.
+method always rotates. The test starts only while the browser's bandwidth
+estimate shows at least 150 kbps of room above what the call is sending;
+without that room rotation simply continues.
 
 ### Changing the method during a call
 
@@ -127,6 +134,18 @@ relayed path that sits at 150-250 ms while healthy would otherwise only ever
 step down. The fixed limits (healthy below 120 ms, poor above 250 ms, critical
 above 500 ms) are the minimum of each band; above a floor of 60 ms the bands
 are floor + 60 / + 150 / + 400 ms, with the floor capped at 300 ms.
+
+A step up needs 5 healthy samples. If that step has to be taken back within
+15 samples, the next attempt needs twice as many (10, 20, 40, at most 60); a
+step that holds restores 5. A link whose capacity lies between two levels
+therefore settles on the lower one instead of switching every few seconds.
+
+A hidden tab keeps adapting: it samples every third second instead of every
+second, since it still publishes its camera and microphone.
+
+If the page cannot fetch `/ice-config`, it falls back to `Automatic` for that
+page load only; the saved connection type is kept and used again once the
+configuration loads.
 
 `/metrics` exports `slowmeet_ice_restarts_total{reason="recovery"|"rotate"|"switch"}`.
 

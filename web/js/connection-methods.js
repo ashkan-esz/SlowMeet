@@ -58,13 +58,40 @@
       .filter((server) => server.urls.length > 0);
   }
 
+  // Canonical form of a TURN URL for comparison: scheme, host, port and
+  // transport with their defaults filled in, lower-cased. Browsers report a
+  // relay candidate's server URL in their own spelling (explicit port and
+  // transport), which need not match the configured string.
+  function canonicalTURNURL(url) {
+    const match = /^(turns?):(\[[^\]]+\]|[^:?]+)(?::(\d+))?(?:\?(.*))?$/i.exec(String(url || "").trim());
+    if (!match) return null;
+    const scheme = match[1].toLowerCase();
+    const port = match[3] || (scheme === "turns" ? "5349" : "3478");
+    const transport = (match[4] || "").split("&").map((part) => part.split("=", 2))
+      .find(([key]) => key.toLowerCase() === "transport")?.[1] || (scheme === "turns" ? "tcp" : "udp");
+    return `${scheme}:${match[2].toLowerCase()}:${port}?transport=${transport.toLowerCase()}`;
+  }
+
+  // The ICE server list reduced to the one TURN URL `url` names, keeping that
+  // server's credentials, or null when no configured URL matches.
+  function narrowICEServersToURL(iceServers, url) {
+    const wanted = canonicalTURNURL(url);
+    if (!wanted) return null;
+    for (const server of iceServers) {
+      const match = server.urls.find((candidate) => canonicalTURNURL(candidate) === wanted);
+      if (match) return [{...server, urls: [match]}];
+    }
+    return null;
+  }
+
   function requiresConfiguredICEServers(methodID) {
     return methodID.startsWith("turn-");
   }
 
   const utilities = Object.freeze({
     filterICEServers, requiresConfiguredICEServers, isRotatingMethod, baseMethod, rotatingVariant,
-    rotatingMethodForProtocol, autoRelayFallback, autoRelayFallbackOrder, sharesPeerConfiguration
+    rotatingMethodForProtocol, autoRelayFallback, autoRelayFallbackOrder, sharesPeerConfiguration,
+    narrowICEServersToURL
   });
   root.SlowMeetConnectionMethods = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;
