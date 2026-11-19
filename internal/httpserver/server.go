@@ -204,6 +204,19 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_overflow_drops_total %d\n", audioDrops.QueueOverflow)
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_expired_drops_total %d\n", audioDrops.QueueExpired)
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_write_failures_total %d\n", audioDrops.WriteFailures)
+		relayed := hub.RTCPRelay()
+		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_batches_total %d\n", relayed.Batches)
+		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_report_only_batches_total %d\n", relayed.ReportOnlyBatches)
+		for _, entry := range []struct {
+			kind  string
+			count uint64
+		}{
+			{"pli", relayed.PLI}, {"fir", relayed.FIR}, {"nack", relayed.NACK},
+			{"receiver_report", relayed.ReceiverReport}, {"sender_report", relayed.SenderReport},
+			{"transport_cc", relayed.TransportCC}, {"remb", relayed.REMB}, {"other", relayed.Other},
+		} {
+			_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_total{type=%q} %d\n", entry.kind, entry.count)
+		}
 		_, _ = fmt.Fprintf(w, "slowmeet_network_sample_available %d\n", boolMetric(snapshot.HasNetworkSample))
 		if snapshot.HasNetworkSample {
 			_, _ = fmt.Fprintf(w, "slowmeet_last_network_sample_timestamp_seconds %d\n", snapshot.LastNetworkSample)

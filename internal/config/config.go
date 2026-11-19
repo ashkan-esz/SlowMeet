@@ -312,6 +312,19 @@ func (c Config) EffectiveMaxVideoQuality() string {
 	return c.MaxVideoQuality
 }
 
+// ServerTURNURLs returns the TURN URLs the SFU's own peer connections gather
+// relay candidates from. With a configured public address and a policy that
+// allows host candidates, the server is directly reachable (also from a
+// browser's relay), so allocating its own relays on every ICE gathering, and
+// so on every relay rotation, would only load the TURN server. Relay-only
+// deployments and servers without a public address keep them.
+func (c Config) ServerTURNURLs() []string {
+	if c.ICETransportPolicy != "relay" && c.ICEPublicIP != "" {
+		return nil
+	}
+	return c.EffectiveTURNURLs()
+}
+
 func (c Config) EffectiveTURNURLs() []string {
 	if len(c.TURNURLs) > 0 {
 		return append([]string(nil), c.TURNURLs...)

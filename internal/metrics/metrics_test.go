@@ -1,6 +1,10 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pion/rtcp"
+)
 
 func TestSnapshotAggregatesNetworkObservations(t *testing.T) {
 	var metrics Metrics
@@ -61,5 +65,20 @@ func TestICERestartRequestsAreCountedByReason(t *testing.T) {
 	if snapshot.ICERestartsRecovery != 3 || snapshot.ICERestartsRotate != 3 || snapshot.ICERestartsSwitch != 1 {
 		t.Fatalf("restart counts = recovery %d, rotate %d, switch %d; want 3, 3, 1",
 			snapshot.ICERestartsRecovery, snapshot.ICERestartsRotate, snapshot.ICERestartsSwitch)
+	}
+}
+
+func TestRTCPRelayCountsForwardedPacketsByType(t *testing.T) {
+	var relayed RTCPRelay
+	relayed.Observe([]rtcp.Packet{&rtcp.ReceiverReport{}, &rtcp.TransportLayerCC{}})
+	relayed.Observe([]rtcp.Packet{&rtcp.ReceiverReport{}, &rtcp.PictureLossIndication{}})
+	relayed.Observe([]rtcp.Packet{&rtcp.TransportLayerNack{}, &rtcp.FullIntraRequest{}})
+	relayed.Observe([]rtcp.Packet{&rtcp.ReceiverEstimatedMaximumBitrate{}, &rtcp.SenderReport{}, &rtcp.SourceDescription{}})
+	relayed.Observe(nil)
+	got := relayed.Snapshot()
+	want := RTCPRelaySnapshot{Batches: 5, PLI: 1, FIR: 1, NACK: 1, ReceiverReport: 2, SenderReport: 1,
+		TransportCC: 1, REMB: 1, Other: 1, ReportOnlyBatches: 3}
+	if got != want {
+		t.Fatalf("snapshot = %+v, want %+v", got, want)
 	}
 }

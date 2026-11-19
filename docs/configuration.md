@@ -106,6 +106,19 @@ connected within 8 seconds the client falls back to a full rejoin.
 
 `/metrics` exports `slowmeet_ice_restarts_total{reason="recovery"|"rotate"|"switch"}`.
 
+A rotation restart does not request video keyframes (nothing is lost during
+it); recovery and method-switch restarts still do. When `ICE_PUBLIC_IP` is set
+and the policy is not `relay`, the server's own peer connections do not use
+the TURN servers: the server is directly reachable, including from a browser's
+relay, so it would otherwise create unused TURN allocations on every ICE
+gathering and rotation.
+
+`/metrics` also exports `slowmeet_rtcp_relayed_total{type=...}`,
+`slowmeet_rtcp_relayed_batches_total`, and
+`slowmeet_rtcp_relayed_report_only_batches_total`: the subscriber RTCP the SFU
+forwards to publishers. They only observe; they exist to decide whether report
+forwarding can be reduced.
+
 `ICE_IPV4_ONLY=true` is the default. Set it to `false` only after testing IPv6
 on the target networks. `ICE_PUBLIC_IP` can rewrite host ICE candidates for a
 server behind 1:1 NAT; the VPS installer detects and sets the public IPv4

@@ -2829,3 +2829,65 @@ func TestChatHistoryReArmSurvivesRoomRefill(t *testing.T) {
 		return hub.chatHistory["default"] == nil
 	})
 }
+
+// A pure relay rotation loses no media, so its answer must not force
+// keyframes; every other restart, and a rotation merged with queued
+// renegotiation, still must.
+func TestRotationRestartSkipsKeyFramesUnlessOtherNegotiationIsInvolved(t *testing.T) {
+	type step struct {
+		name                 string
+		before               func(c *client)
+		completedICERestart  bool
+		pendingICERestart    bool
+		wantRotationOnly     bool
+		wantFlagAfterSettled bool
+	}
+	steps := []step{
+		{name: "ordinary renegotiation answer", completedICERestart: false, wantRotationOnly: false},
+		{name: "pure rotation restart", completedICERestart: true, wantRotationOnly: true},
+		{name: "recovery or switch restart",
+			before:              func(c *client) { c.noteOfferNeedsKeyFramesLocked() },
+			completedICERestart: true, wantRotationOnly: false},
+		{name: "the flag does not leak into the next rotation", completedICERestart: true, wantRotationOnly: true},
+		{name: "rotation in flight with a recovery restart queued behind it",
+			before:              func(c *client) { c.noteOfferNeedsKeyFramesLocked() },
+			completedICERestart: true, pendingICERestart: true,
+			wantRotationOnly: false, wantFlagAfterSettled: true},
+		{name: "the queued recovery restart then keeps its keyframes",
+			completedICERestart: true, wantRotationOnly: false},
+	}
+	c := &client{}
+	for _, s := range steps {
+		if s.before != nil {
+			s.before(c)
+		}
+		if got := c.settleRestartKeyFramesLocked(s.completedICERestart, s.pendingICERestart); got != s.wantRotationOnly {
+			t.Fatalf("%s: rotationOnly = %t, want %t", s.name, got, s.wantRotationOnly)
+		}
+		if c.restartKeyFrameWanted != s.wantFlagAfterSettled {
+			t.Fatalf("%s: flag after settle = %t, want %t", s.name, c.restartKeyFrameWanted, s.wantFlagAfterSettled)
+		}
+	}
+}
+
+// A renegotiation queued behind an in-flight offer can be merged into a
+// restart offer; that merged offer must keep its keyframe requests.
+func TestQueuedRenegotiationMarksMergedRestartForKeyFrames(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		iceRestart bool
+		want       bool
+	}{
+		{name: "queued renegotiation", iceRestart: false, want: true},
+		{name: "queued rotation restart", iceRestart: true, want: false},
+	} {
+		c := &client{negotiationReady: true, offerInFlight: true}
+		if err := sendOfferWithPeer(c, nil, tt.iceRestart); err != nil {
+			t.Fatalf("%s: sendOfferWithPeer: %v", tt.name, err)
+		}
+		if !c.pendingOffer || c.restartKeyFrameWanted != tt.want {
+			t.Fatalf("%s: pendingOffer=%t restartKeyFrameWanted=%t, want pending and %t",
+				tt.name, c.pendingOffer, c.restartKeyFrameWanted, tt.want)
+		}
+	}
+}

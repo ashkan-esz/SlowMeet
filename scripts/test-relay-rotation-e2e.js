@@ -247,6 +247,22 @@ function continuity(page, from, to) {
   }, { from, to });
 }
 
+// Keyframes this page's camera encoder has produced, PLIs it has received,
+// and how many relay candidates the server offered for itself.
+function senderVideoCounters(page) {
+  return page.evaluate(async () => {
+    const counters = { keyFrames: 0, plis: 0, serverRelayCandidates: 0 };
+    (await window.__e2e.peers[0].getStats()).forEach((stat) => {
+      if (stat.type === "outbound-rtp" && stat.kind === "video") {
+        counters.keyFrames += stat.keyFramesEncoded || 0;
+        counters.plis += stat.pliCount || 0;
+      }
+      if (stat.type === "remote-candidate" && stat.candidateType === "relay") counters.serverRelayCandidates += 1;
+    });
+    return counters;
+  });
+}
+
 async function selectMethod(page, method) {
   await page.evaluate((id) => {
     const select = document.querySelector("#settings-connection-method");
@@ -345,6 +361,7 @@ async function main() {
     const continuityFrom = Date.now();
     const freezesBefore = [(await continuity(alice, continuityFrom, continuityFrom)).freezes,
       (await continuity(bob, continuityFrom, continuityFrom)).freezes];
+    const videoCountersBefore = [await senderVideoCounters(alice), await senderVideoCounters(bob)];
     let bobAudio = (await state(bob)).audioPackets;
     const assertBobHearsAlice = async (label) => {
       await delay(1500);
@@ -383,6 +400,16 @@ async function main() {
       assert.ok(flow.audioGapMs <= 400, `${name}: inbound audio paused ${flow.audioGapMs} ms across rotations`);
       assert.ok(flow.videoGapMs <= 600, `${name}: inbound video paused ${flow.videoGapMs} ms across rotations`);
       assert.equal(flow.freezes, freezesBefore[index], `${name}: video froze during rotations`);
+      // A rotation loses no media, so it must not make anyone re-encode a
+      // keyframe: the server sends no PLI for it and viewers have no reason to.
+      const counters = await senderVideoCounters(page);
+      const keyFrames = counters.keyFrames - videoCountersBefore[index].keyFrames;
+      const plis = counters.plis - videoCountersBefore[index].plis;
+      console.log(`[keyframes] ${name}: +${keyFrames} keyframes encoded, +${plis} PLIs received across the rotations`);
+      assert.ok(plis === 0 && keyFrames <= 1,
+        `${name}: rotations forced ${keyFrames} keyframes / ${plis} PLIs; a pure rotation needs none`);
+      assert.equal(counters.serverRelayCandidates, 0,
+        `${name}: a directly reachable server must not allocate TURN relays for itself`);
     }
 
     // 2. Rotating -> plain of the same transport: nothing to renegotiate.

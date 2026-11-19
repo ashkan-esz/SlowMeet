@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"SlowMeet/internal/config"
@@ -101,21 +102,33 @@ type client struct {
 	// announced records whether this participant's join was broadcast to the
 	// room; only announced departures broadcast a left event. Written by the
 	// connection's read loop and read by its cleanup path (same goroutine).
-	announced                     bool
-	intentionalLeave              bool
-	joinAttempts                  int
-	admissionExpired              bool // guarded by Hub.mu
-	peer                          *webrtc.Peer
-	negotiationMu                 sync.Mutex
-	negotiationReady              bool
-	remoteDescription             bool
-	iceFailureTimer               *time.Timer // guarded by negotiationMu
-	pendingCandidates             []Message
-	pendingLocalCandidates        []Message
-	offerInFlight                 bool
-	offerICERestart               bool
-	pendingOffer                  bool
-	pendingICERestart             bool
+	announced              bool
+	intentionalLeave       bool
+	joinAttempts           int
+	admissionExpired       bool // guarded by Hub.mu
+	peer                   *webrtc.Peer
+	negotiationMu          sync.Mutex
+	negotiationReady       bool
+	remoteDescription      bool
+	iceFailureTimer        *time.Timer // guarded by negotiationMu
+	pendingCandidates      []Message
+	pendingLocalCandidates []Message
+	offerInFlight          bool
+	offerICERestart        bool
+	pendingOffer           bool
+	pendingICERestart      bool
+	// restartKeyFrameWanted records that an in-flight or queued offer needs
+	// the usual post-answer keyframe requests even though it is an ICE
+	// restart: a recovery or method-switch restart, or a rotation restart
+	// merged with a queued renegotiation. A pure relay rotation loses no
+	// media (the previous ICE pair stays up until the new one is selected),
+	// so forcing keyframes for it would only cost bitrate. Guarded by
+	// negotiationMu.
+	restartKeyFrameWanted bool
+	// plannedRestart is set while a browser-requested rotate/switch restart
+	// is in progress; it only lowers the log level of the resulting ICE state
+	// transitions.
+	plannedRestart                atomic.Bool
 	activeScreenMediaStreamID     string
 	activeScreenMediaTrackID      string
 	reactionWindowStart           time.Time
@@ -195,6 +208,10 @@ func (h *Hub) Metrics() *metrics.Metrics {
 
 func (h *Hub) AudioDrops() metrics.AudioDropSnapshot {
 	return h.router.AudioDrops()
+}
+
+func (h *Hub) RTCPRelay() metrics.RTCPRelaySnapshot {
+	return h.router.RTCPRelay()
 }
 
 func (h *Hub) Close() {
@@ -1024,7 +1041,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			turnPassword = password
 		}
 		c.peer, err = webrtc.NewPeerWithTURNURLsAndPortRangeAndPolicyAndPublicIP(
-			cfg.STUNServers, cfg.EffectiveTURNURLs(), turnUsername, turnPassword,
+			cfg.STUNServers, cfg.ServerTURNURLs(), turnUsername, turnPassword,
 			cfg.ICEUDPPortMin, cfg.ICEUDPPortMax, cfg.ICEIPv4Only, cfg.ICETransportPolicy, cfg.ICEPublicIP,
 		)
 		if err != nil {
@@ -1058,7 +1075,24 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.metrics.ConnectionFailed()
 				h.scheduleICEFailureTeardown(c)
 			}
-			h.Logger.Info(event, "participant_id", participant.ID, "ice_state", state.String())
+			// A planned restart (relay rotation, method switch) passes through
+			// checking and back to connected every few seconds; keep those two
+			// transitions out of the info log. Anything else ends the planned
+			// episode and is logged as before.
+			level := slog.LevelInfo
+			switch state {
+			case pion.ICEConnectionStateChecking:
+				if c.plannedRestart.Load() {
+					level = slog.LevelDebug
+				}
+			case pion.ICEConnectionStateConnected, pion.ICEConnectionStateCompleted:
+				if c.plannedRestart.Swap(false) {
+					level = slog.LevelDebug
+				}
+			default:
+				c.plannedRestart.Store(false)
+			}
+			h.Logger.Log(context.Background(), level, event, "participant_id", participant.ID, "ice_state", state.String())
 		})
 		c.peer.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
 			role := media.SourceRoleAudio
@@ -1258,13 +1292,14 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 		c.offerICERestart = false
 		shouldOffer := c.offerInFlight && c.pendingOffer
 		pendingICERestart := c.pendingICERestart
+		rotationOnly := c.settleRestartKeyFramesLocked(completedICERestart, pendingICERestart)
 		c.offerInFlight = false
 		c.pendingOffer = false
 		c.pendingICERestart = false
 		c.negotiationMu.Unlock()
 		if err != nil {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
-		} else {
+		} else if !rotationOnly {
 			h.router.RequestVideoKeyFrame(c.participant.ID, func(err error) {
 				h.Logger.Error("video_keyframe_request_failed", "participant_id", c.participant.ID, "error", err)
 			})
@@ -1294,6 +1329,12 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		h.metrics.ICERestartRequested(msg.Reason)
+		c.plannedRestart.Store(msg.Reason != "")
+		if msg.Reason != ICERestartReasonRotate {
+			c.negotiationMu.Lock()
+			c.noteOfferNeedsKeyFramesLocked()
+			c.negotiationMu.Unlock()
+		}
 		if msg.Reason != "" {
 			h.Logger.Debug("ice_restart_planned", "participant_id", c.participant.ID, "reason", msg.Reason)
 		}
@@ -1301,6 +1342,25 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			_ = c.write(Message{Version: ProtocolVersion, Type: TypeError, Error: err.Error()})
 		}
 	}
+}
+
+// noteOfferNeedsKeyFramesLocked marks the in-flight or next offer as one whose
+// answer must be followed by keyframe requests even if it is an ICE restart.
+// The caller holds negotiationMu.
+func (c *client) noteOfferNeedsKeyFramesLocked() {
+	c.restartKeyFrameWanted = true
+}
+
+// settleRestartKeyFramesLocked reports whether the answer just applied
+// completed a pure relay-rotation restart, in which case the post-answer
+// keyframe requests are skipped. A restart still queued behind this answer
+// keeps the flag for its own answer. The caller holds negotiationMu.
+func (c *client) settleRestartKeyFramesLocked(completedICERestart, pendingICERestart bool) bool {
+	rotationOnly := completedICERestart && !c.restartKeyFrameWanted
+	if !pendingICERestart {
+		c.restartKeyFrameWanted = false
+	}
+	return rotationOnly
 }
 
 func applyRemoteAnswer(c *client, peer answerCandidatePeer, sdp string) error {
@@ -1345,12 +1405,20 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 	if !c.negotiationReady {
 		c.pendingOffer = true
 		c.pendingICERestart = c.pendingICERestart || iceRestart
+		if !iceRestart {
+			// A queued renegotiation may be merged into a restart offer.
+			c.noteOfferNeedsKeyFramesLocked()
+		}
 		c.negotiationMu.Unlock()
 		return nil
 	}
 	if c.offerInFlight {
 		c.pendingOffer = true
 		c.pendingICERestart = c.pendingICERestart || iceRestart
+		if !iceRestart {
+			// A queued renegotiation may be merged into a restart offer.
+			c.noteOfferNeedsKeyFramesLocked()
+		}
 		c.negotiationMu.Unlock()
 		return nil
 	}

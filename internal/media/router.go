@@ -246,6 +246,7 @@ type Router struct {
 	senderSourceSSRC map[*pion.RTPSender]*atomic.Uint32
 	limits           Limits
 	audioDrops       metrics.AudioDrops
+	rtcpRelay        metrics.RTCPRelay
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -268,6 +269,11 @@ func NewRouter(config ...Limits) *Router {
 
 func (r *Router) AudioDrops() metrics.AudioDropSnapshot {
 	return r.audioDrops.Snapshot()
+}
+
+// RTCPRelay reports the subscriber RTCP forwarded to publishers by type.
+func (r *Router) RTCPRelay() metrics.RTCPRelaySnapshot {
+	return r.rtcpRelay.Snapshot()
 }
 
 func (r *Router) newTarget(track *pion.TrackLocalStaticRTP, pub *publication) *publicationTarget {
@@ -905,7 +911,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 				sourceSSRC.Store(uint32(op.pub.remote.SSRC()))
 				r.senderSourceSSRC[sender] = sourceSSRC
 				go target.writePackets(op.pub.stoppedChannel())
-				go relayRTCP(sender, op.pub.source, sourceSSRC)
+				go relayRTCP(sender, op.pub.source, sourceSSRC, &r.rtcpRelay)
 			}
 		}
 		r.mu.Unlock()
@@ -963,13 +969,14 @@ func dispatchOffers(offers map[string]Offerer) {
 // holder is read per batch so a publication swap that reuses this sender
 // retargets the feedback to the new source track without restarting the
 // goroutine (the sender keeps one RTCP reader for its whole lifetime).
-func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.Uint32) {
+func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.Uint32, relayed *metrics.RTCPRelay) {
 	buf := make([]byte, receiveMTU)
 	for {
 		packets, err := readSenderRTCP(sender, buf)
 		if err != nil {
 			return
 		}
+		relayed.Observe(packets)
 		if err := source.WriteRTCP(routeRTCPFeedback(packets, sourceSSRC.Load())); err != nil {
 			return
 		}

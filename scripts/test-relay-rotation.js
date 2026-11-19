@@ -172,6 +172,10 @@ const app = fs.readFileSync(path.join(__dirname, "..", "web/js/app.js"), "utf8")
 const check = app.slice(app.indexOf("async function checkRelayRotation()"), app.indexOf("function requestIceRestart("));
 assert.ok(check.includes('type: "ice_restart", reason: "rotate"'),
   "rotation asks the server for an ICE restart and labels it as planned");
+assert.match(check, /shared && shared\.peer === targetPeer && Date\.now\(\) - shared\.atMs < sharedStatsMaxAgeMs\s*\? shared\.report\s*: await targetPeer\.getStats\(\)/,
+  "the rotation check reuses a fresh diagnostics report for the same peer and reads its own otherwise");
+assert.match(app, /lastDiagnosticsStats = \{ report, peer: currentPeer, atMs: Date\.now\(\) \};/,
+  "the diagnostics loop publishes its stats report for reuse");
 assert.match(check, /const wanted = relayProtocol !== null && relayRotationWanted\(relayProtocol\);/,
   "rotation is gated on the connection method, not only on the relay protocol");
 assert.ok(!check.includes("iceRestartAttempts"), "rotation must not consume recovery restart attempts");

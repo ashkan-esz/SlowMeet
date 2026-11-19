@@ -1890,6 +1890,11 @@ let iceDisconnectRestartTimer;
 const relayRotation = window.SlowMeetRelayRotation?.createRelayRotation() || null;
 let relayRotationTimer;
 let relayRotationCheckRunning = false;
+// The diagnostics loop's most recent stats report. The rotation check reuses
+// it while fresh instead of walking getStats a second time every second; it
+// only reads its own when diagnostics is not sampling (a hidden tab).
+const sharedStatsMaxAgeMs = 1500;
+let lastDiagnosticsStats = null;
 // Whether the last rotation check found rotation in effect (shown in the
 // active-path label).
 let relayRotationActive = false;
@@ -4666,7 +4671,10 @@ async function checkRelayRotation() {
     let relayProtocol = null;
     let rttMs = null;
     if (connected) {
-      const report = await targetPeer.getStats();
+      const shared = lastDiagnosticsStats;
+      const report = shared && shared.peer === targetPeer && Date.now() - shared.atMs < sharedStatsMaxAgeMs
+        ? shared.report
+        : await targetPeer.getStats();
       if (!isCurrentWebRTC(generation, targetPeer, targetSocket)) return;
       relayProtocol = window.SlowMeetRelayRotation.rotatableRelayProtocol(report);
       rttMs = selectedCandidatePairRTT(report);
@@ -5000,6 +5008,7 @@ async function runDiagnosticsUpdate() {
   if (!currentPeer) return;
   const report = await currentPeer.getStats().catch(() => undefined);
   if (!report || peer !== currentPeer) return;
+  lastDiagnosticsStats = { report, peer: currentPeer, atMs: Date.now() };
   const uplinkLossPct = await sampleCameraUplinkLoss();
   const values = {
     rttMs: null,
