@@ -20,6 +20,8 @@ const {
   setVideoJitterBufferTarget,
   formatRTT,
   classifyNetworkSample,
+  rttThresholds,
+  createRTTBaseline,
   shouldPauseVideo,
   chooseParticipantLayout
 } = require("../web/js/adaptation-policy.js");
@@ -455,6 +457,58 @@ const fallbackMetrics = classifyNetworkSample({ rttMs: 90, packetLoss: 0, jitter
 if (fallbackMetrics.poor || fallbackMetrics.critical || !fallbackMetrics.good) {
   throw new Error("RTT, loss, and jitter should remain usable when outgoing capacity is unavailable");
 }
+// RTT bands move with the path's own floor. Without a floor (or on a short
+// path) they are the fixed 120/250/500 ms bands.
+for (const baseline of [undefined, null, NaN, -5, 0, 40, 60]) {
+  const bands = rttThresholds(baseline);
+  if (bands.healthyBelowMs !== 120 || bands.poorAboveMs !== 250 || bands.criticalAboveMs !== 500) {
+    throw new Error(`a short or unknown RTT floor (${baseline}) must keep the fixed RTT bands`);
+  }
+}
+const relayBands = rttThresholds(160);
+if (relayBands.healthyBelowMs !== 220 || relayBands.poorAboveMs !== 310 || relayBands.criticalAboveMs !== 560) {
+  throw new Error("RTT bands must shift with a relayed path's floor");
+}
+const cappedBands = rttThresholds(900);
+if (cappedBands.healthyBelowMs !== 360 || cappedBands.poorAboveMs !== 450 || cappedBands.criticalAboveMs !== 700) {
+  throw new Error("a floor learned on an already congested path must be capped");
+}
+// A healthy relayed path at 170 ms: fixed bands never call it healthy, so the
+// quality ladder could only step down and an automatic pause never lifted.
+const relayedHealthyFixed = classifyNetworkSample({ rttMs: 170, packetLoss: 0, jitterMs: 10 });
+const relayedHealthy = classifyNetworkSample({ rttMs: 170, packetLoss: 0, jitterMs: 10, rttBaselineMs: 160 });
+if (relayedHealthyFixed.transportHealthy || !relayedHealthy.transportHealthy || !relayedHealthy.good ||
+    relayedHealthy.poor || relayedHealthy.critical) {
+  throw new Error("a relayed path sitting at its own RTT floor must count as healthy");
+}
+// The same path degrading (the ~20 s TCP relay stall takes RTT to 1-3 s) must
+// still read poor and critical.
+const relayedStalled = classifyNetworkSample({ rttMs: 1200, packetLoss: 0, jitterMs: 10, rttBaselineMs: 160 });
+const relayedSlow = classifyNetworkSample({ rttMs: 330, packetLoss: 0, jitterMs: 10, rttBaselineMs: 160 });
+if (!relayedStalled.poor || !relayedStalled.critical || relayedStalled.transportHealthy ||
+    !relayedSlow.poor || relayedSlow.critical || relayedSlow.transportHealthy) {
+  throw new Error("RTT well above a relayed path's floor must still read poor, and a stall critical");
+}
+{
+  const baseline = createRTTBaseline(3);
+  if (baseline.value() !== null || baseline.observe(NaN) !== null || baseline.observe(-1) !== null) {
+    throw new Error("an RTT floor must stay unknown until a valid sample arrives");
+  }
+  if (baseline.observe(200) !== 200 || baseline.observe(150) !== 150 || baseline.observe(400) !== 150) {
+    throw new Error("the RTT floor must be the lowest recent sample");
+  }
+  // Bucket two starts; the first bucket's minimum still counts.
+  if (baseline.observe(300) !== 150 || baseline.observe(310) !== 150 || baseline.observe(320) !== 150) {
+    throw new Error("the previous bucket must keep contributing to the RTT floor");
+  }
+  // Bucket three starts and the 150 ms bucket rotates out: the longer route
+  // is now the floor. A shorter sample is adopted at once.
+  if (baseline.observe(305) !== 300 || baseline.observe(90) !== 90) {
+    throw new Error("the RTT floor must follow a path change in both directions");
+  }
+  baseline.reset();
+  if (baseline.value() !== null) throw new Error("reset must clear the RTT floor");
+}
 const sustainedLoss = classifyNetworkSample({ rttMs: 180, packetLoss: 12, jitterMs: 40 });
 if (!sustainedLoss.poor || !sustainedLoss.critical || sustainedLoss.good) {
   throw new Error("sustained packet loss should keep the connection in a critical state");
@@ -717,6 +771,17 @@ if (!appSource.includes("async function sampleCameraUplinkLoss()") ||
     !appSource.includes("cameraUplinkSamples.get(outbound.id)") ||
     !appSource.includes("packetLossPercentFromDeltas(lostDelta, sentDelta)")) {
   throw new Error("the camera sender's outbound packet counters must feed the uplink loss signal (inbound-rtp is blind to the sender's own uplink)");
+}
+// Loss is reported by the receiver: outbound-rtp has no packetsLost field, so
+// reading it there silently disabled the signal.
+if (!appSource.includes('stat.type === "remote-inbound-rtp"') ||
+    !appSource.includes("remoteInbound.packetsLost") ||
+    appSource.includes("outbound.packetsLost")) {
+  throw new Error("uplink loss must come from the remote-inbound-rtp entry paired with the camera's outbound stream");
+}
+if (!appSource.includes("rttBaselineMs: rttBaseline.observe(values.rttMs)") ||
+    !appSource.includes("rttBaseline.reset();")) {
+  throw new Error("the diagnostics loop must feed the RTT floor to the classifier and clear it when the session ends");
 }
 if (!appSource.includes("function enqueuePeerNegotiation(operation)") ||
     !appSource.includes("return renegotiationQueue.request();") ||

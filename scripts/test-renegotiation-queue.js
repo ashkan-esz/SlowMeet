@@ -307,6 +307,17 @@ async function run() {
     "a sustained disconnected peer should request one delayed ICE restart");
   assert.match(appSource, /function iceRestartDelayMs\(targetPeer\)[\s\S]*?\/typ relay\/\.test\(sdp\) \? iceRestartRelayGraceDelayMs : iceRestartRetryDelayMs/,
     "the restart delay must give ICE a longer grace window when relay candidates exist (natural failover before agent reset)");
+  assert.match(appSource, /function iceRestartDelayMs\(targetPeer\) \{[\s\S]{0,300}if \(appliedConnectionMethod\.startsWith\("turn-"\)\) return iceRestartRetryDelayMs;/,
+    "a relay-only method has no other pair to wait for, so its restart must not wait out the relay grace window");
+  // An open signaling socket is not a recovered call: clearing the retry count
+  // there kept the delay at its minimum and the retry limit unreachable.
+  const socketOpenHandler = appSource.slice(appSource.indexOf('currentSocket.addEventListener("open"'),
+    appSource.indexOf('currentSocket.addEventListener("message"'));
+  assert.ok(socketOpenHandler.length > 0, "the socket open handler must be found");
+  assert.doesNotMatch(socketOpenHandler, /reconnectAttempts = 0;/,
+    "opening the signaling socket must not clear the reconnect attempt count");
+  assert.match(appSource, /iceRestartAttempts = 0;\s*reconnectAttempts = 0;\s*setConnection\("good", "Connected"\);/,
+    "the reconnect attempt count clears once media is connected");
   assert.match(appSource, /const iceRestartRetryDelayMs = 5000;/,
     "without relay candidates the delayed restart keeps the 5s cadence");
   assert.match(appSource, /const iceRestartRelayGraceDelayMs = 12000;/,

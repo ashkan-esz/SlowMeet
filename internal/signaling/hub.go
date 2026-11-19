@@ -34,6 +34,8 @@ const (
 	websocketPongWait   = 60 * time.Second
 	websocketPingPeriod = (websocketPongWait * 9) / 10
 	websocketWriteWait  = 10 * time.Second
+	// compressedFrameMinBytes is the smallest outbound frame worth deflating.
+	compressedFrameMinBytes = 1024
 	// outboundQueueSize must hold the worst-case join replay (at the 100
 	// participant cap: ack + chat history + roster + media states + screen
 	// state ≈ 202 messages) with headroom for concurrent room chatter.
@@ -125,6 +127,9 @@ type client struct {
 	// so forcing keyframes for it would only cost bitrate. Guarded by
 	// negotiationMu.
 	restartKeyFrameWanted bool
+	// opusDTX marks the SDP sent to this client so its browser sends
+	// discontinuous Opus; set once at join, before any description is sent.
+	opusDTX bool
 	// plannedRestart is set while a browser-requested rotate/switch restart
 	// is in progress; it only lowers the log level of the resulting ICE state
 	// transitions.
@@ -297,14 +302,18 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		maxPendingConnections: 128,
 		joinTimeout:           15 * time.Second,
 		passwordLimiter:       ratelimit.New(joinPasswordFailuresPerMinute, joinPasswordFailureBurst),
-		Upgrader:              websocket.Upgrader{CheckOrigin: sameOrigin},
-		clients:               make(map[*client]struct{}),
-		roomMembers:           make(map[*client]struct{}),
-		pending:               make(map[string]*pendingReconnect),
-		activeTokens:          make(map[string]*client),
-		mediaStates:           make(map[string]Message),
-		chatHistory:           make(map[string]*roomChatHistory),
-		metrics:               &metrics.Metrics{},
+		// permessage-deflate: SDP offers and answers are 5-25 KB of highly
+		// repetitive text, and the rotating TURN methods exchange a pair every
+		// TURN_TCP_ROTATE_SECONDS per participant. Compressed they are about a
+		// tenth of that, which matters on the slow links this app targets.
+		Upgrader:     websocket.Upgrader{CheckOrigin: sameOrigin, EnableCompression: true},
+		clients:      make(map[*client]struct{}),
+		roomMembers:  make(map[*client]struct{}),
+		pending:      make(map[string]*pendingReconnect),
+		activeTokens: make(map[string]*client),
+		mediaStates:  make(map[string]Message),
+		chatHistory:  make(map[string]*roomChatHistory),
+		metrics:      &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
@@ -1034,6 +1043,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.mu.Unlock()
 		}
 		h.cancelChatHistoryExpiry(chatRoomID)
+		c.opusDTX = cfg.OpusDTXEnabled
 		turnUsername := cfg.TURNUsername
 		turnPassword := cfg.TURNPassword
 		if username, password, ok := cfg.TURNCredentials(participant.ID, time.Now()); ok {
@@ -1251,7 +1261,7 @@ func (h *Hub) handleWebRTCMessage(c *client, msg Message) {
 			return
 		}
 		c.negotiationMu.Unlock()
-		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: answer}); err != nil {
+		if err := c.write(Message{Version: ProtocolVersion, Type: TypeAnswer, SDP: c.outboundSDP(answer)}); err != nil {
 			return
 		}
 		h.router.RequestVideoKeyFrame(c.participant.ID, func(err error) {
@@ -1438,7 +1448,7 @@ func sendOfferWithPeer(c *client, peer offerPeer, iceRestart bool) error {
 		c.negotiationMu.Unlock()
 		return err
 	}
-	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: offer})
+	err = c.write(Message{Version: ProtocolVersion, Type: TypeOffer, SDP: c.outboundSDP(offer)})
 	if err == nil {
 		// SDP size telemetry, logged only after a successful write: offer
 		// bytes grow with m-line count, and when they approach
@@ -1504,15 +1514,20 @@ func (c *client) writeFrame(msg *Message) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteWait)); err != nil {
 		return err
 	}
-	var err error
-	if msg.raw != nil {
-		// Broadcasts serialize once and share the encoded bytes; WriteMessage
-		// copies the payload onto the wire before returning.
-		err = c.conn.WriteMessage(websocket.TextMessage, msg.raw)
-	} else {
-		err = c.conn.WriteJSON(msg)
+	// Broadcasts serialize once and share the encoded bytes; WriteMessage
+	// copies the payload onto the wire before returning.
+	payload := msg.raw
+	if payload == nil {
+		var err error
+		if payload, err = json.Marshal(msg); err != nil {
+			return err
+		}
 	}
-	if err != nil {
+	// Compress only frames large enough to gain from it (SDP, join replay);
+	// deflating a 100-byte control message costs CPU and saves nothing. A
+	// no-op when the client did not negotiate permessage-deflate.
+	c.conn.EnableWriteCompression(len(payload) >= compressedFrameMinBytes)
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		return err
 	}
 	return c.conn.SetWriteDeadline(time.Time{})

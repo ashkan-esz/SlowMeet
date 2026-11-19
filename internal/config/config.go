@@ -38,22 +38,25 @@ type Config struct {
 	ICETransportPolicy       string
 	EnabledConnectionMethods []string
 	SimulcastEnabled         bool
-	ICEUDPPortMin            int
-	ICEUDPPortMax            int
-	ICEPublicIP              string
-	TrustedProxyCIDRs        []string
-	MaxParticipants          int
-	DefaultVideoQuality      string
-	MaxVideoQuality          string
-	DefaultVideoFPS          int
-	MaxVideoFPS              int
-	DefaultAudioBitrate      int
-	MaxVideoBitrate          int
-	MaxAudioBitrate          int
-	EnableScreenShare        bool
-	RetainChatHistory        bool
-	ReconnectTimeout         time.Duration
-	LogLevel                 string
+	// OpusDTXEnabled asks browsers to send discontinuous Opus (a comfort-noise
+	// packet every 400 ms while silent instead of 50 packets per second).
+	OpusDTXEnabled      bool
+	ICEUDPPortMin       int
+	ICEUDPPortMax       int
+	ICEPublicIP         string
+	TrustedProxyCIDRs   []string
+	MaxParticipants     int
+	DefaultVideoQuality string
+	MaxVideoQuality     string
+	DefaultVideoFPS     int
+	MaxVideoFPS         int
+	DefaultAudioBitrate int
+	MaxVideoBitrate     int
+	MaxAudioBitrate     int
+	EnableScreenShare   bool
+	RetainChatHistory   bool
+	ReconnectTimeout    time.Duration
+	LogLevel            string
 }
 
 func cloneConfig(cfg Config) Config {
@@ -165,7 +168,12 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	opusDTXEnabled, err := envBool("OPUS_DTX_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
+		OpusDTXEnabled:        opusDTXEnabled,
 		AppName:               envString("APP_NAME", "SlowMeet"),
 		AppEnv:                envString("APP_ENV", "production"),
 		HTTPAddr:              envString("HTTP_ADDR", ":8080"),

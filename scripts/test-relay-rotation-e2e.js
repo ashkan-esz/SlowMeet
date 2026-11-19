@@ -314,6 +314,9 @@ async function main() {
       TURN_URLS: `turn:127.0.0.1:${turnPort}?transport=tcp`,
       TURN_SHARED_SECRET: turnSecret,
       TURN_TCP_ROTATE_SECONDS: String(rotateSeconds),
+      // Continuity is measured as gaps between inbound audio packets; with
+      // DTX a silent source sends one packet every 400 ms by design.
+      OPUS_DTX_ENABLED: "false",
       HTTP_PROXY: "", HTTPS_PROXY: "", http_proxy: "", https_proxy: ""
     });
     cleanup.push(server.stop);

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   filterICEServers, requiresConfiguredICEServers, isRotatingMethod, baseMethod, rotatingMethodForProtocol,
+  rotatingVariant,
   autoRelayFallback, autoRelayFallbackOrder, sharesPeerConfiguration
 } = require("../web/js/connection-methods.js");
 
@@ -50,6 +51,11 @@ assert.equal(rotatingMethodForProtocol("tcp"), "turn-tcp-rotate");
 assert.equal(rotatingMethodForProtocol("TLS"), "turn-tls-rotate");
 assert.equal(rotatingMethodForProtocol("udp"), null, "TURN/UDP has no rotating variant");
 assert.equal(rotatingMethodForProtocol(null), null);
+assert.equal(rotatingVariant("turn-tcp"), "turn-tcp-rotate");
+assert.equal(rotatingVariant("turn-tls"), "turn-tls-rotate");
+for (const methodID of ["auto", "direct", "turn-udp", "turn-tcp-rotate", "turn-tls-rotate", "", undefined]) {
+  assert.equal(rotatingVariant(methodID), null, `${methodID} has no rotating variant to offer`);
+}
 assert.equal(requiresConfiguredICEServers("turn-tls-rotate"), true);
 
 // "Automatic" relay fallback: rotating TCP, rotating TLS, TCP, TLS — first enabled.
@@ -116,6 +122,24 @@ assert.match(appSource, /const directUdpFailureStorageKey = "meeting\.directUdpF
 const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html"), "utf8");
 assert.match(indexSource, /<div id="path-fallback-banner" class="meeting-alert path-fallback-banner" role="status" aria-live="polite" hidden>/,
   "the meeting stage must contain the stalled-direct prompt banner");
+// An explicit plain TURN/TCP or TURN/TLS choice that keeps stalling is offered
+// its rotating variant; the choice itself is never changed without the click.
+assert.match(indexSource, /<div id="rotation-suggest-banner" class="meeting-alert path-fallback-banner" role="status" aria-live="polite" hidden>/,
+  "the meeting stage must contain the rotating-relay suggestion banner");
+assert.match(appSource, /function manageRotationSuggestion\(relayProtocol, rttMs\) \{[\s\S]*?rotationSuggestDismissed\) return;[\s\S]*?connectionMethod === appliedConnectionMethod[\s\S]*?rotatingVariant\(appliedConnectionMethod\)[\s\S]*?\.enabled !== true[\s\S]*?rotationSuggestGuard\.observe\(rttMs\)[\s\S]*?rotationSuggestBanner\.hidden = false;/,
+  "the suggestion needs an explicit plain relay method, an enabled rotating variant, and a tripped RTT guard");
+assert.match(appSource, /rotationSuggestSwitch\?\.addEventListener\("click", \(\) => \{[\s\S]*?rotatingVariant\(connectionMethod\);[\s\S]*?selectConnectionMethod\(rotatingMethod\);/,
+  "accepting the suggestion switches to the rotating variant through the normal method selection");
+assert.match(appSource, /rotationSuggestDismiss\?\.addEventListener\("click", \(\) => \{[\s\S]*?rotationSuggestDismissed = true;/,
+  "declining the suggestion must not ask again for the same method choice");
+assert.match(appSource, /connectionMethod = methodID;[\s\S]{0,120}rotationSuggestDismissed = false;/,
+  "a new method choice may be offered the suggestion again");
+assert.match(appSource, /manageRotationSuggestion\(relayProtocol, rttMs\);/,
+  "the rotation check must feed the suggestion once per tick");
+// Rotation suspended on a healthy-looking plain relay must resume when that
+// flow dies outright; the RTT guard cannot see a dead pair.
+assert.match(appSource, /if \(!connected && plainRelaySuspended &&[\s\S]{0,160}"disconnected"[\s\S]{0,400}plainRelaySuspended = false;[\s\S]{0,300}encodeVerdict\("fail", nowMs\)/,
+  "an ICE disconnect while rotation is suspended must end the suspension and record the failure");
 const pathMemoryScriptAt = indexSource.indexOf('<script defer src="/js/path-memory.js"></script>');
 const appScriptAt = indexSource.indexOf('<script defer src="/js/app.js"></script>');
 assert.ok(pathMemoryScriptAt !== -1, "index.html must load path-memory.js");

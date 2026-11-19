@@ -74,6 +74,9 @@ const meetingAlert = document.querySelector("#meeting-alert");
 const pathFallbackBanner = document.querySelector("#path-fallback-banner");
 const pathFallbackSwitch = document.querySelector("#path-fallback-switch");
 const pathFallbackDismiss = document.querySelector("#path-fallback-dismiss");
+const rotationSuggestBanner = document.querySelector("#rotation-suggest-banner");
+const rotationSuggestSwitch = document.querySelector("#rotation-suggest-switch");
+const rotationSuggestDismiss = document.querySelector("#rotation-suggest-dismiss");
 const meetingStatusBanner = document.querySelector("#meeting-status");
 const testMedia = document.querySelector("#test-media");
 const deviceTest = document.querySelector(".device-test");
@@ -1627,6 +1630,16 @@ pathFallbackSwitch?.addEventListener("click", () => {
   selectConnectionMethod(autoRelayFallbackMethod() || "turn-tcp");
 });
 pathFallbackDismiss?.addEventListener("click", hidePathFallbackBanner);
+rotationSuggestSwitch?.addEventListener("click", () => {
+  const rotatingMethod = window.SlowMeetConnectionMethods.rotatingVariant(connectionMethod);
+  hideRotationSuggestBanner();
+  if (rotatingMethod) selectConnectionMethod(rotatingMethod);
+});
+rotationSuggestDismiss?.addEventListener("click", () => {
+  // Asked once per method choice; the user decided to stay on the plain relay.
+  rotationSuggestDismissed = true;
+  hideRotationSuggestBanner();
+});
 chatMessages?.addEventListener("scroll", () => {
   chatPinnedToBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 24;
   if (chatPinnedToBottom && newMessages) newMessages.hidden = true;
@@ -1917,7 +1930,14 @@ let peerFirstConnectedAtMs = null;
 // rotation is suspended, guarded by the live call's round-trip time.
 const plainRelayProbe = window.SlowMeetPlainRelayProbe || null;
 const plainRelayGuard = plainRelayProbe?.createSuspensionGuard() || null;
+// An explicit plain TURN/TCP or TURN/TLS choice is never overridden, but when
+// its flow shows the same stall the user is offered the rotating variant.
+const rotationSuggestGuard = plainRelayProbe?.createSuspensionGuard() || null;
+let rotationSuggestDismissed = false;
 let plainRelaySuspended = false;
+// The TCP/TLS relay protocol rotation was last suspended on, for recording a
+// verdict when the suspended flow dies instead of merely slowing down.
+let plainRelaySuspendedProtocol = null;
 let plainRelayProbeChecked = false;
 let plainRelayProbeRun = null;
 let relayConnectedSinceMs = null;
@@ -2002,6 +2022,9 @@ let cameraLayer = "medium";
 let cameraLayerPoorSamples = 0;
 let cameraLayerGoodSamples = 0;
 let criticalSamples = 0;
+// The connection's own RTT floor; RTT health is judged relative to it so a
+// relayed path with a naturally higher RTT is not read as congested.
+const rttBaseline = createRTTBaseline();
 let lastPauseCriticalSamples = 0;
 let recoverySamples = 0;
 let videoSuspended = false;
@@ -2201,6 +2224,8 @@ function selectConnectionMethod(methodID) {
   if (connectionMethod === methodID) return true;
   connectionMethod = methodID;
   autoTurnFailoverStrikes = 0;
+  rotationSuggestDismissed = false;
+  hideRotationSuggestBanner();
   hidePathFallbackBanner();
   clearTimeout(directPathWatchdogTimer);
   directPathWatchdogTimer = undefined;
@@ -2238,6 +2263,9 @@ const participantQualitySamples = new Map();
 // against to measure the sender's own uplink loss (inbound-rtp cannot see
 // it — the classifier's loss inputs are receive-side only).
 const cameraUplinkSamples = new Map();
+// The SFU sends a receiver report about once a second; a loss figure older
+// than this is no longer evidence about the uplink.
+const cameraUplinkReportMaxAgeMs = 3000;
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
@@ -3540,7 +3568,11 @@ function connectSocket(name, password) {
   currentSocket.addEventListener("open", () => {
     if (generation !== socketGeneration) return;
     clearTimeout(reconnectTimer);
-    reconnectAttempts = 0;
+    // reconnectAttempts is not cleared here: an open socket proves only that
+    // signaling is reachable. Every later failure (credentials, media setup,
+    // negotiation timeout, exhausted ICE restarts) closes this socket again,
+    // and clearing the count on open kept the retry delay at its minimum and
+    // the retry limit unreachable. The count clears once media connects.
     // A non-empty reconnect token means this connection resumes a dropped
     // session; the participant response then counts a successful reconnect.
     wasReconnectResume = Boolean(reconnectToken);
@@ -4337,6 +4369,7 @@ function updatePeerConnectionUI(targetPeer, targetSocket, generation) {
     exhaustedReconnectTimer = undefined;
     restartRequested = false;
     iceRestartAttempts = 0;
+    reconnectAttempts = 0;
     setConnection("good", "Connected");
     setParticipantConnectionState("connected");
     status.textContent = "Connected";
@@ -4526,9 +4559,11 @@ function resetPlainRelayProbe() {
   plainRelayProbeRun?.cancel();
   plainRelayProbeRun = null;
   plainRelaySuspended = false;
+  plainRelaySuspendedProtocol = null;
   plainRelayProbeChecked = false;
   relayConnectedSinceMs = null;
   plainRelayGuard?.reset();
+  hideRotationSuggestBanner();
 }
 
 function applyPlainRelayVerdict(relayProtocol, verdict, nowMs) {
@@ -4683,8 +4718,23 @@ async function checkRelayRotation() {
       rttMs = selectedCandidatePairRTT(report);
     }
     const nowMs = Date.now();
+    manageRotationSuggestion(relayProtocol, rttMs);
+    if (!connected && plainRelaySuspended &&
+        (targetPeer.iceConnectionState === "disconnected" || targetPeer.iceConnectionState === "failed")) {
+      // Rotation was suspended because the plain relay looked healthy, and
+      // the flow then died outright instead of slowing down. The guard only
+      // sees round-trip times on a live pair, so without this the recovery
+      // restart would come back still suspended and die the same way.
+      plainRelaySuspended = false;
+      plainRelayGuard.reset();
+      if (plainRelaySuspendedProtocol) {
+        writeStoredValue(plainRelayVerdictKey(plainRelaySuspendedProtocol),
+          plainRelayProbe.encodeVerdict("fail", nowMs));
+      }
+    }
     const wanted = relayProtocol !== null && relayRotationWanted(relayProtocol);
     managePlainRelayProbe(relayProtocol, wanted, rttMs, nowMs, targetPeer);
+    if (plainRelaySuspended) plainRelaySuspendedProtocol = relayProtocol;
     const rotatable = wanted && !plainRelaySuspended;
     if (connected) setRelayRotationActive(rotatable);
     const busy = restartRequested || targetSocket.readyState !== WebSocket.OPEN;
@@ -4777,6 +4827,32 @@ function hidePathFallbackBanner() {
   if (pathFallbackBanner) pathFallbackBanner.hidden = true;
 }
 
+function hideRotationSuggestBanner() {
+  if (rotationSuggestBanner) rotationSuggestBanner.hidden = true;
+  rotationSuggestGuard?.reset();
+}
+
+// Called once per rotation check. On an explicitly chosen plain TURN/TCP or
+// TURN/TLS method, a round-trip time that keeps exceeding the stall threshold
+// is the long-lived-TCP degradation relay rotation exists for (see
+// relay-rotation.js). The choice is the user's, so this only offers the
+// rotating variant of the same transport, which switches in place.
+function manageRotationSuggestion(relayProtocol, rttMs) {
+  if (!rotationSuggestGuard || !rotationSuggestBanner || rotationSuggestDismissed) return;
+  const rotatingMethod = connectionMethod === appliedConnectionMethod
+    ? window.SlowMeetConnectionMethods.rotatingVariant(appliedConnectionMethod)
+    : null;
+  if (!rotatingMethod || relayProtocol === null || connectionMethodOptions.get(rotatingMethod)?.enabled !== true) {
+    // Not on a plain TCP/TLS relay right now; samples from another path or
+    // from before a disconnect must not add up to a suggestion.
+    rotationSuggestGuard.reset();
+    return;
+  }
+  if (!rotationSuggestBanner.hidden || !rotationSuggestGuard.observe(rttMs)) return;
+  rotationSuggestGuard.reset();
+  rotationSuggestBanner.hidden = false;
+}
+
 // Arms the "direct is slow" watchdog for direct-led connections. It only
 // prompts: ICE keeps running, and the banner offers the relay method the
 // server has enabled instead of silently burning restart cycles first.
@@ -4819,6 +4895,9 @@ function effectiveConnectionMethod() {
 // means a working fallback pair may exist that ICE can nominate without a
 // restart, so the restart timer uses the longer grace window.
 function iceRestartDelayMs(targetPeer) {
+  // On a relay-only method every pair is already a relay pair: there is no
+  // other pair to wait for, and relay rotation is idle while disconnected.
+  if (appliedConnectionMethod.startsWith("turn-")) return iceRestartRetryDelayMs;
   const sdp = targetPeer?.currentLocalDescription?.sdp ?? targetPeer?.localDescription?.sdp ?? "";
   return /typ relay/.test(sdp) ? iceRestartRelayGraceDelayMs : iceRestartRetryDelayMs;
 }
@@ -4992,18 +5071,36 @@ async function sampleCameraUplinkLoss() {
     }
   });
   if (!outbound) return null;
+  // Loss is not an outbound-rtp field: the receiver (the SFU) reports it in
+  // RTCP receiver reports, which the browser exposes on the remote-inbound-rtp
+  // entry paired with this outbound stream.
+  let remoteInbound;
+  report.forEach((stat) => {
+    if (stat.type === "remote-inbound-rtp" &&
+        (stat.localId === outbound.id || (stat.ssrc != null && stat.ssrc === outbound.ssrc))) {
+      remoteInbound = stat;
+    }
+  });
   const sent = Number.isFinite(outbound.packetsSent) ? outbound.packetsSent : null;
-  const lost = Number.isFinite(outbound.packetsLost) ? outbound.packetsLost : null;
+  const lost = Number.isFinite(remoteInbound?.packetsLost) ? remoteInbound.packetsLost : null;
+  const reportedAt = Number.isFinite(remoteInbound?.timestamp) ? remoteInbound.timestamp : null;
   const previous = cameraUplinkSamples.get(outbound.id);
-  cameraUplinkSamples.set(outbound.id, { sent, lost });
-  if (!previous || previous.sent == null || previous.lost == null ||
-      sent == null || lost == null) return null;
-  const sentDelta = sent - previous.sent;
-  const lostDelta = lost - previous.lost;
-  // A sender that paused (or counters that reset) provides no signal; the
-  // next sample re-baselines instead of fabricating loss.
-  if (sentDelta <= 0 || lostDelta < 0) return null;
-  return packetLossPercentFromDeltas(lostDelta, sentDelta);
+  if (previous && reportedAt != null && reportedAt === previous.reportedAt) {
+    // No receiver report arrived since the last tick. Keep the last result
+    // briefly so a tick between two reports does not read as a clean uplink,
+    // but never let a stale value outlive the reports themselves.
+    return outbound.timestamp - previous.seenAt <= cameraUplinkReportMaxAgeMs ? previous.lossPct : null;
+  }
+  let lossPct = null;
+  if (previous && previous.sent != null && previous.lost != null && sent != null && lost != null) {
+    const sentDelta = sent - previous.sent;
+    const lostDelta = lost - previous.lost;
+    // A sender that paused (or counters that reset) provides no signal; the
+    // next sample re-baselines instead of fabricating loss.
+    if (sentDelta > 0 && lostDelta >= 0) lossPct = packetLossPercentFromDeltas(lostDelta, sentDelta);
+  }
+  cameraUplinkSamples.set(outbound.id, { sent, lost, reportedAt, seenAt: outbound.timestamp, lossPct });
+  return lossPct;
 }
 
 async function runDiagnosticsUpdate() {
@@ -5326,6 +5423,7 @@ async function runDiagnosticsUpdate() {
   const packetLoss = values.packetLoss ?? 0;
   const networkCondition = classifyNetworkSample({
     rttMs: values.rttMs,
+    rttBaselineMs: rttBaseline.observe(values.rttMs),
     packetLoss: lossKnown ? packetLoss : undefined,
     jitterMs: values.jitterMs,
     availableOutgoingKbps: values.availableOutgoingKbps
@@ -6391,6 +6489,7 @@ leave.addEventListener("click", () => {
   remoteCameraLayerTracks.clear();
   remoteScreenTracks.clear();
   previousStats = undefined;
+  rttBaseline.reset();
   criticalSamples = 0;
   lastPauseCriticalSamples = 0;
   recoverySamples = 0;

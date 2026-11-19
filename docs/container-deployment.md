@@ -91,7 +91,10 @@ docker compose up -d --build
 To start the optional coturn profile, first copy
 `deploy/coturn/turnserver.conf.example` to
 `deploy/coturn/turnserver.conf` and provide certificates under
-`deploy/coturn/certs`, then run:
+`deploy/coturn/certs`. The coturn image runs as `nobody` (`65534:65533`), so
+the certificate files must be readable by that user, or coturn starts without
+its TLS listener and TURN over TLS never connects. Set `allowed-peer-ip` in the
+copied file to the address SlowMeet advertises (`ICE_PUBLIC_IP`). Then run:
 
 ```sh
 docker compose --profile turn up -d --build

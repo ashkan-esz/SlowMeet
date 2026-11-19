@@ -409,4 +409,57 @@ host_network_choice() {
 grep -Fq 'max-port=49999' "$INSTALLER" && grep -Fq 'ufw allow 49152:49999/udp' "$INSTALLER" \
     || fail 'the coturn relay range and its firewall rule must match'
 
+# coturn's CPU limit: .env starts as a copy of .env.example, whose shipped
+# value must count as unset, while an operator's own value is kept.
+turn_cpus_after() {
+    printf '%b' "$1" > "$ENV_FILE"
+    raise_turn_cpu_limit
+    read_env_value TURN_CPUS
+}
+shipped_turn_cpus=$(sed -n 's/^TURN_CPUS=//p' .env.example)
+[[ "$shipped_turn_cpus" == 0.20 ]] \
+    || fail "the installer treats TURN_CPUS=0.20 as the shipped default, but .env.example ships '$shipped_turn_cpus'"
+[[ "$(turn_cpus_after 'TURN_CPUS=0.20\n')" == 0.50 ]] || fail 'the shipped coturn CPU limit must be raised'
+[[ "$(turn_cpus_after 'TURN_CPUS=\n')" == 0.50 ]] || fail 'an empty coturn CPU limit must be set'
+[[ "$(turn_cpus_after 'OTHER=1\n')" == 0.50 ]] || fail 'a missing coturn CPU limit must be set'
+[[ "$(turn_cpus_after 'TURN_CPUS=1.0\n')" == 1.0 ]] || fail "an operator's coturn CPU limit must be kept"
+[[ "$(turn_cpus_after 'TURN_CPUS=0.10\n')" == 0.10 ]] || fail "an operator's lower coturn CPU limit must be kept"
+
+# coturn may relay only to the SFU on this host.
+mkdir -p "$INSTALL_DIR/deploy/coturn"
+coturn_config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
+write_coturn_config 0123abcd meet.example.com 203.0.113.7 203.0.113.7
+for expected in 'static-auth-secret=0123abcd' 'realm=meet.example.com' 'no-multicast-peers' 'no-tcp-relay' \
+    'denied-peer-ip=0.0.0.0-255.255.255.255' 'denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' \
+    'allowed-peer-ip=203.0.113.7' 'min-port=49152'; do
+    assert_contains "$coturn_config" "$expected"
+done
+assert_not_contains "$coturn_config" 'external-ip='
+[[ "$(grep -c '^allowed-peer-ip=' "$coturn_config")" == 1 ]] \
+    || fail 'a directly addressed host allows exactly one relay peer'
+write_coturn_config 0123abcd meet.example.com 203.0.113.7 10.0.0.5
+assert_contains "$coturn_config" 'allowed-peer-ip=203.0.113.7'
+assert_contains "$coturn_config" 'allowed-peer-ip=10.0.0.5'
+assert_contains "$coturn_config" 'external-ip=203.0.113.7/10.0.0.5'
+write_coturn_config 0123abcd meet.example.com 203.0.113.7 ''
+assert_not_contains "$coturn_config" 'external-ip='
+
+# coturn runs as nobody and needs its own readable certificate copy, on a
+# fresh install, on an update of an older install, and after every renewal.
+# The patterns are literal installer source text.
+# shellcheck disable=SC2016
+{
+    grep -Fq 'set_env TURN_CERT_DIR "$TURN_CERT_DIR"' "$INSTALLER" \
+        || fail 'coturn must mount its own certificate directory'
+    if grep -Fq 'set_env TURN_CERT_DIR "$CERT_DIR"' "$INSTALLER"; then
+        fail "coturn must not mount the proxy's root-owned certificate directory"
+    fi
+    grep -Fq 'install_turn_certs "/etc/letsencrypt/live/$domain"' "$INSTALLER" \
+        || fail 'a fresh install must give coturn a readable certificate copy'
+    grep -Fq 'install_turn_certs "$CERT_DIR"' "$INSTALLER" \
+        || fail 'an update must migrate an older install to the coturn certificate copy'
+    grep -Fq 'install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem' "$INSTALLER" \
+        || fail 'the renewal hook must refresh the coturn certificate copy'
+}
+
 printf 'Installer configuration checks passed.\n'

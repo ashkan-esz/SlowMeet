@@ -1794,6 +1794,44 @@ func TestHubRaisedHandQueueBroadcastsAndRejectsSpoofing(t *testing.T) {
 	}
 }
 
+func TestHubNegotiatesMessageCompression(t *testing.T) {
+	cfg := config.Config{
+		HTTPAddr: ":8080", MaxParticipants: 2, DefaultVideoQuality: "low", DefaultVideoFPS: 15,
+		MaxVideoFPS: 30, DefaultAudioBitrate: 32000, MaxVideoBitrate: 500000, MaxAudioBitrate: 64000,
+	}
+	hub := NewHub(meeting.New(2), config.NewStore(cfg), slog.Default())
+	server := httptest.NewServer(hub)
+	defer server.Close()
+
+	dialer := websocket.Dialer{EnableCompression: true}
+	conn, response, err := dialer.Dial("ws"+server.URL[len("http"):], nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if extensions := response.Header.Get("Sec-WebSocket-Extensions"); !strings.Contains(extensions, "permessage-deflate") {
+		t.Fatalf("Sec-WebSocket-Extensions = %q, want permessage-deflate", extensions)
+	}
+	// Compressed client frames are read, and the replies arrive intact.
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeJoin, Name: "Ashkan"})
+	var joined Message
+	readTestMessage(t, conn, &joined)
+	if joined.Type != TypeParticipant || joined.Participant == nil {
+		t.Fatalf("join response = %+v", joined)
+	}
+	large := strings.Repeat("a=rtpmap:96 VP8/90000\r\n", 200)
+	writeTestMessage(t, conn, Message{Version: ProtocolVersion, Type: TypeOffer, SDP: large})
+	for {
+		var reply Message
+		readTestMessage(t, conn, &reply)
+		if reply.Type == TypeError {
+			// The fake SDP is rejected; the error reply proves the large
+			// compressed frame was decoded and answered.
+			return
+		}
+	}
+}
+
 func dialTestSocket(t *testing.T, url string) *websocket.Conn {
 	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)

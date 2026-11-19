@@ -29,6 +29,7 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	t.Setenv("TRUSTED_PROXY_CIDRS", "")
 	t.Setenv("ICE_TRANSPORT_POLICY", "")
 	t.Setenv("SIMULCAST_ENABLED", "")
+	t.Setenv("OPUS_DTX_ENABLED", "")
 	t.Setenv("ICE_UDP_PORT_MIN", "")
 	t.Setenv("ICE_UDP_PORT_MAX", "")
 	t.Setenv("LOG_LEVEL", "")
@@ -73,6 +74,9 @@ func TestLoadFromEnvAppliesDefaults(t *testing.T) {
 	if cfg.ICETransportPolicy != "all" || cfg.SimulcastEnabled {
 		t.Fatalf("unexpected ICE and simulcast defaults: policy=%q simulcast=%t", cfg.ICETransportPolicy, cfg.SimulcastEnabled)
 	}
+	if !cfg.OpusDTXEnabled {
+		t.Fatal("Opus DTX should be enabled by default")
+	}
 	if cfg.ReconnectTimeout != 30*time.Second {
 		t.Fatalf("unexpected reconnect timeout: %s", cfg.ReconnectTimeout)
 	}
@@ -102,6 +106,7 @@ func TestLoadFromEnvParsesTURNAndIPv4Settings(t *testing.T) {
 	t.Setenv("ICE_PUBLIC_IP", "203.0.113.42")
 	t.Setenv("ICE_TRANSPORT_POLICY", "relay")
 	t.Setenv("SIMULCAST_ENABLED", "true")
+	t.Setenv("OPUS_DTX_ENABLED", "false")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -116,6 +121,9 @@ func TestLoadFromEnvParsesTURNAndIPv4Settings(t *testing.T) {
 	}
 	if cfg.ICETransportPolicy != "relay" || !cfg.SimulcastEnabled {
 		t.Fatalf("unexpected ICE policy or simulcast setting: %+v", cfg)
+	}
+	if cfg.OpusDTXEnabled {
+		t.Fatal("OPUS_DTX_ENABLED=false was not applied")
 	}
 	if cfg.ICEPublicIP != "203.0.113.42" {
 		t.Fatalf("unexpected public ICE IP: %q", cfg.ICEPublicIP)

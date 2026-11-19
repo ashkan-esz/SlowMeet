@@ -149,6 +149,31 @@ func TestRouteRTCPFeedbackTargetsSourceTrack(t *testing.T) {
 	}
 }
 
+func TestRouteRTCPFeedbackDropsSubscriberLegReports(t *testing.T) {
+	// Receiver reports and transport-cc feedback describe the SFU-to-subscriber
+	// leg in the subscriber's SSRC and sequence space; the publisher cannot use
+	// them and the SFU already reports on the publisher's own leg.
+	subscriberLeg := []rtcp.Packet{
+		&rtcp.ReceiverReport{SSRC: 10},
+		&rtcp.SenderReport{SSRC: 10},
+		&rtcp.TransportLayerCC{SenderSSRC: 10, MediaSSRC: 20},
+		&rtcp.SourceDescription{},
+	}
+	if routed := routeRTCPFeedback(subscriberLeg, 1234); len(routed) != 0 {
+		t.Fatalf("routed %d subscriber-leg packets, want none: %v", len(routed), routed)
+	}
+	remb := &rtcp.ReceiverEstimatedMaximumBitrate{SenderSSRC: 10, Bitrate: 300_000, SSRCs: []uint32{20}}
+	pli := &rtcp.PictureLossIndication{SenderSSRC: 10, MediaSSRC: 20}
+	mixed := append(append([]rtcp.Packet{}, subscriberLeg...), remb, pli)
+	routed := routeRTCPFeedback(mixed, 1234)
+	if len(routed) != 2 || routed[0] != rtcp.Packet(remb) {
+		t.Fatalf("routed = %v, want the REMB and the PLI only", routed)
+	}
+	if routedPLI, ok := routed[1].(*rtcp.PictureLossIndication); !ok || routedPLI.MediaSSRC != 1234 {
+		t.Fatalf("routed PLI = %+v, want source SSRC 1234", routed[1])
+	}
+}
+
 func TestBitrateLimiterDropsWithoutQueueingAndRefills(t *testing.T) {
 	now := time.Unix(0, 0)
 	limiter := newBitrateLimiterAt(100_000, func() time.Time { return now })

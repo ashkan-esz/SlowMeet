@@ -561,3 +561,42 @@ Live container switched to `deploy/compose.host-network.yml`:
 | Memory used by them | 105 MB | 0 |
 | Available memory | 645 MB | 781 MB |
 | Processes on the VPS | 147 | 45 |
+
+## Nov 19, 2026 (audit): load and slow-link fixes from a code review
+
+A read-through of the server, client, and installer, with no live call to
+measure (the container had just restarted). What changed and what is and is
+not measured:
+
+- **Subscriber RTCP is no longer forwarded wholesale.** The SFU forwarded
+  every RTCP batch a subscriber sent about a track to that track's publisher.
+  The Nov 20 counters put 99.9% of those batches at transport-cc feedback and
+  receiver reports, which describe the SFU-to-subscriber leg in the
+  subscriber's SSRC and sequence space; the SFU already sends publishers its
+  own reports and transport-cc feedback. Only PLI, FIR, NACK, and REMB are
+  forwarded now (`slowmeet_rtcp_forwarded_batches_total`).
+- **Opus DTX** (`OPUS_DTX_ENABLED`, default on). Estimate, not measured: in a
+  five-person call with one speaker, audio drops from about 1,000 forwarded
+  packets per second to about 240.
+- **WebSocket compression.** Measured with the server's own offer: 21 KB for 8
+  media sections (4.5 KB per video section), 2.2 KB deflated. A five-person
+  room on a rotating method exchanged roughly 26 KB each way every 12 s per
+  participant, about 17 kbps per direction, before compression.
+- **RTT bands relative to the path's floor** (see `docs/configuration.md`):
+  with fixed bands a healthy relay path at 120-250 ms could step quality down
+  but never up, and an automatic video pause could not lift.
+- **Uplink loss signal revived.** It read `packetsLost` from `outbound-rtp`,
+  which has no such field; it now reads the paired `remote-inbound-rtp`.
+- **Reconnect attempts** are cleared when media connects, not when the socket
+  opens; before, the retry limit was unreachable and the delay stayed at 2 s.
+- **Plain TURN/TCP and TURN/TLS** get a banner offering the rotating variant
+  when the stall signature shows, and a 5 s instead of 12 s recovery restart.
+- **Installer:** the coturn CPU bump never applied (the shipped `.env` value
+  counted as "already set"); coturn could not read its certificate (image
+  user `nobody`, files `root:caddy 0640`), so TURN/TLS never started on
+  installer-made deployments; coturn relayed to any peer. coturn's
+  allowed-over-denied precedence was checked against the 4.18 image.
+
+Still open: ICE-TCP on the SFU (would take coturn out of the media path; the
+vendored ICE patch must cover it), `net.ipv4.tcp_notsent_lowat` to bound relay
+queueing on slow downlinks, and one `turns:` URL instead of two per rotation.

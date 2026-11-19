@@ -235,20 +235,74 @@ function formatRTT(rttMs) {
   return `${Number(rttMs.toFixed(1))} ms`;
 }
 
-function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingKbps } = {}) {
+// RTT bands are judged against the path's own floor, not only against fixed
+// numbers. A relayed or long-distance path can sit at 150-250 ms while
+// perfectly healthy; with fixed bands such a path could step quality down but
+// never climb back, and an automatic video pause could never lift. The fixed
+// values stay as the minimum of each band, so a short path behaves exactly as
+// before, and the floor is capped so a path that was already congested when
+// its floor was learned cannot excuse itself.
+const rttBaselineCapMs = 300;
+
+function rttThresholds(baselineMs) {
+  const baseline = Number.isFinite(baselineMs) && baselineMs > 0 ? Math.min(baselineMs, rttBaselineCapMs) : 0;
+  return {
+    healthyBelowMs: Math.max(120, baseline + 60),
+    poorAboveMs: Math.max(250, baseline + 150),
+    criticalAboveMs: Math.max(500, baseline + 400)
+  };
+}
+
+// Tracks the lowest RTT seen recently as the path's floor. Two rotating
+// buckets give a window of one to two bucket lengths without storing every
+// sample: a path change to a longer route is learned after the old bucket
+// rotates out, and a shorter route is learned at once.
+function createRTTBaseline(bucketSamples = 60) {
+  let currentMin = null;
+  let previousMin = null;
+  let count = 0;
+
+  function value() {
+    if (currentMin === null) return previousMin;
+    return previousMin === null ? currentMin : Math.min(currentMin, previousMin);
+  }
+
+  function observe(rttMs) {
+    if (!Number.isFinite(rttMs) || rttMs < 0) return value();
+    if (count >= bucketSamples) {
+      previousMin = currentMin;
+      currentMin = null;
+      count = 0;
+    }
+    currentMin = currentMin === null ? rttMs : Math.min(currentMin, rttMs);
+    count += 1;
+    return value();
+  }
+
+  function reset() {
+    currentMin = null;
+    previousMin = null;
+    count = 0;
+  }
+
+  return { observe, value, reset };
+}
+
+function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingKbps, rttBaselineMs } = {}) {
+  const { healthyBelowMs, poorAboveMs, criticalAboveMs } = rttThresholds(rttBaselineMs);
   const rttKnown = Number.isFinite(rttMs) && rttMs >= 0;
   const lossKnown = Number.isFinite(packetLoss) && packetLoss >= 0;
   const jitterKnown = Number.isFinite(jitterMs) && jitterMs >= 0;
   // Browsers report zero while the bandwidth estimate is still warming up.
   const capacityKnown = Number.isFinite(availableOutgoingKbps) && availableOutgoingKbps > 0;
   const hasSignal = rttKnown || lossKnown || jitterKnown || capacityKnown;
-  const poor = (rttKnown && rttMs > 250) || (lossKnown && packetLoss > 5) ||
+  const poor = (rttKnown && rttMs > poorAboveMs) || (lossKnown && packetLoss > 5) ||
     (jitterKnown && jitterMs > 50) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 220));
   // Capacity estimates can briefly under-report while a sender starts or resumes.
   // Use measured transport impairment to decide when video must be suspended.
-  const critical = (rttKnown && rttMs > 500) || (lossKnown && packetLoss > 10) ||
+  const critical = (rttKnown && rttMs > criticalAboveMs) || (lossKnown && packetLoss > 10) ||
     (jitterKnown && jitterMs > 120);
-  const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) &&
+  const good = hasSignal && !poor && !critical && (!rttKnown || rttMs < healthyBelowMs) && (!lossKnown || packetLoss < 1) &&
     (!jitterKnown || jitterMs < 30) && (!capacityKnown || availableOutgoingKbps >= 350);
   // While video is suspended almost nothing is sent, so the bandwidth
   // estimate starves below every capacity bar and can no longer distinguish
@@ -257,7 +311,7 @@ function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingK
   // good band), ignoring the starved capacity estimate. At least one transport
   // metric must be measured — capacity alone cannot vouch for health.
   const transportHealthy = (rttKnown || lossKnown || jitterKnown) && !critical &&
-    (!rttKnown || rttMs < 120) && (!lossKnown || packetLoss < 1) && (!jitterKnown || jitterMs < 30);
+    (!rttKnown || rttMs < healthyBelowMs) && (!lossKnown || packetLoss < 1) && (!jitterKnown || jitterMs < 30);
   return { poor, critical, good, transportHealthy };
 }
 
@@ -378,6 +432,8 @@ if (typeof module !== "undefined") {
     setVideoJitterBufferTarget,
     formatRTT,
     classifyNetworkSample,
+    rttThresholds,
+    createRTTBaseline,
     countLadderRecoverySamples,
     shouldPauseVideo,
     chooseParticipantLayout

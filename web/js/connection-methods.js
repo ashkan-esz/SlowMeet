@@ -16,6 +16,12 @@
     return rotatingBases[methodID] || methodID;
   }
 
+  // The rotating method that shares a plain TURN method's servers
+  // ("turn-tcp" -> "turn-tcp-rotate"), or null for any other method.
+  function rotatingVariant(methodID) {
+    return Object.keys(rotatingBases).find((rotatingID) => rotatingBases[rotatingID] === methodID) || null;
+  }
+
   // The rotating method for a relay protocol reported by the browser
   // ("tcp"/"tls"), or null.
   function rotatingMethodForProtocol(protocol) {
@@ -57,7 +63,7 @@
   }
 
   const utilities = Object.freeze({
-    filterICEServers, requiresConfiguredICEServers, isRotatingMethod, baseMethod,
+    filterICEServers, requiresConfiguredICEServers, isRotatingMethod, baseMethod, rotatingVariant,
     rotatingMethodForProtocol, autoRelayFallback, autoRelayFallbackOrder, sharesPeerConfiguration
   });
   root.SlowMeetConnectionMethods = utilities;

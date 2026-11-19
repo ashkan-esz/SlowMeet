@@ -976,8 +976,15 @@ func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.U
 		if err != nil {
 			return
 		}
+		routed := routeRTCPFeedback(packets, sourceSSRC.Load())
 		relayed.Observe(packets)
-		if err := source.WriteRTCP(routeRTCPFeedback(packets, sourceSSRC.Load())); err != nil {
+		if len(routed) == 0 {
+			// Nothing in the batch concerns the publisher; skip the
+			// encrypt-and-send entirely.
+			continue
+		}
+		relayed.ForwardedBatches.Add(1)
+		if err := source.WriteRTCP(routed); err != nil {
 			return
 		}
 	}
@@ -995,8 +1002,20 @@ func readSenderRTCP(sender interface {
 	return attrs.GetRTCPPackets(buf[:n])
 }
 
+// routeRTCPFeedback keeps only the subscriber feedback a publisher can act on
+// and retargets it at the publisher's own track: keyframe requests (PLI, FIR),
+// retransmission requests (NACK), and REMB.
+//
+// Everything else describes the SFU-to-subscriber leg and is dropped. Receiver
+// reports and transport-wide congestion feedback name the subscriber-side SSRC
+// and sequence space, which the publisher does not know, and the SFU already
+// sends the publisher its own reports and transport-cc feedback for the
+// publisher-to-SFU leg (internal/webrtc/peer.go). On a relayed two-person call
+// 99.9% of the forwarded batches were of this kind (see
+// docs/vps-regression-diagnostics.md), each one an SRTCP encrypt, a send, and
+// bytes on the publisher's downlink.
 func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
-	routed := make([]rtcp.Packet, 0, len(packets))
+	var routed []rtcp.Packet
 	for _, packet := range packets {
 		switch feedback := packet.(type) {
 		case *rtcp.PictureLossIndication:
@@ -1016,7 +1035,9 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 			copy.MediaSSRC = sourceSSRC
 			copy.Nacks = append([]rtcp.NackPair(nil), feedback.Nacks...)
 			routed = append(routed, &copy)
-		default:
+		case *rtcp.ReceiverEstimatedMaximumBitrate:
+			// Sent only by receivers without transport-cc; a publisher's
+			// browser applies it as a send-rate cap, so it stays forwarded.
 			routed = append(routed, packet)
 		}
 	}

@@ -206,6 +206,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_write_failures_total %d\n", audioDrops.WriteFailures)
 		relayed := hub.RTCPRelay()
 		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_batches_total %d\n", relayed.Batches)
+		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_forwarded_batches_total %d\n", relayed.ForwardedBatches)
 		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_report_only_batches_total %d\n", relayed.ReportOnlyBatches)
 		for _, entry := range []struct {
 			kind  string

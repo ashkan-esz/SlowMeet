@@ -73,7 +73,19 @@ The installer proceeds through these steps:
    updates and plain `docker compose` commands reuse that line. Set
    `COMPOSE_FILE=docker-compose.yml` to stay on the bridge network; an existing
    `COMPOSE_FILE` is never changed. With TURN enabled it gives coturn 0.50 CPU
-   unless `TURN_CPUS` is already set.
+   unless `TURN_CPUS` was changed from the shipped `0.20` (fresh installs and
+   updates), and it:
+   - gives coturn its own certificate copy in `/etc/slowmeet/turn-certs`,
+     owned by the user the coturn image runs as (`65534:65533`). coturn cannot
+     read the proxy's root-owned copy and would start without its TLS
+     listener. The renewal hook refreshes both copies; an update migrates an
+     older install that still mounts `/etc/slowmeet/certs`.
+   - writes a coturn configuration that relays only to this server's own
+     address (`no-tcp-relay`, `no-multicast-peers`, every peer denied except
+     the public IPv4 and, behind NAT, the private one), so a TURN credential
+     cannot be used to relay elsewhere or to reach private services. An
+     existing `turnserver.conf` is not rewritten by an update; add those lines
+     by hand (see `deploy/coturn/turnserver.conf.example`).
 4. **Configure UFW.** It allows the detected SSH port (or TCP 22), TCP 80, the
    WebRTC UDP range `50000:50100`, and TCP 443 when HTTPS is enabled. TURN adds
    UDP/TCP 3478, TCP 5349, and UDP relay ports `49152:49999`. It then enables

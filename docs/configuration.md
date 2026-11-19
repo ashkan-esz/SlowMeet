@@ -104,6 +104,30 @@ seat, camera, and microphone all stay. Switching between a plain method and
 its rotating variant needs no restart at all. If the new path has not
 connected within 8 seconds the client falls back to a full rejoin.
 
+An explicitly chosen plain `TURN over TCP` or `TURN over TLS` is never
+changed automatically. When its round-trip time keeps exceeding 500 ms (3 of
+the last 10 one-second samples, the same signature rotation exists for) and
+the server enables the rotating variant, the meeting shows a banner offering
+it; accepting switches in place, declining hides the offer until the method
+is changed again. A recovery ICE restart on any TURN-only method waits 5
+seconds instead of 12, since there is no other pair for ICE to fall back to.
+
+### Reconnecting
+
+After a dropped call the client reconnects with a delay that doubles from 2
+to 30 seconds and stops after 5 attempts ("Offline"). An attempt counts as
+recovered only once media is connected again, not when the signaling socket
+reopens.
+
+### Quality adaptation and round-trip time
+
+The quality ladder and the automatic video pause judge round-trip time
+against the connection's own recent minimum, not only against fixed limits. A
+relayed path that sits at 150-250 ms while healthy would otherwise only ever
+step down. The fixed limits (healthy below 120 ms, poor above 250 ms, critical
+above 500 ms) are the minimum of each band; above a floor of 60 ms the bands
+are floor + 60 / + 150 / + 400 ms, with the floor capped at 300 ms.
+
 `/metrics` exports `slowmeet_ice_restarts_total{reason="recovery"|"rotate"|"switch"}`.
 
 A rotation restart does not request video keyframes (nothing is lost during
@@ -115,9 +139,27 @@ gathering and rotation.
 
 `/metrics` also exports `slowmeet_rtcp_relayed_total{type=...}`,
 `slowmeet_rtcp_relayed_batches_total`, and
-`slowmeet_rtcp_relayed_report_only_batches_total`: the subscriber RTCP the SFU
-forwards to publishers. They only observe; they exist to decide whether report
-forwarding can be reduced.
+`slowmeet_rtcp_relayed_report_only_batches_total`: the RTCP subscribers send
+the SFU about its tracks. Only keyframe requests (PLI, FIR), NACKs, and REMB
+are forwarded to the publisher; `slowmeet_rtcp_forwarded_batches_total` counts
+those batches. Receiver reports and transport-cc feedback describe the
+SFU-to-subscriber leg and are dropped: the SFU sends the publisher its own
+reports and transport-cc feedback for the publisher's leg.
+
+`OPUS_DTX_ENABLED=true` (the default) adds `usedtx=1` to the Opus parameters in
+every SDP the server sends, so browsers send discontinuous audio: a
+comfort-noise packet every 400 ms while a participant is silent or muted
+instead of 50 packets per second. Audio is forwarded to every other
+participant, so in a room where one person talks this removes most of the
+packets the SFU and the TURN relay handle and most of the audio a listener's
+downlink carries. Listeners hear generated comfort noise during the gaps. Set
+it to `false` to rule it out while debugging an audio problem; the change
+applies to participants who join afterwards.
+
+Signaling uses WebSocket per-message compression when the browser offers it
+(all current browsers do). SDP offers and answers are 5-25 KB of repetitive
+text and shrink to about a tenth, which matters most with the rotating
+methods' offer/answer pair every `TURN_TCP_ROTATE_SECONDS`.
 
 `ICE_IPV4_ONLY=true` is the default. Set it to `false` only after testing IPv6
 on the target networks. `ICE_PUBLIC_IP` can rewrite host ICE candidates for a

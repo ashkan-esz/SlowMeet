@@ -6,6 +6,8 @@ readonly ENV_FILE="$INSTALL_DIR/.env"
 readonly STATE_DIR=/var/lib/slowmeet-installer
 readonly STATE_FILE="$STATE_DIR/state"
 readonly CERT_DIR=/etc/slowmeet/certs
+# coturn's own copy of the certificate, readable by the user its image runs as.
+readonly TURN_CERT_DIR=/etc/slowmeet/turn-certs
 readonly CERT_HOOK=/etc/letsencrypt/renewal-hooks/deploy/slowmeet
 readonly REPOSITORY=https://github.com/ashkan-esz/SlowMeet.git
 readonly NGINX_SITE=/etc/nginx/conf.d/slowmeet-installer.conf
@@ -870,6 +872,99 @@ enable_host_network_if_supported() {
     log 'Running SlowMeet on the host network (COMPOSE_FILE in .env; set it to docker-compose.yml to use the bridge network).'
 }
 
+# Relayed calls put every media packet through coturn, and the shipped limit
+# (0.20 CPU in .env.example and docker-compose.yml) is sized for occasional
+# relay use: past it coturn is throttled for the rest of each 100 ms period,
+# which every relayed participant hears at once. The shipped value counts as
+# unset because .env starts as a copy of .env.example; any other value is the
+# operator's and is kept.
+raise_turn_cpu_limit() {
+    local current
+    current=$(read_env_value TURN_CPUS)
+    if [[ -z "$current" || "$current" == 0.20 ]]; then
+        set_env TURN_CPUS 0.50
+    fi
+}
+
+# The coturn image runs as nobody (65534:65533) with every capability dropped,
+# so it cannot read the reverse proxy's root-owned certificate copy; without a
+# readable certificate coturn starts without its TLS listener and TURN over
+# TLS silently never works. Give it a private copy it owns.
+install_turn_certs() {
+    local source_dir=$1
+    install -d -o 65534 -g 65533 -m 0700 "$TURN_CERT_DIR"
+    install -o 65534 -g 65533 -m 0400 "$source_dir/fullchain.pem" "$TURN_CERT_DIR/fullchain.pem"
+    install -o 65534 -g 65533 -m 0400 "$source_dir/privkey.pem" "$TURN_CERT_DIR/privkey.pem"
+}
+
+# Writes coturn's configuration. Arguments: shared secret, realm (the domain),
+# public IPv4, private IPv4 (may be empty or equal to the public one).
+#
+# The only peer a SlowMeet browser ever needs to reach through the relay is
+# the SFU on this host, so every other peer address is denied: a TURN
+# credential (handed to anyone who can join a meeting) must not be usable to
+# relay traffic to arbitrary hosts or to reach services on private networks
+# behind the firewall. coturn checks allowed-peer-ip before denied-peer-ip.
+write_coturn_config() {
+    local secret=$1 realm=$2 public_ip=$3 private_ip=$4
+    local config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
+    cat > "$config" <<EOF
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+use-auth-secret
+static-auth-secret=$secret
+realm=$realm
+cert=/etc/letsencrypt/fullchain.pem
+pkey=/etc/letsencrypt/privkey.pem
+min-port=49152
+max-port=49999
+no-multicast-peers
+no-tcp-relay
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+allowed-peer-ip=$public_ip
+EOF
+    if [[ -n "$private_ip" && "$private_ip" != "$public_ip" ]]; then
+        printf 'allowed-peer-ip=%s\nexternal-ip=%s/%s\n' "$private_ip" "$public_ip" "$private_ip" >> "$config"
+    fi
+    chmod 0644 "$config"
+}
+
+# Installs the certbot deploy hook that refreshes the proxy's and coturn's
+# certificate copies after every renewal.
+write_cert_hook() {
+    cat > "$CERT_HOOK" <<'HOOK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+proxy_mode=$(cat /etc/slowmeet/proxy-mode)
+container_engine=$(cat /etc/slowmeet/container-engine)
+if [[ "$proxy_mode" == caddy ]]; then
+    install -d -o root -g caddy -m 0750 /etc/slowmeet/certs
+    install -o root -g caddy -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/certs/fullchain.pem
+    install -o root -g caddy -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/certs/privkey.pem
+else
+    install -d -o root -g root -m 0750 /etc/slowmeet/certs
+    install -o root -g root -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/certs/fullchain.pem
+    install -o root -g root -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/certs/privkey.pem
+fi
+systemctl reload "$proxy_mode"
+if [[ -f /opt/slowmeet/.turn-enabled ]]; then
+    # coturn runs as nobody (65534:65533) and needs its own readable copy.
+    install -d -o 65534 -g 65533 -m 0700 /etc/slowmeet/turn-certs
+    install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/turn-certs/fullchain.pem
+    install -o 65534 -g 65533 -m 0400 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/turn-certs/privkey.pem
+    cd /opt/slowmeet
+    case "$container_engine" in
+        docker) docker compose -f docker-compose.yml --profile turn restart coturn ;;
+        podman) podman-compose -f podman-compose.yml --profile turn restart coturn ;;
+        *) printf '[slowmeet] ERROR: Unknown saved container engine.\n' >&2; exit 1 ;;
+    esac
+fi
+HOOK
+    chmod 0750 "$CERT_HOOK"
+}
+
 set_admin_password() {
     local value=$1 encoded='' char i
     for ((i = 0; i < ${#value}; i++)); do
@@ -1039,6 +1134,21 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
         set_env ICE_PUBLIC_IP "$public_ipv4"
     fi
     enable_host_network_if_supported
+    if [[ "$enable_turn" == yes ]]; then
+        raise_turn_cpu_limit
+        # Installs made before coturn had its own certificate copy mounted the
+        # proxy's root-owned one, which coturn cannot read (no TURN over TLS).
+        # Only that installer-set value is migrated; an operator's own
+        # TURN_CERT_DIR and turnserver.conf are left alone.
+        if [[ "$(read_env_value TURN_CERT_DIR)" == "$CERT_DIR" \
+            && -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
+            install_turn_certs "$CERT_DIR"
+            set_env TURN_CERT_DIR "$TURN_CERT_DIR"
+            if [[ -f "$CERT_HOOK" ]]; then
+                write_cert_hook
+            fi
+        fi
+    fi
     write_podman_service
 
     cd "$INSTALL_DIR"
@@ -1563,6 +1673,8 @@ uninstall_existing_install() {
     rm -f "$CERT_HOOK"
     rm -f "$CERT_DIR/fullchain.pem" "$CERT_DIR/privkey.pem"
     rmdir "$CERT_DIR" 2>/dev/null || true
+    rm -f "$TURN_CERT_DIR/fullchain.pem" "$TURN_CERT_DIR/privkey.pem"
+    rmdir "$TURN_CERT_DIR" 2>/dev/null || true
     rm -f "$PROXY_MODE_FILE" "$CONTAINER_ENGINE_FILE"
     rmdir /etc/slowmeet 2>/dev/null || true
     rm -rf "$INSTALL_DIR"
@@ -2621,28 +2733,19 @@ set_env HTTP_PUBLISH_PORT "$app_port"
 set_env ICE_PUBLIC_IP "$public_ipv4"
 enable_host_network_if_supported
 if [[ "$enable_turn" == yes ]]; then
-    # Relayed calls put every media packet through coturn; the Compose default
-    # of 0.20 CPU is sized for occasional relay use.
-    set_env_if_empty TURN_CPUS 0.50
+    raise_turn_cpu_limit
     set_env TURN_URLS "turn:$domain:3478?transport=udp,turn:$domain:3478?transport=tcp,turns:$domain:5349?transport=tcp"
     set_env TURN_SHARED_SECRET "$turn_secret"
     set_env TURN_CONFIG_FILE "$INSTALL_DIR/deploy/coturn/turnserver.conf"
-    set_env TURN_CERT_DIR "$CERT_DIR"
-    cat > "$INSTALL_DIR/deploy/coturn/turnserver.conf" <<EOF
-listening-port=3478
-tls-listening-port=5349
-fingerprint
-use-auth-secret
-static-auth-secret=$turn_secret
-realm=$domain
-cert=/etc/letsencrypt/fullchain.pem
-pkey=/etc/letsencrypt/privkey.pem
-min-port=49152
-max-port=49999
-EOF
-    if [[ -n "$private_ipv4" && "$private_ipv4" != "$public_ipv4" ]]; then
-        printf 'external-ip=%s/%s\n' "$public_ipv4" "$private_ipv4" >> "$INSTALL_DIR/deploy/coturn/turnserver.conf"
+    set_env TURN_CERT_DIR "$TURN_CERT_DIR"
+    if [[ "$https_required" == yes ]]; then
+        install_turn_certs "/etc/letsencrypt/live/$domain"
+    else
+        # No certificate yet: coturn runs without its TLS listener. Create the
+        # directory so the bind mount does not make a root-owned one.
+        install -d -o 65534 -g 65533 -m 0700 "$TURN_CERT_DIR"
     fi
+    write_coturn_config "$turn_secret" "$domain" "$public_ipv4" "$private_ipv4"
     touch "$INSTALL_DIR/.turn-enabled"
 fi
 chmod 0600 "$ENV_FILE"
@@ -2655,31 +2758,7 @@ chmod 0644 "$CONTAINER_ENGINE_FILE"
 write_podman_service
 
 if [[ "$https_required" == yes ]]; then
-    cat > "$CERT_HOOK" <<'HOOK'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-proxy_mode=$(cat /etc/slowmeet/proxy-mode)
-container_engine=$(cat /etc/slowmeet/container-engine)
-if [[ "$proxy_mode" == caddy ]]; then
-    install -d -o root -g caddy -m 0750 /etc/slowmeet/certs
-    install -o root -g caddy -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/certs/fullchain.pem
-    install -o root -g caddy -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/certs/privkey.pem
-else
-    install -d -o root -g root -m 0750 /etc/slowmeet/certs
-    install -o root -g root -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/slowmeet/certs/fullchain.pem
-    install -o root -g root -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/slowmeet/certs/privkey.pem
-fi
-systemctl reload "$proxy_mode"
-if [[ -f /opt/slowmeet/.turn-enabled ]]; then
-    cd /opt/slowmeet
-    case "$container_engine" in
-        docker) docker compose -f docker-compose.yml --profile turn restart coturn ;;
-        podman) podman-compose -f podman-compose.yml --profile turn restart coturn ;;
-        *) printf '[slowmeet] ERROR: Unknown saved container engine.\n' >&2; exit 1 ;;
-    esac
-fi
-HOOK
-    chmod 0750 "$CERT_HOOK"
+    write_cert_hook
     systemctl enable --now certbot.timer
 fi
 
