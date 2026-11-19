@@ -349,3 +349,29 @@ func TestLoadFromEnvTURNTCPRotateInterval(t *testing.T) {
 		})
 	}
 }
+
+func TestServerTURNURLsSkipRelaysWhenTheServerIsDirectlyReachable(t *testing.T) {
+	urls := []string{"turn:turn.example.com:3478?transport=tcp", "turns:turn.example.com:443?transport=tcp"}
+	tests := []struct {
+		name     string
+		policy   string
+		publicIP string
+		want     int
+	}{
+		{name: "public address, host candidates allowed", policy: "all", publicIP: "203.0.113.7", want: 0},
+		{name: "public address, default policy", policy: "", publicIP: "203.0.113.7", want: 0},
+		{name: "relay-only deployment keeps its relays", policy: "relay", publicIP: "203.0.113.7", want: 2},
+		{name: "no public address may need the relay", policy: "all", publicIP: "", want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{TURNURLs: urls, ICETransportPolicy: tt.policy, ICEPublicIP: tt.publicIP}
+			if got := cfg.ServerTURNURLs(); len(got) != tt.want {
+				t.Fatalf("ServerTURNURLs() = %v, want %d URLs", got, tt.want)
+			}
+			if got := cfg.EffectiveTURNURLs(); len(got) != 2 {
+				t.Fatalf("browsers must still get every TURN URL, got %v", got)
+			}
+		})
+	}
+}
