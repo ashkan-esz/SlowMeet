@@ -108,7 +108,7 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 	if server.udp, err = listenUDP(listenHost, cfg.TURNServerPort, logger); err != nil {
 		return nil, err
 	}
-	if server.tcp, err = net.Listen("tcp", plainAddress); err != nil {
+	if server.tcp, err = listenStream(plainAddress); err != nil {
 		return nil, fmt.Errorf("listen for TURN on TCP %s: %w", plainAddress, err)
 	}
 	server.tcpConns = newStreamConns("tcp", streamClients, logger)
@@ -120,7 +120,7 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 	listeners := []net.Listener{server.tcp}
 	if cfg.TURNServerTLSEnabled() {
 		tlsAddress := net.JoinHostPort(listenHost, strconv.Itoa(cfg.TURNServerTLSPort))
-		inner, listenErr := net.Listen("tcp", tlsAddress)
+		inner, listenErr := listenStream(tlsAddress)
 		if listenErr != nil {
 			return nil, fmt.Errorf("listen for TURN over TLS on TCP %s: %w", tlsAddress, listenErr)
 		}
@@ -379,6 +379,52 @@ func listenUDPOn(addresses []net.IP, port int, logger *slog.Logger) (_ []net.Pac
 		return nil, fmt.Errorf("listen for TURN on UDP port %d: no local address could be bound", port)
 	}
 	return conns, nil
+}
+
+// streamUserTimeout is how long data the relay sent a TURN-over-TCP or
+// TURN-over-TLS client may stay unacknowledged before the kernel gives the
+// connection up.
+//
+// A client that vanishes (a phone that left Wi-Fi, a laptop that went to
+// sleep) says nothing, and one that stops reading keeps its connection open.
+// Left to the kernel's defaults, the relay keeps retransmitting to it for
+// ten to fifteen minutes, and for all that time the client holds a connection
+// slot and a relay port; on a rotating method it left several behind.
+//
+// Sixty seconds is twice as long as ICE takes to give a path up (consent
+// expires after 30 seconds on both sides), so no connection ends here whose
+// call has not already moved to new connections.
+const streamUserTimeout = 60 * time.Second
+
+// listenStream opens the TCP listener for TURN over TCP or TURN over TLS. The
+// connections it accepts carry streamUserTimeout.
+func listenStream(address string) (net.Listener, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	return userTimeoutListener{listener}, nil
+}
+
+// userTimeoutListener sets streamUserTimeout on every connection it accepts.
+//
+// The option cannot be set once on the listening socket and inherited from
+// there: Go listens with Multipath TCP where the kernel offers it, and such a
+// listening socket refuses the option, while the connection of an ordinary
+// TCP client takes it.
+type userTimeoutListener struct {
+	net.Listener
+}
+
+func (l userTimeoutListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	// Best effort: a connection that refuses the option is served all the
+	// same, and a dead client on it is only noticed late.
+	_ = setStreamUserTimeout(conn, streamUserTimeout)
+	return conn, nil
 }
 
 // udpListenReadBuffer is the receive buffer asked for on each TURN/UDP listen

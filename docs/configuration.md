@@ -161,6 +161,13 @@ What to expect from it:
   Known limit: a connection that completes its handshake but never allocates
   is not timed out, so idle connections can fill the cap and make new TURN
   over TCP or TLS clients wait. TURN over UDP and direct calls are unaffected.
+- **A client that vanishes is given up after a minute.** A phone that left
+  Wi-Fi or a laptop that went to sleep does not close its TURN-over-TCP or TLS
+  connection. The relay stops waiting once data it sent has gone
+  unacknowledged for 60 seconds (`TCP_USER_TIMEOUT`, Linux only) and frees the
+  connection slot and the relay port; with the kernel's defaults that took
+  ten to fifteen minutes. ICE gives a path up after 30 seconds, so a call on
+  such a connection has already moved to new ones.
 - **Stream data is checked before it is processed.** On TURN over TCP and TLS
   the relay reads each frame's type and length itself and hands the TURN
   library whole frames only. A connection that sends anything other than a
