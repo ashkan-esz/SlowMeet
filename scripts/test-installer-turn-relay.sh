@@ -373,6 +373,12 @@ assert_env SLOWMEET_GOMEMLIMIT 300MiB 'the Go heap limit follows the memory limi
 assert_contains "$coturn_config.migrated" 'static-auth-secret=0123abcd'
 [[ "$(stat -c '%a' "$coturn_config.migrated")" == 600 ]] \
     || fail 'the kept coturn configuration holds the shared secret and must be private'
+# The move says what it leaves behind, and removes none of it: a rollback to
+# coturn needs the firewall rule and the TURN_* settings.
+assert_contains "$LOG_FILE" "shares SLOWMEET_CPUS=0.75; coturn's own allowance (TURN_CPUS=0.50) no longer applies"
+assert_contains "$LOG_FILE" 'ufw delete allow 49152:49999/udp'
+assert_env TURN_CPUS 0.50 "coturn's settings stay in .env for a rollback"
+assert_env TURN_CONFIG_FILE "$INSTALL_DIR/deploy/coturn/turnserver.conf" "coturn's settings stay in .env for a rollback"
 [[ "$(cat "$TURN_CERT_DIR/privkey.pem")" == key ]] || fail 'the relay must get a certificate copy'
 assert_contains "$INSTALL_LOG" "-o 10001 -g 10001 -m 0400 $CERT_DIR/privkey.pem $TURN_CERT_DIR/privkey.pem"
 assert_not_contains "$LOG_FILE" 'WARNING'
