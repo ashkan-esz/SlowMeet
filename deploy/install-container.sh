@@ -153,8 +153,72 @@ choose_image() {
     image=$(image_for_tag "$answer")
 }
 
+choose_turn_mode() {
+    local answer
+    while true; do
+        read -r -p 'TURN relay for networks that block direct media [none/builtin/external] (none): ' answer <&3
+        answer=${answer,,}
+        answer=${answer:-none}
+        case "$answer" in
+            none|builtin|external) turn_mode=$answer; return ;;
+            *) printf 'Choose none, builtin, or external.\n' >&2 ;;
+        esac
+    done
+}
+
+generate_turn_secret() {
+    local secret
+    secret=$(openssl rand -hex 32 2>/dev/null || true)
+    [[ "$secret" =~ ^[a-f0-9]{64}$ ]] || secret=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    [[ "$secret" =~ ^[a-f0-9]{64}$ ]] || fail 'Could not generate a TURN shared secret.'
+    printf '%s' "$secret"
+}
+
+# Asks how browsers on networks that block direct media reach the server and
+# prints the matching .env lines. Browsers are only ever given time-limited
+# credentials derived from TURN_SHARED_SECRET, so every choice that offers a
+# relay sets one; a fixed TURN username and password would never reach them.
+turn_env_settings() {
+    local turn_mode turn_host turn_secret turn_urls cert_dir
+    choose_turn_mode
+    case "$turn_mode" in
+        none)
+            printf 'TURN_URLS=\n'
+            ;;
+        builtin)
+            turn_host=$(prompt 'Public host name or IPv4 address browsers reach this server by' "$1")
+            [[ "$turn_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+                || fail 'The relay needs a host name or IPv4 address that resolves straight to this host.'
+            turn_secret=$(generate_turn_secret) || exit 1
+            turn_urls="turn:$turn_host:3478?transport=udp,turn:$turn_host:3478?transport=tcp"
+            printf 'TURN_SERVER_ENABLED=true\nTURN_SHARED_SECRET=%s\n' "$turn_secret"
+            if yes_no 'Offer TURN over TLS too (needs a certificate for that host name)?' no; then
+                cert_dir=$(prompt 'Directory with fullchain.pem and privkey.pem, readable by user 10001' '')
+                [[ "$cert_dir" == /* && -d "$cert_dir" ]] \
+                    || fail 'The certificate directory must be an existing absolute path.'
+                [[ "$cert_dir" =~ ^[A-Za-z0-9/._-]+$ ]] \
+                    || fail 'The certificate directory may contain only letters, digits, and / . _ -'
+                turn_urls+=",turns:$turn_host:5349?transport=tcp"
+                printf 'TURN_CERT_DIR=%s\n' "$cert_dir"
+                printf 'TURN_SERVER_TLS_CERT_FILE=/etc/slowmeet/turn-certs/fullchain.pem\n'
+                printf 'TURN_SERVER_TLS_KEY_FILE=/etc/slowmeet/turn-certs/privkey.pem\n'
+            fi
+            printf 'TURN_URLS=%s\n' "$turn_urls"
+            ;;
+        external)
+            turn_urls=$(prompt 'TURN URLs of the external server (comma-separated)' '')
+            [[ "$turn_urls" =~ ^turns?:[^[:space:]]+$ ]] || fail 'TURN URLs must be turn: or turns: URLs without spaces.'
+            IFS= read -r -s -p "The external server's shared secret (coturn: static-auth-secret): " turn_secret <&3
+            printf '\n' >&2
+            [[ -n "$turn_secret" && "$turn_secret" != *[[:space:]]* ]] \
+                || fail 'The shared secret cannot be empty or contain spaces.'
+            printf 'TURN_URLS=%s\nTURN_SHARED_SECRET=%s\n' "$turn_urls" "$turn_secret"
+            ;;
+    esac
+}
+
 create_env_file() {
-    local admin_password confirm_admin_password meeting_password ice_public_ip stun_servers turn_urls turn_username turn_password
+    local admin_password confirm_admin_password meeting_password ice_public_ip stun_servers turn_settings
     local http_publish_port
     http_publish_port=$(prompt 'HTTP host port' '8080')
     [[ "$http_publish_port" =~ ^[0-9]{1,5}$ ]] && (( http_publish_port >= 1 && http_publish_port <= 65535 )) \
@@ -170,9 +234,8 @@ create_env_file() {
     meeting_password=$(prompt 'Meeting password (blank disables it)' '')
     ice_public_ip=$(prompt 'ICE public IP (blank for automatic discovery)' '')
     stun_servers=$(prompt 'STUN servers (comma-separated, optional)' '')
-    turn_urls=$(prompt 'TURN URLs (comma-separated, optional)' '')
-    turn_username=$(prompt 'TURN username (optional)' '')
-    turn_password=$(prompt 'TURN password (optional)' '')
+    # A refused answer ends the installation here, before anything is written.
+    turn_settings=$(turn_env_settings "$ice_public_ip") || exit 1
 
     install -d -m 0750 "$INSTALL_DIR"
     cat > "$ENV_FILE" <<EOF
@@ -187,11 +250,52 @@ ICE_UDP_PORT_MIN=50000
 ICE_UDP_PORT_MAX=50100
 ICE_PUBLIC_IP=$ice_public_ip
 STUN_SERVERS=$stun_servers
-TURN_URLS=$turn_urls
-TURN_USERNAME=$turn_username
-TURN_PASSWORD=$turn_password
+$turn_settings
 EOF
     chmod 0600 "$ENV_FILE"
+}
+
+# Whether something on this host already listens on a port (tcp or udp).
+# Without ss nothing is known and the port counts as free.
+port_in_use() {
+    local protocol=$1 port=$2 flag=-ltn
+    [[ "$protocol" != udp ]] || flag=-lun
+    command -v ss >/dev/null || return 1
+    [[ -n "$(ss -H "$flag" "sport = :$port" 2>/dev/null)" ]]
+}
+
+# Prints the extra `run` arguments, one per line, for the TURN relay built
+# into SlowMeet when .env switches it on: its listen ports, and the
+# certificate directory for TURN over TLS. The relay port range is not
+# published: only the SFU in the same container sends to it.
+#
+# A listen port another service on this host already holds is left out with a
+# warning instead of failing the run, which would leave an update with no
+# container at all.
+turn_run_arguments() {
+    local turn_port tls_port cert_dir mount entry
+    [[ "$(read_env_value TURN_SERVER_ENABLED)" == true ]] || return 0
+    turn_port=$(read_env_value TURN_SERVER_PORT)
+    turn_port=${turn_port:-3478}
+    [[ "$turn_port" =~ ^[0-9]{1,5}$ ]] || fail 'TURN_SERVER_PORT in the environment file must be a port number.'
+    local -a ports=("$turn_port/udp" "$turn_port/tcp")
+    cert_dir=$(read_env_value TURN_CERT_DIR)
+    if [[ -n "$cert_dir" ]]; then
+        tls_port=$(read_env_value TURN_SERVER_TLS_PORT)
+        tls_port=${tls_port:-5349}
+        [[ "$tls_port" =~ ^[0-9]{1,5}$ ]] || fail 'TURN_SERVER_TLS_PORT in the environment file must be a port number.'
+        [[ "$tls_port" == 0 ]] || ports+=("$tls_port/tcp")
+        mount="$cert_dir:/etc/slowmeet/turn-certs:ro"
+        [[ "$engine" != podman ]] || mount+=",Z"
+        printf '%s\n' --volume "$mount"
+    fi
+    for entry in "${ports[@]}"; do
+        if port_in_use "${entry#*/}" "${entry%/*}"; then
+            log "WARNING: port $entry is already in use on this host, so the TURN relay is not published on it. Free the port and run the update again." >&2
+            continue
+        fi
+        printf '%s\n' --publish "${entry%/*}:$entry"
+    done
 }
 
 start_container() {
@@ -208,6 +312,13 @@ start_container() {
     "$engine" pull "$image_value"
     "$engine" rm --force "$CONTAINER_NAME" >/dev/null 2>&1 || true
     "$engine" volume create "$VOLUME_NAME" >/dev/null
+    # After the old container is gone, so that the ports it held count as free.
+    # Captured first and split afterwards, so that a failure in there stops
+    # the run instead of starting a container without the relay's ports.
+    local turn_output
+    local -a turn_arguments=()
+    turn_output=$(turn_run_arguments) || exit 1
+    [[ -z "$turn_output" ]] || mapfile -t turn_arguments <<< "$turn_output"
     "$engine" run --detach \
         --name "$CONTAINER_NAME" \
         --restart "$restart_policy" \
@@ -220,6 +331,7 @@ start_container() {
         --publish "$address:$port:8080" \
         --publish "$udp_min-$udp_max:$udp_min-$udp_max/udp" \
         --volume "$VOLUME_NAME:/app/data" \
+        "${turn_arguments[@]}" \
         "$image_value" >/dev/null
 }
 
@@ -243,6 +355,9 @@ install_or_update() {
     write_state complete "$operation" "$engine" "$image"
     log "SlowMeet is running with $image at http://$(read_env_value HTTP_PUBLISH_ADDRESS):$(read_env_value HTTP_PUBLISH_PORT)/."
     log 'The host and cloud firewalls are unchanged; allow the configured HTTP port and UDP ports 50000-50100 as needed.'
+    if [[ "$(read_env_value TURN_SERVER_ENABLED)" == true ]]; then
+        log 'The built-in TURN relay is on; also allow its listen ports (by default 3478 over UDP and TCP, and 5349 over TCP for TURN over TLS).'
+    fi
     log 'This installer does not configure a reverse proxy or TLS. Configure those separately for public browser use.'
 }
 

@@ -76,9 +76,12 @@ jobs:
           bash -n scripts/test-caddy-install-fallback.sh
           bash -n scripts/test-xray-fallback.sh
           bash -n scripts/test-container-bindings.sh
+          bash -n deploy/install-container.sh
+          bash -n scripts/test-container-installer-turn.sh
           shellcheck -S style deploy/install.sh scripts/test-installer-config.sh scripts/test-installer-turn-relay.sh scripts/test-docker-lxc-runtime-fallback.sh scripts/test-caddy-install-fallback.sh scripts/test-xray-fallback.sh scripts/test-container-bindings.sh
           bash scripts/test-installer-config.sh
           bash scripts/test-installer-turn-relay.sh
+          bash scripts/test-container-installer-turn.sh
           bash scripts/test-docker-lxc-runtime-fallback.sh
           bash scripts/test-caddy-install-fallback.sh
           bash scripts/test-xray-fallback.sh

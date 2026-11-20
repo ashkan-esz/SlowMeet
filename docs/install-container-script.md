@@ -49,12 +49,37 @@ untouched and prints the network ports the operator may need to allow. Public
 browser use requires the operator to provide an appropriate secure web entry
 point separately.
 
-TURN URLs, credentials, and STUN servers can be entered during installation
-for an external TURN server. The script does not set up the TURN relay built
-into SlowMeet; to use it, add `TURN_SERVER_ENABLED=true`, `TURN_SHARED_SECRET`,
-and `TURN_URLS` to the generated `.env` and publish the relay's ports yourself
-(see the [container deployment guide](container-deployment.md)), or use the
-[VPS installer](install-script.md), which does all of it.
+STUN servers can be entered during installation. For participants whose
+networks block direct media, the installation asks which TURN relay to use:
+
+- `none` (the default): no relay.
+- `builtin`: the relay built into SlowMeet. The script asks for the public
+  host name or IPv4 address browsers reach this server by (it must resolve
+  straight to this host, not to a CDN or an HTTP-only proxy), generates
+  `TURN_SHARED_SECRET`, and writes `TURN_SERVER_ENABLED=true` and `TURN_URLS`.
+  For TURN over TLS it also asks for a directory that holds `fullchain.pem`
+  and `privkey.pem` for that host name, readable by user `10001`; the
+  directory is mounted read-only and renewed files are picked up without a
+  restart.
+- `external`: a TURN server you run elsewhere. The script asks for its URLs
+  and for the secret it shares with SlowMeet (coturn: `use-auth-secret` with
+  `static-auth-secret`).
+
+Browsers only ever receive time-limited credentials derived from the shared
+secret. A fixed TURN username and password would never reach them, so the
+script does not ask for one; `TURN_USERNAME` and `TURN_PASSWORD` in an
+existing `.env` are left as they are and, as before, serve only the server's
+own connections.
+
+When `.env` has `TURN_SERVER_ENABLED=true`, the container is started with the
+relay's listen ports published: `TURN_SERVER_PORT` (3478) over UDP and TCP,
+and, with `TURN_CERT_DIR` set, `TURN_SERVER_TLS_PORT` (5349) over TCP. This
+also applies to an existing installation whose `.env` you edit by hand: the
+next update publishes them. A port another service on the host already holds
+is left out with a warning rather than failing the update. Allow the
+published ports in the host and cloud firewalls. The
+[configuration guide](configuration.md#built-in-turn-relay) describes the
+relay's settings.
 
 ## Update and resume
 
