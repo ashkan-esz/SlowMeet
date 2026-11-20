@@ -130,8 +130,14 @@ done
 
 # The two engines' overrides must enable the same relay: same ports, same
 # settings, and the same mount apart from Podman's SELinux relabel suffix.
+#
+# One more difference is allowed. Docker's override lets TURN_TLS_PUBLISH
+# replace the published side of the TLS port; podman-compose does not resolve
+# a default nested in another, so Podman's override has the plain mapping.
+# With TURN_TLS_PUBLISH unset the two publish the same.
 normalized_override() {
-    grep -v '^[[:space:]]*#' "$1" | sed 's/:ro,Z"/:ro"/'
+    grep -v '^[[:space:]]*#' "$1" | sed -e 's/:ro,Z"/:ro"/' \
+        -e 's/\${TURN_TLS_PUBLISH:-\(\${TURN_SERVER_TLS_PORT:-5349}\)}/\1/'
 }
 diff <(normalized_override deploy/compose.turn.yml) <(normalized_override deploy/podman-compose.turn.yml) >/dev/null \
     || fail 'deploy/compose.turn.yml and deploy/podman-compose.turn.yml have drifted apart'
@@ -141,9 +147,14 @@ for override in deploy/compose.turn.yml deploy/podman-compose.turn.yml; do
     assert_contains "$override" 'TURN_SERVER_TLS_KEY_FILE: /etc/slowmeet/turn-certs/privkey.pem'
     assert_contains "$override" '"${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/udp"'
     assert_contains "$override" '"${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/tcp"'
-    assert_contains "$override" '"${TURN_SERVER_TLS_PORT:-5349}:${TURN_SERVER_TLS_PORT:-5349}/tcp"'
     assert_contains "$override" '${TURN_CERT_DIR:-./deploy/turn-certs}:/etc/slowmeet/turn-certs:ro'
 done
+# The TLS port: published as it listens, unless Docker's TURN_TLS_PUBLISH says
+# otherwise. Its default must stay the listening port, so that an installation
+# that set only TURN_SERVER_TLS_PORT keeps publishing that port.
+assert_contains deploy/compose.turn.yml '"${TURN_TLS_PUBLISH:-${TURN_SERVER_TLS_PORT:-5349}}:${TURN_SERVER_TLS_PORT:-5349}/tcp"'
+assert_contains deploy/podman-compose.turn.yml '"${TURN_SERVER_TLS_PORT:-5349}:${TURN_SERVER_TLS_PORT:-5349}/tcp"'
+assert_not_contains deploy/podman-compose.turn.yml 'TURN_TLS_PUBLISH'
 [[ -f deploy/turn-certs/.gitignore ]] || fail 'the default TURN certificate directory must exist in the checkout'
 
 # deploy/ holds that certificate directory, private key included, and after a
