@@ -191,8 +191,10 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 		tlsAddress = server.tls.Addr().String()
 	}
 	udpAddresses := make([]string, 0, len(server.udp))
+	udpReadBuffer := 0
 	for _, conn := range server.udp {
 		udpAddresses = append(udpAddresses, conn.LocalAddr().String())
+		udpReadBuffer = raiseUDPReadBuffer(conn)
 	}
 	// The peer ports the relay forwards to besides its own relay ports.
 	sfuPorts := "any"
@@ -201,6 +203,7 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 	}
 	logger.Info("turn_server_started",
 		"udp", strings.Join(udpAddresses, ","),
+		"udp_read_buffer", udpReadBuffer,
 		"tcp", server.tcp.Addr().String(),
 		"tls", tlsAddress,
 		"relay_ip", addresses.relayIP.String(),
@@ -375,6 +378,29 @@ func listenUDPOn(addresses []net.IP, port int, logger *slog.Logger) (_ []net.Pac
 		return nil, fmt.Errorf("listen for TURN on UDP port %d: no local address could be bound", port)
 	}
 	return conns, nil
+}
+
+// udpListenReadBuffer is the receive buffer asked for on each TURN/UDP listen
+// socket. Every TURN-over-UDP client of an address shares that one socket and
+// the TURN library reads it from a single goroutine, so when that goroutine
+// falls behind for a moment, the media of all of them queues here, and what
+// does not fit is dropped by the kernel. The default buffer (about 200 KB)
+// holds only a few dozen milliseconds of a full room.
+//
+// The kernel grants at most net.core.rmem_max. On a host that leaves that at
+// its default the request changes nothing, and it never shrinks a buffer.
+const udpListenReadBuffer = 2 << 20
+
+// raiseUDPReadBuffer asks for udpListenReadBuffer on a listen socket and
+// returns the size the kernel reports afterwards, zero if it cannot be read.
+// A refusal is not an error: the socket keeps the buffer it had.
+func raiseUDPReadBuffer(conn net.PacketConn) int {
+	udp, ok := conn.(*net.UDPConn)
+	if !ok {
+		return 0
+	}
+	_ = udp.SetReadBuffer(udpListenReadBuffer)
+	return udpReadBufferSize(udp)
 }
 
 // localUnicastAddresses lists the addresses of this host a client can send
