@@ -99,8 +99,46 @@ for (const [name, minor] of [["moderate-2", "21"], ["moderate-3", "22"], ["moder
   tiers[name] = { ...tiers.moderate, classID: `1:${minor}`, handle: `${minor}:` };
 }
 
+// The tiers installRoomQdisc() creates with no arguments. The opt-in tiers
+// below are installed only when a scenario names them, so the CI scenarios
+// keep issuing exactly the tc commands they always have (pinned by
+// scripts/test-netem-tiers.js) and never need netem features such as
+// gemodel or reorder from the CI kernel.
+const defaultTierNames = Object.freeze(Object.keys(tiers));
+
+const optInTiers = {
+  // A thin, lossy UPLOAD with a clean download (ADSL, a phone on a busy
+  // cell): only packets leaving the participant's port are shaped. 8% loss
+  // keeps the client's uplink-loss signal (> 5%) clearly above its bar.
+  "thin-uplink": { classID: "1:90", handle: "90:", rate: "300kbit", delay: "50ms", loss: "8%", limit: "20", uplinkOnly: true },
+  // Bursty loss (Gilbert-Elliott: ~1% chance to enter a bad state that drops
+  // 70% while it lasts, ~10% chance per packet to leave it) with 25%
+  // reordering and 2% duplication, the way congested Wi-Fi misbehaves.
+  bursty: { classID: "1:a0", handle: "a0:", rate: "10gbit", delay: "40ms", loss: "gemodel 1% 10% 70% 0.1%",
+    extra: ["reorder", "25%", "50%", "duplicate", "2%"] },
+  // Loss and delay on a TCP path (the TURN/TCP relay leg), applied with
+  // applyTcpPortTier.
+  "relay-lossy": { classID: "1:b0", handle: "b0:", rate: "10gbit", delay: "50ms", loss: "2%" },
+  // A link whose state a scenario switches at run time with setTierLink and
+  // flapTier; it starts up (no loss).
+  flap: { classID: "1:c0", handle: "c0:", rate: "10gbit", delay: "20ms", loss: "0%" }
+};
+for (const [name, tier] of Object.entries(optInTiers)) {
+  tiers[name] = { ...tier, optIn: true };
+}
+
+let tcRunner = (args) => execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });
+let tcReader = (args) => execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+// Test hook: route every tc call through run (and reads through read) so
+// scripts/test-netem-tiers.js can pin the exact argv without a namespace.
+function __setTcRunner(run, read = () => "") {
+  tcRunner = run;
+  tcReader = read;
+}
+
 function tcRun(args) {
-  execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });
+  tcRunner(args);
 }
 
 // Read-only tc introspection: returns the command's stdout (or a placeholder
@@ -109,7 +147,7 @@ function tcRun(args) {
 // them (Drops climbing) or forwarding was paused server-side (queue idle).
 function tcOut(args) {
   try {
-    return execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+    return tcReader(args);
   } catch (error) {
     return `tc ${args.join(" ")} failed: ${error.message}`;
   }
@@ -119,49 +157,269 @@ function snapshotTierStats() {
   return `# tc -s class show dev lo\n${tcOut(["-s", "class", "show", "dev", "lo"])}\n# tc -s qdisc show dev lo\n${tcOut(["-s", "qdisc", "show", "dev", "lo"])}`;
 }
 
-function installRoomQdisc() {
-  tcRun(["qdisc", "replace", "dev", "lo", "root", "handle", "1:", "htb", "default", "10"]);
-  tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit"]);
-  for (const tier of Object.values(tiers)) {
-    tcRun(["class", "add", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", tier.rate, "ceil", tier.rate]);
-    // A delay spec may be multi-token ("30ms 160ms" — base plus jitter);
-    // execFileSync does not split on spaces, so split it here.
-    const netemArgs = ["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle",
-      tier.handle, "netem", "delay", ...tier.delay.split(" "), "loss", tier.loss];
-    if (tier.limit) netemArgs.push("limit", tier.limit);
-    tcRun(netemArgs);
+function tierNamed(tierName) {
+  const tier = tiers[tierName];
+  assert.ok(tier, `unknown participant tier ${tierName}`);
+  return tier;
+}
+
+// The netem parameters of a tier (or of a link override for it): a delay or
+// loss spec may be multi-token ("30ms 180ms 0", "gemodel 1% 10% 70% 0.1%");
+// execFileSync does not split on spaces, so split them here.
+function netemParamsFor(tier) {
+  const params = ["delay", ...tier.delay.split(" "), "loss", ...tier.loss.split(" ")];
+  if (tier.limit) params.push("limit", tier.limit);
+  if (tier.extra) params.push(...tier.extra);
+  return params;
+}
+
+// Pure argv builders: the tc commands installRoomQdisc issues for a set of
+// tier names, in order.
+function roomQdiscCommands(tierNames = defaultTierNames) {
+  const commands = [
+    ["qdisc", "replace", "dev", "lo", "root", "handle", "1:", "htb", "default", "10"],
+    ["class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit"]
+  ];
+  for (const name of tierNames) {
+    const tier = tierNamed(name);
+    commands.push(["class", "add", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", tier.rate, "ceil", tier.rate]);
+    commands.push(["qdisc", "add", "dev", "lo", "parent", tier.classID, "handle", tier.handle, "netem", ...netemParamsFor(tier)]);
   }
+  return commands;
+}
+
+// installRoomQdisc() installs exactly the default tiers; a scenario that
+// needs opt-in tiers names them: installRoomQdisc({ include: ["bursty"] }).
+function installRoomQdisc({ include = [] } = {}) {
+  for (const name of include) tierNamed(name);
+  const names = [...defaultTierNames, ...include.filter((name) => !defaultTierNames.includes(name))];
+  for (const command of roomQdiscCommands(names)) tcRun(command);
+}
+
+// IPv4: u32 ip sport/dport selectors. IPv6: the UDP ports sit at byte 40
+// (source) and 42 (destination) of the packet, matched with u16 at 40/42.
+// The capped tier shapes only the participant's downlink: every capped
+// assertion is about receiving under a cap (frames trickle, degradation
+// reaction, audio advances), and stacking the participant's own camera on
+// the same tail-drop queue starves ICE consent itself on slow encoders —
+// a 150 kbit uplink cannot carry a camera, so the peer dies instead of
+// degrading (CI-only: fast machines encode the fake camera lightly enough
+// to skate under the cap). An uplinkOnly tier shapes only what the
+// participant sends.
+function participantFilterCommands(port, tierName) {
+  const tier = tierNamed(tierName);
+  const p = String(port);
+  const uplink = [
+    ["protocol", "ip", "u32", "match", "ip", "sport", p, "0xffff"],
+    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "40"]
+  ];
+  const downlink = [
+    ["protocol", "ip", "u32", "match", "ip", "dport", p, "0xffff"],
+    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "42"]
+  ];
+  let selectors;
+  if (tier.downlinkOnly) selectors = downlink;
+  else if (tier.uplinkOnly) selectors = uplink;
+  else selectors = [uplink[0], downlink[0], uplink[1], downlink[1]];
+  return selectors.map((selector) => ["filter", "add", "dev", "lo", ...selector, "flowid", tier.classID]);
 }
 
 function applyParticipantTier(port, tierName) {
-  const tier = tiers[tierName];
-  assert.ok(tier, `unknown participant tier ${tierName}`);
-  // IPv4: u32 ip sport/dport selectors. IPv6: the UDP ports sit at byte 40
-  // (source) and 42 (destination) of the packet, matched with u16 at 40/42.
-  // The capped tier shapes only the participant's downlink: every capped
-  // assertion is about receiving under a cap (frames trickle, degradation
-  // reaction, audio advances), and stacking the participant's own camera on
-  // the same tail-drop queue starves ICE consent itself on slow encoders —
-  // a 150 kbit uplink cannot carry a camera, so the peer dies instead of
-  // degrading (CI-only: fast machines encode the fake camera lightly enough
-  // to skate under the cap).
-  const selectors = tier.downlinkOnly ? [
-    ["protocol", "ip", "u32", "match", "ip", "dport", String(port), "0xffff"],
-    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "42"]
-  ] : [
-    ["protocol", "ip", "u32", "match", "ip", "sport", String(port), "0xffff"],
-    ["protocol", "ip", "u32", "match", "ip", "dport", String(port), "0xffff"],
-    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "40"],
-    ["protocol", "ipv6", "u32", "match", "u16", String(port), "0xffff", "at", "42"]
-  ];
-  for (const selector of selectors) {
-    tcRun(["filter", "add", "dev", "lo", ...selector, "flowid", tier.classID]);
+  for (const command of participantFilterCommands(port, tierName)) tcRun(command);
+}
+
+// Shapes a TCP port in both directions (the participant's TURN/TCP or
+// signaling connection) into a tier. IPv6 matches next-header 6 at byte 6.
+function tcpPortFilterCommands(port, tierName) {
+  const tier = tierNamed(tierName);
+  const p = String(port);
+  const v4 = ["protocol", "ip", "u32", "match", "ip", "protocol", "6", "0xff"];
+  const v6 = ["protocol", "ipv6", "u32", "match", "u8", "6", "0xff", "at", "6"];
+  return [
+    [...v4, "match", "ip", "sport", p, "0xffff"],
+    [...v4, "match", "ip", "dport", p, "0xffff"],
+    [...v6, "match", "u16", p, "0xffff", "at", "40"],
+    [...v6, "match", "u16", p, "0xffff", "at", "42"]
+  ].map((selector) => ["filter", "add", "dev", "lo", ...selector, "flowid", tier.classID]);
+}
+
+function applyTcpPortTier(port, tierName) {
+  for (const command of tcpPortFilterCommands(port, tierName)) tcRun(command);
+}
+
+// Changes a tier's link in place (its netem qdisc, and its htb rate when
+// given): link fields override the tier's own. Used to flap a link without
+// reclassifying anybody.
+function tierLinkCommands(tierName, link = {}) {
+  const tier = tierNamed(tierName);
+  const merged = { ...tier, ...link };
+  const commands = [["qdisc", "change", "dev", "lo", "parent", tier.classID, "handle", tier.handle, "netem", ...netemParamsFor(merged)]];
+  if (link.rate) {
+    commands.unshift(["class", "change", "dev", "lo", "parent", "1:", "classid", tier.classID, "htb", "rate", link.rate, "ceil", link.rate]);
   }
+  return commands;
+}
+
+function setTierLink(tierName, link = {}) {
+  for (const command of tierLinkCommands(tierName, link)) tcRun(command);
+}
+
+// Flaps a tier's link through a schedule of {link, ms} steps, `cycles` times
+// or until `untilMs` has passed. onMs/offMs is shorthand for "up for onMs,
+// fully down (100% loss) for offMs". The tier's own link is restored at the
+// end. Returns {transitions, errors, done, stop}.
+function flapTier(tierName, { schedule, onMs, offMs, cycles, untilMs, sleep = delay, now = Date.now } = {}) {
+  tierNamed(tierName);
+  const steps = schedule || [{ link: {}, ms: onMs }, { link: { loss: "100%" }, ms: offMs }];
+  assert.ok(steps.length > 0 && steps.every((step) => step.ms > 0), "flapTier needs steps with positive durations");
+  assert.ok(cycles > 0 || untilMs > 0, "flapTier needs cycles or untilMs");
+  const state = { transitions: [], errors: [], stopped: false };
+  const startedAt = now();
+  state.done = (async () => {
+    for (let cycle = 0; !state.stopped; cycle++) {
+      if (cycles > 0 && cycle >= cycles) break;
+      for (const step of steps) {
+        if (state.stopped || (untilMs > 0 && now() - startedAt >= untilMs)) break;
+        try {
+          setTierLink(tierName, step.link);
+          state.transitions.push({ at: now(), link: step.link });
+        } catch (error) {
+          state.errors.push(error.message);
+        }
+        await sleep(step.ms);
+      }
+      if (untilMs > 0 && now() - startedAt >= untilMs) break;
+    }
+    try {
+      setTierLink(tierName, {});
+      state.transitions.push({ at: now(), link: {} });
+    } catch (error) {
+      state.errors.push(error.message);
+    }
+    return state;
+  })();
+  state.stop = () => {
+    state.stopped = true;
+    return state.done;
+  };
+  return state;
+}
+
+// Parses `tc -s class show dev lo` into {classID: {sentBytes, sentPackets,
+// dropped}}. An htb class's dropped counter includes its netem child's
+// random-loss and queue-limit drops.
+function parseClassCounters(text) {
+  const counters = {};
+  let classID;
+  for (const line of String(text).split("\n")) {
+    const header = line.match(/^class \S+ (\S+)/);
+    if (header) {
+      classID = header[1];
+      continue;
+    }
+    const sent = line.match(/^\s*Sent (\d+) bytes (\d+) pkt \(dropped (\d+)/);
+    if (sent && classID) {
+      counters[classID] = { sentBytes: Number(sent[1]), sentPackets: Number(sent[2]), dropped: Number(sent[3]) };
+      classID = undefined;
+    }
+  }
+  return counters;
+}
+
+function tierClassCounters() {
+  return parseClassCounters(tcOut(["-s", "class", "show", "dev", "lo"]));
+}
+
+// Packets and drops a class gained between two tierClassCounters() reads.
+function classCounterDelta(before, after, classID) {
+  const a = after[classID] || { sentBytes: 0, sentPackets: 0, dropped: 0 };
+  const b = before[classID] || { sentBytes: 0, sentPackets: 0, dropped: 0 };
+  return { sentBytes: a.sentBytes - b.sentBytes, sentPackets: a.sentPackets - b.sentPackets, dropped: a.dropped - b.dropped };
+}
+
+// The filters armRoleUdpIsolation installs. Allowlist entries sit at prio 1
+// (evaluated first) and send the other roles' ports to the clean default
+// class; the catch-all at prio 60000 (evaluated after every auto-prio tier
+// filter, which start at 49152 and count down) sends any other UDP — the
+// isolated participant's, on whatever port it rebinds to — into the tier.
+function isolationAllowCommands(port) {
+  const p = String(port);
+  return [
+    ["protocol", "ip", "u32", "match", "ip", "sport", p, "0xffff"],
+    ["protocol", "ip", "u32", "match", "ip", "dport", p, "0xffff"],
+    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "40"],
+    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "42"]
+  ].map(([proto, family, ...rest]) => ["filter", "add", "dev", "lo", proto, family, "prio", "1", ...rest, "flowid", "1:10"]);
+}
+
+function isolationCatchAllCommands(tierName) {
+  const tier = tierNamed(tierName);
+  return [
+    ["filter", "add", "dev", "lo", "protocol", "ip", "prio", "60000", "u32", "match", "ip", "protocol", "17", "0xff", "flowid", tier.classID],
+    ["filter", "add", "dev", "lo", "protocol", "ipv6", "prio", "60000", "u32", "match", "u8", "17", "0xff", "at", "6", "flowid", tier.classID]
+  ];
+}
+
+function isolationLiftCommands() {
+  return [
+    ["filter", "del", "dev", "lo", "protocol", "ip", "prio", "60000"],
+    ["filter", "del", "dev", "lo", "protocol", "ipv6", "prio", "60000"]
+  ];
+}
+
+// Puts ALL of one participant's UDP into a tier, including ports it has not
+// opened yet (a rebuilt peer, an ICE restart): every other role's live ports
+// are allowlisted every intervalMs, and everything else that is UDP falls
+// into the tier. allowRoles limits the allowlist (roles with tiers of their
+// own must not be allowlisted, or they would be shaped clean). lift()
+// removes the catch-all; the allowlist entries are harmless leftovers that
+// clearRoomProfiles removes with the root.
+function armRoleUdpIsolation(targetRole, tierName, pages, { allowRoles, readPorts = pageGatheredIcePorts, intervalMs = 250, log = console.log } = {}) {
+  const roles = (allowRoles || [...pages.keys()]).filter((role) => role !== targetRole);
+  const state = { stopped: false, allowed: new Map(), errors: [], events: [] };
+  const allow = async () => {
+    for (const role of roles) {
+      try {
+        for (const port of await readPorts(pages.get(role))) {
+          if (state.allowed.get(role)?.has(port)) continue;
+          for (const command of isolationAllowCommands(port)) tcRun(command);
+          if (!state.allowed.has(role)) state.allowed.set(role, new Set());
+          state.allowed.get(role).add(port);
+          state.events.push({ at: Date.now(), role, port });
+        }
+      } catch (error) {
+        state.errors.push(`${role}: ${error.message}`);
+      }
+    }
+  };
+  state.ready = (async () => {
+    await allow();
+    for (const command of isolationCatchAllCommands(tierName)) tcRun(command);
+    log(`[netem] isolated ${targetRole}'s UDP into the ${tierName} tier; allowlisted ${roles.join(", ")}`);
+    state.isolatedAt = Date.now();
+    state.loop = (async () => {
+      while (!state.stopped) {
+        await delay(intervalMs);
+        if (!state.stopped) await allow();
+      }
+    })();
+    return state;
+  })();
+  state.lift = async () => {
+    state.stopped = true;
+    await state.ready.catch(() => {});
+    for (const command of isolationLiftCommands()) {
+      try { tcRun(command); } catch (error) { state.errors.push(error.message); }
+    }
+    state.liftedAt = Date.now();
+    log(`[netem] lifted ${targetRole}'s UDP isolation`);
+  };
+  return state;
 }
 
 function clearRoomProfiles() {
   try {
-    execFileSync("tc", ["qdisc", "del", "dev", "lo", "root"], { stdio: "ignore" });
+    tcRunner(["qdisc", "del", "dev", "lo", "root"]);
   } catch (_) {}
 }
 
@@ -225,10 +483,16 @@ async function pageGatheredIcePorts(page) {
 // port reader is injectable: cold-join scenarios classify ports that have
 // not connected yet (see pageGatheredIcePorts), the default reads live
 // ports. `pages` maps role -> Playwright page for the named participants.
-function armParticipantTiers(tierByRole, pages, readPorts = pageLocalIcePorts, log = console.log) {
+//
+// The returned object is the stop handle (set .stopped = true) and also the
+// evidence of what was classified: applied maps role -> Set of ports,
+// appliedAt maps "role:port" -> time, events lists every classification in
+// order, and errors keeps every failed read or tc call instead of dropping
+// it. intervalMs (default 2000) is how often the ports are re-read.
+function armParticipantTiers(tierByRole, pages, readPorts = pageLocalIcePorts, log = console.log, { intervalMs = 2000, sleep = delay } = {}) {
   const applied = new Map();
-  const stop = { stopped: false };
-  (async () => {
+  const stop = { stopped: false, applied, appliedAt: new Map(), events: [], errors: [] };
+  stop.done = (async () => {
     while (!stop.stopped) {
       for (const [role, tier] of Object.entries(tierByRole)) {
         if (tier === "clean") continue;
@@ -239,18 +503,27 @@ function armParticipantTiers(tierByRole, pages, readPorts = pageLocalIcePorts, l
               if (!applied.has(role)) applied.set(role, new Set());
               applyParticipantTier(port, tier);
               applied.get(role).add(port);
+              const at = Date.now();
+              stop.appliedAt.set(`${role}:${port}`, at);
+              stop.events.push({ at, role, port, tier });
               log(`[netem] ${role} -> ${tier} tier on port ${port}`);
             }
           }
-        } catch (_) {}
+        } catch (error) {
+          stop.errors.push(`${role}: ${error.message}`);
+        }
       }
-      await delay(2000);
+      await sleep(intervalMs);
     }
   })();
   return stop;
 }
 
 module.exports = {
-  tiers, tcRun, tcOut, snapshotTierStats, installRoomQdisc, applyParticipantTier,
+  tiers, defaultTierNames, tcRun, tcOut, snapshotTierStats, installRoomQdisc, applyParticipantTier,
   clearRoomProfiles, pageLocalIcePorts, pageGatheredIcePorts, armParticipantTiers,
+  roomQdiscCommands, participantFilterCommands, applyTcpPortTier, tcpPortFilterCommands,
+  setTierLink, tierLinkCommands, flapTier, parseClassCounters, tierClassCounters, classCounterDelta,
+  armRoleUdpIsolation, isolationAllowCommands, isolationCatchAllCommands, isolationLiftCommands,
+  __setTcRunner,
 };
