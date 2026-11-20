@@ -106,9 +106,17 @@ What to expect from it:
 - **A relay that cannot listen stops startup.** If a listen port is taken, the
   process exits with an error naming the port instead of running without a
   relay. A missing certificate is not fatal: TURN over UDP and TCP work, and
-  TLS handshakes fail until the files exist.
+  TLS handshakes fail until the files exist. The relay reads the certificate
+  when it starts and logs `turn_server_certificate_unavailable` then if it
+  cannot, so a wrong path shows at startup and not with the first participant
+  who needs TURN over TLS.
 - **Certificates reload by themselves.** Replaced certificate files are picked
   up within about 30 seconds, without a restart and without dropping calls.
+  A certificate with less than 14 days left, or already expired, is logged as
+  `turn_server_certificate_expiring` at startup and then at most once a day
+  while clients connect over TLS: renewal has stopped, or its result no longer
+  reaches these files. Browsers refuse an expired certificate without the
+  relay seeing an error.
 - **It shares the app's resource limits.** Relayed media passes through the
   SlowMeet process and counts against `SLOWMEET_CPUS` (0.75 by default, which
   the installer does not change) and `SLOWMEET_MEMORY_LIMIT`. Raise them
@@ -191,8 +199,10 @@ that window. Rotation is separate from recovery restarts: it does not count
 toward the client's restart attempts or change the connection status. Expect
 about `90 / interval + 1` TURN allocations per rotating participant at any
 time, so keep the relay port range comfortably larger than that times the room
-size (the built-in relay's default range has 848 ports). Plain TURN methods,
-Direct, and TURN/UDP never rotate.
+size (the built-in relay's default range has 848 ports). The relay logs
+`turn_server_relay_range_small` at startup when `MAX_PARTICIPANTS` times that
+number exceeds the range; it still starts, since a room rarely has everyone
+relayed. Plain TURN methods, Direct, and TURN/UDP never rotate.
 
 Rotation does not interrupt media: the server keeps the previous ICE pair
 carrying audio and video until the restarted one is selected (a patched

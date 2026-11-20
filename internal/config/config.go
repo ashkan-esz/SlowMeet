@@ -447,6 +447,21 @@ func ParseTURNServerRelayIP(value string) (net.IP, error) {
 	return ip, nil
 }
 
+// turnRotationOverlap is how long a browser keeps the TURN connections of a
+// rotation it has moved away from: Chrome closes them about 90 seconds later.
+const turnRotationOverlap = 90 * time.Second
+
+// TURNAllocationsPerParticipant is how many relay allocations one participant
+// holds at a time on a rotating TURN method with the given interval: the
+// current one, and one for every rotation still inside the overlap. It is one
+// when rotation is off (a zero interval).
+func TURNAllocationsPerParticipant(rotateInterval time.Duration) int {
+	if rotateInterval <= 0 {
+		return 1
+	}
+	return int((turnRotationOverlap+rotateInterval-1)/rotateInterval) + 1
+}
+
 // TURNServerTLSEnabled reports whether the built-in relay serves TURN over
 // TLS: it needs a port and both certificate files.
 func (c Config) TURNServerTLSEnabled() bool {
