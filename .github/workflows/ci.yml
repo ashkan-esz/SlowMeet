@@ -153,7 +153,7 @@ jobs:
         run: ./scripts/test-media-e2e-netns.sh
 
       - name: Run the four-person mixed-quality room scenarios in an isolated namespace
-        run: MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links" make test-media-e2e-four-netns
+        run: MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired" make test-media-e2e-four-netns
 
       - name: Run the sustained weak-network soak in an isolated namespace
         run: make test-soak-netns

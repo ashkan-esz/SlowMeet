@@ -77,11 +77,73 @@ host interface:
     bar and steps the ladder without suspending video; the clean pair's
     chips stay unaffected, and the ladder climbs back from the floor on
     transport health once the tiers lift.
+  - `all-fast-link-top-quality` — all four participants on the `fast` tier
+    (20 mbit/10 ms/0% loss, both directions; shaped, unlike the unshaped
+    clean default class). Every participant's Auto ladder reaches and holds
+    level 3 (`high`) with no suspension or degraded tile, and the camera
+    sender runs at the `high` bitrate. A short moderate window on one
+    participant then lifts, and all four climb back to level 3.
+  - `one-fast-three-bad-uplinks` — the 1 good / 3 bad room where the three
+    bad participants have lossy uplinks (moderate/severe/moderate, both
+    directions), so the fast participant has no clean inbound stream to
+    calibrate against. Audio advances for everyone, the bad cameras degrade
+    on the fast participant, one bad participant leaving alone does not
+    interrupt the rest, and everything recovers on lift. The fast
+    participant's own ladder and verdict are recorded as evidence for known
+    issue B1 below, not asserted.
+  - `all-four-impaired` — every participant on the moderate tier at once,
+    each on its own copy of it (`moderate-2`…`moderate-4`, so four people do
+    not share one 200 kbit queue), with no clean peer anywhere: audio keeps
+    advancing, the room does not rebuild peers in a storm, and every camera
+    recovers on lift.
+
+Deterministic coverage for the same rooms runs in `make check` without a
+namespace:
+
+- `scripts/test-room-network-scenarios.js` (`make test-room-network-scenarios`)
+  drives the real adaptation-policy functions through the same ladder wiring
+  as `web/js/app.js`: a fast link climbing to and holding level 3 (including
+  missing stats fields and isolated loss blips), recovery to the top after a
+  failed climb, and a room-mix table (4 good, 3/1, 2/2, 1 good/3 bad, 4 bad)
+  for the participant on the good link.
+- `internal/media` Go tests: a four-party full mesh on loopback
+  (`TestRouterForwardsFourPartyFullMesh`), keyframe-request fan-in from
+  several subscribers, mixed simulcast layers across four receivers,
+  high-rate fan-out to three healthy targets, and three saturated targets
+  beside a healthy one.
+- `TestWeakNetSymmetricMeshIsolatesCleanParticipant` (`make test-weaknet`)
+  is the Go form of the 1 good / 3 bad room: four peers that all publish,
+  three with impaired uplinks.
+
+### Known issues pinned by tests
+
+These tests pin today's behaviour and say in a `KNOWN ISSUE (Bn)` comment
+what should change. Fixing an issue means flipping that assertion.
+
+- **B1 — good participant blames its own link.** The own-link loss estimate
+  is the minimum loss across inbound streams. When every remote sender has a
+  lossy uplink, that minimum is high even though the receiver's link is
+  clean, so a fast participant steps its own camera down and, above 10%,
+  pauses it. Pinned in `scripts/test-room-network-scenarios.js`. In
+  `one-fast-three-bad-uplinks` the fast participant fell from level 3 to 0
+  within about 5 s and paused its camera for most of the window in every
+  run so far.
+- **B2 — keyframe requests are not coalesced.** Every subscriber's PLI/FIR
+  reaches the publisher, and server keyframe retries run once per receiver,
+  so three lossy subscribers multiply keyframe requests on a shared
+  publisher. Pinned in `TestSubscriberKeyFrameRequestsFanInToPublisher` and
+  `TestLayerTransitionKeyFrameRetriesPerReceiver`.
+- **B3 — frames over 128 packets are dropped whole.** A large keyframe at
+  the default 3 Mbps cap can exceed the frame buffer's packet limit. Pinned
+  in `TestVideoFrameBufferMaxPacketsBoundary`.
+- **B4 — FPS gate decimates a source at the cap.** With capture-time jitter,
+  a source running at exactly the configured frame-rate cap loses about
+  half its frames. Pinned in `TestBitrateLimiterFPSGateAtSourceRate`.
 
   Run the whole gated set the way CI does:
 
   ```sh
-  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links" make test-media-e2e-four-netns
+  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired" make test-media-e2e-four-netns
   ```
 
 - `make test-soak-netns` runs the sustained weak-network soak: the same

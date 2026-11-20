@@ -71,8 +71,33 @@ const tiers = {
   // the ladder steps down in bursts without the 500 ms critical bar ever
   // being reached (worst-case RTT ≈ 420 ms). No rate cap, no loss: audio
   // and video keep flowing throughout.
-  jitter: { classID: "1:70", handle: "70:", rate: "10gbit", delay: "30ms 180ms 0", loss: "0%" }
+  jitter: { classID: "1:70", handle: "70:", rate: "10gbit", delay: "30ms 180ms 0", loss: "0%" },
+  // A shaped-but-fast link: 20 mbit with 10 ms one-way delay in BOTH
+  // directions (measured RTT ≈ 20 ms) and no loss — fibre or good office
+  // Wi-Fi rather than the unshaped namespace loopback, whose ~0 ms RTT and
+  // unbounded rate no real participant ever sees. It exists so the good end
+  // of the ladder is exercised on a link that still passes through the
+  // classifier: scenarios assert that a participant on it reaches and holds
+  // the top Auto level, and that it stays the room's one good link while the
+  // others are impaired. It is named `fast`, not `clean`, because
+  // armParticipantTiers skips the `clean` name outright (those participants
+  // stay unclassified on the 10 gbit default class). The class is one shared
+  // queue, but four participants at the top Auto level offer ~12 mbit in
+  // total (4 uplinks plus 12 forwarded streams at ≤ 650 kbit video + audio),
+  // so the 20 mbit rate never becomes the bottleneck.
+  fast: { classID: "1:80", handle: "80:", rate: "20mbit", delay: "10ms", loss: "0%" }
 };
+
+// A tier's class is ONE queue. Every other tier is held by at most one
+// participant per scenario, but rooms with several moderate links need each
+// participant on a link of their own: two participants classified into
+// `moderate` would split a single 200 kbit pipe (their two uplinks plus six
+// forwarded streams — audio alone is ~360 kbit), which is a shared-bottleneck
+// outage, not two moderate links. The replicas carry exactly the moderate
+// link quality on their own classes and netem queues.
+for (const [name, minor] of [["moderate-2", "21"], ["moderate-3", "22"], ["moderate-4", "23"]]) {
+  tiers[name] = { ...tiers.moderate, classID: `1:${minor}`, handle: `${minor}:` };
+}
 
 function tcRun(args) {
   execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });

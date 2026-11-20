@@ -2615,6 +2615,601 @@ async function scenarioDelayAndJitterLinks() {
   await assertMedia();
 }
 
+// --- Fast-link and room-mix support ------------------------------------------
+
+// The top of the Automatic ladder is profiles[3] ("high") in web/js/app.js:
+// Automatic never selects very-good or ultra. Its 650 kbps is what the camera
+// sender's maxBitrate must read at that level under the e2e server's default
+// 3 Mbps MAX_VIDEO_BITRATE (the netns capture preset caps resolution and
+// frame rate, never the bitrate).
+const topAutomaticLevel = 3;
+const topAutomaticBitrate = 650000;
+
+// Evidence a scenario gathers that is worth keeping whether it passes or
+// fails: it is attached to failure.json by saveFailure and, when
+// MEDIA_E2E_ARTIFACT_DIR is set, written beside the failure artifacts as
+// <scenario>/<name>.json on passing runs too.
+const scenarioEvidence = new Map();
+
+function recordEvidence(name, evidence) {
+  scenarioEvidence.set(activeScenario, { ...(scenarioEvidence.get(activeScenario) || {}), [name]: evidence });
+  const parent = process.env.MEDIA_E2E_ARTIFACT_DIR;
+  if (!parent) return;
+  const directory = path.join(path.resolve(parent), activeScenario);
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `${name}.json`), JSON.stringify(evidence, null, 2));
+}
+
+// An automatic pause left behind by an earlier scenario persists across
+// reconnects by design; the manual camera off/on is the documented user
+// resume path (see scenarioDelayAndJitterLinks), so the suspension checks
+// below are strictly about their own windows.
+async function clearStaleVideoSuspensions() {
+  for (const page of pages.values()) {
+    const suspended = await page.evaluate(() =>
+      window.__slowMeetTest?.adaptationState?.videoSuspended === true);
+    if (!suspended) continue;
+    await page.locator("#camera").click();
+    await page.locator("#camera").click();
+    await page.waitForFunction(() =>
+      window.__slowMeetTest?.adaptationState?.videoSuspended === false,
+    null, { timeout: 15000 });
+  }
+}
+
+// The ladder only runs on the "Automatic" selection, and fresh browsers carry
+// the server's fixed DEFAULT_VIDEO_QUALITY. Selecting a fixed profile and then
+// Automatic is the user path that also makes the start deterministic: the
+// profile change handler puts the ladder at level 2 ("normal") with both
+// streaks at zero and the climb backoff reset, whatever earlier scenarios
+// left behind on the shared page. The published adaptationState is refreshed
+// only by the one-second stats tick, so each selection is awaited there: a
+// page an earlier scenario left on Automatic at level 3 would otherwise still
+// show that stale snapshot and read as an already-climbed restarted ladder.
+async function restartAutomaticLadder(page) {
+  await openSettingsPanel(page);
+  for (const selection of ["normal", "auto"]) {
+    await page.selectOption("#profile", selection);
+    await page.waitForFunction((expected) =>
+      window.__slowMeetTest?.adaptationState?.selectedProfile === expected,
+    selection, { timeout: 10000 });
+  }
+}
+
+async function restartAutomaticLadders() {
+  await Promise.all([...pages.values()].map((page) => restartAutomaticLadder(page)));
+}
+
+async function waitForTopAutomaticLevel(role, timeoutMs, label) {
+  const page = pages.get(role);
+  try {
+    await page.waitForFunction((level) => {
+      const adaptation = window.__slowMeetTest?.adaptationState || {};
+      return adaptation.selectedProfile === "auto" && adaptation.profileLevel === level &&
+        adaptation.videoSuspended === false;
+    }, topAutomaticLevel, { timeout: timeoutMs });
+  } catch (_) {
+    const state = await page.evaluate(() => ({
+      adaptation: window.__slowMeetTest?.adaptationState || null,
+      quality: window.__slowMeetTest?.networkQuality || null
+    })).catch(() => null);
+    throw new Error(`${role} did not reach the top Auto level within ${timeoutMs / 1000}s ${label}: ${JSON.stringify(state)}`);
+  }
+}
+
+// Proof that a delay-carrying tier really classifies this participant's
+// media: the unshaped namespace loopback measures an RTT of ~0 ms, so an RTT
+// at or above the tier's one-way delay can only come from the class. Without
+// it a fast-link assertion would pass vacuously on an unshaped link.
+async function waitForShapedLink(role, minimumRttMs, timeoutMs = 30000) {
+  const page = pages.get(role);
+  try {
+    await page.waitForFunction((minimum) => {
+      const rttMs = window.__slowMeetTest?.networkQuality?.rttMs;
+      return Number.isFinite(rttMs) && rttMs >= minimum;
+    }, minimumRttMs, { timeout: timeoutMs });
+  } catch (_) {
+    const quality = await page.evaluate(() => window.__slowMeetTest?.networkQuality || null).catch(() => null);
+    throw new Error(`${role}'s tier never shaped its link (RTT stayed under ${minimumRttMs} ms): ${JSON.stringify(quality)}`);
+  }
+}
+
+// Samples every listed participant's own ladder and connection verdict about
+// once a second until stopped. `mark` timestamps scenario events on the same
+// clock so a timeline can be read against what the room was doing.
+function startAdaptationSampler(roleList, intervalMs = 1000) {
+  const startedAt = Date.now();
+  const elapsed = () => Math.round((Date.now() - startedAt) / 100) / 10;
+  const sampler = { stopped: false, timeline: new Map(roleList.map((role) => [role, []])), marks: [] };
+  const loop = (async () => {
+    while (!sampler.stopped) {
+      for (const role of roleList) {
+        const page = pages.get(role);
+        if (!page) continue;
+        const sample = await page.evaluate(() => {
+          const adaptation = window.__slowMeetTest?.adaptationState;
+          const quality = window.__slowMeetTest?.networkQuality;
+          if (!adaptation || !quality) return null;
+          // Same predicate as degradedTileIDs / waitForDegradedCameraTile.
+          const degradedTiles = [...document.querySelectorAll("li[data-participant-id]")].filter((tile) => {
+            const tileQuality = tile.dataset.quality || "";
+            return tile.dataset.camera === "paused" || tile.classList.contains("is-poor-connection") ||
+              tileQuality === "degraded" || tileQuality === "poor";
+          }).map((tile) => tile.dataset.participantId);
+          return {
+            degradedTiles,
+            selected: adaptation.selectedProfile, profile: adaptation.effectiveProfile,
+            level: adaptation.profileLevel, suspended: adaptation.videoSuspended === true,
+            suspendedAutomatically: adaptation.videoSuspendedAutomatically === true,
+            poor: quality.poor === true, critical: quality.critical === true, good: quality.good === true,
+            rttMs: quality.rttMs ?? null, lossPct: quality.packetLossPct ?? null,
+            uplinkLossPct: quality.uplinkLossPct ?? null, jitterMs: quality.jitterMs ?? null,
+            estimatedOutgoingKbps: quality.estimatedOutgoingKbps ?? null,
+            outgoingVideoKbps: quality.outgoingVideoKbps ?? null
+          };
+        }).catch(() => null);
+        if (sample) sampler.timeline.get(role).push({ t: elapsed(), ...sample });
+      }
+      await delay(intervalMs);
+    }
+  })();
+  sampler.mark = (label) => sampler.marks.push({ t: elapsed(), label });
+  sampler.stop = async () => { sampler.stopped = true; await loop; return sampler; };
+  return sampler;
+}
+
+function summarizeAdaptationTimeline(samples) {
+  const finite = (values) => values.filter((value) => Number.isFinite(value));
+  const levels = finite(samples.map((sample) => sample.level));
+  const losses = finite(samples.map((sample) => sample.lossPct));
+  const rtts = finite(samples.map((sample) => sample.rttMs));
+  return {
+    samples: samples.length,
+    minLevel: levels.length ? Math.min(...levels) : null,
+    maxLevel: levels.length ? Math.max(...levels) : null,
+    finalLevel: levels.length ? levels.at(-1) : null,
+    suspendedSamples: samples.filter((sample) => sample.suspended).length,
+    poorSamples: samples.filter((sample) => sample.poor).length,
+    criticalSamples: samples.filter((sample) => sample.critical).length,
+    maxLossPct: losses.length ? Math.round(Math.max(...losses) * 10) / 10 : null,
+    maxRttMs: rtts.length ? Math.round(Math.max(...rtts)) : null
+  };
+}
+
+// One token per sample: seconds, ladder level (P = video suspended), the
+// own-link verdict (! critical, ~ poor, + good, . neither), own-link loss %.
+function formatAdaptationTimeline(samples) {
+  return samples.map((sample) => {
+    const verdict = sample.critical ? "!" : sample.poor ? "~" : sample.good ? "+" : ".";
+    const loss = Number.isFinite(sample.lossPct) ? sample.lossPct.toFixed(1) : "?";
+    return `${Math.round(sample.t)}s:L${sample.level}${sample.suspended ? "P" : ""}${verdict}${loss}`;
+  }).join(" ");
+}
+
+// The camera sender's first encoding on the page's current peer connection.
+// No screen share is live in the scenarios that read it, so the only video
+// sender is the camera.
+async function cameraSenderEncoding(page) {
+  return page.evaluate(() => {
+    const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+    const sender = peer?.getSenders().find((item) => item.track?.kind === "video");
+    const encoding = sender?.getParameters().encodings?.[0];
+    if (!encoding) return null;
+    return { maxBitrate: encoding.maxBitrate ?? null, maxFramerate: encoding.maxFramerate ?? null };
+  });
+}
+
+async function degradedTileIDs(page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll("li[data-participant-id]")].filter((tile) => {
+      const quality = tile.dataset.quality || "";
+      return tile.dataset.camera === "paused" ||
+        tile.classList.contains("is-poor-connection") ||
+        quality === "degraded" || quality === "poor";
+    }).map((tile) => tile.dataset.participantId));
+}
+
+// pageMediaSnapshot pools every inbound audio stream, so one live sender
+// hides two silent ones. This polls per stream until at least
+// `minimumStreams` distinct inbound audio streams grow between two
+// consecutive samples on the page's current peer — the per-publisher form of
+// waitForAudioFlow, and replacement-proof for the same reason.
+async function waitForAdvancingAudioStreams(page, minimumStreams, label, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  let advancing = 0;
+  for (;;) {
+    const current = await page.evaluate(async () => {
+      const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+      if (!peer || typeof peer.getStats !== "function") return {};
+      const report = await peer.getStats();
+      const streams = {};
+      report.forEach((stat) => {
+        if (stat.type === "inbound-rtp" && stat.kind === "audio") streams[stat.id] = stat.bytesReceived || 0;
+      });
+      return streams;
+    });
+    if (previous) {
+      advancing = Object.keys(current).filter((id) => id in previous && current[id] > previous[id]).length;
+      if (advancing >= minimumStreams) return advancing;
+    }
+    previous = current;
+    if (Date.now() > deadline) {
+      throw new Error(`${label}: only ${advancing} of ${minimumStreams} inbound audio streams advanced`);
+    }
+    await delay(1000);
+  }
+}
+
+// A camera crossing an impaired link is acceptable in exactly two observable
+// shapes on its observer (the contract all-distinct-qualities documents):
+// frames still trickling through, or the visible degradation reaction — a
+// protect-audio pause or a degraded/poor quality badge.
+async function assertCameraTrickleOrDegraded(observerRole, senderIndex, tag) {
+  const observer = pages.get(observerRole);
+  const participantID = await participantIDFor(observer, names[senderIndex]);
+  const framesStart = await tileVideoFrames(observer, participantID);
+  if (framesStart >= 0) {
+    await delay(5000);
+    const delta = await tileVideoFrames(observer, participantID) - framesStart;
+    if (delta > 0) {
+      console.log(`[${tag}] ${roles[senderIndex]}'s camera decoded ${delta} frames on ${observerRole} in 5s`);
+      return;
+    }
+  }
+  await waitForDegradedCameraTile([observer], participantID);
+  console.log(`[${tag}] ${observerRole}'s view of ${roles[senderIndex]}'s camera shows the degradation reaction`);
+}
+
+// How many peer connections and signaling sockets a page has created so far,
+// and the state of the current peer: a rebuild or a signaling reconnect shows
+// up as a count that moved.
+async function connectionIdentity(page) {
+  return page.evaluate(() => ({
+    peers: (window.__slowMeetTest?.peerConnections || []).length,
+    sockets: (window.__slowMeetTest?.sockets || []).length,
+    state: (window.__slowMeetTest?.peerConnections || []).at(-1)?.connectionState || "missing"
+  }));
+}
+
+// The good-network counterpart of the impaired rooms, on a link that is
+// actually shaped: all four participants on the fast tier (20 mbit, RTT
+// ≈ 20 ms, no loss). Every participant's Automatic ladder must reach the top
+// level and HOLD it — no step-down, no protect-audio pause, no degraded tile
+// — with the camera sender carrying the top profile's bitrate. One
+// participant's link then turns moderate for a window and returns: the whole
+// room must be back at the top level afterwards.
+async function scenarioAllFastLinkTopQuality() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
+  const config = await (await fetch(`${server.url}/config`)).json();
+  // 650000 under the default caps; an admin cap left lowered by an earlier
+  // scenario in a full run (admin-caps-and-chat-reset) lowers it with it.
+  const expectedTopBitrate = Math.min(topAutomaticBitrate, config.max_video_bitrate);
+  const allFast = Object.fromEntries(roles.map((role) => [role, "fast"]));
+  let armer;
+  // Moving a participant between tiers replaces the whole qdisc: classifier
+  // filters accumulate per port, so a second filter for an already-classified
+  // port would leave which tier wins to filter ordering.
+  const arm = (tierByRole) => {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+    installRoomQdisc();
+    armer = armParticipantTiers(tierByRole);
+  };
+  try {
+    arm(allFast);
+    // 10 ms each way ⇒ ~20 ms RTT; 15 ms leaves margin below that while
+    // staying clear of what a loaded unshaped loopback can show.
+    for (const role of roles) await waitForShapedLink(role, 15);
+    await restartAutomaticLadders();
+    // From level 2 the climb needs 5 transport-healthy one-second samples.
+    await Promise.all(roles.map((role) => waitForTopAutomaticLevel(role, 30000, "on the fast tier")));
+
+    const before = new Map();
+    for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
+    const holdSampler = startAdaptationSampler(roles);
+    await delay(15000);
+    const hold = await holdSampler.stop();
+    for (const role of roles) {
+      const page = pages.get(role);
+      const samples = hold.timeline.get(role);
+      const summary = summarizeAdaptationTimeline(samples);
+      assert.ok(samples.length >= 10, `${role} produced only ${samples.length} ladder samples in the 15s hold window`);
+      assert.ok(samples.every((sample) => sample.selected === "auto"), `${role} left the Automatic profile during the hold window`);
+      assert.equal(summary.minLevel, topAutomaticLevel,
+        `${role} stepped down from the top Auto level on the fast tier: ${formatAdaptationTimeline(samples)}`);
+      assert.equal(summary.suspendedSamples, 0,
+        `${role} suspended video on the fast tier: ${formatAdaptationTimeline(samples)}`);
+      // Every sample, not one end-of-window snapshot: a badge that flickers
+      // to degraded mid-window is exactly what the fast link must not show.
+      const degradedSample = samples.find((sample) => sample.degradedTiles.length > 0);
+      assert.equal(degradedSample, undefined,
+        `${role} saw degraded tiles on the fast tier at ${degradedSample?.t}s: ${JSON.stringify(degradedSample?.degradedTiles)}`);
+      const after = await pageMediaSnapshot(page);
+      assert.ok(after.audioSent > before.get(role).audioSent, `${role} outbound audio stalled on the fast tier`);
+      assert.ok(after.audioReceived > before.get(role).audioReceived, `${role} inbound audio stalled on the fast tier`);
+      assert.ok(after.videoFrames > before.get(role).videoFrames, `${role} decoded no video on the fast tier`);
+      assert.deepEqual(await degradedTileIDs(page), [], `${role} saw degraded tiles on the fast tier`);
+      const encoding = await cameraSenderEncoding(page);
+      assert.ok(encoding, `${role} has no camera sender encoding`);
+      assert.equal(encoding.maxBitrate, expectedTopBitrate,
+        `${role}'s camera sender does not carry the top Auto profile's bitrate (maxFramerate=${encoding.maxFramerate})`);
+      console.log(`[fast] ${role} held Auto level ${summary.minLevel} for ${samples.length} samples: rtt<=${summary.maxRttMs}ms loss<=${summary.maxLossPct}% poor=${summary.poorSamples} maxBitrate=${encoding.maxBitrate} maxFramerate=${encoding.maxFramerate}`);
+    }
+
+    // One link turns bad and comes back.
+    arm({ ...allFast, P2: "moderate" });
+    const impairedSampler = startAdaptationSampler(roles);
+    await delay(20000);
+    const impaired = await impairedSampler.stop();
+    const impairedSummaries = Object.fromEntries(roles.map((role) =>
+      [role, summarizeAdaptationTimeline(impaired.timeline.get(role))]));
+    // Without this the return-to-top check below would pass on a window that
+    // never bit: the moderate tier's RTT alone (~400 ms) is past the poor bar.
+    assert.ok(impairedSummaries.P2.minLevel < topAutomaticLevel,
+      `the moderate window never stepped P2's ladder down: ${formatAdaptationTimeline(impaired.timeline.get("P2"))}`);
+    // One bad uplink must not drag the fast participants: each still has two
+    // clean inbound streams, so its own-link estimate (the per-stream
+    // minimum) stays clean and its ladder holds the top level. This is the
+    // contrast case for one-fast-three-bad-uplinks, where no clean stream is
+    // left and B1 steps the good participant down.
+    for (const role of roles.filter((item) => item !== "P2")) {
+      const samples = impaired.timeline.get(role);
+      assert.ok(samples.length >= 10, `${role} produced only ${samples.length} ladder samples in P2's moderate window`);
+      assert.equal(impairedSummaries[role].minLevel, topAutomaticLevel,
+        `${role} on the fast tier stepped down while only P2's link was moderate: ${formatAdaptationTimeline(samples)}`);
+      assert.equal(impairedSummaries[role].suspendedSamples, 0,
+        `${role} on the fast tier paused its video while only P2's link was moderate: ${formatAdaptationTimeline(samples)}`);
+    }
+    console.log(`[fast] P2 on moderate for 20s — min Auto levels: ${roles.map((role) =>
+      `${role}=${impairedSummaries[role].minLevel}${impairedSummaries[role].suspendedSamples ? "(paused)" : ""}`).join(" ")}`);
+    arm(allFast);
+    await Promise.all(roles.map((role) =>
+      waitForTopAutomaticLevel(role, 90000, "after P2's moderate window lifted")));
+    for (const role of roles) {
+      const encoding = await cameraSenderEncoding(pages.get(role));
+      assert.equal(encoding?.maxBitrate, expectedTopBitrate,
+        `${role}'s camera sender did not return to the top Auto profile's bitrate after the lift`);
+    }
+    console.log("[fast] all four ladders returned to the top Auto level after the moderate window lifted");
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  await assertMedia();
+}
+
+// The hard room mix: ONE good link and three bad UPLINKS. P1 sits on the
+// fast tier; P2 (moderate), P3 (severe), and P4 (moderate, on its own class)
+// are impaired in both directions, so — unlike all-distinct-qualities, where
+// the capped participant is downlink-only and still publishes cleanly — P1
+// has no clean inbound stream at all. Hard guarantees: audio keeps flowing
+// for everyone and from every bad publisher to P1, P1's camera reaches each
+// bad participant as a trickle or a visible degradation reaction, every bad
+// camera reads as degraded on P1, the severe participant leaving does not
+// disturb P1's connection, its audio, or its remaining streams, and the room
+// recovers when the tiers lift.
+async function scenarioOneFastThreeBadUplinks() {
+  const tag = "one-fast-three-bad";
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
+  const tierByRole = { P1: "fast", P2: "moderate", P3: "severe", P4: "moderate-2" };
+  const badRoles = ["P2", "P3", "P4"];
+  const p1 = pages.get("P1");
+  let armer;
+  let sampler;
+  let b1Evidence = null;
+  installRoomQdisc();
+  try {
+    // P1 starts from the top of the ladder on its fast link, so the sampled
+    // timeline below reads from a known state.
+    armer = armParticipantTiers({ P1: "fast" });
+    await waitForShapedLink("P1", 15);
+    await restartAutomaticLadders();
+    await waitForTopAutomaticLevel("P1", 45000, "on the fast tier before the three uplinks turned bad");
+
+    armer.stopped = true;
+    clearRoomProfiles();
+    installRoomQdisc();
+    armer = armParticipantTiers(tierByRole);
+    const impairedAt = Date.now();
+    sampler = startAdaptationSampler(roles);
+    await delay(15000);
+
+    // Audio flows everywhere — polled for flow, as in every impaired room.
+    for (const role of roles) {
+      await waitForAudioFlow(pages.get(role), `${role} receiving audio with three bad uplinks in the room`);
+    }
+    // ...and P1 hears each of the three bad publishers, not just one of them.
+    await waitForAdvancingAudioStreams(p1, badRoles.length,
+      "P1 receiving audio from each of the three bad publishers", 60000);
+    // P1's camera reaches every bad participant at their tier's rate or as
+    // the degradation reaction.
+    for (const role of badRoles) await assertCameraTrickleOrDegraded(role, 0, tag);
+    // Every bad camera reads as degraded on the good participant.
+    for (const role of badRoles) {
+      const participantID = await participantIDFor(p1, names[roles.indexOf(role)]);
+      await waitForDegradedCameraTile([p1], participantID);
+      console.log(`[${tag}] ${role}'s camera degraded on P1`);
+    }
+    // Keep the three-bad-uplinks window open long enough for the sampled
+    // timeline to show P1's whole reaction before the room changes shape.
+    const remaining = 40000 - (Date.now() - impairedAt);
+    if (remaining > 0) await delay(remaining);
+
+    // Only the severe participant leaves (leaveSharedRoom would drain the
+    // whole room). P1 must keep its peer connection and its signaling socket,
+    // keep sending audio, and keep receiving both remaining publishers.
+    const identityBefore = await connectionIdentity(p1);
+    const audioSentBefore = (await pageMediaSnapshot(p1)).audioSent;
+    const p3 = pages.get("P3");
+    await p3.locator("#leave").click();
+    await p3.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 });
+    pages.delete("P3");
+    sampler.mark("P3 left");
+    await delay(2000);
+    const remainingNames = [names[0], names[1], names[3]];
+    for (const page of pages.values()) await roster(page, remainingNames);
+    await waitForAdvancingAudioStreams(p1, 2, "P1 receiving audio from both remaining publishers after P3 left");
+    for (const role of ["P2", "P4"]) await assertCameraTrickleOrDegraded("P1", roles.indexOf(role), tag);
+    const identityAfter = await connectionIdentity(p1);
+    assert.deepEqual(identityAfter, { ...identityBefore, state: "connected" },
+      "P3 leaving rebuilt P1's peer connection or reconnected its signaling socket");
+    assert.ok((await pageMediaSnapshot(p1)).audioSent > audioSentBefore,
+      "P1's outbound audio stalled when P3 left");
+    console.log(`[${tag}] P3 left alone: P1 kept its peer connection, its audio, and both remaining streams`);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+    if (sampler) {
+      const sampled = await sampler.stop();
+      // KNOWN ISSUE (B1): the client estimates its own link as the MINIMUM
+      // per-stream inbound loss (selectOwnLinkMeasurements). With three lossy
+      // remote uplinks there is no clean inbound stream, so P1 — whose own
+      // link is the fast tier, with a clean uplink — can read its own link as
+      // poor, step its ladder down from the top level, and at level 0 pause
+      // its own camera once the minimum exceeds 10%. Desired: P1 holds level
+      // 3 and never auto-pauses, because remote-uplink loss is not its link's.
+      // Whether a given run crosses the 5% / 10% bars depends on how much of
+      // the injected loss NACK repair hides, so P1's own profileLevel /
+      // videoSuspended / networkQuality timeline is SAMPLED here as evidence
+      // and NOT asserted. Measured in the netns runner (2026-11): P1 read
+      // 20-70% own-link loss and a critical verdict from the first impaired
+      // second, stepped 3 -> 0 in ~5 s, and paused its camera at ~6 s for
+      // the rest of the window — so the "degradation reaction" P2/P3/P4 see
+      // on P1's camera above is P1's own B1 pause, not its fast link.
+      // When B1 is fixed, promote the two logged values to
+      // assertions on the window before P3 left: minLevel === 3
+      // (topAutomaticLevel) and suspendedSamples === 0.
+      const p1Samples = sampled.timeline.get("P1");
+      const p3LeftAtSec = sampled.marks.find((mark) => mark.label === "P3 left")?.t ?? null;
+      const beforeP3Left = p3LeftAtSec == null ? p1Samples : p1Samples.filter((sample) => sample.t < p3LeftAtSec);
+      const evidence = {
+        issue: "B1", asserted: false, tiers: tierByRole, p3LeftAtSec,
+        p1ThreeBadUplinks: summarizeAdaptationTimeline(beforeP3Left),
+        p1WholeWindow: summarizeAdaptationTimeline(p1Samples),
+        marks: sampled.marks,
+        timeline: Object.fromEntries(sampled.timeline)
+      };
+      b1Evidence = evidence;
+      recordEvidence("b1-own-link-evidence", evidence);
+      console.log(`[${tag}] B1 evidence (sampled, not asserted) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
+      console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
+    }
+  }
+  // The B1 values are evidence, not assertions, but the evidence itself must
+  // exist: a sampler that silently read nothing would leave B1 unobserved.
+  // The three-bad-uplinks window is held open for 40 s.
+  assert.ok(b1Evidence && b1Evidence.p1ThreeBadUplinks.samples >= 20,
+    `the B1 evidence sampler recorded only ${b1Evidence?.p1ThreeBadUplinks.samples ?? 0} P1 samples before P3 left`);
+
+  // Recovery. The cameras that were live through the window return first —
+  // P1's own camera included, since B1 may have paused it — then a fresh
+  // browser takes the seat P3 freed.
+  const present = ["P1", "P2", "P4"];
+  for (const observer of present) {
+    for (const sender of present) {
+      if (observer === sender) continue;
+      const participantID = await participantIDFor(pages.get(observer), names[roles.indexOf(sender)]);
+      await waitForTileState(pages.get(observer), participantID, "camera", "on", 90000);
+    }
+  }
+  await join("P3");
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  for (const page of pages.values()) await roster(page, names);
+  const p3ID = await participantIDFor(p1, names[2]);
+  await waitForTileState(p1, p3ID, "camera", "on", 90000);
+  // On the healed room P1's ladder must be back at the top whatever B1 did
+  // to it during the window.
+  await waitForTopAutomaticLevel("P1", 90000, "after the three bad uplinks lifted");
+  for (const role of roles) {
+    await waitForAudioFlow(pages.get(role), `${role} receiving audio after the three bad uplinks lifted`);
+  }
+  console.log(`[${tag}] the room recovered after the tiers were lifted and P3 rejoined`);
+  await assertMedia();
+}
+
+// Nobody has a good link: all four participants on the moderate link quality
+// at once, each on a class of its own (200 kbit, 200 ms, 8% loss in both
+// directions — so every stream crosses two impaired hops and no participant
+// has a clean reference stream). Audio must keep flowing for everyone, the
+// impairment must degrade the room without turning into a peer-rebuild
+// storm, and every camera and ladder must recover when the tiers lift.
+async function scenarioAllFourImpaired() {
+  const tag = "all-impaired";
+  // A rebuild or two per participant is the recovery machinery working on a
+  // link this bad; a storm is the same peer being torn down over and over.
+  const maxRebuildsPerParticipant = 2;
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
+  await restartAutomaticLadders();
+  const tierByRole = { P1: "moderate", P2: "moderate-2", P3: "moderate-3", P4: "moderate-4" };
+  const identityBefore = new Map();
+  for (const role of roles) identityBefore.set(role, await connectionIdentity(pages.get(role)));
+  installRoomQdisc();
+  let armer;
+  let sampler;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    const impairedAt = Date.now();
+    sampler = startAdaptationSampler(roles);
+    await delay(20000);
+    // Per publisher: the pooled waitForAudioFlow would pass on one live
+    // sender while the other two are silent.
+    for (const role of roles) {
+      await waitForAdvancingAudioStreams(pages.get(role), roles.length - 1,
+        `${role} receiving audio from each of the three other impaired publishers`, 60000);
+    }
+    const remaining = 40000 - (Date.now() - impairedAt);
+    if (remaining > 0) await delay(remaining);
+    const sampled = await sampler.stop();
+    sampler = null;
+    for (const role of roles) {
+      const samples = sampled.timeline.get(role);
+      const summary = summarizeAdaptationTimeline(samples);
+      const identity = await connectionIdentity(pages.get(role));
+      const rebuilds = identity.peers - identityBefore.get(role).peers;
+      console.log(`[${tag}] ${role} over the impaired window: ${JSON.stringify(summary)} rebuilds=${rebuilds} reconnects=${identity.sockets - identityBefore.get(role).sockets} peer=${identity.state}`);
+      // The tier must have bitten on every participant's own link (its RTT
+      // alone, ~400 ms, is past the poor bar), or the room was not impaired.
+      assert.ok(summary.poorSamples > 0,
+        `${role}'s own link never read as poor with all four links impaired: ${formatAdaptationTimeline(samples)}`);
+      assert.ok(rebuilds <= maxRebuildsPerParticipant,
+        `${role} rebuilt its peer connection ${rebuilds} times in the impaired window (a rebuild storm)`);
+    }
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+    if (sampler) await sampler.stop();
+  }
+
+  // Recovery: every camera returns on every other browser, no participant
+  // stays suspended, and audio flows room-wide.
+  for (const observer of roles) {
+    for (const sender of roles) {
+      if (observer === sender) continue;
+      const participantID = await participantIDFor(pages.get(observer), names[roles.indexOf(sender)]);
+      await waitForTileState(pages.get(observer), participantID, "camera", "on", 90000);
+    }
+  }
+  // ...and every ladder climbs back to the top Auto level (which also means
+  // the camera is no longer suspended): the moderate window never offers a
+  // transport-healthy sample, so no climb fails and the back-off stays at its
+  // base, leaving 0 -> 3 well inside the bound.
+  await Promise.all(roles.map((role) =>
+    waitForTopAutomaticLevel(role, 90000, "after the four impaired links lifted")));
+  for (const role of roles) {
+    await waitForAudioFlow(pages.get(role), `${role} receiving audio after the four impaired links lifted`);
+  }
+  console.log(`[${tag}] every camera and ladder recovered after the four impaired links were lifted`);
+  await assertMedia();
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
@@ -2675,7 +3270,10 @@ const scenarios = [
   { name: "blackout-and-recovery", description: "A participant's media drops entirely mid-call while signaling stays alive: the room keeps flowing, the tile shows reconnecting, and the client recovers on its own once the blackout lifts.", run: scenarioBlackoutAndRecovery, netns: true },
   { name: "all-distinct-qualities", description: "All four participants sit on different tiers at once (clean/moderate/severe/capped): audio advances everywhere, video degrades by tier with no cross-tier drag, and every camera recovers.", run: scenarioAllDistinctQualities, netns: true },
   { name: "impaired-sharer-screen-share", description: "The screen-share owner's own uplink is impaired while every viewer is clean: the lease survives, the sharer keeps sending, and every viewer decodes the share again once the window lifts.", run: scenarioImpairedSharerScreenShare, netns: true },
-  { name: "delay-and-jitter-links", description: "A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.", run: scenarioDelayAndJitterLinks, netns: true }
+  { name: "delay-and-jitter-links", description: "A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.", run: scenarioDelayAndJitterLinks, netns: true },
+  { name: "all-fast-link-top-quality", description: "All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.", run: scenarioAllFastLinkTopQuality, netns: true },
+  { name: "one-fast-three-bad-uplinks", description: "One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.", run: scenarioOneFastThreeBadUplinks, netns: true },
+  { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true }
 ];
 
 function scenarioFilter() {
@@ -2694,7 +3292,8 @@ async function saveFailure(error) {
   const report = { scenario: activeScenario, reproduction: "make test-media-e2e-four",
     expected: expectedByScenario.get(activeScenario) || "Four participants join, synchronize room state, exchange media, and reject a fifth join.",
     actual: error.message, failureType: /launch|executable doesn't exist|permission|eperm|eacces|address already in use|did not become ready/i.test(error.message) ? "environment-or-browser" : "application-or-assertion",
-    participants: names.map((name, index) => ({ role: roles[index], name })), artifactDirectory: directory, serverLogs: server?.output.slice(-1500), pages: [] };
+    participants: names.map((name, index) => ({ role: roles[index], name })), artifactDirectory: directory, serverLogs: server?.output.slice(-1500),
+    evidence: scenarioEvidence.get(activeScenario) || null, pages: [] };
   for (const [role, page] of pages) {
     const diagnostics = await page.evaluate(async () => ({ url: location.href, status: document.querySelector("#status")?.textContent,
       meetingStatus: document.querySelector("#meeting-status")?.textContent,

@@ -809,6 +809,250 @@ func (s *weakNetSink) arrived() int {
 	return kinds
 }
 
+// gaps reports every video sequence the sink found missing at the
+// high-water mark, whether or not it was later repaired: proof that the
+// impairment reached the flow even when NACK repair hid all of it.
+func (s *weakNetSink) gaps() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gapTotal
+}
+
+// weakNetMeshMember is one participant of the symmetric mesh: a single
+// client peer connection that publishes audio and a camera and receives
+// every other member's streams, as the browser client does, and the SFU-side
+// peer it is registered with. Its ICE socket is pinned to its own UDP port
+// block so the member's access link can be shaped by port.
+type weakNetMeshMember struct {
+	id     string
+	tier   weakNetTier
+	client *pion.PeerConnection
+	sfu    *internalwebrtc.Peer
+	audio  *pion.TrackLocalStaticRTP
+	camera *pion.TrackLocalStaticRTP
+	// nacks counts retransmission requests that reach this member's camera
+	// sender from any receiver in the room.
+	nacks *weakNetNACKCounter
+	port  uint16
+
+	mu      sync.Mutex
+	inbound map[string]*weakNetSink // keyed by the publishing member's ID
+}
+
+// weakNetMeshSinkFrom returns the sink collecting what this member receives
+// from one publisher, creating it on the publisher's first track.
+func (m *weakNetMeshMember) weakNetMeshSinkFrom(sourceID string) *weakNetSink {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sink := m.inbound[sourceID]
+	if sink == nil {
+		sink = newWeakNetSink()
+		m.inbound[sourceID] = sink
+	}
+	return sink
+}
+
+// weakNetMeshFlow is one directed publisher → receiver flow at one instant.
+type weakNetMeshFlow struct {
+	audio, video, gaps int
+}
+
+// weakNetMeshSnapshot reads every directed flow in the room, keyed
+// "publisher->receiver".
+func weakNetMeshSnapshot(members []*weakNetMeshMember) map[string]weakNetMeshFlow {
+	flows := make(map[string]weakNetMeshFlow, len(members)*(len(members)-1))
+	for _, receiver := range members {
+		for _, publisher := range members {
+			if publisher == receiver {
+				continue
+			}
+			sink := receiver.weakNetMeshSinkFrom(publisher.id)
+			audio, video, _, _, _ := sink.counts()
+			flows[weakNetMeshFlowKey(publisher, receiver)] = weakNetMeshFlow{audio: audio, video: video, gaps: sink.gaps()}
+		}
+	}
+	return flows
+}
+
+func weakNetMeshFlowKey(publisher, receiver *weakNetMeshMember) string {
+	return publisher.id + "->" + receiver.id
+}
+
+// weakNetMeshDelta subtracts an earlier snapshot of the same flow.
+func weakNetMeshDelta(after, before weakNetMeshFlow) weakNetMeshFlow {
+	return weakNetMeshFlow{
+		audio: after.audio - before.audio,
+		video: after.video - before.video,
+		gaps:  after.gaps - before.gaps,
+	}
+}
+
+// newWeakNetMeshFixture wires a symmetric room through one router on clean
+// loopback: every member publishes audio and a camera and subscribes to every
+// other member, so each member's link carries its own uplink and all of the
+// room's downlinks — unlike newWeakNetRoomFixture, whose single clean
+// publisher always leaves every subscriber one clean inbound path. Members
+// are named p1..pN in tier order. All uplinks are established before media
+// flows, the SFU's resulting offers are answered once the full mesh of
+// targets exists, and sustained streaming runs from inside the fixture until
+// cleanup. Impairment is applied afterwards by the test.
+func newWeakNetMeshFixture(t *testing.T, limits Limits, tiers ...weakNetTier) []*weakNetMeshMember {
+	t.Helper()
+	router := NewRouter(limits)
+	ids := make([]string, len(tiers))
+	for i := range tiers {
+		ids[i] = fmt.Sprintf("p%d", i+1)
+	}
+	members := make([]*weakNetMeshMember, len(tiers))
+	for i, id := range ids {
+		base := uint16(54000 + i*100)
+		member := &weakNetMeshMember{
+			id:      id,
+			tier:    tiers[i],
+			client:  newWeakNetPionPeerWithPorts(t, base, base+19),
+			sfu:     newWeakNetWrapperPeer(t),
+			nacks:   &weakNetNACKCounter{},
+			inbound: make(map[string]*weakNetSink),
+			audio: newIntegrationTrack(pion.RTPCodecCapability{
+				MimeType: pion.MimeTypeOpus, ClockRate: 48000, Channels: 2,
+			}, id+"-audio"),
+			camera: newIntegrationTrack(pion.RTPCodecCapability{
+				MimeType: pion.MimeTypeVP8, ClockRate: 90000,
+			}, id+"-video"),
+		}
+		members[i] = member
+		t.Cleanup(func() {
+			router.Unregister(member.id)
+			_ = member.client.Close()
+			_ = member.sfu.Close()
+		})
+
+		member.client.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+			// Egress track IDs are "<publisher>|<role>".
+			sourceID, _, _ := strings.Cut(track.ID(), "|")
+			sink := member.weakNetMeshSinkFrom(sourceID)
+			go func() {
+				for {
+					packet, _, err := track.ReadRTP()
+					if err != nil {
+						return
+					}
+					sink.record(track.Kind(), packet.SequenceNumber)
+				}
+			}()
+		})
+		if _, err := member.client.AddTrack(member.audio); err != nil {
+			t.Fatalf("add %s audio track: %v", id, err)
+		}
+		cameraSender, err := member.client.AddTrack(member.camera)
+		if err != nil {
+			t.Fatalf("add %s camera track: %v", id, err)
+		}
+		member.nacks.read(cameraSender)
+
+		others := make([]string, 0, len(ids)-1)
+		for _, other := range ids {
+			if other != id {
+				others = append(others, other)
+			}
+		}
+		router.SetVideoSubscriptionsWithLayer(id, others, "medium")
+		router.Register(id, member.sfu, nil)
+		member.sfu.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
+			role := SourceRoleCamera
+			if track.Kind() == pion.RTPCodecTypeAudio {
+				role = SourceRoleAudio
+			}
+			router.Publish(member.id, role, member.sfu, track)
+		})
+	}
+
+	// Every uplink comes up before any media flows, so all publications
+	// appear while every receiver is already registered. The client's ICE
+	// socket is bound once its offer has gathered; the later SFU offer reuses
+	// the same transport, so this port carries both directions.
+	for _, member := range members {
+		negotiateIntegrationPeers(t, member.client, member.sfu.Connection())
+		waitIntegrationPeerConnected(t, member.client, member.id+" client")
+		waitIntegrationPeerConnected(t, member.sfu.Connection(), member.id+" SFU peer")
+		member.port = weakNetLocalPort(t, member.client)
+	}
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	for _, member := range members {
+		sendWeakNetPackets(member.audio, pion.RTPCodecTypeAudio, weakNetAudioInterval, weakNetAudioPayloadBytes, stop)
+		sendWeakNetPackets(member.camera, pion.RTPCodecTypeVideo, weakNetVideoInterval, weakNetVideoPayloadBytes, stop)
+	}
+	// Each of the 2N publications fans out to the N-1 other members.
+	waitIntegrationPublicationTargets(t, router, 2*len(members), 2*len(members)*(len(members)-1))
+	for _, member := range members {
+		negotiateIntegrationPeers(t, member.sfu.Connection(), member.client)
+	}
+
+	deadline := time.After(20 * time.Second)
+	for _, receiver := range members {
+		for _, publisher := range members {
+			if publisher == receiver {
+				continue
+			}
+			sink := receiver.weakNetMeshSinkFrom(publisher.id)
+			for sink.arrived() < 2 {
+				select {
+				case <-deadline:
+					audio, video, _, _, _ := sink.counts()
+					t.Fatalf("%s never received both of %s's tracks on clean loopback (audio=%d video=%d)",
+						receiver.id, publisher.id, audio, video)
+				default:
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}
+	return members
+}
+
+// installWeakNetMeshQdisc gives every impaired member its own access link at
+// its tier: one htb class for its uplink (packets leaving its port) and one
+// for its downlink (packets arriving at its port), each with the tier's rate,
+// delay, and loss. Unlike installWeakNetRoomQdisc, whose classes are shared
+// by every port of the same tier, two members on the same tier never share
+// capacity here — each has a separate line, the way two people on two bad
+// home connections do. Clean members stay on the default class.
+func installWeakNetMeshQdisc(t *testing.T, members []*weakNetMeshMember) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("tc", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("install mesh qdisc: tc %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	run("qdisc", "replace", "dev", "lo", "root", "handle", "1:", "htb", "default", "10")
+	run("class", "add", "dev", "lo", "parent", "1:", "classid", "1:10", "htb", "rate", "10gbit", "ceil", "10gbit")
+	for i, member := range members {
+		if member.tier == weakNetTierClean {
+			continue
+		}
+		portArg := fmt.Sprintf("%d", member.port)
+		for direction, selector := range []string{"sport", "dport"} {
+			minor := 0x100 + i*2 + direction
+			classID := fmt.Sprintf("1:%x", minor)
+			run("class", "add", "dev", "lo", "parent", "1:", "classid", classID,
+				"htb", "rate", member.tier.rate, "ceil", member.tier.rate)
+			netemArgs := []string{"qdisc", "add", "dev", "lo", "parent", classID, "handle", fmt.Sprintf("%x:", minor),
+				"netem", "delay", member.tier.delay, "loss", member.tier.loss}
+			if member.tier.limit != "" {
+				netemArgs = append(netemArgs, "limit", member.tier.limit)
+			}
+			run(netemArgs...)
+			run("filter", "add", "dev", "lo", "protocol", "ip", "parent", "1:", "prio", "1", "u32",
+				"match", "ip", selector, portArg, "0xffff", "flowid", classID)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("tc", "qdisc", "del", "dev", "lo", "root").Run() })
+}
+
 func TestWeakNetMixedQualityRoomIsolatesParticipants(t *testing.T) {
 	skipWithoutWeakNetNamespace(t)
 	feedback, subscribers := newWeakNetRoomFixture(t, Limits{
@@ -1176,4 +1420,188 @@ func TestWeakNetBlackoutStopsMediaThenRecovers(t *testing.T) {
 		t.Fatal("no sequence gaps around the blackout: the outage never reached the RTP stream")
 	}
 	waitWeakNetConnected(t, subscribers[1].peer, "blackout client")
+}
+
+// weakNetMeshWireOverheadBytes is what a forwarded RTP packet costs on the
+// shaped link beyond its RTP marshal size (header plus payload, the size the
+// SFU's limiters count): the SRTP auth tag, UDP, and IPv4 headers.
+const weakNetMeshWireOverheadBytes = 10 + 8 + 20
+
+// weakNetMeshFloorSafety divides the throughput a tier's preset predicts for
+// one audio flow. The model treats the netem FIFO as sharing capacity in
+// proportion to offered bytes, and ignores RTCP, NACK retransmissions, and
+// STUN consent traffic that also cross the link, so the floor only claims
+// that a third of the predicted audio survives.
+const weakNetMeshFloorSafety = 3
+
+// weakNetMeshTierRate reads a tier preset's rate ("200kbit") in bits per
+// second.
+func weakNetMeshTierRate(t *testing.T, tier weakNetTier) float64 {
+	t.Helper()
+	var kbit int
+	if _, err := fmt.Sscanf(tier.rate, "%dkbit", &kbit); err != nil || kbit <= 0 {
+		t.Fatalf("weak-network tier rate %q is not in kbit: %v", tier.rate, err)
+	}
+	return float64(kbit) * 1000
+}
+
+// weakNetMeshTierLoss reads a tier preset's netem loss ("3%") as a fraction.
+func weakNetMeshTierLoss(t *testing.T, tier weakNetTier) float64 {
+	t.Helper()
+	var percent float64
+	if _, err := fmt.Sscanf(tier.loss, "%f%%", &percent); err != nil || percent < 0 || percent >= 100 {
+		t.Fatalf("weak-network tier loss %q is not a percentage: %v", tier.loss, err)
+	}
+	return percent / 100
+}
+
+// weakNetMeshAudioFloors derives, from a bad member's tier preset, the
+// minimum audio packets over window for the two flows that cross exactly one
+// impaired hop: its own audio reaching a clean receiver (its uplink only) and
+// a clean publisher's audio reaching it (its downlink only). Each direction
+// passes the fraction of offered load the tier's rate can carry, then the
+// tier's loss, and never more than the SFU's audio budget admits.
+//
+// The uplink carries the member's own synthetic audio and camera at their
+// source rates. The downlink is taken at its worst case: every one of the
+// room's other members delivering audio at the SFU's full audio budget and
+// video at the full video cap.
+func weakNetMeshAudioFloors(t *testing.T, tier weakNetTier, limits Limits, roomSize int, window time.Duration) (uplink, downlink int) {
+	t.Helper()
+	rate := weakNetMeshTierRate(t, tier)
+	survive := 1 - weakNetMeshTierLoss(t, tier)
+	audioRTPBytes := float64(12 + weakNetAudioPayloadBytes)
+	videoRTPBytes := float64(12 + weakNetVideoPayloadBytes)
+	sourceAudioPPS := float64(time.Second) / float64(weakNetAudioInterval)
+	sourceVideoPPS := float64(time.Second) / float64(weakNetVideoInterval)
+	admittedAudioPPS := float64(rateForKind(pion.RTPCodecTypeAudio, limits)) / audioRTPBytes
+	carried := func(offeredBitsPerSecond float64) float64 {
+		return min(1, rate/offeredBitsPerSecond)
+	}
+
+	uplinkOffered := 8 * (sourceAudioPPS*(audioRTPBytes+weakNetMeshWireOverheadBytes) +
+		sourceVideoPPS*(videoRTPBytes+weakNetMeshWireOverheadBytes))
+	uplinkPPS := min(admittedAudioPPS, sourceAudioPPS*carried(uplinkOffered)*survive)
+
+	perPublisherDownlink := 8*admittedAudioPPS*(audioRTPBytes+weakNetMeshWireOverheadBytes) +
+		float64(limits.MaxVideoBitrate)*(videoRTPBytes+weakNetMeshWireOverheadBytes)/videoRTPBytes
+	downlinkOffered := float64(roomSize-1) * perPublisherDownlink
+	downlinkPPS := admittedAudioPPS * carried(downlinkOffered) * survive
+
+	seconds := window.Seconds()
+	return int(uplinkPPS * seconds / weakNetMeshFloorSafety), int(downlinkPPS * seconds / weakNetMeshFloorSafety)
+}
+
+// One clean participant in a room of three bad ones, where every member
+// publishes and subscribes — the Go-level shape of the 1-good/3-bad meeting.
+// P2 and P4 sit on separate moderate links and P3 on a severe one, each
+// shaped on its own UDP port in both directions, so the clean participant has
+// no clean inbound stream at all: every stream it receives crossed a bad
+// uplink, and every stream it sends crosses a bad downlink. The guarantees:
+// audio keeps flowing on every pair touching the clean participant, at floors
+// derived from the Go tier presets; the clean participant's own link adds no
+// impairment (it receives each bad publisher better than any bad receiver
+// does, and each bad receiver gets it better than any bad publisher); the
+// repair loop for its stream stays alive; and every pair resumes on lift.
+func TestWeakNetSymmetricMeshIsolatesCleanParticipant(t *testing.T) {
+	skipWithoutWeakNetNamespace(t)
+	limits := Limits{MaxAudioBitrate: 32_000, MaxVideoBitrate: 150_000, MaxVideoFPS: 30}
+	members := newWeakNetMeshFixture(t, limits,
+		weakNetTierClean, weakNetTierModerate, weakNetTierSevere, weakNetTierModerate)
+	clean, bad := members[0], members[1:]
+
+	const window = 8 * time.Second
+	installWeakNetMeshQdisc(t, members)
+	before := weakNetMeshSnapshot(members)
+	nacksBefore := clean.nacks.count()
+	time.Sleep(window)
+	impaired := weakNetMeshSnapshot(members)
+	flow := func(publisher, receiver *weakNetMeshMember) weakNetMeshFlow {
+		key := weakNetMeshFlowKey(publisher, receiver)
+		return weakNetMeshDelta(impaired[key], before[key])
+	}
+	for _, receiver := range members {
+		for _, publisher := range members {
+			if publisher != receiver {
+				got := flow(publisher, receiver)
+				t.Logf("%s (%s) -> %s (%s): audio=%d video=%d gaps=%d", publisher.id, weakNetTierID(publisher.tier),
+					receiver.id, weakNetTierID(receiver.tier), got.audio, got.video, got.gaps)
+			}
+		}
+	}
+
+	// The most audio any flow can carry over the window: the SFU's audio
+	// budget. A bad member's tier must cost at least its preset loss.
+	audioBudget := float64(rateForKind(pion.RTPCodecTypeAudio, limits)) / float64(12+weakNetAudioPayloadBytes) * window.Seconds()
+	for _, member := range bad {
+		uplinkFloor, downlinkFloor := weakNetMeshAudioFloors(t, member.tier, limits, len(members), window)
+		tierCeiling := int(audioBudget * (1 - weakNetMeshTierLoss(t, member.tier)))
+		t.Logf("%s (%s) audio floors from the tier preset: uplink %d, downlink %d; ceiling %d",
+			member.id, weakNetTierID(member.tier), uplinkFloor, downlinkFloor, tierCeiling)
+
+		fromBad := flow(member, clean)
+		if fromBad.audio < uplinkFloor {
+			t.Errorf("%s received %d audio packets from %s (%s uplink), want >= %d derived from the tier preset: audio must cross a bad uplink",
+				clean.id, fromBad.audio, member.id, weakNetTierID(member.tier), uplinkFloor)
+		}
+		toBad := flow(clean, member)
+		if toBad.audio < downlinkFloor {
+			t.Errorf("%s received %d audio packets from %s across its %s downlink, want >= %d derived from the tier preset",
+				member.id, toBad.audio, clean.id, weakNetTierID(member.tier), downlinkFloor)
+		}
+		if toBad.video == 0 {
+			t.Errorf("%s's camera never reached %s across its %s downlink", clean.id, member.id, weakNetTierID(member.tier))
+		}
+		if fromBad.audio > tierCeiling || toBad.audio > tierCeiling {
+			t.Errorf("%s flows carried %d (from) and %d (to) audio packets, above %d: the %s tier never reached the member's port",
+				member.id, fromBad.audio, toBad.audio, tierCeiling, weakNetTierID(member.tier))
+		}
+
+		// Isolation, in both directions. A bad publisher's audio reaches the
+		// clean participant through one impaired hop and any other bad
+		// receiver through two, so the clean participant must hear it best;
+		// a bad receiver gets the clean participant through one impaired hop
+		// and every other bad publisher through two.
+		for _, other := range bad {
+			if other == member {
+				continue
+			}
+			if viaBad := flow(member, other); fromBad.audio <= viaBad.audio {
+				t.Errorf("%s's audio reached the clean %s (%d packets) no better than the bad %s (%d): the clean downlink must add no impairment",
+					member.id, clean.id, fromBad.audio, other.id, viaBad.audio)
+			}
+			if fromOther := flow(other, member); toBad.audio <= fromOther.audio {
+				t.Errorf("%s received the clean %s's audio (%d packets) no better than the bad %s's (%d): the clean uplink must add no impairment",
+					member.id, clean.id, toBad.audio, other.id, fromOther.audio)
+			}
+		}
+	}
+	if nacks := clean.nacks.count() - nacksBefore; nacks < 1 {
+		t.Errorf("%s's camera sender saw no NACK while its stream crossed three lossy downlinks: the repair loop is dead", clean.id)
+	}
+	if t.Failed() {
+		return
+	}
+
+	removeWeakNetProfile(t)
+	time.Sleep(3 * time.Second)
+	lifted := weakNetMeshSnapshot(members)
+	for _, receiver := range members {
+		for _, publisher := range members {
+			if publisher == receiver {
+				continue
+			}
+			key := weakNetMeshFlowKey(publisher, receiver)
+			got := weakNetMeshDelta(lifted[key], impaired[key])
+			if got.audio == 0 {
+				t.Errorf("%s audio stopped flowing after the impairment was lifted", key)
+			}
+			if got.video == 0 {
+				t.Errorf("%s video stopped flowing after the impairment was lifted", key)
+			}
+		}
+	}
+	for _, member := range members {
+		waitWeakNetConnected(t, member.client, member.id+" client")
+	}
 }
