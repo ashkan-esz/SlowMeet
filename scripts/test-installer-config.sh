@@ -82,6 +82,8 @@ source <(sed -n '/^reload_caddy_after_config_change() {/,/^uninstall_existing_in
 # shellcheck disable=SC1090
 source <(awk '/^write_nginx_site\(\) \{/ { copying=1 } copying { if (/^\[\[ -r \/etc\/os-release/) exit; print }' "$INSTALLER")
 
+# Called by the installer functions sourced above, which shellcheck cannot see.
+# shellcheck disable=SC2317
 log() { :; }
 caddy_https_port_conflicts() { printf '%s\n' "${HTTPS_CONFLICTS:-}"; }
 
