@@ -103,6 +103,14 @@ What to expect from it:
   address separately at startup. After adding an address to the host, restart
   SlowMeet. An address that disappears while the relay starts is skipped with
   a warning.
+- **It asks for a larger UDP receive buffer.** All TURN-over-UDP clients of
+  an address share one listen socket, so each of those sockets requests a
+  2 MiB receive buffer. The kernel grants at most `net.core.rmem_max` (about
+  200 KB unless raised), and the size it reports is logged as
+  `udp_read_buffer` in `turn_server_started`. The request never shrinks a
+  buffer. If many participants are relayed over UDP and the host drops
+  datagrams, raise the limit, for example
+  `sysctl -w net.core.rmem_max=2097152`.
 - **A relay that cannot listen stops startup.** If a listen port is taken, the
   process exits with an error naming the port instead of running without a
   relay. A missing certificate is not fatal: TURN over UDP and TCP work, and
