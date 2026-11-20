@@ -142,15 +142,20 @@ async function join(browser, baseURL, name, method) {
   await page.goto(baseURL);
   await page.fill("#name", name);
   await page.fill("#password", meetingPassword);
+  // The selector is rendered again when the ICE configuration arrives, which
+  // puts a choice made before that back. iceConfigReady is the page's own
+  // promise for it, settled after that rendering.
+  /* global iceConfigReady */
+  assert.equal(await page.evaluate(() => iceConfigReady), true, `${name} did not receive the ICE configuration`);
   await page.waitForFunction((id) => {
     const option = document.querySelector(`#join-connection-method option[value="${id}"]`);
     return option && !option.disabled;
   }, method, { timeout: 15000 });
-  // The selector is re-rendered when the ICE configuration arrives.
-  await delay(1000);
   await page.selectOption("#join-connection-method", method);
-  assert.equal(await page.evaluate(() => document.querySelector("#join-connection-method").value), method,
-    `${name} could not select ${method} on the join form`);
+  /* global connectionMethod */
+  assert.deepEqual(
+    await page.evaluate(() => [document.querySelector("#join-connection-method").value, connectionMethod]),
+    [method, method], `${name} could not select ${method} on the join form`);
   await page.evaluate(() => document.querySelector("#join-form").requestSubmit());
   await page.waitForFunction(() => window.__e2e.peers[0]?.connectionState === "connected", null, { timeout: 30000 });
   return page;
@@ -237,8 +242,9 @@ async function assertMediaFlows(pages, label) {
 }
 
 async function main() {
+  // Without a system Chrome, Playwright's own Chromium is used, as in CI
+  // (npx playwright-core install chromium).
   const chromePath = findChrome();
-  if (!chromePath) throw new Error("no Chromium/Chrome found; set CHROMIUM_PATH");
   const goCache = process.env.GOCACHE || path.join(os.tmpdir(), "slowmeet-media-e2e-gocache");
   const cleanup = [];
   try {
@@ -286,6 +292,11 @@ async function main() {
     }, "SlowMeet", server);
     assert.ok(server.output.join("").includes("turn_server_started"), "the built-in relay must report that it started");
     assert.ok(!server.output.join("").includes(turnSecret), "the shared secret must not be logged");
+    // The relay must know the SFU's media ports, or it would forward to any
+    // port and this test would not exercise its port check. The empty
+    // ICE_UDP_PORT_* above select the default range.
+    assert.match(server.output.join(""), /sfu_ports\W+50000-50100/,
+      "the relay must restrict peers to the SFU's media port range");
 
     const iceConfig = await (await fetch(`${baseURL}/ice-config`)).json();
     const methods = Object.fromEntries(iceConfig.connection_methods.map((method) => [method.id, method]));
@@ -295,11 +306,12 @@ async function main() {
     assert.ok(JSON.stringify(iceConfig).includes(`turn:127.0.0.1:${turnPort}`), "browsers must be told the relay's address");
     assert.ok(!JSON.stringify(iceConfig).includes("credential"), "the public ICE configuration must carry no credentials");
 
-    const browser = await chromium.launch({
-      executablePath: chromePath,
+    const launchOptions = {
       headless: process.env.MEDIA_E2E_HEADED !== "1",
       args: ["--no-proxy-server", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]
-    });
+    };
+    if (chromePath) launchOptions.executablePath = chromePath;
+    const browser = await chromium.launch(launchOptions);
     cleanup.push(() => browser.close());
     const alice = await join(browser, baseURL, "Alice", "turn-udp");
     const bob = await join(browser, baseURL, "Bob", "turn-tcp");
