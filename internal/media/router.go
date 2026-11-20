@@ -1724,6 +1724,20 @@ func (r *Router) AddPublicationFixture(sourceID string, role SourceRole) {
 
 // HasPublication reports whether any publication is registered for the
 // source and role.
+// PublicationSource returns the peer connection a source's role is currently
+// published from, or nil when it is not published. Like HasPublication it
+// lets other packages observe a publication swap end to end.
+func (r *Router) PublicationSource(sourceID string, role SourceRole) *webrtc.Peer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pub := range r.pubs {
+		if pub.sourceID == sourceID && pub.role == role {
+			return pub.source
+		}
+	}
+	return nil
+}
+
 func (r *Router) HasPublication(sourceID string, role SourceRole) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
