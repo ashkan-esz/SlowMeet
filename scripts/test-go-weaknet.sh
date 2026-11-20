@@ -32,5 +32,5 @@ unshare --user --map-root-user --net --fork --kill-child=TERM /bin/sh -c '
   set -eu
   ip link set lo up
   export SLOWMEET_WEAKNET_NETNS=1
-  exec "$1" -test.run "^TestWeakNet" -test.v
+  exec "$1" -test.run "${SLOWMEET_WEAKNET_RUN:-^TestWeakNet}" -test.timeout 20m -test.v
 ' sh "$test_dir/weaknet.test"

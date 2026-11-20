@@ -93,10 +93,44 @@ type weakNetSink struct {
 	videoSeen  map[uint16]struct{}
 	gapTotal   int
 	repaired   int
+
+	// Delivery order and continuity, read through order(): sequences seen
+	// twice, sequences below the high-water mark, and the longest time
+	// between two audio packets.
+	audioSeen       map[uint16]struct{}
+	lastAudio       uint16
+	lastAudioAt     time.Time
+	maxAudioGap     time.Duration
+	audioDuplicates int
+	audioLate       int
+	videoDuplicates int
 }
 
 func newWeakNetSink() *weakNetSink {
-	return &weakNetSink{videoSeen: make(map[uint16]struct{})}
+	return &weakNetSink{videoSeen: make(map[uint16]struct{}), audioSeen: make(map[uint16]struct{})}
+}
+
+// weakNetOrder is a snapshot of a sink's delivery order and audio continuity.
+type weakNetOrder struct {
+	audioDuplicates, audioLate, videoDuplicates int
+	maxAudioGap                                 time.Duration
+}
+
+func (s *weakNetSink) order() weakNetOrder {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return weakNetOrder{
+		audioDuplicates: s.audioDuplicates, audioLate: s.audioLate,
+		videoDuplicates: s.videoDuplicates, maxAudioGap: s.maxAudioGap,
+	}
+}
+
+// resetAudioGap starts a new window for the longest audio gap.
+func (s *weakNetSink) resetAudioGap() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxAudioGap = 0
+	s.lastAudioAt = time.Now()
 }
 
 // readPublisherNACKs counts retransmission requests that reach the
@@ -126,10 +160,30 @@ func (s *weakNetSink) record(kind pion.RTPCodecType, sequence uint16) {
 	defer s.mu.Unlock()
 	if kind == pion.RTPCodecTypeAudio {
 		s.audioCount++
+		now := time.Now()
+		if !s.lastAudioAt.IsZero() && now.Sub(s.lastAudioAt) > s.maxAudioGap {
+			s.maxAudioGap = now.Sub(s.lastAudioAt)
+		}
+		s.lastAudioAt = now
+		if s.audioSeen == nil {
+			s.audioSeen = make(map[uint16]struct{})
+		}
+		if _, seen := s.audioSeen[sequence]; seen {
+			s.audioDuplicates++
+		}
+		s.audioSeen[sequence] = struct{}{}
+		if s.lastAudio != 0 && sequence < s.lastAudio {
+			s.audioLate++
+		} else {
+			s.lastAudio = sequence
+		}
 		return
 	}
 	s.videoCount++
 	_, duplicate := s.videoSeen[sequence]
+	if duplicate {
+		s.videoDuplicates++
+	}
 	s.videoSeen[sequence] = struct{}{}
 	if s.lastVideo != 0 && sequence < s.lastVideo {
 		if !duplicate {
@@ -502,7 +556,15 @@ type weakNetTier struct {
 	// limit optionally caps the netem queue in packets so a rate-only tier
 	// congests through tail drops instead of bufferbloating the window away.
 	limit string
+	// direction limits a mesh tier to the member's uplink (packets leaving
+	// its port) or downlink (packets arriving at it); empty shapes both.
+	direction string
 }
+
+const (
+	weakNetUplinkOnly   = "uplink"
+	weakNetDownlinkOnly = "downlink"
+)
 
 var (
 	weakNetTierClean    = weakNetTier{rate: "", delay: "", loss: ""}
@@ -1036,6 +1098,10 @@ func installWeakNetMeshQdisc(t *testing.T, members []*weakNetMeshMember) {
 		}
 		portArg := fmt.Sprintf("%d", member.port)
 		for direction, selector := range []string{"sport", "dport"} {
+			if (selector == "sport" && member.tier.direction == weakNetDownlinkOnly) ||
+				(selector == "dport" && member.tier.direction == weakNetUplinkOnly) {
+				continue
+			}
 			minor := 0x100 + i*2 + direction
 			classID := fmt.Sprintf("1:%x", minor)
 			run("class", "add", "dev", "lo", "parent", "1:", "classid", classID,
