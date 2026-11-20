@@ -124,6 +124,7 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 			return nil, fmt.Errorf("listen for TURN over TLS on TCP %s: %w", tlsAddress, listenErr)
 		}
 		certificates := newCertReloader(cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile, logger)
+		certificates.prime()
 		// The cap sits under TLS, and tlsListener closes a connection whose
 		// handshake fails, which is what gives its slot back.
 		server.tlsConns = newStreamConns("tls", streamClients, logger)
@@ -213,6 +214,7 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 			"hint", "set ICE_UDP_PORT_MIN and ICE_UDP_PORT_MAX: without a media port range the relay "+
 				"forwards to any UDP port on this server's own address")
 	}
+	warnAboutRelayRange(logger, cfg)
 	if loopbackRelayCannotReachSFU(cfg, addresses.relayIP) {
 		logger.Warn("turn_server_loopback_relay_address",
 			"relay_ip", addresses.relayIP.String(), "ice_public_ip", cfg.ICEPublicIP,
@@ -225,6 +227,23 @@ func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ 
 	}
 	warnAboutTURNURLs(logger, cfg.EffectiveTURNURLs(), localPort(server.tcp.Addr()), tlsPort)
 	return server, nil
+}
+
+// warnAboutRelayRange warns when the relay port range cannot hold a full room
+// on a rotating TURN method, where each participant holds several allocations
+// at a time. A range that fills refuses new allocations, which a participant
+// sees as a rotation that does not complete. Nothing is refused here: a room
+// rarely has everyone relayed, so the smaller range often works.
+func warnAboutRelayRange(logger *slog.Logger, cfg config.Config) {
+	ports := cfg.TURNServerRelayPortMax - cfg.TURNServerRelayPortMin + 1
+	perParticipant := config.TURNAllocationsPerParticipant(cfg.TURNTCPRotateInterval)
+	if needed := cfg.MaxParticipants * perParticipant; needed > ports {
+		logger.Warn("turn_server_relay_range_small",
+			"relay_ports", ports, "max_participants", cfg.MaxParticipants,
+			"allocations_per_participant", perParticipant, "needed", needed,
+			"hint", "a full room on a rotating TURN method needs more relay ports than "+
+				"TURN_SERVER_RELAY_PORT_MIN-MAX holds; widen the range, keeping it clear of the ICE UDP range")
+	}
 }
 
 // warnAboutTURNURLs compares TURN_URLS, which is where browsers are sent, with
