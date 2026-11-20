@@ -144,6 +144,58 @@ const five = chooseParticipantLayout({ width: 1200, height: 620, count: 5 });
 if (five.columns !== 3 || five.rows !== 2 || five.rowCounts.join(",") !== "3,2") {
   throw new Error("five tiles should use the largest fitting responsive layout");
 }
+// A four-person room on a desktop stage is a balanced 2x2 grid, and its tiles
+// are never smaller than the tiles of a five-person room on the same stage.
+for (const [width, height] of [[1440, 900], [1200, 620], [780, 493]]) {
+  const four = chooseParticipantLayout({ width, height, count: 4 });
+  const usedWidth = four.columns * four.tileWidth + Math.max(0, four.columns - 1) * 12;
+  const usedHeight = four.rows * four.tileHeight + Math.max(0, four.rows - 1) * 12;
+  if (four.columns !== 2 || four.rows !== 2 || four.rowCounts.join(",") !== "2,2" || four.overflow ||
+      usedWidth > width + 0.01 || usedHeight > height + 0.01) {
+    throw new Error(`four participants should use a fitting 2x2 layout at ${width}x${height}`);
+  }
+  // The tiles keep the camera aspect ratio and are as large as the stage
+  // allows: the grid touches the stage edge on at least one axis.
+  if (Math.abs(four.tileWidth / four.tileHeight - 16 / 9) > 0.001 ||
+      (usedWidth < width - 0.01 && usedHeight < height - 0.01)) {
+    throw new Error(`four-participant tiles should be 16:9 and fill the stage on one axis at ${width}x${height}`);
+  }
+  const fiveOnSameStage = chooseParticipantLayout({ width, height, count: 5 });
+  if (four.tileWidth < fiveOnSameStage.tileWidth) {
+    throw new Error(`four-participant tiles should not be narrower than five-participant tiles at ${width}x${height}`);
+  }
+  // The app feeds the previous column count back in as preferredColumns. When
+  // a fifth participant leaves (or a third joins), the stale preference must
+  // not keep the four remaining tiles in a 1x4, 3+1 or 4x1 grid. The
+  // five-person grid is 3 columns on some of these stages and 2 on others, so
+  // every stale column count is checked explicitly.
+  for (const staleColumns of new Set([1, 3, 4, fiveOnSameStage.columns])) {
+    const afterChange = chooseParticipantLayout({ width, height, count: 4, preferredColumns: staleColumns });
+    if (afterChange.columns !== 2 || afterChange.rowCounts.join(",") !== "2,2" ||
+        afterChange.tileWidth !== four.tileWidth) {
+      throw new Error(`four participants should return to the 2x2 layout from a stale ${staleColumns}-column preference at ${width}x${height}`);
+    }
+  }
+  // The same holds with the arguments app.js passes for a desktop window
+  // (updateParticipantLayout: minTileWidth from the stage width, 82 px
+  // minimum height, 1000 px cap above a 1400 px window, 720 px below; the
+  // stage width stands in for the window width here).
+  const appArgs = {
+    width,
+    height,
+    gap: 12,
+    maxColumns: 0,
+    minTileWidth: Math.min(180, Math.max(160, width / 2.6)),
+    minTileHeight: 82,
+    maxTileWidth: width > 1400 ? 1000 : 720
+  };
+  const fourInApp = chooseParticipantLayout({ ...appArgs, count: 4, preferredColumns: 3 });
+  const fiveInApp = chooseParticipantLayout({ ...appArgs, count: 5 });
+  if (fourInApp.columns !== 2 || fourInApp.rowCounts.join(",") !== "2,2" || fourInApp.overflow ||
+      fourInApp.tileWidth < fiveInApp.tileWidth) {
+    throw new Error(`four participants should use a 2x2 layout with the app's layout arguments at ${width}x${height}`);
+  }
+}
 const wide = chooseParticipantLayout({ width: 1200, height: 620, count: 6 });
 const narrow = chooseParticipantLayout({ width: 344, height: 500, count: 6 });
 const ultraNarrow = chooseParticipantLayout({ width: 120, height: 1110, count: 5, minTileWidth: 132 });
