@@ -148,6 +148,20 @@ choice, certificates, and TURN configuration. Existing Nginx or Caddy
 configuration is validated before activation so an update does not silently
 replace unrelated proxy configuration.
 
+With Caddy, the update reads the SlowMeet domain from the installer's managed
+block in `/etc/caddy/Caddyfile` (between the `BEGIN` and `END SlowMeet
+installer managed site` lines). Sites you add around that block, such as one
+that only answers ACME challenges for a TURN host name, do not make the
+installation ambiguous and are written back untouched. An older Caddyfile
+without the block must still hold exactly one site, or the update stops.
+
+Another service may own TCP port 443 in front of Caddy: HAProxy or another
+SNI router that sends TURN over TLS to the relay and web traffic to Caddy on
+another port. Say so in the Caddyfile with the `https_port` global option, as
+Caddy needs anyway. The update then checks that port, not 443, for a
+conflicting listener, and keeps HTTPS on. Without `https_port`, a foreign
+listener on 443 still makes the update fall back to the HTTP site, as before.
+
 ### Updating an installation that ran coturn
 
 Earlier versions ran coturn in its own container. An update moves such an

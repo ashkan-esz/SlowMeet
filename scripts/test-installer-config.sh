@@ -438,4 +438,133 @@ if ! grep -Fq 'if [[ -f "$CERT_HOOK" ]]; then' <<<"$update_path" || ! grep -Fq '
     fail 'an update must refresh an existing renewal hook'
 fi
 
+# --- An operator's own sites, and an SNI router in front of Caddy -------------
+#
+# A host can carry more than SlowMeet: here a second site that only answers
+# ACME challenges for a TURN host name, and HAProxy on TCP 443 that routes by
+# SNI and forwards web traffic to Caddy on another port (https_port). An
+# update must still know which domain is SlowMeet's, and must not take the
+# working HTTPS site down to HTTP because "port 443 is taken".
+
+# shellcheck disable=SC1090
+source <(sed -n '/^load_legacy_install_settings() {/,/^}/p' "$INSTALLER")
+# The real one from here on; the checks above use a stub.
+# shellcheck disable=SC1090
+source <(sed -n '/^caddy_https_port_conflicts() {/,/^}/p' "$INSTALLER")
+# shellcheck disable=SC1090
+source <(sed -n '/^xray_https_port_443_is_active() {/,/^}/p' "$INSTALLER")
+declare -F load_legacy_install_settings caddy_https_port caddy_https_port_conflicts xray_https_port_443_is_active >/dev/null \
+    || fail 'the installer no longer defines the proxy detection functions'
+
+# Listeners per port, as `ss -H -ltnp "sport = :PORT"` prints them.
+declare -A LISTENERS=()
+ss() {
+    local port=${*: -1}
+    port=${port##*:}
+    [[ -z "${LISTENERS[$port]:-}" ]] || printf '%s\n' "${LISTENERS[$port]}"
+}
+systemctl() {
+    if [[ "$*" == 'show -p MainPID --value caddy' ]]; then
+        printf '4242\n'
+        return 0
+    fi
+    command systemctl "$@"
+}
+
+fronted="$TEMP_DIR/caddy/Caddyfile.fronted"
+cat > "$fronted" <<'CADDY'
+{
+	https_port 9443
+	servers :9443 {
+		listener_wrappers {
+			proxy_protocol {
+				allow 127.0.0.1/32
+			}
+			tls
+		}
+	}
+}
+
+http://turn.example.com {
+    handle /.well-known/acme-challenge/* {
+        root * /var/www/letsencrypt
+        file_server
+    }
+}
+CADDY
+domain=meet.example.com
+app_port=8080
+caddy_tls_mode=direct
+write_caddy_site final "$fronted"
+assert_contains "$fronted" 'http://turn.example.com {'
+assert_contains "$fronted" 'https://meet.example.com {'
+fronted_before=$(cat "$fronted")
+
+[[ "$(caddy_https_port "$fronted")" == 9443 ]] || fail 'the https_port global option was not read'
+[[ "$(caddy_https_port "$caddyfile")" == 443 ]] || fail 'a Caddyfile without https_port serves HTTPS on 443'
+[[ "$(caddy_https_port "$TEMP_DIR/caddy/absent")" == 443 ]] || fail 'a missing Caddyfile means the default HTTPS port'
+
+# The domain comes from the managed block, not from the operator's sites.
+NGINX_SITE="$TEMP_DIR/nginx/absent.conf"
+ENV_FILE="$TEMP_DIR/absent.env"
+INSTALL_DIR="$TEMP_DIR/absent-install"
+domain=''
+app_port=''
+load_legacy_install_settings "$fronted"
+[[ "$proxy_mode" == caddy && "$domain" == meet.example.com && "$app_port" == 8080 ]] \
+    || fail "an operator's site next to the managed block hid the SlowMeet domain: domain=$domain port=$app_port"
+
+# Without the managed block nothing says which site is SlowMeet's.
+printf 'http://a.example.com {\n}\nhttp://b.example.com {\n}\n' > "$TEMP_DIR/caddy/Caddyfile.two-sites"
+if (load_legacy_install_settings "$TEMP_DIR/caddy/Caddyfile.two-sites") 2>/dev/null; then
+    fail 'two unmarked sites must still stop an update as ambiguous'
+fi
+# A block that was cut in half is not trusted either.
+grep -Fxv "$CADDY_END_MARKER" "$fronted" > "$TEMP_DIR/caddy/Caddyfile.half-block"
+if (load_legacy_install_settings "$TEMP_DIR/caddy/Caddyfile.half-block") 2>/dev/null; then
+    fail 'a managed block without its end marker must stop an update'
+fi
+
+# HAProxy on 443 is no conflict for a Caddy that serves HTTPS on 9443 ...
+LISTENERS[443]='LISTEN 0 4096 *:443 *:* users:(("haproxy",pid=99,fd=6))'
+LISTENERS[9443]='LISTEN 0 4096 *:9443 *:* users:(("caddy",pid=4242,fd=7))'
+[[ -z "$(caddy_https_port_conflicts caddy "$fronted")" ]] \
+    || fail "a router on 443 was reported as a conflict for Caddy on 9443: $(caddy_https_port_conflicts caddy "$fronted")"
+domain=meet.example.com
+app_port=8080
+proxy_mode=caddy
+caddy_tls_mode=direct
+https_reason=
+detect_caddy_tls_mode "$fronted"
+[[ "$caddy_tls_mode" == direct && -z "$https_reason" ]] \
+    || fail "an update behind an SNI router would turn HTTPS off: mode=$caddy_tls_mode reason=$https_reason"
+# ... and the update writes the Caddyfile back as it was (but for the blank
+# line that separates the managed block from what precedes it).
+write_caddy_site final "$fronted"
+[[ "$(grep -v '^$' "$fronted")" == "$(grep -v '^$' <<<"$fronted_before")" ]] \
+    || fail 'an update changed a Caddyfile it had nothing to change in'
+
+# ... but something else on Caddy's own HTTPS port is.
+LISTENERS[9443]='LISTEN 0 4096 *:9443 *:* users:(("nipovpn",pid=301,fd=7))'
+[[ "$(caddy_https_port_conflicts caddy "$fronted")" == 'nipovpn (PID 301)' ]] \
+    || fail 'a foreign listener on the configured HTTPS port was not reported'
+caddy_tls_mode=direct
+detect_caddy_tls_mode "$fronted"
+[[ "$caddy_tls_mode" == http-only && "$https_reason" == 'TCP port 9443 is already in use by nipovpn (PID 301).' ]] \
+    || fail "a conflict on the configured HTTPS port was not named: mode=$caddy_tls_mode reason=$https_reason"
+
+# Without https_port everything is as before: 443 is Caddy's, and a foreign
+# listener there turns HTTPS off. Nginx always serves on 443.
+LISTENERS[9443]=''
+[[ "$(caddy_https_port_conflicts caddy "$caddyfile")" == 'haproxy (PID 99)' ]] \
+    || fail 'a foreign listener on 443 must stay a conflict for a default Caddy'
+[[ "$(caddy_https_port_conflicts nginx "$fronted")" == 'haproxy (PID 99)' ]] \
+    || fail 'Nginx serves HTTPS on 443 whatever a Caddyfile says'
+caddy_tls_mode=direct
+https_reason=
+detect_caddy_tls_mode "$caddyfile"
+[[ "$caddy_tls_mode" == http-only && "$https_reason" == 'TCP port 443 is already in use by haproxy (PID 99).' ]] \
+    || fail "a conflict on 443 was not kept for a default Caddy: mode=$caddy_tls_mode reason=$https_reason"
+unset -f ss systemctl
+
 printf 'Installer configuration checks passed.\n'

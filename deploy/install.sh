@@ -1094,8 +1094,9 @@ is_known_slowmeet_checkout() {
     esac
 }
 
+# Optional path supports testing isolated Caddyfiles; the installer uses the system default.
 load_legacy_install_settings() {
-    local turn_config env_port
+    local caddyfile=${1:-/etc/caddy/Caddyfile} caddy_source managed='' turn_config env_port
     local -a proxy_domains
     if [[ -f "$NGINX_SITE" ]]; then
         proxy_mode=nginx
@@ -1107,12 +1108,28 @@ load_legacy_install_settings() {
         app_port=${env_port:-$(sed -nE 's/.*proxy_pass[[:space:]]+http:\/\/127\.0\.0\.1:([0-9]+);.*/\1/p' "$NGINX_SITE" | head -n1)}
     else
         proxy_mode=caddy
+        # A Caddyfile that carries the installer's managed block says which
+        # domain SlowMeet serves inside that block. Sites around it are the
+        # operator's (an ACME-only site for a TURN host name, say) and must
+        # not make the installation look ambiguous. Without the block, as
+        # older installations have it, the whole file is the SlowMeet site.
+        caddy_source=$caddyfile
+        if grep -Fxq "$CADDY_BEGIN_MARKER" "$caddyfile" 2>/dev/null \
+            || grep -Fxq "$CADDY_END_MARKER" "$caddyfile" 2>/dev/null; then
+            managed=$(mktemp)
+            if ! extract_caddy_managed_block "$caddyfile" "$managed"; then
+                rm -f "$managed"
+                fail 'The managed SlowMeet block in the Caddyfile is malformed; refusing to update it.'
+            fi
+            caddy_source=$managed
+        fi
         mapfile -t proxy_domains < <(
-            sed -nE 's/^[[:space:]]*https?:\/\/([^[:space:]{]+)[[:space:]]*\{.*/\1/p' /etc/caddy/Caddyfile \
+            sed -nE 's/^[[:space:]]*https?:\/\/([^[:space:]{]+)[[:space:]]*\{.*/\1/p' "$caddy_source" \
                 | tr '[:upper:]' '[:lower:]' | sort -u
         )
         env_port=$(read_env_value HTTP_PUBLISH_PORT)
-        app_port=${env_port:-$(sed -nE 's/.*reverse_proxy[[:space:]]+127\.0\.0\.1:([0-9]+).*/\1/p' /etc/caddy/Caddyfile | head -n1)}
+        app_port=${env_port:-$(sed -nE 's/.*reverse_proxy[[:space:]]+127\.0\.0\.1:([0-9]+).*/\1/p' "$caddy_source" | head -n1)}
+        [[ -z "$managed" ]] || rm -f "$managed"
     fi
     [[ "${#proxy_domains[@]}" -eq 1 ]] || fail 'Could not identify exactly one SlowMeet domain from the configured reverse proxy; refusing to update an ambiguous installation.'
     domain=${proxy_domains[0]}
@@ -1652,20 +1669,35 @@ reload_caddy_after_config_change() {
     fi
 }
 
+# The TCP port Caddy serves HTTPS on: 443, unless the Caddyfile moves it with
+# the https_port global option. An operator does that when another service
+# (HAProxy or another SNI router) owns port 443 and forwards to Caddy. That
+# service holding port 443 is then no conflict for Caddy, and treating it as
+# one would take a working HTTPS site down to HTTP on the next update.
+# Optional path supports testing isolated Caddyfiles.
+caddy_https_port() {
+    local caddyfile=${1:-/etc/caddy/Caddyfile} port=''
+    if [[ -f "$caddyfile" ]]; then
+        port=$(sed -nE 's/^[[:space:]]*https_port[[:space:]]+([0-9]{1,5})[[:space:]]*$/\1/p' "$caddyfile" | head -n1)
+    fi
+    printf '%s' "${port:-443}"
+}
+
 activate_caddy_site() {
-    local phase=$1 caddyfile=${2:-/etc/caddy/Caddyfile} conflicts
+    local phase=$1 caddyfile=${2:-/etc/caddy/Caddyfile} conflicts https_port
     write_caddy_site "$phase" "$caddyfile"
     if reload_caddy_after_config_change; then
         return 0
     fi
     [[ "${caddy_tls_mode:-direct}" != http-only ]] \
         || fail 'Caddy could not start its HTTP-only configuration; the port 80 proxy is unavailable.'
-    if ! conflicts=$(caddy_https_port_conflicts); then
-        fail 'Caddy failed to activate, and TCP port 443 could not be inspected to identify a TLS bind conflict.'
+    https_port=$(caddy_https_port "$caddyfile")
+    if ! conflicts=$(caddy_https_port_conflicts caddy "$caddyfile"); then
+        fail "Caddy failed to activate, and TCP port $https_port could not be inspected to identify a TLS bind conflict."
     fi
     [[ -n "$conflicts" ]] \
-        || fail 'Caddy failed to activate for a reason other than a TCP port 443 conflict.'
-    mark_https_unavailable "Caddy could not bind TCP port 443 because it is held by $conflicts."
+        || fail "Caddy failed to activate for a reason other than a TCP port $https_port conflict."
+    mark_https_unavailable "Caddy could not bind TCP port $https_port because it is held by $conflicts."
     write_caddy_site "$phase" "$caddyfile"
     reload_caddy_after_config_change \
         || fail 'Caddy could not activate its HTTP-only configuration after the HTTPS bind conflict.'
@@ -1922,13 +1954,17 @@ prompt_admin_password() {
     done
 }
 
+# Lists what else holds the port the given proxy serves HTTPS on. For Caddy
+# that is caddy_https_port; Nginx always uses 443.
 caddy_https_port_conflicts() {
-    local service=${1:-caddy} listener_output service_main_pid line owner_data process_name process_pid found_owner
+    local service=${1:-caddy} caddyfile=${2:-/etc/caddy/Caddyfile} port=443
+    local listener_output service_main_pid line owner_data process_name process_pid found_owner
     local -a conflicts=()
     local owner_regex='\(?\("([^"]+)",pid=([0-9]+)'
 
     command -v ss >/dev/null || return 1
-    listener_output=$(ss -H -ltnp 'sport = :443') || return 1
+    [[ "$service" != caddy ]] || port=$(caddy_https_port "$caddyfile")
+    listener_output=$(ss -H -ltnp "sport = :$port") || return 1
     [[ -n "$listener_output" ]] || return 0
     service_main_pid=$(systemctl show -p MainPID --value "$service" 2>/dev/null || true)
 
@@ -1962,11 +1998,12 @@ caddy_https_port_conflicts() {
 }
 
 check_caddy_https_port_available() {
-    local conflicts
+    local conflicts https_port
+    https_port=$(caddy_https_port)
     if ! conflicts=$(caddy_https_port_conflicts); then
-        fail 'Could not inspect TCP port 443 before configuring Caddy.'
+        fail "Could not inspect TCP port $https_port before configuring Caddy."
     fi
-    [[ -z "$conflicts" ]] || fail "TCP port 443 is already in use by $conflicts. Caddy cannot load the SlowMeet HTTPS listener; the existing service was left untouched."
+    [[ -z "$conflicts" ]] || fail "TCP port $https_port is already in use by $conflicts. Caddy cannot load the SlowMeet HTTPS listener; the existing service was left untouched."
 }
 
 xray_https_port_443_is_active() {
@@ -2231,8 +2268,9 @@ detect_proxy_mode() {
     fi
 }
 
+# Optional path supports testing isolated Caddyfiles; the installer uses the system default.
 detect_caddy_tls_mode() {
-    local config listeners caddy_main_pid reason conflicts
+    local caddyfile=${1:-/etc/caddy/Caddyfile} config listeners caddy_main_pid reason conflicts
     https_reason=
     if [[ "$proxy_mode" != caddy ]]; then
         if xray_https_port_443_is_active; then
@@ -2271,10 +2309,10 @@ detect_caddy_tls_mode() {
         caddy_tls_mode=xray
         log "Detected Xray on TCP port 443; SlowMeet will use a Caddy HTTP backend on 127.0.0.1:$CADDY_XRAY_BACKEND_PORT."
     else
-        if ! conflicts=$(caddy_https_port_conflicts); then
-            mark_https_unavailable 'Could not inspect TCP port 443 before activating the HTTPS proxy.'
+        if ! conflicts=$(caddy_https_port_conflicts caddy "$caddyfile"); then
+            mark_https_unavailable "Could not inspect TCP port $(caddy_https_port "$caddyfile") before activating the HTTPS proxy."
         elif [[ -n "$conflicts" ]]; then
-            mark_https_unavailable "TCP port 443 is already in use by $conflicts."
+            mark_https_unavailable "TCP port $(caddy_https_port "$caddyfile") is already in use by $conflicts."
         else
             caddy_tls_mode=direct
         fi
