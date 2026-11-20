@@ -19,7 +19,7 @@ DOCKER_COMPOSE ?= docker compose -f docker-compose.yml
 PODMAN_COMPOSE ?= podman compose -f podman-compose.yml
 
 .PHONY: help run build test cover vet fmt fmt-check tidy \
-	test-js test-js-syntax test-admin test-protocol test-connection-methods test-opus-dtx test-relay-rotation test-plain-relay-probe test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
+	test-js test-js-syntax test-admin test-protocol test-connection-methods test-opus-dtx test-relay-rotation test-plain-relay-probe test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-reconnect-policy test-remote-screen-video test-participant-identity test-connection-history test-media-fixes test-media-e2e test-connection-methods-e2e test-media-e2e-netns test-media-e2e-screen-share test-media-e2e-picker test-media-e2e-real test-media-e2e-real-single smoke \
 	check docker-build docker-up docker-turn-up docker-down docker-logs \
 	podman-check podman-build podman-up podman-turn-up podman-down podman-logs \
 	container-config container-parity image-build image-build-podman image-check release-preflight \
@@ -58,7 +58,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-opus-dtx test-relay-rotation test-plain-relay-probe test-path-memory test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
+	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-opus-dtx test-relay-rotation test-plain-relay-probe test-path-memory test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-reconnect-policy test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
 
 test-js-syntax: ## Syntax-check every browser JavaScript file
 	@status=0; \
@@ -128,6 +128,9 @@ test-meeting-status: ## Test the pre-join and in-meeting status router
 
 test-renegotiation-queue: ## Test the browser renegotiation queue and its app wiring
 	$(NODE) scripts/test-renegotiation-queue.js
+
+test-reconnect-policy: ## Test the signaling reconnect backoff and Offline budget
+	$(NODE) scripts/test-reconnect-policy.js
 
 test-remote-screen-video: ## Test remote screen video binding and cleanup
 	$(NODE) scripts/test-remote-screen-video.js

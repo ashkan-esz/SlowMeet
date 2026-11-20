@@ -3860,13 +3860,14 @@ function connectSocket(name, password) {
     }
     reconnectAttempts++;
     setConnection("fair", "Reconnecting");
-    if (reconnectAttempts > maxReconnectAttempts) {
+    const reconnectStep = nextReconnectStep(reconnectAttempts, maxReconnectAttempts);
+    if (reconnectStep.offline) {
       resetMediaConnection();
       setConnection("poor", "Offline");
       showStatus("Offline. Select Leave to try again.");
       return;
     }
-    const delay = Math.min(30000, 2000 * 2 ** Math.min(reconnectAttempts - 1, 4));
+    const delay = reconnectStep.delayMs;
     showStatus(`Reconnecting in ${Math.ceil(delay / 1000)}s...`);
     reconnectTimer = setTimeout(() => {
       resetMediaConnection();
