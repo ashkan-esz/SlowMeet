@@ -18,6 +18,7 @@ import (
 type Peer struct {
 	connection *pion.PeerConnection
 	closeOnce  sync.Once
+	ciphers    *cipherReport
 }
 
 func NewPeer(iceServers []string) (*Peer, error) {
@@ -126,6 +127,16 @@ func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEn
 
 func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool, publicIP string) (*Peer, error) {
 	settingEngine := pion.SettingEngine{}
+	settingEngine.SetSRTPProtectionProfiles(srtpProfileOrder(hardwareAES)...)
+	// The DTLS server's preference picks the SRTP profile. Browsers send the
+	// first offer, which would make the answering SFU the DTLS client and
+	// leave the choice to the browser; answer as the server instead so the
+	// order above is the one that applies.
+	if err := settingEngine.SetAnsweringDTLSRole(pion.DTLSRoleServer); err != nil {
+		return nil, fmt.Errorf("configure DTLS role: %w", err)
+	}
+	ciphers := &cipherReport{}
+	settingEngine.SetDTLSServerHelloMessageHook(ciphers.serverHello)
 	if portMin != 0 || portMax != 0 {
 		if portMin < 1 || portMin > 65535 || portMax < 1 || portMax > 65535 || portMin > portMax {
 			return nil, fmt.Errorf("ICE UDP port range must be between 1 and 65535 with minimum <= maximum")
@@ -176,7 +187,7 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
-	return &Peer{connection: connection}, nil
+	return &Peer{connection: connection, ciphers: ciphers}, nil
 }
 
 // localInterfaceHasIP reports whether ip is assigned to a local interface.

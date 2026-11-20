@@ -16,6 +16,7 @@ import (
 	"SlowMeet/internal/config"
 	"SlowMeet/internal/httpserver"
 	"SlowMeet/internal/turnserver"
+	"SlowMeet/internal/webrtc"
 )
 
 func main() {
@@ -61,7 +62,14 @@ func run() error {
 		"go", runtime.Version(),
 		"max_procs", runtime.GOMAXPROCS(0),
 		"num_cpu", runtime.NumCPU(),
-		"mem_limit_bytes", debug.SetMemoryLimit(-1))
+		"mem_limit_bytes", debug.SetMemoryLimit(-1),
+		"aes_hw", webrtc.HardwareAES())
+	if !webrtc.HardwareAES() {
+		// Common on VPS plans that hide CPU flags from guests. The SFU then
+		// prefers AES-CTR + HMAC-SHA1, the cheapest profile in software.
+		logger.Warn("aes_hardware_missing",
+			"effect", "media encryption runs in software and costs several times more CPU per packet")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

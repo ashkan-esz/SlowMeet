@@ -1104,6 +1104,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			h.Logger.Log(context.Background(), level, event, "participant_id", participant.ID, "ice_state", state.String())
 		})
+		c.peer.OnCiphersNegotiated(func(srtpCipher, dtlsCipher string) {
+			h.Logger.Info("webrtc_ciphers", "participant_id", participant.ID,
+				"srtp_cipher", srtpCipher, "dtls_cipher", dtlsCipher)
+		})
 		c.peer.OnTrack(func(track *pion.TrackRemote, _ *pion.RTPReceiver) {
 			role := media.SourceRoleAudio
 			if track.Kind() == pion.RTPCodecTypeVideo {

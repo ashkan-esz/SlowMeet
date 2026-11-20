@@ -338,3 +338,22 @@ Prometheus-compatible counters and the latest network samples, including active
 participants, peer connections, reconnects, ICE failures, RTT, packet loss,
 jitter, and reported audio/video bitrate. These are current-state diagnostics,
 not a durable event or audit log.
+
+### Media encryption cost
+
+Browsers always encrypt WebRTC media, so the SFU picks the cheapest SRTP
+profile for the CPU it runs on. There is no setting. The `runtime_info` startup
+log line reports `aes_hw`:
+
+- `aes_hw=true`: AES-128-GCM is preferred. It is the fastest profile with
+  hardware AES.
+- `aes_hw=false`: the host hides or lacks hardware AES (some VPS plans do), an
+  `aes_hardware_missing` warning is logged, and AES-CTR with HMAC-SHA1 is
+  preferred because it is the cheapest profile in software. Encryption still
+  costs several times more CPU per packet than on a host with hardware AES, so
+  a plan that exposes the `aes` CPU flag is the better fix.
+
+Each participant's selected profile is logged once as `webrtc_ciphers`. The
+SFU always takes the DTLS server role so that its preference applies. AES-GCM
+adds 6 more bytes per packet than HMAC-SHA1. `go test ./internal/webrtc -run
+'^$' -bench SRTPEncrypt` measures the profiles on a given machine.
