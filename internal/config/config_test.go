@@ -361,19 +361,30 @@ func TestLoadFromEnvTURNTCPRotateInterval(t *testing.T) {
 func TestServerTURNURLsSkipRelaysWhenTheServerIsDirectlyReachable(t *testing.T) {
 	urls := []string{"turn:turn.example.com:3478?transport=tcp", "turns:turn.example.com:443?transport=tcp"}
 	tests := []struct {
-		name     string
-		policy   string
-		publicIP string
-		want     int
+		name         string
+		policy       string
+		publicIP     string
+		builtInRelay bool
+		want         int
 	}{
 		{name: "public address, host candidates allowed", policy: "all", publicIP: "203.0.113.7", want: 0},
 		{name: "public address, default policy", policy: "", publicIP: "203.0.113.7", want: 0},
 		{name: "relay-only deployment keeps its relays", policy: "relay", publicIP: "203.0.113.7", want: 2},
 		{name: "no public address may need the relay", policy: "all", publicIP: "", want: 2},
+		// The built-in relay's sockets are on this host and reach the SFU's
+		// host candidates, with or without a public address.
+		{name: "built-in relay, no public address", policy: "all", publicIP: "", builtInRelay: true, want: 0},
+		{name: "built-in relay, default policy", policy: "", publicIP: "", builtInRelay: true, want: 0},
+		{name: "built-in relay, public address", policy: "all", publicIP: "203.0.113.7", builtInRelay: true, want: 0},
+		{name: "built-in relay, relay-only deployment", policy: "relay", publicIP: "", builtInRelay: true, want: 2},
+		{name: "built-in relay, relay-only with a public address", policy: "relay", publicIP: "203.0.113.7", builtInRelay: true, want: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{TURNURLs: urls, ICETransportPolicy: tt.policy, ICEPublicIP: tt.publicIP}
+			cfg := Config{
+				TURNURLs: urls, ICETransportPolicy: tt.policy, ICEPublicIP: tt.publicIP,
+				TURNServerEnabled: tt.builtInRelay,
+			}
 			if got := cfg.ServerTURNURLs(); len(got) != tt.want {
 				t.Fatalf("ServerTURNURLs() = %v, want %d URLs", got, tt.want)
 			}

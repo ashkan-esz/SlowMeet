@@ -39,16 +39,26 @@ type Server struct {
 	handler http.Handler
 	hub     *signaling.Hub
 	ready   atomic.Bool
-	// turnAllocations reports the built-in TURN relay's current allocation
-	// count for /metrics; nil when the relay is not running.
-	turnAllocations func() int
+	// turnStats reports what the built-in TURN relay holds open, for
+	// /metrics; nil when the relay is not running.
+	turnStats func() TURNStats
 }
 
-// SetTURNAllocations makes /metrics report how many allocations the built-in
-// TURN relay holds. Call it before the server starts serving; without it the
-// sample is omitted.
-func (s *Server) SetTURNAllocations(count func() int) {
-	s.turnAllocations = count
+// TURNStats is what the built-in TURN relay holds open at one moment.
+type TURNStats struct {
+	// Allocations is the number of relay allocations.
+	Allocations int
+	// TCPConnections and TLSConnections are the open TURN-over-TCP and
+	// TURN-over-TLS connections.
+	TCPConnections int
+	TLSConnections int
+}
+
+// SetTURNStats makes /metrics report the built-in TURN relay's allocations and
+// stream connections. Call it before the server starts serving; without it
+// the samples are omitted.
+func (s *Server) SetTURNStats(stats func() TURNStats) {
+	s.turnStats = stats
 }
 
 type participantPreviewRequest struct {
@@ -203,10 +213,15 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = fmt.Fprintf(w, "slowmeet_active_participants %d\n", meetingState.Count())
 		_, _ = fmt.Fprintf(w, "slowmeet_peer_connections %d\n", snapshot.PeerConnections)
-		if app.turnAllocations != nil {
+		if app.turnStats != nil {
+			stats := app.turnStats()
 			// One per relay candidate a browser (or a relay-only SFU peer)
 			// currently holds; a rotating method holds several at a time.
-			_, _ = fmt.Fprintf(w, "slowmeet_turn_allocations %d\n", app.turnAllocations())
+			_, _ = fmt.Fprintf(w, "slowmeet_turn_allocations %d\n", stats.Allocations)
+			// Each transport's listener holds a limited number of connections
+			// and makes further clients wait once it is full.
+			_, _ = fmt.Fprintf(w, "slowmeet_turn_stream_connections{transport=\"tcp\"} %d\n", stats.TCPConnections)
+			_, _ = fmt.Fprintf(w, "slowmeet_turn_stream_connections{transport=\"tls\"} %d\n", stats.TLSConnections)
 		}
 		_, _ = fmt.Fprintf(w, "slowmeet_connection_failures_total %d\n", snapshot.ConnectionFailures)
 		_, _ = fmt.Fprintf(w, "slowmeet_reconnects_total %d\n", snapshot.Reconnects)

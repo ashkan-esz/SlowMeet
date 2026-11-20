@@ -40,7 +40,9 @@ func run() error {
 	}
 	app := httpserver.New(cfg, logger)
 	if cfg.TURNServerEnabled {
-		app.SetTURNAllocations(relay.AllocationCount)
+		// The two packages do not know each other; their stats types have the
+		// same fields, and the conversion stops compiling if they drift apart.
+		app.SetTURNStats(func() httpserver.TURNStats { return httpserver.TURNStats(relay.Stats()) })
 	}
 	// Package-level code that logs through slog.Default() (for example the
 	// offer-send debug record in internal/signaling) must honor LOG_LEVEL too.

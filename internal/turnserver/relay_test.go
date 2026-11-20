@@ -1,8 +1,13 @@
 package turnserver
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -10,6 +15,25 @@ import (
 
 	"SlowMeet/internal/config"
 )
+
+// lockedBuffer collects the log of a relay that keeps logging from its own
+// goroutines while the test reads it.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
 
 var loopback = net.IPv4(127, 0, 0, 1)
 
@@ -81,10 +105,36 @@ func TestSelectRelayAddresses(t *testing.T) {
 }
 
 func TestSelectRelayAddressesRejectsAnInvalidOverride(t *testing.T) {
-	for _, relayIP := range []string{"not-an-ip", "2001:db8::1"} {
+	// The wildcard address binds, so only this check keeps it from being
+	// advertised to browsers as the relay address.
+	for _, relayIP := range []string{"not-an-ip", "2001:db8::1", "0.0.0.0", "224.0.0.1", "255.255.255.255"} {
 		if _, err := selectRelayAddresses(config.Config{TURNServerRelayIP: relayIP}); err == nil {
 			t.Fatalf("TURN_SERVER_RELAY_IP=%q was accepted", relayIP)
 		}
+	}
+}
+
+func TestLoopbackRelayAddressIsSuspectOnlyWhenChosenAutomatically(t *testing.T) {
+	lan := net.IPv4(192, 168, 1, 10)
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		relayIP net.IP
+		want    bool
+	}{
+		{name: "loopback fallback, SFU advertised elsewhere", cfg: config.Config{ICEPublicIP: "203.0.113.7"}, relayIP: loopback, want: true},
+		{name: "loopback fallback, IPv6 public address", cfg: config.Config{ICEPublicIP: "2001:db8::1"}, relayIP: loopback, want: true},
+		{name: "everything on loopback", cfg: config.Config{ICEPublicIP: "127.0.0.1"}, relayIP: loopback},
+		{name: "no public address", cfg: config.Config{}, relayIP: loopback},
+		{name: "loopback set by the operator", cfg: config.Config{ICEPublicIP: "203.0.113.7", TURNServerRelayIP: "127.0.0.1"}, relayIP: loopback},
+		{name: "an interface address", cfg: config.Config{ICEPublicIP: "203.0.113.7"}, relayIP: lan},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := loopbackRelayCannotReachSFU(test.cfg, test.relayIP); got != test.want {
+				t.Fatalf("loopbackRelayCannotReachSFU() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -119,6 +169,7 @@ func newGenerator(t *testing.T, ports int, publicIP net.IP) *relayAddressGenerat
 		},
 		portMin: portMin,
 		portMax: portMax,
+		logger:  quietLogger(),
 	}
 	if err := generator.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -185,18 +236,18 @@ func TestRelayAddressGeneratorValidate(t *testing.T) {
 	valid := relayAddresses{relayIP: loopback.To4()}
 	tests := []struct {
 		name      string
-		generator relayAddressGenerator
+		generator *relayAddressGenerator
 		wantErr   error
 	}{
-		{name: "valid", generator: relayAddressGenerator{addresses: valid, portMin: 49152, portMax: 49999}},
-		{name: "single port", generator: relayAddressGenerator{addresses: valid, portMin: 49152, portMax: 49152}},
-		{name: "no relay address", generator: relayAddressGenerator{portMin: 49152, portMax: 49999}, wantErr: errIPv4RelayOnly},
-		{name: "IPv6 relay address", generator: relayAddressGenerator{
+		{name: "valid", generator: &relayAddressGenerator{addresses: valid, portMin: 49152, portMax: 49999}},
+		{name: "single port", generator: &relayAddressGenerator{addresses: valid, portMin: 49152, portMax: 49152}},
+		{name: "no relay address", generator: &relayAddressGenerator{portMin: 49152, portMax: 49999}, wantErr: errIPv4RelayOnly},
+		{name: "IPv6 relay address", generator: &relayAddressGenerator{
 			addresses: relayAddresses{relayIP: net.ParseIP("2001:db8::1")}, portMin: 49152, portMax: 49999,
 		}, wantErr: errIPv4RelayOnly},
-		{name: "reversed range", generator: relayAddressGenerator{addresses: valid, portMin: 50000, portMax: 49999}, wantErr: errRelayRangeInvalid},
-		{name: "zero minimum", generator: relayAddressGenerator{addresses: valid, portMin: 0, portMax: 10}, wantErr: errRelayRangeInvalid},
-		{name: "maximum too high", generator: relayAddressGenerator{addresses: valid, portMin: 1, portMax: 65536}, wantErr: errRelayRangeInvalid},
+		{name: "reversed range", generator: &relayAddressGenerator{addresses: valid, portMin: 50000, portMax: 49999}, wantErr: errRelayRangeInvalid},
+		{name: "zero minimum", generator: &relayAddressGenerator{addresses: valid, portMin: 0, portMax: 10}, wantErr: errRelayRangeInvalid},
+		{name: "maximum too high", generator: &relayAddressGenerator{addresses: valid, portMin: 1, portMax: 65536}, wantErr: errRelayRangeInvalid},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -207,17 +258,158 @@ func TestRelayAddressGeneratorValidate(t *testing.T) {
 	}
 }
 
-func TestRelaySocketIsPlainWhenThereIsNothingToRewriteOrCheck(t *testing.T) {
-	// A host that owns its public address, with the SFU on any port: no layer
-	// on the media path.
+func TestRelaySocketIsTrackedWhenThereIsNothingToRewriteOrCheck(t *testing.T) {
+	// A host that owns its public address, with the SFU on any port: no
+	// address is rewritten and no SFU port range is checked, but the socket is
+	// still recorded as a relay port, and it forwards.
 	generator := newGenerator(t, 1, loopback.To4())
-	conn, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	conn, address, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
 	if err != nil {
 		t.Fatalf("AllocatePacketConn() error = %v", err)
 	}
 	defer conn.Close()
-	if _, ok := conn.(*net.UDPConn); !ok {
-		t.Fatalf("relay socket is %T, want an unwrapped *net.UDPConn", conn)
+	if _, ok := conn.(*relayPacketConn); !ok {
+		t.Fatalf("relay socket is %T, want a *relayPacketConn", conn)
+	}
+	port := address.(*net.UDPAddr).Port
+	if !generator.openPorts.has(port) {
+		t.Fatalf("relay port %d is not marked open", port)
+	}
+
+	cfg := config.Config{TURNServerRelayPortMin: generator.portMin, TURNServerRelayPortMax: generator.portMax}
+	sfu := sfuSocket(t, cfg)
+	if _, err := conn.WriteTo([]byte("to sfu"), sfu.LocalAddr()); err != nil {
+		t.Fatalf("WriteTo the SFU on any port: %v", err)
+	}
+	if payload, source := readDatagram(t, sfu); payload != "to sfu" || source.Port != port {
+		t.Fatalf("SFU received %q from %v, want it from relay port %d", payload, source, port)
+	}
+	if _, err := sfu.WriteTo([]byte("from sfu"), address); err != nil {
+		t.Fatal(err)
+	}
+	if payload, source := readDatagram(t, conn); payload != "from sfu" || source.String() != sfu.LocalAddr().String() {
+		t.Fatalf("relay read %q from %v, want the SFU untranslated", payload, source)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if generator.openPorts.has(port) {
+		t.Fatalf("relay port %d is still marked open after its socket closed", port)
+	}
+}
+
+func TestRelaySocketNeverSendsToTheRelaysOwnListenPort(t *testing.T) {
+	// A relay socket that reaches the relay's TURN port is a TURN client of
+	// its own server: it could allocate there and make the relay forward to
+	// itself. The port is refused whatever else is allowed, also with no SFU
+	// port range, when every other port is.
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+	if err != nil {
+		t.Fatalf("open a socket standing in for the TURN listener: %v", err)
+	}
+	defer listener.Close()
+	listenPort := listener.LocalAddr().(*net.UDPAddr).Port
+
+	tests := []struct {
+		name       string
+		sfuPortMin int
+		sfuPortMax int
+	}{
+		{name: "no SFU port range"},
+		// Configuration validation keeps the listen port out of the SFU's
+		// range; the relay socket does not depend on it.
+		{name: "SFU port range that contains the listen port", sfuPortMin: listenPort, sfuPortMax: listenPort},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generator := newGenerator(t, 1, loopback.To4())
+			generator.listenPort = listenPort
+			generator.sfuPortMin, generator.sfuPortMax = test.sfuPortMin, test.sfuPortMax
+			generator.relayToRelay = true
+			relay, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+			if err != nil {
+				t.Fatalf("AllocatePacketConn() error = %v", err)
+			}
+			defer relay.Close()
+
+			n, err := relay.WriteTo([]byte("to the turn listener"), listener.LocalAddr())
+			if !errors.Is(err, errPeerPortNotAllowed) || n != 0 {
+				t.Fatalf("WriteTo the relay's own listen port = %d, %v; want errPeerPortNotAllowed", n, err)
+			}
+			if err := listener.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			if n, _, err := listener.ReadFrom(make([]byte, 64)); err == nil {
+				t.Fatalf("the TURN listener received %d bytes from a relay socket", n)
+			}
+		})
+	}
+}
+
+func TestRelayAddressGeneratorDoesNotBindPortsItAlreadyHolds(t *testing.T) {
+	// Once the range is full, any participant can keep asking for
+	// allocations. Each refusal must cost no bind attempts, and the log must
+	// not grow with every one.
+	var logs lockedBuffer
+	generator := newGenerator(t, 3, nil)
+	generator.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	// The ports are marked as relay sockets without being bound: an attempt to
+	// bind one would succeed and show up as an allocation.
+	for port := generator.portMin; port <= generator.portMax; port++ {
+		generator.openPorts.mark(port, true)
+	}
+	for range 3 {
+		conn, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+		if err == nil {
+			_ = conn.Close()
+			t.Fatal("a port the relay already holds was bound again")
+		}
+		if !errors.Is(err, errRelayPortsExhausted) {
+			t.Fatalf("error = %v, want errRelayPortsExhausted", err)
+		}
+	}
+	if got := strings.Count(logs.String(), "turn_server_relay_ports_exhausted"); got != 1 {
+		t.Fatalf("logged the full range %d times for three refusals, want once:\n%s", got, logs.String())
+	}
+
+	// A port that is released is found again.
+	generator.openPorts.mark(generator.portMin+1, false)
+	conn, address, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("AllocatePacketConn() error = %v with one port free", err)
+	}
+	defer conn.Close()
+	if got := address.(*net.UDPAddr).Port; got != generator.portMin+1 {
+		t.Fatalf("allocated port %d, want the only free one, %d", got, generator.portMin+1)
+	}
+}
+
+func TestRelayAddressGeneratorPassesOverPortsOtherSocketsHold(t *testing.T) {
+	// With no ICE port range the SFU, or anything else on the host, may hold
+	// a port of the relay range. Such a port is not a relay socket; it is
+	// tried, found taken and passed over.
+	generator := newGenerator(t, 2, nil)
+	foreign, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: generator.portMin})
+	if err != nil {
+		t.Fatalf("bind a port of the relay range: %v", err)
+	}
+	defer foreign.Close()
+
+	conn, address, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if err != nil {
+		t.Fatalf("AllocatePacketConn() error = %v with one port free", err)
+	}
+	defer conn.Close()
+	if got := address.(*net.UDPAddr).Port; got != generator.portMax {
+		t.Fatalf("allocated port %d, want the free one, %d", got, generator.portMax)
+	}
+	if generator.openPorts.has(generator.portMin) {
+		t.Fatal("a port another socket holds was recorded as a relay socket")
+	}
+	_, _, err = generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"})
+	if !errors.Is(err, errRelayPortsExhausted) || !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("error = %v, want errRelayPortsExhausted naming the port that is in use", err)
 	}
 }
 
@@ -435,7 +627,7 @@ func TestRelayAddressGeneratorNeedsValidateBeforeItTracksPorts(t *testing.T) {
 	if _, _, err := generator.AllocatePacketConn(turn.AllocateListenerConfig{Network: "udp4"}); !errors.Is(err, errGeneratorNotValidated) {
 		t.Fatalf("error = %v, want errGeneratorNotValidated", err)
 	}
-	// The socket bound for the failed attempt was released.
+	// The failed attempt holds no socket.
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portMin})
 	if err != nil {
 		t.Fatalf("the relay port was left bound: %v", err)

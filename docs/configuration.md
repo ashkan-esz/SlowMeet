@@ -44,9 +44,11 @@ turns:meet.example.com:5349?transport=tcp
 
 Set `TURN_SHARED_SECRET` to issue short-lived browser credentials; the relay
 verifies them with the same secret. `TURN_CREDENTIAL_TTL_SECONDS` defaults to
-24 hours. Legacy `TURN_URL`, `TURN_USERNAME`, and `TURN_PASSWORD` settings
-remain supported for server-side use; static credentials are not sent to
-browsers.
+24 hours. The built-in relay checks that lifetime when a relay is allocated:
+a call that is already relayed goes on past it, and only a new allocation
+needs a credential that is still valid. Legacy `TURN_URL`, `TURN_USERNAME`,
+and `TURN_PASSWORD` settings remain supported for server-side use; static
+credentials are not sent to browsers.
 
 ### Built-in TURN relay
 
@@ -65,7 +67,7 @@ use it. With the relay off, none of the settings below are read.
 | `TURN_SERVER_TLS_CERT_FILE`, `TURN_SERVER_TLS_KEY_FILE` | empty | PEM certificate chain and key the process can read |
 | `TURN_SERVER_REALM` | `slowmeet` | TURN realm; any name works |
 | `TURN_SERVER_RELAY_PORT_MIN`, `TURN_SERVER_RELAY_PORT_MAX` | `49152`, `49999` | UDP ports for relay allocations; must not overlap the ICE UDP range |
-| `TURN_SERVER_RELAY_IP` | automatic | Local IPv4 address relay sockets bind |
+| `TURN_SERVER_RELAY_IP` | automatic | Local IPv4 address relay sockets bind: one address of this host, not the wildcard, a multicast, or the broadcast address |
 
 What to expect from it:
 
@@ -73,14 +75,17 @@ What to expect from it:
   are `ICE_PUBLIC_IP` and the relay's own address, and only UDP relay
   addresses are offered. On those addresses it forwards only to the SFU's
   port range (`ICE_UDP_PORT_MIN`-`ICE_UDP_PORT_MAX`). Another relay socket is
-  reachable only when the SFU itself allocates on the relay
-  (`ICE_TRANSPORT_POLICY=relay`, or no `ICE_PUBLIC_IP`); otherwise relay
-  sockets belong to participants alone and one cannot send to another's. A
+  reachable only when the SFU itself allocates on the relay, which it does
+  only with `ICE_TRANSPORT_POLICY=relay`: under any other policy a
+  participant's relay socket reaches the SFU's own ports on the same host, so
+  the SFU needs no relay of its own. Relay sockets then belong to participants
+  alone and one cannot send to another's. A
   TURN credential, which anyone who can join a meeting receives, therefore
   cannot be used to reach other hosts, private networks, other UDP services on
   this server, or other participants. If you set the ICE port range to `0`
   (any port), the port check is off: every UDP port on the server's own
-  address is reachable through the relay. Relayed calls still work. Keep a
+  address is reachable through the relay, except the relay's own
+  `TURN_SERVER_PORT`, which is never a peer. Relayed calls still work. Keep a
   range configured; the relay warns at startup when there is none.
 - **Only the listen ports face the network.** Clients must reach
   `TURN_SERVER_PORT` over UDP and TCP and `TURN_SERVER_TLS_PORT` over TCP. The
@@ -108,26 +113,54 @@ What to expect from it:
   SlowMeet process and counts against `SLOWMEET_CPUS` (0.75 by default, which
   the installer does not change) and `SLOWMEET_MEMORY_LIMIT`. Raise them
   yourself if many participants are relayed and the container is throttled.
-
 - **Stream connections are capped.** TURN over TCP and TURN over TLS each
   hold at most 1024 connections at a time, so connections that are opened and
   left idle cannot take the memory the meeting needs. Further connections wait
-  until one closes. The cap is far above what a full room needs. A connection
-  whose TLS handshake fails, or does not finish within 10 seconds, is closed
-  at once and does not count. After a transient error while accepting (for
-  example no free file descriptor) the listeners retry instead of stopping.
+  until one closes, and the relay logs `turn_server_connection_limit_reached`
+  (at most once a minute per transport). The cap is far above what a full
+  room needs. A connection whose TLS handshake fails, or does not finish
+  within 10 seconds, is closed at once and does not count. After a transient
+  error while accepting (for example no free file descriptor) the listeners
+  retry instead of stopping.
   Known limit: a connection that completes its handshake but never allocates
   is not timed out, so idle connections can fill the cap and make new TURN
   over TCP or TLS clients wait. TURN over UDP and direct calls are unaffected.
+- **Stream data is checked before it is processed.** On TURN over TCP and TLS
+  the relay reads each frame's type and length itself and hands the TURN
+  library whole frames only. A connection that sends anything other than a
+  STUN message or TURN ChannelData is closed. A frame of 1600 bytes or more,
+  larger than any relayed media packet, is read past without being stored.
+- **A full relay port range fails fast.** When every port in
+  `TURN_SERVER_RELAY_PORT_MIN`-`TURN_SERVER_RELAY_PORT_MAX` is in use, further
+  allocations are refused at once and the relay logs
+  `turn_server_relay_ports_exhausted` (at most once a minute). Widen the range
+  if you see it.
+- **Stopping the process disconnects its clients.** On shutdown the relay
+  closes its allocations and every open TURN over TCP and TLS connection.
 
 The log line `turn_server_started` lists the bound addresses, the relay
 address, the SFU ports it forwards to, and whether the public address is
-translated. Rejected credentials, denied peers, and malformed packets are
-logged only with `LOG_LEVEL=debug`. `/metrics` exports
-`slowmeet_turn_allocations` while the relay runs: one per relay candidate a
+translated. At startup the relay also warns when `TURN_URLS` cannot lead
+browsers to it: `turn_server_without_urls` when it is empty,
+`turn_server_tls_url_without_listener` for a `turns:` URL while the TLS
+listener is off, and `turn_server_urls_miss_listen_ports` when no URL names
+`TURN_SERVER_PORT` or `TURN_SERVER_TLS_PORT` (correct only if a port mapping
+or SNI router in front forwards to the relay). It warns with
+`turn_server_loopback_relay_address` when it found no address but loopback for
+relay sockets while `ICE_PUBLIC_IP` is another address: relayed media would
+arrive nowhere, so restart once the network is up or set
+`TURN_SERVER_RELAY_IP`.
+
+Rejected credentials (`turn_server_credential_rejected`), denied peers
+(`turn_server_peer_denied`), and requests the relay could not serve
+(`turn_server_request_failed`, for example a malformed packet or a failed
+integrity check) are logged only with `LOG_LEVEL=debug`. While the relay runs,
+`/metrics` exports `slowmeet_turn_allocations`: one per relay candidate a
 browser currently holds (several per participant on a rotating method), so it
-shows how much of the relay port range is in use. The relay has no per-user
-allocation quota.
+shows how much of the relay port range is in use. It also exports
+`slowmeet_turn_stream_connections{transport="tcp"}` and `{transport="tls"}`,
+the open TURN over TCP and TLS connections, to compare with the cap of 1024.
+The relay has no per-user allocation quota.
 
 To serve TURN over TLS on port 443 next to the HTTPS proxy, put an SNI router
 in front of both and forward the TURN name to `TURN_SERVER_TLS_PORT`; the

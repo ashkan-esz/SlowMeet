@@ -138,9 +138,13 @@ func TestTLSListenerClosesAClientThatNeverHandshakes(t *testing.T) {
 	select {
 	case conn := <-accepted:
 		defer conn.Close()
-		secured, ok := conn.(*tls.Conn)
+		framed, ok := conn.(*framedConn)
+		if !ok {
+			t.Fatalf("Accept() returned %T, want a connection that frames TURN", conn)
+		}
+		secured, ok := framed.Conn.(*tls.Conn)
 		if !ok || !secured.ConnectionState().HandshakeComplete {
-			t.Fatalf("Accept() returned %T, want a *tls.Conn with its handshake complete", conn)
+			t.Fatalf("the framed connection is %T, want a *tls.Conn with its handshake complete", framed.Conn)
 		}
 	case <-time.After(testTimeout):
 		t.Fatal("Accept() did not return the connection whose handshake succeeded")
@@ -185,7 +189,7 @@ func TestFailedTLSHandshakesDoNotUseUpTheConnectionLimit(t *testing.T) {
 	cfg := testConfig(t, 4)
 	cfg.TURNServerTLSPort = freeTCPPort(t)
 	cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile = writeCertificate(t, t.TempDir(), "relay.test")
-	server, err := startWithLimit(cfg, quietLogger(), "127.0.0.1", 2)
+	server, err := startWith(cfg, quietLogger(), startOptions{listenHost: "127.0.0.1", streamClients: 2})
 	if err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
@@ -215,4 +219,32 @@ func TestFailedTLSHandshakesDoNotUseUpTheConnectionLimit(t *testing.T) {
 		t.Fatalf("allocate over TLS after failed handshakes: %v", err)
 	}
 	_ = relay.Close()
+}
+
+func TestCloseDisconnectsStreamClients(t *testing.T) {
+	// The TURN library closes its listeners, not the connections they
+	// accepted. Without the relay closing those itself, a client that never
+	// allocated would stay connected to a relay that no longer serves it.
+	cfg := testConfig(t, 4)
+	server := startRelay(t, cfg)
+	client, err := net.DialTimeout("tcp", server.tcp.Addr().String(), testTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if !stunBinding(t, client, testTimeout) {
+		t.Fatal("the client was not served")
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(testTimeout))
+	_, err = client.Read(make([]byte, 1))
+	var timeout net.Error
+	if err == nil || (errors.As(err, &timeout) && timeout.Timeout()) {
+		t.Fatalf("the relay kept a TURN-over-TCP client connected after Close: %v", err)
+	}
+	if got := server.Stats().TCPConnections; got != 0 {
+		t.Fatalf("Stats().TCPConnections = %d after Close, want 0", got)
+	}
 }

@@ -103,7 +103,7 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	}
 }
 
-func TestMetricsReportTURNAllocationsOnlyWhenTheRelayRuns(t *testing.T) {
+func TestMetricsReportTheTURNRelayOnlyWhenItRuns(t *testing.T) {
 	app := New(testConfig(t), NewLogger("error"))
 	defer app.Close()
 	metrics := func() string {
@@ -115,17 +115,31 @@ func TestMetricsReportTURNAllocationsOnlyWhenTheRelayRuns(t *testing.T) {
 		return response.Body.String()
 	}
 
-	if body := metrics(); strings.Contains(body, "slowmeet_turn_allocations") {
-		t.Fatalf("metrics report TURN allocations without a built-in relay:\n%s", body)
+	if body := metrics(); strings.Contains(body, "slowmeet_turn_") {
+		t.Fatalf("metrics report a TURN relay although none runs:\n%s", body)
 	}
-	allocations := 0
-	app.SetTURNAllocations(func() int { return allocations })
-	if body := metrics(); !strings.Contains(body, "slowmeet_turn_allocations 0\n") {
-		t.Fatalf("metrics omit the idle relay's allocation count:\n%s", body)
+	var stats TURNStats
+	app.SetTURNStats(func() TURNStats { return stats })
+	body := metrics()
+	for _, want := range []string{
+		"slowmeet_turn_allocations 0\n",
+		"slowmeet_turn_stream_connections{transport=\"tcp\"} 0\n",
+		"slowmeet_turn_stream_connections{transport=\"tls\"} 0\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics omit %q for an idle relay:\n%s", want, body)
+		}
 	}
-	allocations = 7
-	if body := metrics(); !strings.Contains(body, "slowmeet_turn_allocations 7\n") {
-		t.Fatalf("metrics do not follow the relay's allocation count:\n%s", body)
+	stats = TURNStats{Allocations: 7, TCPConnections: 3, TLSConnections: 1024}
+	body = metrics()
+	for _, want := range []string{
+		"slowmeet_turn_allocations 7\n",
+		"slowmeet_turn_stream_connections{transport=\"tcp\"} 3\n",
+		"slowmeet_turn_stream_connections{transport=\"tls\"} 1024\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics do not follow the relay, want %q:\n%s", want, body)
+		}
 	}
 }
 

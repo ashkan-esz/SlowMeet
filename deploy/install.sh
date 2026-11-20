@@ -1218,6 +1218,16 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     git -C "$INSTALL_DIR" fetch --depth=1 origin master
     git -C "$INSTALL_DIR" checkout -B master FETCH_HEAD
 
+    # Build first: the old containers still serve meanwhile, and nothing below
+    # has changed the installation yet. A build that fails (registry or Go
+    # proxy unreachable, out of memory) therefore leaves it as it was, an
+    # installation that still runs coturn included. The image needs none of
+    # the settings written below. Under Podman it does not need the relay's
+    # override file either, which compose() passes only once the .turn-enabled
+    # marker exists: that file says how the container runs, not how the image
+    # is built.
+    compose build
+
     set_env_if_empty HTTP_PUBLISH_ADDRESS 127.0.0.1
     set_env_if_empty HTTP_PUBLISH_PORT "$app_port"
     if [[ -z "$existing_ice" ]]; then
@@ -1239,12 +1249,19 @@ if [[ -z "$public_ipv4" && -z "$existing_ice" ]]; then
     write_podman_service
 
     cd "$INSTALL_DIR"
-    # Build while the old containers still serve, so that only the swap below
-    # interrupts calls. The former coturn container would keep the TURN ports
-    # the new SlowMeet container binds, so it goes right before that swap
-    # rather than before the build, which can take minutes.
-    compose build
+    # Only the swap below interrupts calls. The former coturn container would
+    # keep the TURN ports the new SlowMeet container binds, so it goes here,
+    # right before the swap, rather than before the build, which can take
+    # minutes.
     remove_coturn_container
+    if [[ "$container_engine" == podman ]]; then
+        # podman-compose starts the existing container again unless the
+        # Compose configuration changed, so the image built above would not
+        # run. Removing the containers first makes it create them from that
+        # image. Volumes are kept. Docker Compose replaces a container whose
+        # image changed by itself.
+        compose down
+    fi
     compose up -d
     if [[ "$container_engine" == podman ]]; then
         systemctl enable --now slowmeet-podman.service

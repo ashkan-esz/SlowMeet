@@ -218,6 +218,13 @@ func TestMainServesTheBuiltInRelayAndStopsCleanly(t *testing.T) {
 	if err != nil || !strings.Contains(string(metrics), "slowmeet_turn_allocations 0\n") {
 		t.Fatalf("metrics do not report the relay's allocations (%v):\n%s", err, metrics)
 	}
+	// The connection counts are not compared: the probe above may still be
+	// closing on the relay's side.
+	for _, transport := range []string{"tcp", "tls"} {
+		if sample := `slowmeet_turn_stream_connections{transport="` + transport + `"} `; !strings.Contains(string(metrics), sample) {
+			t.Fatalf("metrics do not report the relay's %s connections:\n%s", transport, metrics)
+		}
+	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal child: %v", err)

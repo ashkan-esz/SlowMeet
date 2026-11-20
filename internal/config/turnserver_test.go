@@ -149,6 +149,9 @@ func TestLoadFromEnvRejectsInvalidBuiltInRelaySettings(t *testing.T) {
 		{name: "listen port inside ICE range", env: map[string]string{"TURN_SERVER_PORT": "50050"}, wantError: "outside the ICE UDP port range"},
 		{name: "relay IP not an address", env: map[string]string{"TURN_SERVER_RELAY_IP": "relay.example.com"}, wantError: "TURN_SERVER_RELAY_IP"},
 		{name: "relay IP is IPv6", env: map[string]string{"TURN_SERVER_RELAY_IP": "2001:db8::1"}, wantError: "TURN_SERVER_RELAY_IP"},
+		{name: "relay IP is the wildcard address", env: map[string]string{"TURN_SERVER_RELAY_IP": "0.0.0.0"}, wantError: "one address of this host"},
+		{name: "relay IP is a multicast address", env: map[string]string{"TURN_SERVER_RELAY_IP": "224.0.0.1"}, wantError: "one address of this host"},
+		{name: "relay IP is the broadcast address", env: map[string]string{"TURN_SERVER_RELAY_IP": "255.255.255.255"}, wantError: "one address of this host"},
 		{name: "enabled flag not boolean", env: map[string]string{"TURN_SERVER_ENABLED": "maybe"}, wantError: "TURN_SERVER_ENABLED"},
 		{name: "port not a number", env: map[string]string{"TURN_SERVER_PORT": "turn"}, wantError: "TURN_SERVER_PORT"},
 	}

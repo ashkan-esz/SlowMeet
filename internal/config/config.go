@@ -423,11 +423,28 @@ func (c Config) validateTURNServer() error {
 			c.ICEUDPPortMin, c.ICEUDPPortMax)
 	}
 	if c.TURNServerRelayIP != "" {
-		if ip := net.ParseIP(c.TURNServerRelayIP); ip == nil || ip.To4() == nil {
-			return fmt.Errorf("TURN_SERVER_RELAY_IP must be a valid IPv4 address")
+		if _, err := ParseTURNServerRelayIP(c.TURNServerRelayIP); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// ParseTURNServerRelayIP parses TURN_SERVER_RELAY_IP, the address the built-in
+// relay's sockets bind and advertise. It has to be one IPv4 address of this
+// host. The wildcard address binds, but it would be advertised to browsers as
+// it is and reach nothing; a multicast or broadcast address is no place the
+// SFU can be reached from either.
+func ParseTURNServerRelayIP(value string) (net.IP, error) {
+	ip := net.ParseIP(value).To4()
+	if ip == nil {
+		return nil, fmt.Errorf("TURN_SERVER_RELAY_IP must be a valid IPv4 address")
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return nil, fmt.Errorf("TURN_SERVER_RELAY_IP must be one address of this host, " +
+			"not the wildcard, a multicast or the broadcast address")
+	}
+	return ip, nil
 }
 
 // TURNServerTLSEnabled reports whether the built-in relay serves TURN over
@@ -445,13 +462,17 @@ func (c Config) EffectiveMaxVideoQuality() string {
 }
 
 // ServerTURNURLs returns the TURN URLs the SFU's own peer connections gather
-// relay candidates from. With a configured public address and a policy that
-// allows host candidates, the server is directly reachable (also from a
-// browser's relay), so allocating its own relays on every ICE gathering, and
-// so on every relay rotation, would only load the TURN server. Relay-only
-// deployments and servers without a public address keep them.
+// relay candidates from. Under a relay-only policy that is every TURN URL, as
+// the SFU then has no other candidate. Under any other policy it is none when
+// a browser's relay can reach the SFU's host candidates anyway: with a
+// configured public address the server is directly reachable, and the built-in
+// relay's sockets are on this host. Allocating its own relays on every ICE
+// gathering, and so on every relay rotation, would then only load the TURN
+// server, and on the built-in relay it would require relay sockets to reach
+// each other. A server with neither, which may sit behind NAT with an
+// external TURN server as its only way out, keeps the URLs.
 func (c Config) ServerTURNURLs() []string {
-	if c.ICETransportPolicy != "relay" && c.ICEPublicIP != "" {
+	if c.ICETransportPolicy != "relay" && (c.ICEPublicIP != "" || c.TURNServerEnabled) {
 		return nil
 	}
 	return c.EffectiveTURNURLs()

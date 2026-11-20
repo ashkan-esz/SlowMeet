@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/pion/turn/v5"
 	"golang.org/x/net/netutil"
@@ -27,14 +29,18 @@ import (
 )
 
 // Server is a running built-in TURN relay. The zero value is a relay that was
-// never started: Close and AllocationCount are safe to call on it.
+// never started: Close, AllocationCount and Stats are safe to call on it.
 type Server struct {
 	turn   *turn.Server
 	logger *slog.Logger
 	// udp holds one socket per local address; see listenUDP.
-	udp       []net.PacketConn
-	tcp       net.Listener
-	tls       net.Listener
+	udp []net.PacketConn
+	tcp net.Listener
+	tls net.Listener
+	// tcpConns and tlsConns are the connections the two stream listeners hold
+	// open; tlsConns is nil without a TLS listener.
+	tcpConns  *streamConns
+	tlsConns  *streamConns
 	addresses relayAddresses
 
 	closeOnce sync.Once
@@ -60,15 +66,31 @@ func Start(cfg config.Config, logger *slog.Logger) (*Server, error) {
 // nine connections each. Beyond it, new connections wait to be accepted.
 const maxStreamClients = 1024
 
+// startOptions are the parts of a relay that tests replace.
+type startOptions struct {
+	// listenHost is the address the listeners bind; empty for every address.
+	listenHost string
+	// streamClients replaces maxStreamClients when it is not zero.
+	streamClients int
+	// now is the clock credentials expire by; time.Now when nil.
+	now func() time.Time
+}
+
 // start binds the listeners on listenHost (empty for every address) and runs
 // the relay. Tests pass a loopback host and port 0.
 func start(cfg config.Config, logger *slog.Logger, listenHost string) (*Server, error) {
-	return startWithLimit(cfg, logger, listenHost, maxStreamClients)
+	return startWith(cfg, logger, startOptions{listenHost: listenHost})
 }
 
-func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, streamClients int) (_ *Server, err error) {
+func startWith(cfg config.Config, logger *slog.Logger, options startOptions) (_ *Server, err error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	listenHost := options.listenHost
+	streamClients := cmp.Or(options.streamClients, maxStreamClients)
+	now := options.now
+	if now == nil {
+		now = time.Now
 	}
 	addresses, err := selectRelayAddresses(cfg)
 	if err != nil {
@@ -88,7 +110,12 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 	if server.tcp, err = net.Listen("tcp", plainAddress); err != nil {
 		return nil, fmt.Errorf("listen for TURN on TCP %s: %w", plainAddress, err)
 	}
-	server.tcp = &retryListener{Listener: netutil.LimitListener(server.tcp, streamClients), name: "tcp", logger: logger}
+	server.tcpConns = newStreamConns("tcp", streamClients, logger)
+	server.tcp = &streamListener{
+		Listener: &retryListener{Listener: netutil.LimitListener(server.tcp, streamClients), name: "tcp", logger: logger},
+		conns:    server.tcpConns,
+		framed:   true,
+	}
 	listeners := []net.Listener{server.tcp}
 	if cfg.TURNServerTLSEnabled() {
 		tlsAddress := net.JoinHostPort(listenHost, strconv.Itoa(cfg.TURNServerTLSPort))
@@ -99,7 +126,11 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		certificates := newCertReloader(cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile, logger)
 		// The cap sits under TLS, and tlsListener closes a connection whose
 		// handshake fails, which is what gives its slot back.
-		capped := &retryListener{Listener: netutil.LimitListener(inner, streamClients), name: "tls", logger: logger}
+		server.tlsConns = newStreamConns("tls", streamClients, logger)
+		capped := &streamListener{
+			Listener: &retryListener{Listener: netutil.LimitListener(inner, streamClients), name: "tls", logger: logger},
+			conns:    server.tlsConns,
+		}
 		server.tls = newTLSListener(capped, &tls.Config{
 			MinVersion:     tls.VersionTLS12,
 			GetCertificate: certificates.GetCertificate,
@@ -113,9 +144,12 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		portMax:    cfg.TURNServerRelayPortMax,
 		sfuPortMin: cfg.ICEUDPPortMin,
 		sfuPortMax: cfg.ICEUDPPortMax,
+		// Every UDP socket of the relay is on the same port.
+		listenPort: localPort(server.udp[0].LocalAddr()),
 		// The same rule internal/signaling uses to give the SFU's own peer
 		// connections TURN servers.
 		relayToRelay: len(cfg.ServerTURNURLs()) > 0,
+		logger:       logger,
 	}
 	permit := func(_ net.Addr, peerIP net.IP) bool {
 		if addresses.permits(peerIP) {
@@ -124,11 +158,11 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 		logger.Debug("turn_server_peer_denied", "peer", peerIP.String())
 		return false
 	}
-	loggers := pionLoggerFactory{logger: logger}
 	turnConfig := turn.ServerConfig{
 		Realm:         cmp.Or(cfg.TURNServerRealm, config.DefaultTURNServerRealm),
-		AuthHandler:   turn.LongTermTURNRESTAuthHandler(cfg.TURNSharedSecret, loggers.NewLogger("turn-auth")),
-		LoggerFactory: loggers,
+		AuthHandler:   newAuthHandler(cfg.TURNSharedSecret, now, logger),
+		LoggerFactory: pionLoggerFactory{logger: logger},
+		EventHandler:  turn.EventHandler{OnAllocationError: logRequestFailure(logger)},
 		// Relays are IPv4 whatever address family the client reached the
 		// listener over, as the SFU's media ports are.
 		StrictAddressFamily: true,
@@ -179,11 +213,91 @@ func startWithLimit(cfg config.Config, logger *slog.Logger, listenHost string, s
 			"hint", "set ICE_UDP_PORT_MIN and ICE_UDP_PORT_MAX: without a media port range the relay "+
 				"forwards to any UDP port on this server's own address")
 	}
-	if len(cfg.EffectiveTURNURLs()) == 0 {
+	if loopbackRelayCannotReachSFU(cfg, addresses.relayIP) {
+		logger.Warn("turn_server_loopback_relay_address",
+			"relay_ip", addresses.relayIP.String(), "ice_public_ip", cfg.ICEPublicIP,
+			"hint", "no other local IPv4 address was found for relay sockets, and the SFU does not listen "+
+				"on loopback: restart once the network is up, or set TURN_SERVER_RELAY_IP")
+	}
+	tlsPort := 0
+	if server.tls != nil {
+		tlsPort = localPort(server.tls.Addr())
+	}
+	warnAboutTURNURLs(logger, cfg.EffectiveTURNURLs(), localPort(server.tcp.Addr()), tlsPort)
+	return server, nil
+}
+
+// warnAboutTURNURLs compares TURN_URLS, which is where browsers are sent, with
+// what the relay serves: plainPort for TURN over UDP and TCP, and tlsPort for
+// TURN over TLS, zero when that listener does not run. A mismatch is only
+// warned about. A port mapping or an SNI router in front of the relay makes
+// URLs right that name neither port.
+func warnAboutTURNURLs(logger *slog.Logger, urls []string, plainPort, tlsPort int) {
+	if len(urls) == 0 {
 		logger.Warn("turn_server_without_urls",
 			"hint", "set TURN_URLS so browsers are told where to reach the built-in relay")
+		return
 	}
-	return server, nil
+	namesListenPort := false
+	for _, raw := range urls {
+		scheme, port, ok := turnURLPort(raw)
+		if !ok {
+			continue
+		}
+		if scheme == "turns" && tlsPort == 0 {
+			logger.Warn("turn_server_tls_url_without_listener", "url", raw,
+				"hint", "TURN_URLS offers TURN over TLS, which the built-in relay serves only with "+
+					"TURN_SERVER_TLS_PORT, TURN_SERVER_TLS_CERT_FILE and TURN_SERVER_TLS_KEY_FILE set")
+		}
+		if port == plainPort || (tlsPort != 0 && port == tlsPort) {
+			namesListenPort = true
+		}
+	}
+	if !namesListenPort {
+		listenPorts := strconv.Itoa(plainPort)
+		if tlsPort != 0 {
+			listenPorts += "," + strconv.Itoa(tlsPort)
+		}
+		logger.Warn("turn_server_urls_miss_listen_ports", "listen_ports", listenPorts,
+			"hint", "no URL in TURN_URLS names a port the built-in relay listens on; "+
+				"browsers reach it only if something in front forwards those URLs to it")
+	}
+}
+
+// turnURLPort returns the scheme of a turn: or turns: URL and the port it
+// names, which is the scheme's registered port when the URL has none.
+func turnURLPort(raw string) (scheme string, port int, ok bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", 0, false
+	}
+	switch parsed.Scheme {
+	case "turn":
+		port = config.DefaultTURNServerPort
+	case "turns":
+		port = config.DefaultTURNServerTLSPort
+	default:
+		return "", 0, false
+	}
+	// "turn:host:3478?transport=udp" has no "//", so the URL parser keeps
+	// host and port as opaque text.
+	if _, portText, splitErr := net.SplitHostPort(cmp.Or(parsed.Opaque, parsed.Host)); splitErr == nil {
+		if port, err = strconv.Atoi(portText); err != nil {
+			return "", 0, false
+		}
+	}
+	return parsed.Scheme, port, true
+}
+
+// localPort returns the port of a listener's or socket's local address.
+func localPort(address net.Addr) int {
+	switch address := address.(type) {
+	case *net.UDPAddr:
+		return address.Port
+	case *net.TCPAddr:
+		return address.Port
+	}
+	return 0
 }
 
 // listenUDP binds the TURN port for UDP. With no listenHost it binds every
@@ -282,7 +396,31 @@ func (s *Server) AllocationCount() int {
 	return s.turn.AllocationCount()
 }
 
-// Close stops the relay, releasing its listeners and every relay socket.
+// Stats is what the relay holds open at one moment.
+type Stats struct {
+	// Allocations is the number of relay allocations.
+	Allocations int
+	// TCPConnections and TLSConnections are the open TURN-over-TCP and
+	// TURN-over-TLS connections, TLS ones still in their handshake included.
+	// Each count is limited by maxStreamClients.
+	TCPConnections int
+	TLSConnections int
+}
+
+// Stats returns the relay's current allocation and stream connection counts.
+func (s *Server) Stats() Stats {
+	if s == nil {
+		return Stats{}
+	}
+	return Stats{
+		Allocations:    s.AllocationCount(),
+		TCPConnections: s.tcpConns.count(),
+		TLSConnections: s.tlsConns.count(),
+	}
+}
+
+// Close stops the relay, releasing its listeners, every relay socket and the
+// TURN-over-TCP and TURN-over-TLS connections clients hold.
 func (s *Server) Close() error {
 	if s == nil {
 		return nil
@@ -293,8 +431,12 @@ func (s *Server) Close() error {
 			return
 		}
 		// The TURN server owns the listeners it was given and closes them;
-		// each one's allocations (and their relay sockets) go with it.
+		// each one's allocations (and their relay sockets) go with it. It
+		// leaves accepted stream connections open, though, and would go on
+		// serving them, new allocations included.
 		s.closeErr = s.turn.Close()
+		s.tcpConns.closeAll()
+		s.tlsConns.closeAll()
 		s.logger.Info("turn_server_stopped")
 	})
 	return s.closeErr
@@ -312,5 +454,8 @@ func (s *Server) closeListeners() error {
 	if s.tls != nil {
 		errs = append(errs, s.tls.Close())
 	}
+	// The TLS listener accepts as soon as it exists.
+	s.tcpConns.closeAll()
+	s.tlsConns.closeAll()
 	return errors.Join(errs...)
 }

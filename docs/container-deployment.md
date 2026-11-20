@@ -109,6 +109,8 @@ The override turns the relay on, publishes its listen ports (UDP and TCP 3478,
 TCP 5349), and mounts `TURN_CERT_DIR` (default `deploy/turn-certs`) for TURN
 over TLS. Put `fullchain.pem` and `privkey.pem` there, readable by the
 container user (`10001:10001`); renewed files are picked up without a restart.
+`deploy/` is left out of the image build context (`.dockerignore`,
+`.containerignore`), so the key is never sent to a build.
 Without a certificate, TURN over UDP and TCP still work. Allow the three listen
 ports in the host and provider firewalls. The relay port range
 (`49152-49999`) is not published and needs no firewall rule: only the SFU in
@@ -188,6 +190,13 @@ Compose wrapper requires a provider connected to the Podman API socket; check
 it with `podman compose version` and `make podman-check`. The Makefile also offers
 `make docker-up`, `make docker-turn-up`, `make podman-up`, and
 `make podman-turn-up`.
+
+When `podman-compose` is that provider, `up -d` starts the existing container
+again unless the Compose configuration changed, so a rebuilt image alone does
+not replace it. After pulling a newer checkout, run `down` (it keeps the data
+volume) before `up -d --build`. `deploy/install.sh` does the same when it
+updates a Podman installation: it builds first, then removes and starts the
+containers.
 
 The default container limits are 0.75 CPU and 256 MiB for SlowMeet. The TURN
 relay runs inside the same container and shares them. With it enabled, raise

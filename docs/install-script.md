@@ -133,19 +133,29 @@ The installer proceeds through these steps:
 Updates are limited to a recognized installation in `/opt/slowmeet`; tracked
 local changes in that checkout stop the update rather than being overwritten.
 The script reads the existing environment and saved engine/proxy settings,
-marks the update incomplete, fetches the latest shallow `master` checkout,
-rebuilds and restarts the app, and waits for readiness and a local proxy health
-check. It preserves the environment and credentials, application data volume,
-container engine, proxy choice, certificates, and TURN configuration. Existing
-Nginx or Caddy configuration is validated before activation so an update does
-not silently replace unrelated proxy configuration.
+marks the update incomplete, fetches the latest shallow `master` checkout, and
+builds the new image right away: the old containers still serve meanwhile, and
+nothing in `.env`, the renewal hook, or the Podman unit has been changed yet,
+so a build that fails leaves the installation running as it was. Only then
+does it apply its settings, replace the containers, and wait for readiness and
+a local proxy health check. With Docker, `docker compose up -d` replaces the
+container because its image changed. `podman-compose up -d` starts the
+existing container again unless the Compose configuration changed, so with
+Podman the update first removes the containers with `down`, which keeps the
+data volume, and then starts them from the new image. It preserves the
+environment and credentials, application data volume, container engine, proxy
+choice, certificates, and TURN configuration. Existing Nginx or Caddy
+configuration is validated before activation so an update does not silently
+replace unrelated proxy configuration.
 
 ### Updating an installation that ran coturn
 
 Earlier versions ran coturn in its own container. An update moves such an
 installation to the relay built into SlowMeet. Browsers keep the same TURN
 addresses and credentials: `TURN_URLS` and `TURN_SHARED_SECRET` are not
-changed. The update:
+changed. The new image is built first, while coturn still serves and before
+any of the steps below, so a failed build leaves coturn, its configuration,
+and its certificate copy as they were. The update then:
 
 - switches the relay on and adds its Compose override, as on a fresh install;
 - keeps listen ports you changed in `turnserver.conf` (as `TURN_SERVER_PORT`
@@ -163,8 +173,8 @@ changed. The update:
   readable by user `10001` yourself;
 - sets `turnserver.conf` aside as `turnserver.conf.migrated` (readable by root
   only, as it holds the shared secret); nothing reads it any more;
-- builds the new image while coturn still serves, then removes the coturn
-  container and starts SlowMeet, so TURN is only down for the container swap.
+- removes the coturn container and starts SlowMeet from the image built at
+  the start, so TURN is only down for the container swap.
 
 Relayed calls drop while the containers restart, as on any update. The UFW
 rule for the old relay port range stays in place; it is no longer needed and
@@ -175,8 +185,9 @@ can be removed with `ufw delete allow 49152:49999/udp`.
 To return to coturn if the built-in relay does not work on your host, as root
 in `/opt/slowmeet`:
 
-1. Check out the last commit that shipped coturn:
-   `git checkout <commit>` (the one before "relay TURN inside SlowMeet").
+1. Check out the last commit that shipped coturn. The installer's checkout is
+   shallow and does not hold that commit, so fetch it first:
+   `git fetch --depth=1 origin 0de4740ea6c1b9a62f5c6d95cc09f09093e13968 && git checkout FETCH_HEAD`.
 2. Restore the configuration:
    `mv deploy/coturn/turnserver.conf.migrated deploy/coturn/turnserver.conf`
    and `chmod 0644` it.
@@ -190,7 +201,11 @@ in `/opt/slowmeet`:
    `sed -i 's/-o 10001 -g 10001/-o 65534 -g 65533/g' /etc/letsencrypt/renewal-hooks/deploy/slowmeet`.
    The hook no longer tells coturn to re-read its certificate; after a renewal
    run `docker compose --profile turn kill -s SIGUSR2 coturn` (or restart it).
-6. Start both containers: `docker compose --profile turn up -d --build`
+6. With Podman, point the systemd unit back at the coturn profile. It names
+   the relay's override file, which this checkout does not have, so without
+   this step the containers do not start at the next boot:
+   `sed -i 's# -f /opt/slowmeet/deploy/podman-compose.turn.yml# --profile turn#' /etc/systemd/system/slowmeet-podman.service && systemctl daemon-reload`.
+7. Start both containers: `docker compose --profile turn up -d --build`
    (Podman: `podman-compose -f podman-compose.yml --profile turn up -d --build`).
 
 Do not run the installer's update afterwards until you want to move again: it

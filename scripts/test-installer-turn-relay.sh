@@ -146,6 +146,16 @@ for override in deploy/compose.turn.yml deploy/podman-compose.turn.yml; do
 done
 [[ -f deploy/turn-certs/.gitignore ]] || fail 'the default TURN certificate directory must exist in the checkout'
 
+# deploy/ holds that certificate directory, private key included, and after a
+# move off coturn the set-aside turnserver.conf with the shared secret. None of
+# it may be sent to an image build, and the build needs nothing from there.
+for ignore_file in .dockerignore .containerignore; do
+    grep -Fxq -- deploy "$ignore_file" || fail "$ignore_file must keep deploy/ out of the image build context"
+done
+for build_file in Dockerfile Containerfile; do
+    assert_not_contains "$build_file" 'deploy'
+done
+
 line_of() {
     # $1: text, $2: literal pattern; prints the first matching line number
     grep -nF -- "$2" <<<"$1" | head -n1 | cut -d: -f1
@@ -253,7 +263,15 @@ reset_install ''
 compose up -d --build
 [[ "$(last_engine_call)" == "podman-compose -f $INSTALL_DIR/podman-compose.yml up -d --build" ]] \
     || fail "Podman without TURN ran: $(last_engine_call)"
+# An update builds before it writes the marker. The image does not depend on
+# the override, so that build runs without it.
+compose build
+[[ "$(last_engine_call)" == "podman-compose -f $INSTALL_DIR/podman-compose.yml build" ]] \
+    || fail "Podman must be able to build before TURN is marked as enabled, but ran: $(last_engine_call)"
 touch "$INSTALL_DIR/.turn-enabled"
+compose build
+[[ "$(last_engine_call)" == "podman-compose -f $INSTALL_DIR/podman-compose.yml -f $INSTALL_DIR/deploy/podman-compose.turn.yml build" ]] \
+    || fail "a Podman build with TURN enabled ran: $(last_engine_call)"
 compose up -d --build
 [[ "$(last_engine_call)" == "podman-compose -f $INSTALL_DIR/podman-compose.yml -f $INSTALL_DIR/deploy/podman-compose.turn.yml up -d --build" ]] \
     || fail "Podman with TURN must pass the relay override, but ran: $(last_engine_call)"
@@ -457,10 +475,11 @@ assert_contains "$ENGINE_LOG" 'podman rm -f abc123'
 
 # --- Installer flows ---------------------------------------------------------
 
-# An update moves a coturn installation over before it starts the new
-# containers. It builds the image while coturn still serves, and removes the
-# coturn container only right before the swap, so TURN is not down for the
-# length of a build.
+# An update builds the new image first: the old containers, coturn included,
+# still serve meanwhile, and nothing about the installation has changed yet,
+# so a failed build leaves a coturn installation as it was. Only then does it
+# move the installation over, and it removes the coturn container right before
+# the swap, so TURN is not down for the length of a build.
 update_path=$(sed -n '/Updating the existing SlowMeet checkout/,/wait_for_updated_service$/p' "$INSTALLER")
 for expected in 'migrate_coturn_relay' 'enable_relay_compose_override' 'touch "$INSTALL_DIR/.turn-enabled"' \
     'if [[ -f "$CERT_HOOK" ]]; then' 'write_cert_hook' 'write_podman_service' 'compose build' \
@@ -473,12 +492,77 @@ done
     || fail 'the checkout must be updated before the relay override it ships is used'
 [[ "$(line_of "$update_path" 'enable_host_network_if_supported')" -lt "$(line_of "$update_path" 'enable_relay_compose_override')" ]] \
     || fail 'host networking must be chosen before the relay override is added'
-[[ "$(line_of "$update_path" 'migrate_coturn_relay')" -lt "$(line_of "$update_path" 'compose build')" ]] \
-    || fail 'the relay must be configured before the containers are built and started'
+[[ "$(line_of "$update_path" 'migrate_coturn_relay')" -lt "$(line_of "$update_path" 'compose up -d')" ]] \
+    || fail 'the relay must be configured before the containers are started'
 [[ "$(line_of "$update_path" 'compose build')" -lt "$(line_of "$update_path" 'remove_coturn_container')" ]] \
     || fail 'the image must be built while the coturn container still serves'
 [[ "$(line_of "$update_path" 'remove_coturn_container')" -lt "$(line_of "$update_path" 'compose up -d')" ]] \
     || fail 'the coturn container must be removed before the relay binds the TURN ports'
+
+update_step() {
+    # $1: a command; prints the number of the first update line that is exactly
+    # that command, whatever its indentation. A comment naming it does not count.
+    local line
+    line=$(step=$1 awk '{ sub(/^[[:space:]]+/, "") } $0 == ENVIRON["step"] { print NR; exit }' <<<"$update_path")
+    [[ -n "$line" ]] || fail "an update must run: $1"
+    printf '%s' "$line"
+}
+checkout_step=$(update_step 'git -C "$INSTALL_DIR" checkout -B master FETCH_HEAD')
+build_step=$(update_step 'compose build')
+((checkout_step < build_step)) || fail 'an update must build the new checkout, not the one it replaces'
+for later in 'migrate_coturn_relay' 'enable_relay_compose_override' 'touch "$INSTALL_DIR/.turn-enabled"' \
+    'write_cert_hook' 'write_podman_service' 'remove_coturn_container'; do
+    later_step=$(update_step "$later")
+    ((build_step < later_step)) \
+        || fail "an update must build the image before it changes the installation, but builds after: $later"
+done
+
+# The swap, run as the update has it. podman-compose starts the existing
+# container again unless the Compose configuration changed, so under Podman
+# the containers are removed first and the rebuilt image is the one that runs.
+# Docker Compose replaces a container whose image changed by itself.
+update_swap=$(sed -n '/^    remove_coturn_container$/,/^    compose up -d$/p' <<<"$update_path")
+[[ "$(tail -n1 <<<"$update_swap")" == '    compose up -d' ]] \
+    || fail 'an update must remove the coturn container and then start the containers'
+[[ "$update_swap" != *--volumes* ]] || fail 'an update must keep the data volume'
+engine_calls_of_swap() (
+    # $1: container engine, $2: yes when TURN is enabled for the installation;
+    # prints every engine command the swap ran, in order
+    reset_install ''
+    container_engine=$1
+    if [[ "$2" == yes ]]; then
+        touch "$INSTALL_DIR/.turn-enabled"
+    fi
+    export FAKE_CONTAINERS=$'abc123\n'
+    eval "$update_swap"
+    cat "$ENGINE_LOG"
+)
+coturn_lookup='ps -aq --filter label=com.docker.compose.service=coturn --filter label=com.docker.compose.project=slowmeet'
+podman_files="-f $INSTALL_DIR/podman-compose.yml"
+
+swap_calls=$(engine_calls_of_swap podman no)
+expected_calls="podman $coturn_lookup
+podman rm -f abc123
+podman-compose $podman_files down
+podman-compose $podman_files up -d"
+[[ "$swap_calls" == "$expected_calls" ]] \
+    || fail "a Podman update must remove the containers and then start them, but ran: $swap_calls"
+
+swap_calls=$(engine_calls_of_swap podman yes)
+podman_files+=" -f $INSTALL_DIR/deploy/podman-compose.turn.yml"
+expected_calls="podman $coturn_lookup
+podman rm -f abc123
+podman-compose $podman_files down
+podman-compose $podman_files up -d"
+[[ "$swap_calls" == "$expected_calls" ]] \
+    || fail "a Podman update with TURN must remove the containers and then start them, but ran: $swap_calls"
+
+swap_calls=$(engine_calls_of_swap docker yes)
+expected_calls="docker $coturn_lookup
+docker rm -f abc123
+docker compose -f $INSTALL_DIR/docker-compose.yml up -d"
+[[ "$swap_calls" == "$expected_calls" ]] \
+    || fail "a Docker update must only start the containers, but ran: $swap_calls"
 
 # A fresh installation and an uninstall also clear a leftover coturn container.
 [[ "$(grep -c '^remove_coturn_container$' "$INSTALLER")" == 1 ]] \

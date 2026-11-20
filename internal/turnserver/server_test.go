@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
+	"github.com/pion/stun/v4"
 	"github.com/pion/turn/v5"
 
 	"SlowMeet/internal/config"
@@ -854,7 +855,7 @@ func TestStreamListenersHoldALimitedNumberOfConnections(t *testing.T) {
 	// Connections that are opened and left idle must not pile up without
 	// bound in the process the SFU shares.
 	cfg := testConfig(t, 4)
-	server, err := startWithLimit(cfg, quietLogger(), "127.0.0.1", 2)
+	server, err := startWith(cfg, quietLogger(), startOptions{listenHost: "127.0.0.1", streamClients: 2})
 	if err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
@@ -963,5 +964,136 @@ func TestRelayTranslatesAnSFUPortInsideTheRelayRange(t *testing.T) {
 	payload, peer := readDatagram(t, relay)
 	if payload != "sfu to browser" || peer.String() != publicSFU.String() {
 		t.Fatalf("browser received %q from %v, want it from the public address %v", payload, peer, publicSFU)
+	}
+}
+
+func TestStartWarnsWhenTURNURLsDoNotMatchTheListeners(t *testing.T) {
+	warnings := func(urls []string, plainPort, tlsPort int) string {
+		var logs bytes.Buffer
+		warnAboutTURNURLs(slog.New(slog.NewTextHandler(&logs, nil)), urls, plainPort, tlsPort)
+		return logs.String()
+	}
+	matching := []string{"turn:meet.example.com:3478?transport=udp", "turns:meet.example.com:5349?transport=tcp"}
+	if logs := warnings(matching, 3478, 5349); logs != "" {
+		t.Fatalf("warned about URLs that match the listeners:\n%s", logs)
+	}
+	if logs := warnings([]string{"turn:meet.example.com?transport=tcp"}, 3478, 0); logs != "" {
+		t.Fatalf("a URL without a port means the default port:\n%s", logs)
+	}
+	if logs := warnings(matching, 3478, 0); !strings.Contains(logs, "turn_server_tls_url_without_listener") {
+		t.Fatalf("no warning for a turns: URL without a TLS listener:\n%s", logs)
+	}
+	if logs := warnings([]string{"turn:meet.example.com:3478?transport=udp"}, 3479, 0); !strings.Contains(logs, "turn_server_urls_miss_listen_ports") {
+		t.Fatalf("no warning when no URL names a listen port:\n%s", logs)
+	}
+}
+
+func TestRelayAnswersOnlyFromTheAddressAsked(t *testing.T) {
+	// The strict form of TestRelayAnswersFromTheAddressAClientSentTo, whose
+	// TURN client would also accept an answer from another address. A
+	// connected socket receives only from the address it sent to, as a
+	// browser accepts answers. The client is on a non-loopback address and
+	// asks 127.0.0.1: a wildcard listener would answer from the client's own
+	// address and the answer would never arrive.
+	var local net.IP
+	for _, address := range localUnicastAddresses() {
+		if address.To4() != nil && !address.IsLoopback() {
+			local = address
+			break
+		}
+	}
+	if local == nil {
+		t.Skip("this host has only loopback addresses")
+	}
+	cfg := testConfig(t, 4)
+	cfg.TURNServerPort = freeTURNPort(t)
+	server, err := start(cfg, quietLogger(), "")
+	if err != nil {
+		t.Fatalf("start relay on every address: %v", err)
+	}
+	defer server.Close()
+	conn, err := net.DialUDP("udp4", &net.UDPAddr{IP: local},
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.TURNServerPort})
+	if err != nil {
+		t.Fatalf("connect from %v: %v", local, err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(stunBindingRequest); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(testTimeout))
+	answer := make([]byte, 1500)
+	n, err := conn.Read(answer)
+	if err != nil || n < 20 || answer[0] != 0x01 || answer[1] != 0x01 {
+		t.Fatalf("no STUN answer from 127.0.0.1 for a client on %v: n=%d err=%v", local, n, err)
+	}
+}
+
+func TestClientOverIPv6GetsAnIPv4Relay(t *testing.T) {
+	// A browser that reaches the relay over IPv6 does not say which address
+	// family it wants. The relay must still give it an IPv4 relay address,
+	// the only kind the SFU's media ports can talk to.
+	cfg := testConfig(t, 4)
+	server, err := start(cfg, quietLogger(), "::1")
+	if err != nil {
+		t.Skipf("this host cannot listen on ::1: %v", err)
+	}
+	defer server.Close()
+	port := server.udp[0].LocalAddr().(*net.UDPAddr).Port
+	conn, err := net.Dial("udp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("connect over IPv6: %v", err)
+	}
+	defer conn.Close()
+	username, password := browserCredentials(t, cfg)
+
+	allocate := func(credentials ...stun.Setter) *stun.Message {
+		t.Helper()
+		setters := append([]stun.Setter{
+			stun.TransactionID,
+			stun.NewType(stun.MethodAllocate, stun.ClassRequest),
+			// REQUESTED-TRANSPORT: UDP, and no REQUESTED-ADDRESS-FAMILY.
+			stun.RawAttribute{Type: stun.AttrRequestedTransport, Value: []byte{17, 0, 0, 0}},
+		}, credentials...)
+		request, err := stun.Build(setters...)
+		if err != nil {
+			t.Fatalf("build Allocate: %v", err)
+		}
+		if _, err := conn.Write(request.Raw); err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(testTimeout))
+		buffer := make([]byte, 1500)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			t.Fatalf("no answer to Allocate: %v", err)
+		}
+		response := &stun.Message{Raw: buffer[:n]}
+		if err := response.Decode(); err != nil {
+			t.Fatalf("decode answer: %v", err)
+		}
+		return response
+	}
+
+	challenge := allocate()
+	var realm stun.Realm
+	var nonce stun.Nonce
+	if err := realm.GetFrom(challenge); err != nil {
+		t.Fatalf("challenge without a realm: %v", err)
+	}
+	if err := nonce.GetFrom(challenge); err != nil {
+		t.Fatalf("challenge without a nonce: %v", err)
+	}
+	response := allocate(stun.NewUsername(username), realm, nonce,
+		stun.NewLongTermIntegrity(username, realm.String(), password))
+	if response.Type.Class != stun.ClassSuccessResponse {
+		t.Fatalf("Allocate over IPv6 was answered with %v", response.Type)
+	}
+	var relayed stun.XORMappedAddress
+	if err := relayed.GetFromAs(response, stun.AttrXORRelayedAddress); err != nil {
+		t.Fatalf("no relayed address in the answer: %v", err)
+	}
+	if relayed.IP.To4() == nil || !relayed.IP.Equal(server.addresses.relayIP) {
+		t.Fatalf("relayed address = %v, want an IPv4 address on the relay IP %v", relayed.IP, server.addresses.relayIP)
 	}
 }

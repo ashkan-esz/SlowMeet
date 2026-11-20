@@ -125,20 +125,28 @@ operations cockpit.
 Runs the optional TURN relay inside the process (`TURN_SERVER_ENABLED`), on
 Pion's TURN server. It listens for TURN over UDP and TCP and, with a
 certificate, over TLS, and verifies the time-limited shared-secret credentials
-`internal/config` issues. It shares no state with the SFU packages: a relayed
-participant's media reaches the SFU's ordinary ICE UDP ports from a relay
-socket on the same host.
+`internal/config` issues. The lifetime is checked when a relay is allocated,
+not on the refreshes of a running call. It shares no state with the SFU
+packages: a relayed participant's media reaches the SFU's ordinary ICE UDP
+ports from a relay socket on the same host. The SFU's own peer connections
+therefore gather no relay candidates from it, except under
+`ICE_TRANSPORT_POLICY=relay`.
 
-Two rules keep it from being an open relay or a network hazard:
+Three rules keep it from being an open relay or a network hazard:
 
 - It forwards only to this server's own addresses (`ICE_PUBLIC_IP` and the
   local relay address), there only to the SFU's media port range (and to
-  other relay sockets when the SFU itself allocates on the relay), and offers
-  UDP relay addresses only.
+  other relay sockets when the SFU itself allocates on the relay), never to
+  its own listen port, and offers UDP relay addresses only.
 - When `ICE_PUBLIC_IP` is not a local address (a container on a bridge
   network, or a VM behind 1:1 NAT), it translates that address to the local
   one on the relay sockets, so relayed media never leaves the network
   namespace and needs no hairpin NAT.
+- Its ports take input from anyone, before any credential is checked. TURN
+  over TCP and TLS connections are capped per transport, and the relay splits
+  those streams into frames itself (`framedConn`), so the library only reads
+  whole frames of a bounded size; anything that is not a TURN frame closes
+  the connection.
 
 The TLS certificate is re-read when its files change, so a renewal does not
 interrupt relayed calls.
@@ -335,8 +343,9 @@ remain connected and can receive later publications or renegotiation results.
 ### Process shutdown
 
 `main.go` receives SIGINT/SIGTERM, closes the application hub, closes peer and
-WebSocket resources, closes the built-in TURN relay with its allocations, then
-calls `http.Server.Shutdown` with a ten-second timeout.
+WebSocket resources, closes the built-in TURN relay with its allocations and
+its open TURN over TCP and TLS connections, then calls `http.Server.Shutdown`
+with a ten-second timeout.
 
 ## Security boundaries
 
@@ -366,8 +375,9 @@ Tests are colocated with their package and cover:
 - peer wrapper lifecycle;
 - media router publication, subscription, limits, and integration behavior;
 - metrics formatting;
-- the built-in TURN relay: credentials, peer restriction, address translation,
-  certificate reload, and a relay-only peer reaching an SFU peer through it;
+- the built-in TURN relay: credentials and their expiry, peer restriction,
+  address translation, stream framing and connection limits, certificate
+  reload, and a relay-only peer reaching an SFU peer through it;
 - browser protocol, adaptation, and layout scripts through Node-based checks.
 
 The normal repository gate is `go test ./...`, supplemented by the relevant

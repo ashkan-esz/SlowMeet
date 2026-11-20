@@ -3,10 +3,12 @@ package turnserver
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/turn/v5"
 
@@ -69,11 +71,11 @@ func selectRelayAddresses(cfg config.Config) (relayAddresses, error) {
 	}
 	switch {
 	case cfg.TURNServerRelayIP != "":
-		relayIP := net.ParseIP(cfg.TURNServerRelayIP)
-		if relayIP == nil || relayIP.To4() == nil {
-			return relayAddresses{}, fmt.Errorf("TURN_SERVER_RELAY_IP must be a valid IPv4 address")
+		relayIP, err := config.ParseTURNServerRelayIP(cfg.TURNServerRelayIP)
+		if err != nil {
+			return relayAddresses{}, err
 		}
-		addresses.relayIP = relayIP.To4()
+		addresses.relayIP = relayIP
 	case addresses.publicIP != nil && localInterfaceHasIP(addresses.publicIP):
 		addresses.relayIP = addresses.publicIP
 	default:
@@ -92,6 +94,19 @@ func selectRelayAddresses(cfg config.Config) (relayAddresses, error) {
 	addresses.translate = addresses.publicIP != nil && !addresses.publicIP.Equal(addresses.relayIP) &&
 		!localInterfaceHasIP(addresses.publicIP)
 	return addresses, nil
+}
+
+// loopbackRelayCannotReachSFU reports whether the relay address was chosen
+// automatically and came out as loopback although the SFU is advertised at
+// another address. That happens when the host had no other IPv4 address at
+// startup (routedLocalIPv4's last resort). The SFU does not listen on
+// loopback then, so relayed media would arrive nowhere.
+func loopbackRelayCannotReachSFU(cfg config.Config, relayIP net.IP) bool {
+	if cfg.TURNServerRelayIP != "" || !relayIP.IsLoopback() {
+		return false
+	}
+	publicIP := net.ParseIP(cfg.ICEPublicIP)
+	return publicIP != nil && !publicIP.IsLoopback()
 }
 
 // routedLocalIPv4 returns the local address the kernel would send from to
@@ -154,22 +169,31 @@ type relayAddressGenerator struct {
 	// relayPacketConn for what they restrict.
 	sfuPortMin int
 	sfuPortMax int
+	// listenPort is the UDP port the relay itself serves TURN on, which no
+	// relay socket may send to.
+	listenPort int
 	// relayToRelay is set when the SFU itself allocates on this relay (a
-	// relay-only ICE policy, or no public address), so one relay socket must
-	// be able to reach another.
+	// relay-only ICE policy), so one relay socket must be able to reach
+	// another.
 	relayToRelay bool
+	// logger receives the warning about a full port range; Validate falls
+	// back to the default logger.
+	logger    *slog.Logger
+	exhausted warningGate
 	// openPorts records which relay ports are bound; Validate creates it.
 	openPorts *relayPortSet
 }
 
-// relayPortSet records which ports of the relay range are bound right now.
-// Relay sockets consult it on every datagram, so it is lock-free: one flag
-// per port.
+// relayPortSet records which ports of the relay range are bound by relay
+// sockets right now. Every relay socket is in it from the moment it is bound
+// until it is closed. Relay sockets consult it on every datagram, so it is
+// lock-free: one flag per port.
 //
-// It exists because a port number alone does not say what a socket is. With
-// no ICE port range configured the SFU binds any port, including ones inside
-// the relay range; "inside the range" would then take the SFU for a relay
-// socket.
+// It serves two purposes. A port number alone does not say what a socket is:
+// with no ICE port range configured the SFU binds any port, including ones
+// inside the relay range, and "inside the range" would then take the SFU for
+// a relay socket. And an allocation does not have to try binding ports the
+// relay already holds, which matters once the range is full.
 type relayPortSet struct {
 	min  int
 	open []atomic.Bool
@@ -202,14 +226,26 @@ func (g *relayAddressGenerator) Validate() error {
 	if g.openPorts == nil {
 		g.openPorts = newRelayPortSet(g.portMin, g.portMax)
 	}
+	if g.logger == nil {
+		g.logger = slog.Default()
+	}
 	return nil
 }
 
 // AllocatePacketConn binds a relay socket. It starts at a random port and
 // walks the whole range, so an allocation fails only when every port is taken.
+//
+// The TURN library calls it from the loop that reads a listener, so it must
+// not be slow when it fails: any participant can keep asking for allocations
+// once the range is full. Ports the relay holds itself are therefore passed
+// over without a bind attempt, which leaves nothing to try when it holds all
+// of them.
 func (g *relayAddressGenerator) AllocatePacketConn(conf turn.AllocateListenerConfig) (net.PacketConn, net.Addr, error) {
 	if conf.Network != "udp4" {
 		return nil, nil, errIPv4RelayOnly
+	}
+	if g.openPorts == nil {
+		return nil, nil, errGeneratorNotValidated
 	}
 	if conf.RequestedPort != 0 {
 		if conf.RequestedPort < g.portMin || conf.RequestedPort > g.portMax {
@@ -219,13 +255,29 @@ func (g *relayAddressGenerator) AllocatePacketConn(conf turn.AllocateListenerCon
 	}
 	span := g.portMax - g.portMin + 1
 	first := rand.IntN(span)
+	// lastErr stays nil when every port is a relay socket already; otherwise it
+	// is why the last port something else holds could not be bound.
 	var lastErr error
 	for offset := range span {
-		conn, address, err := g.listen(g.portMin + (first+offset)%span)
+		port := g.portMin + (first+offset)%span
+		if g.openPorts.has(port) {
+			continue
+		}
+		conn, address, err := g.listen(port)
 		if err == nil {
 			return conn, address, nil
 		}
 		lastErr = err
+	}
+	if g.exhausted.open(time.Now()) {
+		g.logger.Warn("turn_server_relay_ports_exhausted",
+			"relay_ports", fmt.Sprintf("%d-%d", g.portMin, g.portMax),
+			"bind_error", errorText(lastErr),
+			"hint", "every relay port is in use, so new relay allocations are refused; "+
+				"widen TURN_SERVER_RELAY_PORT_MIN-MAX if this is ordinary load")
+	}
+	if lastErr == nil {
+		return nil, nil, errRelayPortsExhausted
 	}
 	return nil, nil, fmt.Errorf("%w: %w", errRelayPortsExhausted, lastErr)
 }
@@ -246,17 +298,6 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	relayAddress := &net.UDPAddr{IP: g.addresses.relayIP, Port: port}
-	if !g.addresses.translates() && g.sfuPortMin == 0 {
-		// Nothing to rewrite and nothing to check: the plain socket.
-		return conn, relayAddress, nil
-	}
-	if g.openPorts == nil {
-		_ = conn.Close()
-		return nil, nil, errGeneratorNotValidated
-	}
-	// Every relay socket of this generator is wrapped or none is, so the set
-	// is complete whenever one of them consults it.
 	g.openPorts.mark(port, true)
 	return &relayPacketConn{
 		PacketConn:   conn,
@@ -265,12 +306,23 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 		openPorts:    g.openPorts,
 		sfuPortMin:   g.sfuPortMin,
 		sfuPortMax:   g.sfuPortMax,
+		listenPort:   g.listenPort,
 		relayToRelay: g.relayToRelay,
-	}, relayAddress, nil
+	}, &net.UDPAddr{IP: g.addresses.relayIP, Port: port}, nil
+}
+
+// errorText is err's message, or "" when there is none.
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // relayPacketConn is a relay socket with the two rules the TURN library cannot
-// express, because its permissions name a peer by IP address only.
+// express, because its permissions name a peer by IP address only. Every relay
+// socket is one, also where neither rule has anything to do, so that the set
+// of open relay ports is complete.
 //
 // Ports. The permitted peer address is this server's own, and other UDP
 // services may listen on it. A TURN credential, which every meeting
@@ -280,7 +332,10 @@ func (g *relayAddressGenerator) listen(port int) (net.PacketConn, net.Addr, erro
 // itself allocates on this relay (relayToRelay). Otherwise relay sockets
 // belong to participants alone, and one participant has no business sending
 // to another's. Without a configured media port range the SFU may be on any
-// port, relay range included, and nothing is refused.
+// port, relay range included, and only one port is refused: the relay's own
+// TURN port, which is never a peer. A relay socket that could send there
+// would be a TURN client of the server it belongs to, and the allocation it
+// made a way to have the relay forward to itself in a loop.
 //
 // Addresses. On a host whose public address is not local (addresses.translate)
 // browsers address the SFU by that public address, while the SFU's sockets
@@ -301,6 +356,7 @@ type relayPacketConn struct {
 	openPorts    *relayPortSet
 	sfuPortMin   int
 	sfuPortMax   int
+	listenPort   int
 	relayToRelay bool
 	closeOnce    sync.Once
 }
@@ -321,6 +377,9 @@ func (c *relayPacketConn) Close() error {
 // permitsPort reports whether a peer on port can be the SFU: on one of its
 // media ports, or behind a relay socket of its own.
 func (c *relayPacketConn) permitsPort(port int) bool {
+	if port == c.listenPort {
+		return false
+	}
 	if c.sfuPortMin == 0 {
 		return true
 	}

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/pion/logging"
 )
@@ -14,7 +17,8 @@ import (
 // level that is noise an operator cannot act on. LOG_LEVEL=debug shows it.
 //
 // The library's own trace and debug messages are dropped: several are emitted
-// per relayed packet.
+// per relayed packet. One of them is its only report of a request it could not
+// serve; logRequestFailure takes that over.
 type pionLoggerFactory struct {
 	logger *slog.Logger
 }
@@ -56,3 +60,48 @@ func (l pionLogger) Warn(message string)               { l.write("warn", message
 func (l pionLogger) Warnf(format string, args ...any)  { l.writef("warn", format, args...) }
 func (l pionLogger) Error(message string)              { l.write("error", message) }
 func (l pionLogger) Errorf(format string, args ...any) { l.writef("error", format, args...) }
+
+// logRequestFailure returns the TURN library's callback for a request it
+// could not serve: a malformed packet, a failed integrity check, a credential
+// the relay rejects, an allocation it has no port for. Like the rest of what
+// the internet sends the relay's ports, these are logged at debug level.
+func logRequestFailure(logger *slog.Logger) func(source, destination net.Addr, protocol, message string) {
+	// The library passes "UDP" as the protocol whatever the client's transport
+	// is, so the local address is logged instead: it names the listener.
+	return func(source, destination net.Addr, _, message string) {
+		if !logger.Enabled(context.Background(), slog.LevelDebug) {
+			return
+		}
+		logger.Debug("turn_server_request_failed",
+			"remote", addrString(source), "local", addrString(destination), "error", message)
+	}
+}
+
+func addrString(address net.Addr) string {
+	if address == nil {
+		return ""
+	}
+	return address.String()
+}
+
+// repeatedWarningInterval is how often a warning about a condition that can
+// recur with every request (a full listener, a full relay port range) is
+// logged while the condition lasts.
+const repeatedWarningInterval = time.Minute
+
+// warningGate lets such a warning through once per repeatedWarningInterval.
+// The zero value is ready to use and lets the first one through.
+type warningGate struct {
+	// last is when a warning last passed, in Unix nanoseconds; zero if never.
+	last atomic.Int64
+}
+
+// open reports whether a warning may be logged at now, and records that it
+// was. Of several concurrent callers one gets true.
+func (g *warningGate) open(now time.Time) bool {
+	last := g.last.Load()
+	if last != 0 && now.UnixNano()-last < int64(repeatedWarningInterval) {
+		return false
+	}
+	return g.last.CompareAndSwap(last, now.UnixNano())
+}
