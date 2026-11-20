@@ -176,9 +176,18 @@ and its certificate copy as they were. The update then:
 - removes the coturn container and starts SlowMeet from the image built at
   the start, so TURN is only down for the container swap.
 
-Relayed calls drop while the containers restart, as on any update. The UFW
-rule for the old relay port range stays in place; it is no longer needed and
-can be removed with `ufw delete allow 49152:49999/udp`.
+Relayed calls drop while the containers restart, as on any update.
+
+The update removes nothing coturn used, so that it can be rolled back. It
+prints two reminders when it migrates:
+
+- the UFW rule for the old relay port range stays in place. The built-in
+  relay does not need it; coturn does. Once you no longer intend to roll back,
+  remove it with `ufw delete allow 49152:49999/udp`;
+- relayed media now shares `SLOWMEET_CPUS`, and coturn's `TURN_CPUS` no longer
+  applies. `TURN_CONFIG_FILE`, `TURN_CPUS`, `TURN_MEMORY_LIMIT`, and
+  `TURN_PIDS_LIMIT` stay in `.env` although nothing reads them; delete them,
+  and `deploy/coturn/turnserver.conf.migrated`, at the same point.
 
 #### Rolling back
 

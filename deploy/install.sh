@@ -966,7 +966,7 @@ remove_coturn_container() {
 # more, so the full default range is always right. A port below 1024 cannot be
 # carried, because the container has no capability to bind it.
 migrate_coturn_relay() {
-    local config key value cert_dir
+    local config key value cert_dir turn_cpus slowmeet_cpus
     config=$(read_env_value TURN_CONFIG_FILE)
     [[ -n "$config" ]] || config="$INSTALL_DIR/deploy/coturn/turnserver.conf"
     [[ "$config" == /* ]] || config="$INSTALL_DIR/${config#./}"
@@ -1000,6 +1000,13 @@ migrate_coturn_relay() {
         # can be brought back (see "Rolling back" in docs/install-script.md).
         mv -f "$config" "$config.migrated"
         chmod 0600 "$config.migrated"
+        # Say once, when the move happens, what it leaves behind. Nothing is
+        # removed: the way back to coturn needs the firewall rule and the
+        # TURN_* settings.
+        turn_cpus=$(read_env_value TURN_CPUS)
+        slowmeet_cpus=$(read_env_value SLOWMEET_CPUS)
+        log "Relayed media now runs inside SlowMeet and shares SLOWMEET_CPUS=${slowmeet_cpus:-0.75}; coturn's own allowance${turn_cpus:+ (TURN_CPUS=$turn_cpus)} no longer applies. Raise SLOWMEET_CPUS in $ENV_FILE if relayed calls stutter under load."
+        log "The firewall rule for coturn's relay ports is no longer needed. Once you do not intend to roll back, remove it with: ufw delete allow 49152:49999/udp"
     fi
     set_env TURN_SERVER_ENABLED true
     set_env_if_empty TURN_SERVER_REALM "$domain"
