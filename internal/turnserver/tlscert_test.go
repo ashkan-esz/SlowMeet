@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -21,13 +22,21 @@ import (
 // call produces a different certificate, as a renewal does.
 func writeCertificateFiles(t *testing.T, certFile, keyFile, commonName string) {
 	t.Helper()
+	if err := writeSelfSignedCertificate(certFile, keyFile, commonName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeSelfSignedCertificate does the work of writeCertificateFiles. TestMain
+// needs it before any test exists.
+func writeSelfSignedCertificate(certFile, keyFile, commonName string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		return fmt.Errorf("generate key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
 	if err != nil {
-		t.Fatalf("generate serial: %v", err)
+		return fmt.Errorf("generate serial: %w", err)
 	}
 	template := &x509.Certificate{
 		SerialNumber: serial,
@@ -41,20 +50,21 @@ func writeCertificateFiles(t *testing.T, certFile, keyFile, commonName string) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		t.Fatalf("create certificate: %v", err)
+		return fmt.Errorf("create certificate: %w", err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		t.Fatalf("marshal key: %v", err)
+		return fmt.Errorf("marshal key: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
-		t.Fatalf("write certificate: %v", err)
+		return fmt.Errorf("write certificate: %w", err)
 	}
 	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
+		return fmt.Errorf("write key: %w", err)
 	}
+	return nil
 }
 
 func writeCertificate(t *testing.T, directory, commonName string) (string, string) {
