@@ -55,7 +55,8 @@ func Start(cfg config.Config, logger *slog.Logger) (*Server, error) {
 	if !cfg.TURNServerEnabled {
 		return &Server{}, nil
 	}
-	return start(cfg, logger, "")
+	// Every address of the host, unless TURN_SERVER_LISTEN_IP names one.
+	return start(cfg, logger, cfg.TURNServerListenIP)
 }
 
 // maxStreamClients caps the connections each stream listener (TURN over TCP,

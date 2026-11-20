@@ -106,6 +106,30 @@ func TestWarningGateLetsOneWarningThroughPerInterval(t *testing.T) {
 	}
 }
 
+func TestStartListensOnlyOnTheConfiguredAddress(t *testing.T) {
+	// TURN_SERVER_LISTEN_IP keeps the relay off the other addresses of a
+	// host, for example so that an HTTPS proxy can have their port 443.
+	cfg := withTLSListener(t, testConfig(t, 4))
+	cfg.TURNServerPort = freeTURNPort(t)
+	cfg.TURNServerListenIP = "127.0.0.1"
+	server, err := Start(cfg, quietLogger())
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer server.Close()
+	if len(server.udp) != 1 {
+		t.Fatalf("the relay listens on %d UDP sockets, want the one configured address", len(server.udp))
+	}
+	for name, address := range map[string]net.Addr{
+		"UDP": server.udp[0].LocalAddr(), "TCP": server.tcp.Addr(), "TLS": server.tls.Addr(),
+	} {
+		host, _, err := net.SplitHostPort(address.String())
+		if err != nil || host != "127.0.0.1" {
+			t.Errorf("the %s listener is on %s, want 127.0.0.1", name, address)
+		}
+	}
+}
+
 // withTLSListener returns cfg with TURN over TLS on a free port and a
 // certificate on disk.
 func withTLSListener(t *testing.T, cfg config.Config) config.Config {

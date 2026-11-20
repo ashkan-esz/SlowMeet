@@ -28,6 +28,16 @@
 #
 # TURN_SERVER_PORT and TURN_SERVER_TLS_PORT from .env change both the published
 # and the listening port. Do not set TURN_SERVER_TLS_PORT=0 with this file.
+#
+# TURN_TLS_PUBLISH, when set, replaces only the published side of the TLS
+# port, so TURN over TLS can be offered where filtered networks let it
+# through while the relay keeps listening on its own port in the container:
+#
+#   TURN_TLS_PUBLISH=203.0.113.9:443   a second address of the host, port 443
+#   TURN_TLS_PUBLISH=8443              another port on every address
+#
+# Name that address and port in a turns: URL of TURN_URLS. Unset, the mapping
+# is the one described above.
 services:
   slowmeet:
     environment:
@@ -37,6 +47,6 @@ services:
     ports:
       - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/udp"
       - "${TURN_SERVER_PORT:-3478}:${TURN_SERVER_PORT:-3478}/tcp"
-      - "${TURN_SERVER_TLS_PORT:-5349}:${TURN_SERVER_TLS_PORT:-5349}/tcp"
+      - "${TURN_TLS_PUBLISH:-${TURN_SERVER_TLS_PORT:-5349}}:${TURN_SERVER_TLS_PORT:-5349}/tcp"
     volumes:
       - "${TURN_CERT_DIR:-./deploy/turn-certs}:/etc/slowmeet/turn-certs:ro"

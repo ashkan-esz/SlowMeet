@@ -116,6 +116,12 @@ ports in the host and provider firewalls. The relay port range
 (`49152-49999`) is not published and needs no firewall rule: only the SFU in
 the same container sends to it.
 
+To offer TURN over TLS on port 443 of a second address of the host, set
+`TURN_TLS_PUBLISH=<address>:443` in `.env`; it changes only the published
+side of the TLS port. The
+[configuration guide](configuration.md#built-in-turn-relay) has the details
+and the Podman equivalent.
+
 To keep the override for every later command, list it once in `.env`:
 
 ```text

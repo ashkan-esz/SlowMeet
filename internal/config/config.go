@@ -53,7 +53,10 @@ type Config struct {
 	TURNServerRelayPortMax int
 	// TURNServerRelayIP overrides the local IPv4 address relay sockets bind;
 	// empty selects it automatically.
-	TURNServerRelayIP        string
+	TURNServerRelayIP string
+	// TURNServerListenIP is the one local address the relay's listeners
+	// bind; empty for every address of the host.
+	TURNServerListenIP       string
 	ICEIPv4Only              bool
 	ICETransportPolicy       string
 	EnabledConnectionMethods []string
@@ -238,6 +241,7 @@ func LoadFromEnv() (Config, error) {
 		TURNServerRelayPortMin: turnServerRelayPortMin,
 		TURNServerRelayPortMax: turnServerRelayPortMax,
 		TURNServerRelayIP:      os.Getenv("TURN_SERVER_RELAY_IP"),
+		TURNServerListenIP:     strings.TrimSpace(os.Getenv("TURN_SERVER_LISTEN_IP")),
 
 		ICEIPv4Only:         iceIPv4Only,
 		ICETransportPolicy:  iceTransportPolicy,
@@ -425,6 +429,14 @@ func (c Config) validateTURNServer() error {
 	if c.TURNServerRelayIP != "" {
 		if _, err := ParseTURNServerRelayIP(c.TURNServerRelayIP); err != nil {
 			return err
+		}
+	}
+	// The listeners may be on IPv6; only relay sockets are IPv4.
+	if c.TURNServerListenIP != "" {
+		ip := net.ParseIP(c.TURNServerListenIP)
+		if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+			return fmt.Errorf("TURN_SERVER_LISTEN_IP must be one address of this host, " +
+				"or empty to listen on every address")
 		}
 	}
 	return nil

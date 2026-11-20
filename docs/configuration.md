@@ -67,6 +67,7 @@ use it. With the relay off, none of the settings below are read.
 | `TURN_SERVER_TLS_CERT_FILE`, `TURN_SERVER_TLS_KEY_FILE` | empty | PEM certificate chain and key the process can read |
 | `TURN_SERVER_REALM` | `slowmeet` | TURN realm; any name works |
 | `TURN_SERVER_RELAY_PORT_MIN`, `TURN_SERVER_RELAY_PORT_MAX` | `49152`, `49999` | UDP ports for relay allocations; must not overlap the ICE UDP range |
+| `TURN_SERVER_LISTEN_IP` | every address | One local address (IPv4 or IPv6) for the relay's listeners, for host-network and non-container installs |
 | `TURN_SERVER_RELAY_IP` | automatic | Local IPv4 address relay sockets bind: one address of this host, not the wildcard, a multicast, or the broadcast address |
 
 What to expect from it:
@@ -92,6 +93,25 @@ What to expect from it:
   relay port range carries traffic only between the relay and the SFU on the
   same host, so it needs neither a firewall rule nor published container
   ports.
+- **TURN over TLS can be offered on port 443.** Networks that pass only web
+  traffic also drop 3478 and 5349, and port 443 of the host's first address
+  belongs to the HTTPS proxy. With a second public address there are two ways
+  to give it to the relay, and both leave everything else as it is:
+  - Docker bridge network: set `TURN_TLS_PUBLISH=<second address>:443`. The
+    relay keeps listening on `TURN_SERVER_TLS_PORT` inside the container and
+    only the published side changes (see `deploy/compose.turn.yml`).
+    `podman-compose` does not resolve that setting; under Podman add an
+    override file of your own with the extra mapping, for example
+    `"203.0.113.9:443:5349/tcp"` under `services.slowmeet.ports`.
+  - Host network or no container: set `TURN_SERVER_LISTEN_IP=<second
+    address>` and `TURN_SERVER_TLS_PORT=443`. The relay then binds only that
+    address, for UDP and TCP as well. Binding a port below 1024 needs the
+    `CAP_NET_BIND_SERVICE` capability, which the shipped container does not
+    have.
+
+  Either way, name the address and port in a `turns:` URL of `TURN_URLS`
+  (through a host name the certificate covers), and make the HTTPS proxy
+  listen on the first address only instead of on every address.
 - **It works behind NAT without hairpinning.** Relay sockets bind
   `ICE_PUBLIC_IP` when this host owns that address, otherwise the address of
   the default route, and then translate the public address to the local one
