@@ -101,6 +101,9 @@ type client struct {
 	reconnectToken string
 	resumed        bool
 	joined         bool
+	// writeWait bounds each frame write; zero means websocketWriteWait (for
+	// clients built outside ServeHTTP).
+	writeWait time.Duration
 	// announced records whether this participant's join was broadcast to the
 	// room; only announced departures broadcast a left event. Written by the
 	// connection's read loop and read by its cleanup path (same goroutine).
@@ -189,6 +192,12 @@ type Hub struct {
 	pendingConnections    int
 	maxPendingConnections int
 	joinTimeout           time.Duration
+	// Liveness and resume timings. NewHub sets them from the package
+	// constants; tests shorten them on a hub before serving it.
+	pongWait             time.Duration
+	pingPeriod           time.Duration
+	writeWait            time.Duration
+	supersededCloseDelay time.Duration
 }
 
 func videoMediaStateBecameActive(previous, current Message) bool {
@@ -301,6 +310,10 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		Meeting: m, Config: cfg, Logger: logger,
 		maxPendingConnections: 128,
 		joinTimeout:           15 * time.Second,
+		pongWait:              websocketPongWait,
+		pingPeriod:            websocketPingPeriod,
+		writeWait:             websocketWriteWait,
+		supersededCloseDelay:  supersededPeerCloseDelay,
 		passwordLimiter:       ratelimit.New(joinPasswordFailuresPerMinute, joinPasswordFailureBurst),
 		// permessage-deflate: SDP offers and answers are 5-25 KB of highly
 		// repetitive text, and the rotating TURN methods exchange a pair every
@@ -691,7 +704,7 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 			// the client never re-publishes, the dead publications are
 			// cleaned up by that close.
 			previousPeer := previous.peer
-			time.AfterFunc(supersededPeerCloseDelay, func() { _ = previousPeer.Close() })
+			time.AfterFunc(h.supersededCloseDelay, func() { _ = previousPeer.Close() })
 		}
 		if previous.finished != nil {
 			<-previous.finished
@@ -817,15 +830,17 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(maxSignalingMessageSize)
-	conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+	pongWait := h.pongWait
+	conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 	c := &client{
 		conn:       conn,
 		finished:   make(chan struct{}),
 		outbound:   make(chan *Message, outboundQueueSize),
 		writerDone: make(chan struct{}),
+		writeWait:  h.writeWait,
 		remoteIP:   ratelimit.ClientIPWithTrustedProxyCIDRs(r, h.Config.Snapshot().TrustedProxyCIDRs),
 	}
 	done := make(chan struct{})
@@ -857,7 +872,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		close(c.finished)
 	}()
 	go func() {
-		ticker := time.NewTicker(websocketPingPeriod)
+		ticker := time.NewTicker(h.pingPeriod)
 		defer ticker.Stop()
 		for {
 			select {
@@ -881,7 +896,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A live client keeps exchanging data frames even when its pong
 		// control frames are swallowed by an intermediary; every successful
 		// read is proof of liveness.
-		_ = conn.SetReadDeadline(time.Now().Add(websocketPongWait))
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		if msg.Type == TypeJoin && c.participant.ID == "" {
 			c.joinAttempts++
 			if c.joinAttempts > maxJoinAttempts {
@@ -1515,7 +1530,11 @@ func (c *client) writeFrame(msg *Message) error {
 		close(msg.flush)
 		return nil
 	}
-	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteWait)); err != nil {
+	writeWait := c.writeWait
+	if writeWait <= 0 {
+		writeWait = websocketWriteWait
+	}
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
 		return err
 	}
 	// Broadcasts serialize once and share the encoded bytes; WriteMessage
