@@ -36,6 +36,10 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 		{name: "tcp", transport: "tcp", publicIP: "127.0.0.1", policy: "all"},
 		{name: "udp with a public address that is not local", transport: "udp", publicIP: "203.0.113.7", policy: "all"},
 		{name: "tcp with a public address that is not local", transport: "tcp", publicIP: "203.0.113.7", policy: "all"},
+		// TURN over TLS is the last resort on a filtered network. The ICE
+		// agent verifies the relay's certificate; see TestMain.
+		{name: "tls", transport: "tls", publicIP: "127.0.0.1", policy: "all"},
+		{name: "tls with a public address that is not local", transport: "tls", publicIP: "203.0.113.7", policy: "all"},
 		{name: "relay-only SFU", transport: "udp", publicIP: "127.0.0.1", policy: "relay"},
 		{name: "relay-only SFU with a public address that is not local", transport: "udp", publicIP: "203.0.113.7", policy: "relay"},
 	}
@@ -57,6 +61,10 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 			for cfg.ICEUDPPortMin <= cfg.TURNServerRelayPortMax && cfg.TURNServerRelayPortMin <= cfg.ICEUDPPortMax {
 				cfg.ICEUDPPortMin, cfg.ICEUDPPortMax = freeRelayRange(t, 8)
 			}
+			if test.transport == "tls" {
+				cfg.TURNServerTLSPort = freeTCPPort(t)
+				cfg.TURNServerTLSCertFile, cfg.TURNServerTLSKeyFile = trustedCertFile, trustedKeyFile
+			}
 			server := startRelay(t, cfg)
 			if server.addresses.translates() != translated {
 				t.Fatalf("translates() = %v for public address %s and relay address %v",
@@ -68,6 +76,9 @@ func TestBrowserReachesTheSFUThroughTheRelay(t *testing.T) {
 				relayPort = server.tcp.Addr().(*net.TCPAddr).Port
 			}
 			relayURL := fmt.Sprintf("turn:127.0.0.1:%d?transport=%s", relayPort, test.transport)
+			if test.transport == "tls" {
+				relayURL = fmt.Sprintf("turns:127.0.0.1:%d?transport=tcp", localPort(server.tls.Addr()))
+			}
 
 			// As internal/signaling builds it: the SFU's peer is given the
 			// TURN server only when it has no reachable address of its own.
