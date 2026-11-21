@@ -33,22 +33,20 @@ func fastLinkFramePackets(timestamp uint32, firstSequence uint16, count int) []*
 }
 
 func TestVideoFrameBufferMaxPacketsBoundary(t *testing.T) {
-	// KNOWN ISSUE (B3): frames larger than maxFramePackets (128) are dropped
-	// whole. A 1080p keyframe at the 3 Mbps default cap can reach ~150 KB, i.e.
-	// more than 128 full-size packets, so a fast publisher's keyframe never
-	// reaches any receiver and every receiver keeps asking for another one.
-	// Desired: such a frame is forwarded. When fixed, the 129 and 200 rows flip
-	// to wantComplete: true (and videoRepairFrame.seen must be resized with the
-	// limit).
+	// A 1080p keyframe at the 3 Mbps default cap can reach ~150 KB, more than
+	// 128 full-size packets; the old 128-packet limit dropped such keyframes
+	// whole, so receivers kept asking for one that never arrived (B3). Frames
+	// up to maxFramePackets are forwarded; only larger ones are dropped.
 	tests := []struct {
 		name         string
 		packets      int
 		wantComplete bool
 	}{
 		{name: "127 packets", packets: 127, wantComplete: true},
-		{name: "128 packets at the limit", packets: 128, wantComplete: true},
-		{name: "129 packets over the limit", packets: 129, wantComplete: false},
-		{name: "200 packet 1080p keyframe", packets: 200, wantComplete: false},
+		{name: "129 packets, over the old limit", packets: 129, wantComplete: true},
+		{name: "200 packet 1080p keyframe", packets: 200, wantComplete: true},
+		{name: "packets at the limit", packets: maxFramePackets, wantComplete: true},
+		{name: "one packet over the limit", packets: maxFramePackets + 1, wantComplete: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

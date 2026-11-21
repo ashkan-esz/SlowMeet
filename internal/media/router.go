@@ -295,9 +295,15 @@ const (
 	maxVideoFrameBufferBytes  = 16 << 20
 	maxQueuedVideoFrames      = 4
 	cameraLayerActivityWindow = 3 * time.Second
-	// maxFramePackets bounds a buffered frame well above any real codec frame
-	// size, which keeps the per-frame dedupe scan and insertion sort trivial.
-	maxFramePackets = 128
+	// maxFramePackets bounds a buffered frame; a frame with more packets is
+	// dropped whole. It must hold a keyframe at the highest bitrate cap: a
+	// 1080p keyframe at the 3 Mbps default reaches ~150 KB, about 130 full
+	// packets, and the old limit of 128 dropped exactly those, so receivers
+	// kept asking for keyframes that never arrived (B3 in
+	// docs/network-testing.md). 512 packets (~600 KB) leaves room for larger
+	// keyframes while keeping the per-frame dedupe scan, insertion sort and
+	// repair bitmaps (videoRepairFrame.seen) small.
+	maxFramePackets = 512
 )
 
 type Router struct {
@@ -1590,7 +1596,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	if !f.dropping {
 		if len(f.packets) > 0 {
 			// The common in-order case cannot contain a duplicate: a frame is
-			// limited to 128 packets, far fewer than a sequence number cycle.
+			// limited to maxFramePackets, far fewer than a sequence number cycle.
 			if !f.consecutive || packet.SequenceNumber != f.lastSequence+1 {
 				f.consecutive = false
 				if framePacketDuplicate(f.packets, packet.SequenceNumber) {
