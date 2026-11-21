@@ -505,6 +505,13 @@ func (h *Hub) disconnect(c *client) {
 	if !graceEligible && !superseded {
 		h.teardownClientMedia(c)
 	}
+	if graceEligible {
+		// The browser closes its old peer connection when it reconnects, so
+		// the participant's media ends within seconds; keep its publications
+		// for the resume to swap into instead of letting the end of media
+		// remove them. Grace expiry unregisters the participant and drops them.
+		h.router.HoldPublications(c.participant.ID)
+	}
 
 	if c.joined {
 		h.metrics.PeerLeft()

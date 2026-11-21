@@ -89,6 +89,76 @@ type publicationTarget struct {
 	// publication's single forwarding goroutine.
 	lastSentLayer string
 	stopOnce      sync.Once
+	// lastAudio is the sequence number (high 32 bits) and timestamp (low 32
+	// bits) of the last audio packet written, valid once hasLastAudio is set.
+	// A publication swap reads it to continue the receiver's stream.
+	lastAudio    atomic.Uint64
+	hasLastAudio atomic.Bool
+	// audioRebase is set on a target that took over a receiver's sender in a
+	// publication swap; written only by the target's writer goroutine.
+	audioRebase *audioRebase
+}
+
+// audioRebase keeps one receiver's audio stream continuous across a
+// publication swap. The receiver's sender (and its SSRC) stays the same while
+// the source becomes the resumed publisher, whose RTP sequence numbers and
+// timestamps start somewhere unrelated; on an unchanged SSRC a browser's audio
+// receiver can read that jump as old or duplicate packets and drop them, so
+// the resumed participant goes silent for the room (B11 in
+// docs/network-testing.md). Video is not rebased: receivers' NACKs name source
+// sequence numbers (target_video_loss.go), and a keyframe resynchronizes it.
+type audioRebase struct {
+	// predecessor is the target this one replaced. Its last packet is read
+	// when the first packet of the new source arrives, after the swap stopped
+	// the predecessor's writer, so a packet it was still flushing is counted.
+	predecessor     *publicationTarget
+	started         bool
+	sequenceOffset  uint16
+	timestampOffset uint32
+}
+
+// audioRebaseFrameTicks is the timestamp step assumed between the last packet
+// before a swap and the first one after it: one 20 ms Opus frame at 48 kHz.
+const audioRebaseFrameTicks = 960
+
+func (rebase *audioRebase) apply(packet *rtp.Packet) *rtp.Packet {
+	if !rebase.started {
+		rebase.started = true
+		if rebase.predecessor.hasLastAudio.Load() {
+			last := rebase.predecessor.lastAudio.Load()
+			rebase.sequenceOffset = uint16(last>>32) + 1 - packet.SequenceNumber
+			rebase.timestampOffset = uint32(last) + audioRebaseFrameTicks - packet.Timestamp
+		}
+		rebase.predecessor = nil
+	}
+	// The packet is shared by every target of the publication: rewrite a copy.
+	rewritten := *packet
+	rewritten.SequenceNumber += rebase.sequenceOffset
+	rewritten.Timestamp += rebase.timestampOffset
+	return &rewritten
+}
+
+// writeAudio writes one audio packet to the receiver, continuing its stream
+// across a publication swap, and records what was sent for the next swap.
+func (t *publicationTarget) writeAudio(packet *rtp.Packet) error {
+	if t.audioRebase != nil {
+		packet = t.audioRebase.apply(packet)
+	}
+	if err := t.track.WriteRTP(packet); err != nil {
+		return err
+	}
+	t.lastAudio.Store(uint64(packet.SequenceNumber)<<32 | uint64(packet.Timestamp))
+	t.hasLastAudio.Store(true)
+	return nil
+}
+
+// continueAudioFrom makes t continue predecessor's audio stream to the same
+// receiver. Called in a publication swap before t's writer starts.
+func (t *publicationTarget) continueAudioFrom(predecessor *publicationTarget) {
+	if t.audio == nil || predecessor == nil {
+		return
+	}
+	t.audioRebase = &audioRebase{predecessor: predecessor}
 }
 
 const (
@@ -150,7 +220,7 @@ func (t *publicationTarget) stop() {
 // removed. WriteRTP failures (receiver left, track removed) are dropped.
 func (t *publicationTarget) writePackets(stopped <-chan struct{}) {
 	if t.audio != nil {
-		t.audio.writePackets(t.track.WriteRTP, t.done, stopped)
+		t.audio.writePackets(t.writeAudio, t.done, stopped)
 		return
 	}
 	for {
@@ -245,9 +315,12 @@ type Router struct {
 	// long-lived relay goroutine always targets the current source — the
 	// resumed publisher, not the peer it superseded (B7).
 	senderFeedback map[*pion.RTPSender]*atomic.Pointer[feedbackRoute]
-	limits         Limits
-	audioDrops     metrics.AudioDrops
-	rtcpRelay      metrics.RTCPRelay
+	// heldSources are publishers inside their reconnect grace window: their
+	// publications outlive the end of their media (see keepStoppedPublication).
+	heldSources map[string]struct{}
+	limits      Limits
+	audioDrops  metrics.AudioDrops
+	rtcpRelay   metrics.RTCPRelay
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -264,8 +337,40 @@ func NewRouter(config ...Limits) *Router {
 		cameraLayers:          make(map[string]string),
 		videoKeyFrameRetries:  make(map[videoKeyFrameRequestKey]*videoKeyFrameRetry),
 		senderFeedback:        make(map[*pion.RTPSender]*atomic.Pointer[feedbackRoute]),
+		heldSources:           make(map[string]struct{}),
 		limits:                limits,
 	}
+}
+
+// HoldPublications keeps sourceID's publications registered when their media
+// ends, until sourceID registers a new peer (a resume) or is unregistered (it
+// left, or its grace window lapsed). The hub calls it when a participant
+// enters its reconnect grace window.
+func (r *Router) HoldPublications(sourceID string) {
+	r.mu.Lock()
+	r.heldSources[sourceID] = struct{}{}
+	r.mu.Unlock()
+}
+
+// keepStoppedPublication reports whether a publication whose media ended must
+// stay registered instead of being removed. It does while its publisher is in
+// the reconnect grace window, and once the publisher has resumed onto a new
+// peer. A browser closes its old peer connection when it reconnects, so every
+// publication's media ends within seconds of the drop; removing them would
+// detach every receiver's sender, and the resume would republish onto
+// whichever free transceivers pion's AddTrack picks — a camera landing on the
+// old screen's transceiver keeps the receiver's "|screen" track ID, and the
+// browser client shows nothing (B9). Kept, each publication is replaced by
+// the resumed one through migrateTargetsLocked: the same senders and
+// transceivers, the same track IDs, and no renegotiation for the room. A
+// publication whose publisher is still on the same peer ended for real and is
+// removed. The caller must hold r.mu.
+func (r *Router) keepStoppedPublicationLocked(pub *publication) bool {
+	if _, held := r.heldSources[pub.sourceID]; held {
+		return true
+	}
+	current := r.peers[pub.sourceID]
+	return current != nil && pub.source != nil && current != pub.source
 }
 
 func (r *Router) AudioDrops() metrics.AudioDropSnapshot {
@@ -329,6 +434,9 @@ func (r *Router) Register(id string, peer *webrtc.Peer, offerer Offerer) {
 	r.mu.Lock()
 	r.peers[id] = peer
 	r.offerers[id] = offerer
+	// From here on a stopped publication of the predecessor peer is kept by
+	// the peer comparison in keepStoppedPublicationLocked.
+	delete(r.heldSources, id)
 	// A resumed client reclaims its participant ID with a brand-new peer
 	// while the reconnect-grace path deliberately skips the superseded
 	// client's teardown (publications are kept alive for the publication-swap
@@ -361,6 +469,7 @@ func (r *Router) Unregister(id string) {
 	r.cancelVideoKeyFrameRetriesForReceiverLocked(id)
 	delete(r.peers, id)
 	delete(r.offerers, id)
+	delete(r.heldSources, id)
 	delete(r.videoSubscriptions, id)
 	delete(r.videoSubscriptionsSet, id)
 	delete(r.cameraLayers, id)
@@ -842,6 +951,7 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 			continue
 		}
 		target := r.newTarget(local, replacement)
+		target.continueAudioFrom(oldTarget)
 		replacement.tracks[targetID] = target
 		replacement.senders[targetID] = sender
 		if route := r.senderFeedback[sender]; route != nil {
@@ -1245,7 +1355,13 @@ func decodeIngressPacket(wire []byte) (*rtp.Packet, error) {
 func (r *Router) reportPublicationReadStop(pub *publication, err error) {
 	r.mu.RLock()
 	stillRegistered := r.pubs[pub.key] == pub
+	keep := stillRegistered && r.keepStoppedPublicationLocked(pub)
 	r.mu.RUnlock()
+	if keep {
+		slog.Default().Info("media_publication_kept_for_resume",
+			"source_id", pub.sourceID, "role", pub.role, "layer", pub.layer, "error", err)
+		return
+	}
 	if stillRegistered {
 		slog.Default().Warn("media_publication_read_stopped",
 			"source_id", pub.sourceID,

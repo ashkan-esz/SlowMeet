@@ -2327,6 +2327,9 @@ const cameraUplinkReportMaxAgeMs = 3000;
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
+// Every track event bound to a remote participant's tile, kept so a resumed
+// participant's still-live tracks can be bound again (remote-track-memory.js).
+const remoteTrackMemory = typeof createRemoteTrackMemory === "function" ? createRemoteTrackMemory() : null;
 const remoteCameraLayerTracks = new Map();
 const remoteScreenTracks = new Map();
 const participantQualityLabels = {
@@ -3037,6 +3040,103 @@ function rememberRemoteTrack(participantID, track, receiver) {
     remoteTrackOwners.set(track.id, participantID);
   }
   if (receiver?.id) remoteReceiverOwners.set(receiver.id, participantID);
+}
+
+// bindRemoteTrack attaches one remote track to its participant's tile. It is
+// the peer connection's ontrack handler and also the rebind path for a
+// participant that resumes onto the same receivers (rebindRememberedTracks).
+function bindRemoteTrack({ streams, track, receiver }) {
+  let participantID = remoteParticipantID(streams, track);
+  let role = remoteMediaRole(streams, track);
+  let element = participantElements.get(participantID);
+  if (track.kind === "video" && screenShareOwner && screenShareOwner !== localParticipantID) {
+    const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
+    const trackID = track?.id || "";
+    const explicitCameraTrack = /-camera$/.test(streamID) ||
+      /\|camera(?:\|(low|medium|high))?$/.test(trackID);
+    const explicitScreenTrack = /-screen$/.test(streamID) || /\|screen$/.test(trackID);
+    // Some browsers deliver screen tracks without stream metadata; the active
+    // owner is the signaling source of truth when the track IDs are ambiguous.
+    if (!explicitCameraTrack && (explicitScreenTrack || !element || participantID === screenShareOwner)) {
+      participantID = screenShareOwner;
+      role = "screen";
+      element = participantElements.get(participantID);
+    }
+  }
+  if (!element) return;
+  rememberRemoteTrack(participantID, track, receiver);
+  remoteTrackMemory?.remember(participantID, { streams, track, receiver });
+  const stream = remoteMediaStream(streams, track);
+  if (track.kind === "video") {
+    const layer = role === "camera" ? remoteCameraLayer(track) : "";
+    const video = role === "screen" ? element.screenVideo : element.cameraVideo;
+    if (layer) {
+      const tracks = remoteCameraLayerTracks.get(participantID) || new Map();
+      tracks.set(layer, track);
+      remoteCameraLayerTracks.set(participantID, tracks);
+      const updateSelectedLayer = () => {
+        if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
+        if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
+      };
+      track.addEventListener("mute", updateSelectedLayer);
+      track.addEventListener("unmute", updateSelectedLayer);
+      track.addEventListener("ended", () => {
+        if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
+        tracks.delete(layer);
+        if (tracks.size === 0) remoteCameraLayerTracks.delete(participantID);
+        if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
+      }, { once: true });
+      showSelectedRemoteCamera(element);
+    } else {
+      if (role === "screen") {
+        bindRemoteScreenTrackForParticipant(participantID, element, track);
+      } else if (role === "camera") {
+        bindRemoteCameraTrack(video, track, () => updateParticipantVideoVisibility(element));
+      } else {
+        video.srcObject = stream;
+      }
+    }
+    video.autoplay = true;
+    video.playsInline = true;
+    video.dataset.mediaRole = role;
+    remoteTrackRoles.set(track.id, role);
+    video.classList.toggle("is-screen-content", role === "screen");
+    updateParticipantVideoVisibility(element);
+    updateVideoOrientation(participantID);
+    if (!layer && (role !== "screen" || video.srcObject?.getTracks().includes(track))) video.play().catch(() => {});
+    if (role === "camera") element.video.play().catch(() => {});
+  } else {
+    element.audio.srcObject = stream;
+    element.audio.autoplay = true;
+    remoteAudioElements.add(element.audio);
+    if (selectedDeviceIDs.speaker && typeof element.audio.setSinkId === "function") {
+      element.audio.setSinkId(selectedDeviceIDs.speaker).catch(() => {});
+    }
+    attachSpeakerAnalyzer(participantID, element.audio, true);
+    Promise.resolve(element.audio.play()).then(() => {
+      if (remoteAudioElements.size > 0) enableAudio.hidden = true;
+    }).catch(() => {
+      enableAudio.hidden = false;
+      showStatus("Click “Enable remote audio” to hear participants.");
+    });
+  }
+}
+
+// rebindRememberedTracks binds a participant's remembered tracks to its tile
+// again when it rejoins under the same ID. A resume inside the reconnect grace
+// window keeps the receivers and swaps the media source behind them on the
+// server, so no ontrack fires; without this the tile the participant_left
+// handler cleared stays silent and black (B11, B9). Only live tracks on
+// receivers the current connection still receives on are rebound.
+function rebindRememberedTracks(participantID) {
+  if (!remoteTrackMemory || !peer) return;
+  const receiving = new Set(peer.getTransceivers()
+    .filter((transceiver) => !transceiver.stopped &&
+      transceiver.currentDirection !== "inactive" && transceiver.currentDirection !== "sendonly")
+    .map((transceiver) => transceiver.receiver));
+  const events = remoteTrackMemory.take(participantID, (event) =>
+    event.track?.readyState === "live" && receiving.has(event.receiver));
+  events.forEach((event) => bindRemoteTrack(event));
 }
 
 function forgetRemoteTracks(element, participantID) {
@@ -3766,7 +3866,10 @@ function connectSocket(name, password) {
     if (message.type === "participant" || message.type === "participant_joined") {
       const participant = message.participant;
       addParticipant(participant);
-      if (message.type === "participant_joined") addChatSystem(`${participant.name} joined the room`);
+      if (message.type === "participant_joined") {
+        addChatSystem(`${participant.name} joined the room`);
+        rebindRememberedTracks(participant.id);
+      }
         if (message.type === "participant") {
           localParticipantID = participant.id;
           markLocalParticipant(participant.id);
@@ -3804,6 +3907,25 @@ function connectSocket(name, password) {
       addChatSystem(`${leftParticipant.name || "A participant"} left the room`);
       const element = participantElements.get(leftParticipant.id);
       if (element) {
+        // Schedule the tile's removal before any of the UI updates below, so
+        // an exception in one of them cannot leave a "Participant left" ghost
+        // tile behind (B10 in docs/network-testing.md).
+        const removalTimer = setTimeout(() => {
+          participantRemovalTimers.delete(leftParticipant.id);
+          if (participantElements.get(leftParticipant.id)?.item === element.item) {
+            element.item.remove();
+            participantElements.delete(leftParticipant.id);
+            if (stageFocusParticipantID === leftParticipant.id) clearStageFocus(true);
+            remoteCameraLayerTracks.delete(leftParticipant.id);
+            const orderIndex = participantOrder.indexOf(leftParticipant.id);
+            if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);
+            updateParticipantCount();
+            renderMeetingLayout();
+          }
+        }, 1200);
+        const previousRemovalTimer = participantRemovalTimers.get(leftParticipant.id);
+        if (previousRemovalTimer) clearTimeout(previousRemovalTimer);
+        participantRemovalTimers.set(leftParticipant.id, removalTimer);
         if (participantMenuOwner?.participantID === leftParticipant.id) closeParticipantMenu(false);
         if (pinnedParticipantIDs.includes(leftParticipant.id)) setPinnedParticipant(leftParticipant.id);
         participantQualitySamples.delete(leftParticipant.id);
@@ -3821,22 +3943,6 @@ function connectSocket(name, password) {
         element.micIndicator.setAttribute("aria-label", `${leftParticipant.name || "A participant"} disconnected`);
         updateParticipantTileState(element);
         renderPeopleList();
-        const removalTimer = setTimeout(() => {
-          participantRemovalTimers.delete(leftParticipant.id);
-          if (participantElements.get(leftParticipant.id)?.item === element.item) {
-            element.item.remove();
-            participantElements.delete(leftParticipant.id);
-            if (stageFocusParticipantID === leftParticipant.id) clearStageFocus(true);
-            remoteCameraLayerTracks.delete(leftParticipant.id);
-            const orderIndex = participantOrder.indexOf(leftParticipant.id);
-            if (orderIndex >= 0) participantOrder.splice(orderIndex, 1);
-            updateParticipantCount();
-            renderMeetingLayout();
-          }
-        }, 1200);
-        const previousRemovalTimer = participantRemovalTimers.get(leftParticipant.id);
-        if (previousRemovalTimer) clearTimeout(previousRemovalTimer);
-        participantRemovalTimers.set(leftParticipant.id, removalTimer);
       }
       if (leftParticipant.id === screenShareOwner) {
         screenShareOwner = undefined;
@@ -3895,6 +4001,7 @@ function resetMediaConnection() {
   participantRemovalTimers.clear();
   participants.replaceChildren();
   participantElements.clear();
+  remoteTrackMemory?.clear();
   participantOrder.splice(0);
   pendingHandState = undefined;
   updateRaisedHandsUI();
@@ -4085,81 +4192,7 @@ async function startWebRTC() {
   videoTransceiver = currentPeer.addTransceiver("video", {
     direction: receiveVideoEnabled ? "sendrecv" : "sendonly"
   });
-  currentPeer.ontrack = ({ streams, track, receiver }) => {
-    let participantID = remoteParticipantID(streams, track);
-    let role = remoteMediaRole(streams, track);
-    let element = participantElements.get(participantID);
-    if (track.kind === "video" && screenShareOwner && screenShareOwner !== localParticipantID) {
-      const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
-      const trackID = track?.id || "";
-      const explicitCameraTrack = /-camera$/.test(streamID) ||
-        /\|camera(?:\|(low|medium|high))?$/.test(trackID);
-      const explicitScreenTrack = /-screen$/.test(streamID) || /\|screen$/.test(trackID);
-      // Some browsers deliver screen tracks without stream metadata; the active
-      // owner is the signaling source of truth when the track IDs are ambiguous.
-      if (!explicitCameraTrack && (explicitScreenTrack || !element || participantID === screenShareOwner)) {
-        participantID = screenShareOwner;
-        role = "screen";
-        element = participantElements.get(participantID);
-      }
-    }
-    if (!element) return;
-    rememberRemoteTrack(participantID, track, receiver);
-    const stream = remoteMediaStream(streams, track);
-    if (track.kind === "video") {
-      const layer = role === "camera" ? remoteCameraLayer(track) : "";
-      const video = role === "screen" ? element.screenVideo : element.cameraVideo;
-      if (layer) {
-        const tracks = remoteCameraLayerTracks.get(participantID) || new Map();
-        tracks.set(layer, track);
-        remoteCameraLayerTracks.set(participantID, tracks);
-        const updateSelectedLayer = () => {
-          if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
-          if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
-        };
-        track.addEventListener("mute", updateSelectedLayer);
-        track.addEventListener("unmute", updateSelectedLayer);
-        track.addEventListener("ended", () => {
-          if (remoteCameraLayerTracks.get(participantID) !== tracks || tracks.get(layer) !== track) return;
-          tracks.delete(layer);
-          if (tracks.size === 0) remoteCameraLayerTracks.delete(participantID);
-          if (participantElements.get(participantID) === element) showSelectedRemoteCamera(element);
-        }, { once: true });
-        showSelectedRemoteCamera(element);
-      } else {
-        if (role === "screen") {
-          bindRemoteScreenTrackForParticipant(participantID, element, track);
-        } else if (role === "camera") {
-          bindRemoteCameraTrack(video, track, () => updateParticipantVideoVisibility(element));
-        } else {
-          video.srcObject = stream;
-        }
-      }
-      video.autoplay = true;
-      video.playsInline = true;
-      video.dataset.mediaRole = role;
-      remoteTrackRoles.set(track.id, role);
-      video.classList.toggle("is-screen-content", role === "screen");
-      updateParticipantVideoVisibility(element);
-      updateVideoOrientation(participantID);
-      if (!layer && (role !== "screen" || video.srcObject?.getTracks().includes(track))) video.play().catch(() => {});
-      if (role === "camera") element.video.play().catch(() => {});
-    } else {
-      element.audio.srcObject = stream;
-      element.audio.autoplay = true;
-      remoteAudioElements.add(element.audio);
-      if (selectedDeviceIDs.speaker && typeof element.audio.setSinkId === "function") {
-        element.audio.setSinkId(selectedDeviceIDs.speaker).catch(() => {});
-      }
-      attachSpeakerAnalyzer(participantID, element.audio, true);
-      Promise.resolve(element.audio.play()).then(() => {
-        if (remoteAudioElements.size > 0) enableAudio.hidden = true;
-      }).catch(() => {
-        enableAudio.hidden = false;
-        showStatus("Click “Enable remote audio” to hear participants.");
-      });
-    }
-  };
+  currentPeer.ontrack = (event) => bindRemoteTrack(event);
   currentPeer.onicecandidate = ({ candidate }) => {
     if (candidate && isCurrentWebRTC(generation, currentPeer, currentSocket)) currentSocket.send(JSON.stringify({
       version: 1, type: "candidate", candidate: candidate.candidate,
