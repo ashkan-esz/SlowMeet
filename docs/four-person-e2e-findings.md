@@ -1591,3 +1591,13 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-hwkhTx`
+
+## 2026-11-21T09:14:37.151Z — relay-path-under-loss
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=relay-path-under-loss make test-media-e2e-four-netns`
+- Expected: A participant on TURN/TCP sees 2% loss and 50 ms on the relay leg: audio flows both ways and the room recovers.
+- Actual: P4 back on Automatic: the current peer connection never reached connected within 60000 ms ({"count":5,"state":"closed","ports":[],"pair":null,"sockets":1,"socketOpen":true})
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ZlDVUq`
+- Cause: harness, not product. P4's meeting peer stayed connected; the closed "current peer" was the plain-relay probe's sender/echo pair, which the harness counted as the latest peer. Fixed by keeping probe peers out of `peerConnections`.

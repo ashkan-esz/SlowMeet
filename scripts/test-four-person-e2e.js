@@ -206,16 +206,23 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
     // socketCreates and peerStates are timestamped histories for the
     // resilience scenarios; they are separate from socketEvents so readers
     // that slice or filter socketEvents keep their meaning.
-    window.__slowMeetTest = { peerConnections: [], sockets: [], socketEvents: [], socketCreates: [], peerStates: [] };
+    window.__slowMeetTest = { peerConnections: [], probePeers: [], sockets: [], socketEvents: [], socketCreates: [], peerStates: [] };
     window.RTCPeerConnection = new Proxy(nativePeer, { construct(target, args, newTarget) {
       const peer = Reflect.construct(target, args, newTarget);
-      const index = window.__slowMeetTest.peerConnections.length;
+      // The background plain-relay probe (startPlainRelayProbe in app.js)
+      // builds its own short-lived sender/echo pair while "Automatic" sits on
+      // a relay. Those are not the meeting's peer, so they are kept out of
+      // peerConnections, where every reader takes at(-1) as the live one.
+      const probe = /startPlainRelayProbe/.test(new Error().stack || "");
+      const list = probe ? window.__slowMeetTest.probePeers : window.__slowMeetTest.peerConnections;
+      const index = list.length;
       peer.__createdAt = Date.now();
-      window.__slowMeetTest.peerConnections.push(peer);
+      list.push(peer);
       peer.addEventListener("connectionstatechange", () => {
         const at = Date.now();
         if (peer.connectionState === "connected" && !peer.__connectedAt) peer.__connectedAt = at;
-        window.__slowMeetTest.peerStates.push({ at, peer: index, state: peer.connectionState });
+        window.__slowMeetTest.peerStates.push(probe ? { at, peer: index, probe: true, state: peer.connectionState }
+          : { at, peer: index, state: peer.connectionState });
       });
       return peer;
     } });
@@ -3555,7 +3562,8 @@ async function currentPeerState(page) {
         }
       });
     } catch (_) {}
-    return { count: peers.length, state: peer.connectionState, ports, pair, sockets: window.__slowMeetTest.sockets.length,
+    return { count: peers.length, probePeers: window.__slowMeetTest.probePeers.length, state: peer.connectionState, ports, pair,
+      sockets: window.__slowMeetTest.sockets.length,
       socketOpen: window.__slowMeetTest.sockets.at(-1)?.readyState === WebSocket.OPEN };
   });
 }
@@ -4362,6 +4370,7 @@ async function scenarioRelayPathUnderLoss() {
   await openSettingsPanel(p4);
   await p4.locator("#settings-connection-method").selectOption("auto", { force: true });
   await waitForCurrentPeerConnected(p4, "P4 back on Automatic", 60000);
+  console.log(`  P4 back on Automatic: ${JSON.stringify(await currentPeerState(p4))}`);
   await assertFullMeshMedia({ label: "after the relay leg clears" });
 }
 
