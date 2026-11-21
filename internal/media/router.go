@@ -845,7 +845,7 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 		replacement.tracks[targetID] = target
 		replacement.senders[targetID] = sender
 		if route := r.senderFeedback[sender]; route != nil {
-			route.Store(newFeedbackRoute(replacement))
+			route.Store(newFeedbackRoute(replacement, target))
 		}
 		go target.writePackets(replacement.stoppedChannel())
 		// The old target's writer exits through stop; any packets still in its
@@ -909,7 +909,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 			op.pub.senders[op.targetID] = sender
 			if op.pub.source != nil && op.pub.remote != nil {
 				route := &atomic.Pointer[feedbackRoute]{}
-				route.Store(newFeedbackRoute(op.pub))
+				route.Store(newFeedbackRoute(op.pub, target))
 				r.senderFeedback[sender] = route
 				go target.writePackets(op.pub.stoppedChannel())
 				go relayRTCP(sender, route, &r.rtcpRelay)
@@ -972,10 +972,36 @@ func dispatchOffers(offers map[string]Offerer) {
 type feedbackRoute struct {
 	source *webrtc.Peer
 	ssrc   uint32
+	// videoTarget is the receiver's egress target for a video publication,
+	// whose mailbox-loss record decides which NACKed packets only the
+	// publisher can resend; nil for audio, whose NACKs relay unfiltered.
+	videoTarget *publicationTarget
 }
 
-func newFeedbackRoute(pub *publication) *feedbackRoute {
-	return &feedbackRoute{source: pub.source, ssrc: uint32(pub.remote.SSRC())}
+func newFeedbackRoute(pub *publication, target *publicationTarget) *feedbackRoute {
+	route := &feedbackRoute{source: pub.source, ssrc: uint32(pub.remote.SSRC())}
+	if pub.remote.Kind() == pion.RTPCodecTypeVideo {
+		route.videoTarget = target
+	}
+	return route
+}
+
+// publisherResendable reports, for a receiver's NACK, the packets only the
+// publisher can resend: those this receiver's mailbox dropped, which the
+// SFU never wrote to the receiver and repairs from the publisher's
+// retransmission (target_video_loss.go). Every other NACKed packet is
+// already handled at the SFU — its NACK responder resends what it wrote and
+// lost on the downlink, its NACK generator requests what the publisher's
+// uplink lost, and frames the FPS gate or a full pacer queue dropped are
+// meant to stay dropped — so relaying it would only multiply the
+// publisher's retransmissions by the number of receivers. On a thin lossy
+// uplink that multiplication filled the link and starved the publisher's
+// own audio (B8 in docs/network-testing.md).
+func (route *feedbackRoute) publisherResendable(now time.Time) func(uint16) bool {
+	if route.videoTarget == nil {
+		return nil
+	}
+	return func(sequence uint16) bool { return route.videoTarget.hasVideoLossSequence(sequence, now) }
 }
 
 // relayRTCP forwards receiver feedback to the publication's source. The route
@@ -993,7 +1019,7 @@ func relayRTCP(sender *pion.RTPSender, route *atomic.Pointer[feedbackRoute], rel
 			return
 		}
 		current := route.Load()
-		routed := routeRTCPFeedback(packets, current.ssrc)
+		routed := routeFilteredRTCPFeedback(packets, current.ssrc, current.publisherResendable(time.Now()))
 		relayed.Observe(packets)
 		if len(routed) == 0 || current.source == nil {
 			// Nothing in the batch concerns the publisher; skip the
@@ -1030,6 +1056,13 @@ func readSenderRTCP(sender interface {
 // docs/vps-regression-diagnostics.md), each one an SRTCP encrypt, a send, and
 // bytes on the publisher's downlink.
 func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
+	return routeFilteredRTCPFeedback(packets, sourceSSRC, nil)
+}
+
+// routeFilteredRTCPFeedback is routeRTCPFeedback that keeps, in each NACK,
+// only the sequence numbers resendable accepts; a NACK left with nothing is
+// not relayed at all. A nil resendable keeps every NACK whole.
+func routeFilteredRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32, resendable func(uint16) bool) []rtcp.Packet {
 	var routed []rtcp.Packet
 	for _, packet := range packets {
 		switch feedback := packet.(type) {
@@ -1048,7 +1081,14 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 		case *rtcp.TransportLayerNack:
 			copy := *feedback
 			copy.MediaSSRC = sourceSSRC
-			copy.Nacks = append([]rtcp.NackPair(nil), feedback.Nacks...)
+			if resendable != nil {
+				copy.Nacks = filterNackPairs(feedback.Nacks, resendable)
+				if len(copy.Nacks) == 0 {
+					continue
+				}
+			} else {
+				copy.Nacks = append([]rtcp.NackPair(nil), feedback.Nacks...)
+			}
 			routed = append(routed, &copy)
 		case *rtcp.ReceiverEstimatedMaximumBitrate:
 			// Sent only by receivers without transport-cc; a publisher's
@@ -1057,6 +1097,23 @@ func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
 		}
 	}
 	return routed
+}
+
+// filterNackPairs rebuilds NACK pairs from the sequence numbers keep accepts,
+// returning nil when none is left. The receiver's pairs are never modified.
+func filterNackPairs(pairs []rtcp.NackPair, keep func(uint16) bool) []rtcp.NackPair {
+	var kept []uint16
+	for _, pair := range pairs {
+		for _, sequence := range pair.PacketList() {
+			if keep(sequence) {
+				kept = append(kept, sequence)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return rtcp.NackPairsFromSequenceNumbers(kept)
 }
 
 func (r *Router) forward(pub *publication) {

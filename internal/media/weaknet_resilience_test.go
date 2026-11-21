@@ -108,13 +108,12 @@ func TestWeakNetImpairedPublisherUplinkReachesEverySubscriber(t *testing.T) {
 		// minAudio is the audio packets each receiver must get from the
 		// impaired publisher over the window (calibrated; see the log).
 		minAudio int
-		// knownIssue gates the audio floor behind SLOWMEET_KNOWN_FAILING.
-		knownIssue string
 	}{
-		{name: "lossy uplink", tier: weakNetTier{rate: "1mbit", delay: "50ms", loss: "8%", direction: weakNetUplinkOnly}, minAudio: 200,
-			knownIssue: "B8: the SFU relays receivers' NACKs for the video packets it dropped on purpose (FPS gate, " +
-				"bitrate limiter) to the publisher, whose retransmissions then fill a 1 Mbit uplink and starve its audio " +
-				"to about a third"},
+		// Before B8 was fixed, three receivers' NACKs for each lost packet
+		// were relayed on top of the SFU's own, the publisher's
+		// retransmissions filled this 1 Mbit uplink, and its audio fell to
+		// about a third (107-164 of ~300 packets); it now carries 264-288.
+		{name: "lossy uplink", tier: weakNetTier{rate: "1mbit", delay: "50ms", loss: "8%", direction: weakNetUplinkOnly}, minAudio: 200},
 		{name: "slow uplink", tier: weakNetTier{rate: "300kbit", delay: "50ms", loss: "0%", limit: "20", direction: weakNetUplinkOnly}, minAudio: 145},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,9 +153,6 @@ func TestWeakNetImpairedPublisherUplinkReachesEverySubscriber(t *testing.T) {
 				}
 			}
 			t.Run("audio crosses the impaired uplink", func(t *testing.T) {
-				if tc.knownIssue != "" {
-					knownFailing(t, tc.knownIssue)
-				}
 				for _, receiver := range clean {
 					if got := flow(impaired, receiver); got.audio < tc.minAudio {
 						t.Errorf("%s received %d audio packets from %s's impaired uplink, want >= %d", receiver.id, got.audio, impaired.id, tc.minAudio)

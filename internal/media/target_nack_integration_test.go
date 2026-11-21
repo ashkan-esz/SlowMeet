@@ -127,6 +127,12 @@ func TestRouterRepairsMailboxDropThroughReceiverNACK(t *testing.T) {
 	slow.lastSentLayer = old.lastSentLayer
 	slow.enqueue(&rtp.Packet{}) // Occupy the mailbox until the loss is recorded.
 	pub.tracks["slow"] = slow
+	// The receiver's NACKs are relayed by its mailbox-loss record, so the
+	// feedback route must follow the replacement target, as a publication
+	// swap does.
+	if route := router.senderFeedback[pub.senders["slow"]]; route != nil {
+		route.Store(newFeedbackRoute(pub, slow))
+	}
 	router.mu.Unlock()
 	if err := write(nackIntegrationLostSequence); err != nil {
 		t.Fatal(err)

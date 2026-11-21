@@ -25,7 +25,25 @@ const (
 	// responder on the path has a packet to retransmit for them.
 	rtcpFanInSenderSSRCBase = uint32(0x5100)
 	rtcpFanInNackBase       = uint16(40_000)
+	// rtcpFanInDownstreamLoss is a packet every subscriber NACKs without the
+	// SFU having dropped it from that subscriber's mailbox.
+	rtcpFanInDownstreamLoss = uint16(40_100)
 )
+
+// recordTestMailboxLoss marks sequence as dropped by target's mailbox, as
+// enqueueVideo does when the mailbox is full.
+func recordTestMailboxLoss(target *publicationTarget, sequence uint16) {
+	losses := target.videoLosses.Load()
+	if losses == nil {
+		target.videoLosses.CompareAndSwap(nil, &targetVideoLosses{})
+		losses = target.videoLosses.Load()
+	}
+	losses.mu.Lock()
+	losses.slots[int(sequence)%len(losses.slots)] = targetVideoLoss{
+		sequence: sequence, timestamp: uint32(sequence) * 3000, expires: time.Now().Add(videoRepairWindow),
+	}
+	losses.mu.Unlock()
+}
 
 // rtcpFanInFeedback collects the keyframe and retransmission requests that
 // reach a publisher's camera sender.
@@ -267,15 +285,39 @@ func testSubscriberKeyFrameRequestsFanIn(t *testing.T, subscriberCount int) {
 	}
 
 	// Retransmission requests are per packet, so unlike keyframe requests
-	// every distinct one must reach the publisher, retargeted at its track.
+	// every distinct one the publisher alone can answer must reach it,
+	// retargeted at its track. Only packets the SFU dropped from that
+	// receiver's mailbox are such: each subscriber's lost packet is recorded
+	// as a mailbox loss, and each also NACKs a packet it lost downstream of
+	// the SFU, which the SFU's own NACK responder answers and which must
+	// stop at the SFU (B8).
+	router.mu.RLock()
+	var cameraPub *publication
+	for _, candidate := range router.pubs {
+		if candidate.sourceID == "publisher" && candidate.role == SourceRoleCamera {
+			cameraPub = candidate
+		}
+	}
+	targets := make(map[string]*publicationTarget, len(subscribers))
+	if cameraPub != nil {
+		for _, subscriber := range subscribers {
+			targets[subscriber.id] = cameraPub.tracks[subscriber.id]
+		}
+	}
+	router.mu.RUnlock()
 	wantLost := make([]uint16, 0, subscriberCount)
 	for index, subscriber := range subscribers {
 		lost := rtcpFanInNackBase + uint16(index)
 		wantLost = append(wantLost, lost)
+		target := targets[subscriber.id]
+		if target == nil {
+			t.Fatalf("%s has no egress target for the publisher's camera", subscriber.id)
+		}
+		recordTestMailboxLoss(target, lost)
 		if err := subscriber.client.WriteRTCP([]rtcp.Packet{&rtcp.TransportLayerNack{
 			SenderSSRC: rtcpFanInSenderSSRCBase + uint32(index),
 			MediaSSRC:  uint32(subscriber.camera.SSRC()),
-			Nacks:      []rtcp.NackPair{{PacketID: lost}},
+			Nacks:      rtcp.NackPairsFromSequenceNumbers([]uint16{lost, rtcpFanInDownstreamLoss}),
 		}}); err != nil {
 			t.Fatalf("write %s NACK: %v", subscriber.id, err)
 		}
@@ -286,6 +328,9 @@ func testSubscriberKeyFrameRequestsFanIn(t *testing.T, subscriberCount int) {
 		case nack := <-feedback.nacks:
 			for _, pair := range nack.Nacks {
 				for _, sequence := range pair.PacketList() {
+					if sequence == rtcpFanInDownstreamLoss {
+						t.Fatalf("a NACK for packet %d, lost downstream of the SFU, reached the publisher", sequence)
+					}
 					if !slices.Contains(wantLost, sequence) {
 						// Not one of the test's requests: a NACK some receiver
 						// on the path generated for a packet of its own.
@@ -308,6 +353,19 @@ func testSubscriberKeyFrameRequestsFanIn(t *testing.T, subscriberCount int) {
 	slices.Sort(gotLost)
 	if !slices.Equal(gotLost, wantLost) {
 		t.Fatalf("NACKed sequences at the publisher = %v, want each of %v exactly once", gotLost, wantLost)
+	}
+	quiet := time.After(rtcpFanInQuietWindow)
+	for {
+		select {
+		case nack := <-feedback.nacks:
+			for _, pair := range nack.Nacks {
+				if slices.Contains(pair.PacketList(), rtcpFanInDownstreamLoss) {
+					t.Fatalf("a NACK for packet %d, lost downstream of the SFU, reached the publisher", rtcpFanInDownstreamLoss)
+				}
+			}
+		case <-quiet:
+			return
+		}
 	}
 }
 

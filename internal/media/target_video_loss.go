@@ -60,6 +60,21 @@ func (t *publicationTarget) hasVideoLoss(packet *rtp.Packet) bool {
 	return match
 }
 
+// hasVideoLossSequence is hasVideoLoss for a NACKed sequence number, which
+// carries no RTP timestamp: it reports whether this target's mailbox dropped
+// that packet within the repair window.
+func (t *publicationTarget) hasVideoLossSequence(sequence uint16, now time.Time) bool {
+	losses := t.videoLosses.Load()
+	if losses == nil {
+		return false
+	}
+	losses.mu.Lock()
+	slot := &losses.slots[int(sequence)%len(losses.slots)]
+	match := slot.sequence == sequence && now.Before(slot.expires)
+	losses.mu.Unlock()
+	return match
+}
+
 func (r *Router) videoLossTargets(pub *publication, packet *rtp.Packet) []*publicationTarget {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

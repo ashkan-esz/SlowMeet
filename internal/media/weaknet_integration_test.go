@@ -917,6 +917,9 @@ func (m *weakNetMeshMember) weakNetMeshSinkFrom(sourceID string) *weakNetSink {
 // weakNetMeshFlow is one directed publisher → receiver flow at one instant.
 type weakNetMeshFlow struct {
 	audio, video, gaps int
+	// repaired counts video sequences that arrived after a later one: loss
+	// the receiver got back through NACK.
+	repaired int
 }
 
 // weakNetMeshSnapshot reads every directed flow in the room, keyed
@@ -929,8 +932,10 @@ func weakNetMeshSnapshot(members []*weakNetMeshMember) map[string]weakNetMeshFlo
 				continue
 			}
 			sink := receiver.weakNetMeshSinkFrom(publisher.id)
-			audio, video, _, _, _ := sink.counts()
-			flows[weakNetMeshFlowKey(publisher, receiver)] = weakNetMeshFlow{audio: audio, video: video, gaps: sink.gaps()}
+			audio, video, _, repaired, _ := sink.counts()
+			flows[weakNetMeshFlowKey(publisher, receiver)] = weakNetMeshFlow{
+				audio: audio, video: video, gaps: sink.gaps(), repaired: repaired,
+			}
 		}
 	}
 	return flows
@@ -943,9 +948,10 @@ func weakNetMeshFlowKey(publisher, receiver *weakNetMeshMember) string {
 // weakNetMeshDelta subtracts an earlier snapshot of the same flow.
 func weakNetMeshDelta(after, before weakNetMeshFlow) weakNetMeshFlow {
 	return weakNetMeshFlow{
-		audio: after.audio - before.audio,
-		video: after.video - before.video,
-		gaps:  after.gaps - before.gaps,
+		audio:    after.audio - before.audio,
+		video:    after.video - before.video,
+		gaps:     after.gaps - before.gaps,
+		repaired: after.repaired - before.repaired,
 	}
 }
 
@@ -1590,8 +1596,8 @@ func TestWeakNetSymmetricMeshIsolatesCleanParticipant(t *testing.T) {
 		for _, publisher := range members {
 			if publisher != receiver {
 				got := flow(publisher, receiver)
-				t.Logf("%s (%s) -> %s (%s): audio=%d video=%d gaps=%d", publisher.id, weakNetTierID(publisher.tier),
-					receiver.id, weakNetTierID(receiver.tier), got.audio, got.video, got.gaps)
+				t.Logf("%s (%s) -> %s (%s): audio=%d video=%d gaps=%d repaired=%d", publisher.id, weakNetTierID(publisher.tier),
+					receiver.id, weakNetTierID(receiver.tier), got.audio, got.video, got.gaps, got.repaired)
 			}
 		}
 	}
@@ -1642,8 +1648,12 @@ func TestWeakNetSymmetricMeshIsolatesCleanParticipant(t *testing.T) {
 			}
 		}
 	}
-	if nacks := clean.nacks.count() - nacksBefore; nacks < 1 {
-		t.Errorf("%s's camera sender saw no NACK while its stream crossed three lossy downlinks: the repair loop is dead", clean.id)
+	// Loss on a receiver's downlink is the SFU's to answer (its NACK
+	// responder resends what it wrote). Relaying those NACKs to a publisher
+	// with a clean uplink only makes it resend once per lossy receiver, which
+	// on a thin uplink starved its audio (B8).
+	if nacks := clean.nacks.count() - nacksBefore; nacks > 5 {
+		t.Errorf("%s's camera sender saw %d NACKs although only the receivers' downlinks are lossy: downlink loss must stop at the SFU", clean.id, nacks)
 	}
 	if t.Failed() {
 		return
