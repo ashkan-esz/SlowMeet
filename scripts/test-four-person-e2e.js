@@ -3756,27 +3756,31 @@ async function runSharerReconnectMidShare(impaired) {
     await delay(1000);
     sharerCameraFlows = (await framesAt()) > Math.max(0, startFrames) + 5;
   }
-  const cameraOK = knownIssue("B9", sharerCameraFlows,
-    "a camera turned on after a mid-share resume never reaches the viewers",
-    { sharerID, startFrames, endFrames: await framesAt(), inbound: await tileInboundRtp(pages.get("P1"), sharerID, "video") });
-  // After a resume over a weak link the viewers have been seen to keep
-  // receiving the owner's audio packets with no track bound to the owner's
-  // tile, which is what plays it: the owner is silent for the room.
-  const audioBound = [];
-  for (const role of viewers) audioBound.push(await tileAudioBytes(pages.get(role), await participantIDFor(pages.get(role), names[2])));
-  const audioOK = knownIssue("B11", audioBound.every((bytes) => bytes >= 0),
-    "after a resume the viewers' tile for the owner has no audio track, so the owner is not heard",
-    { viewers, audioBound });
-  await assertMedia();
-  await assertFullMeshMedia({ label: "after the sharer reconnect", skipVideoFrom: cameraOK ? [] : [sharerRole],
-    skipAudioFrom: audioOK ? [] : [sharerRole] });
-  // The owner rejoins afresh either way, so a defect seen here cannot leak
-  // into the next scenario.
-  await stopAnyShare();
-  await retireParticipant(sharerRole);
-  await delay(reconnectGraceSeconds * 1000 + 1000);
-  await join(sharerRole);
-  await enableCamera(pages.get(sharerRole));
+  try {
+    const cameraOK = knownIssue("B9", sharerCameraFlows,
+      "a camera turned on after a mid-share resume never reaches the viewers",
+      { sharerID, startFrames, endFrames: await framesAt(), inbound: await tileInboundRtp(pages.get("P1"), sharerID, "video") });
+    // After a resume over a weak link the viewers have been seen to keep
+    // receiving the owner's audio packets with no track bound to the owner's
+    // tile, which is what plays it: the owner is silent for the room.
+    const audioBound = [];
+    for (const role of viewers) audioBound.push(await tileAudioBytes(pages.get(role), await participantIDFor(pages.get(role), names[2])));
+    const audioOK = knownIssue("B11", audioBound.every((bytes) => bytes >= 0),
+      "after a resume the viewers' tile for the owner has no audio track, so the owner is not heard",
+      { viewers, audioBound });
+    await assertMedia();
+    await assertFullMeshMedia({ label: "after the sharer reconnect", skipVideoFrom: cameraOK ? [] : [sharerRole],
+      skipAudioFrom: audioOK ? [] : [sharerRole] });
+  } finally {
+    // The owner rejoins afresh whatever happened above (a known issue that
+    // fails under SLOWMEET_KNOWN_FAILING=1 included), so a defect seen here
+    // cannot leak into the next scenario.
+    await stopAnyShare();
+    await retireParticipant(sharerRole);
+    await delay(reconnectGraceSeconds * 1000 + 1000);
+    await join(sharerRole);
+    await enableCamera(pages.get(sharerRole));
+  }
 }
 
 // B11: after a resume the viewers have been seen to keep receiving the
@@ -3792,14 +3796,21 @@ async function assertResumedParticipantHeard(role, label) {
     const page = pages.get(observer);
     bound[observer] = await tileAudioBytes(page, await participantIDFor(page, names[roles.indexOf(role)]));
   }
-  const heard = knownIssue("B11", Object.values(bound).every((bytes) => bytes >= 0),
-    `after ${role}'s resume the other tiles for ${role} have no audio track, so ${role} is not heard`, { role, bound });
-  await assertFullMeshMedia({ label, skipAudioFrom: heard ? [] : [role] });
-  if (!heard) {
-    await retireParticipant(role);
-    await delay(reconnectGraceSeconds * 1000 + 1000);
-    await join(role);
-    await enableCamera(pages.get(role));
+  let heard = false;
+  try {
+    heard = knownIssue("B11", Object.values(bound).every((bytes) => bytes >= 0),
+      `after ${role}'s resume the other tiles for ${role} have no audio track, so ${role} is not heard`, { role, bound });
+    await assertFullMeshMedia({ label, skipAudioFrom: heard ? [] : [role] });
+  } finally {
+    // Also when the known issue fails the scenario under
+    // SLOWMEET_KNOWN_FAILING=1, so the silent participant does not leak into
+    // later scenarios.
+    if (!heard) {
+      await retireParticipant(role);
+      await delay(reconnectGraceSeconds * 1000 + 1000);
+      await join(role);
+      await enableCamera(pages.get(role));
+    }
   }
 }
 
