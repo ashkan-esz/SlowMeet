@@ -33,8 +33,13 @@ const path = require("node:path");
 const { setTimeout: delay } = require("node:timers/promises");
 const { chromium } = require("playwright-core");
 const netemTiers = require("./netem-tiers");
+const audioContinuity = require("./audio-continuity");
 
 const root = path.join(__dirname, "..");
+// SOAK_STRICT=1 (weak-network soak only): honour the full impaired window,
+// measure per-participant audio continuity and count reconnects from the
+// moment the tiers are armed. See assertSoakContinuity.
+const soakStrict = process.env.SOAK_STRICT === "1";
 const adminPassword = "slowmeet-soak-admin-password";
 const impairment = process.env.SOAK_IMPAIRMENT === "1";
 const soakNetns = process.env.SOAK_NETNS === "1";
@@ -353,6 +358,53 @@ async function goroutineCount() {
   return match ? Number(match[1]) : null;
 }
 
+// Proof that every impaired tier's class carried the participant's traffic
+// during the window, so a classifier that never matched a port cannot pass
+// the soak unimpaired. Skipped when the counters cannot be read.
+function assertSoakShaping(cycle, tierByRole, before, after) {
+  if (!Object.keys(after || {}).length) {
+    console.log(`[cycle ${cycle}] class counters unreadable, shaping proof skipped`);
+    return;
+  }
+  const deltas = {};
+  for (const tierName of new Set(Object.values(tierByRole))) {
+    const tier = netemTiers.tiers[tierName];
+    const delta = netemTiers.classCounterDelta(before, after, tier.classID);
+    deltas[tierName] = delta;
+    assert.ok(delta.sentPackets + delta.dropped >= 20,
+      `cycle ${cycle}: the ${tierName} tier carried ${delta.sentPackets} packets and dropped ${delta.dropped}: the shaping never reached its participant`);
+  }
+  fs.writeFileSync(path.join(artifactsDir, `shaping-cycle${cycle}.json`), JSON.stringify(deltas, null, 2));
+  console.log(`[cycle ${cycle}] shaping: ${Object.entries(deltas).map(([name, delta]) => `${name} sent=${delta.sentPackets} dropped=${delta.dropped}`).join(", ")}`);
+}
+
+// SOAK_STRICT=1: real continuity instead of "bytes are non-zero". Over the
+// impaired window (after a 10 s settle) no participant may hear total
+// silence from the whole room for more than soakRoomSilenceMs, and the
+// reconnects counted from the moment the tiers were armed stay within the
+// per-window limit (the default path only counts from after the lift).
+const soakRoomSilenceMs = Number(process.env.SOAK_STRICT_ROOM_SILENCE_MS || 3000);
+async function assertSoakContinuity(cycle, from, to, metricsAtArm, reconnectsLimit) {
+  const summaries = [];
+  const problems = [];
+  for (const [index, page] of pages.entries()) {
+    const history = await audioContinuity.readAudioContinuity(page);
+    const summary = audioContinuity.summarize(history, { from, to });
+    summaries.push({ participant: `P${index + 1}`, ...summary });
+    if (summary.pooledGapMs > soakRoomSilenceMs) {
+      problems.push(`P${index + 1} heard nobody for ${summary.pooledGapMs} ms (limit ${soakRoomSilenceMs} ms)`);
+    }
+  }
+  const metricsNow = await metricsSnapshot();
+  const reconnects = reconnectsFromSnapshot(metricsNow) - reconnectsFromSnapshot(metricsAtArm);
+  fs.writeFileSync(path.join(artifactsDir, `audio-continuity-cycle${cycle}.json`),
+    JSON.stringify({ from, to, reconnects, summaries }, null, 2));
+  console.log(`[cycle ${cycle} strict] room silence per participant: ${summaries.map((item) => `${item.participant}=${item.pooledGapMs}ms`).join(" ")}; reconnects since arm +${reconnects}`);
+  assert.ok(reconnects >= 0 && reconnects <= reconnectsLimit,
+    `cycle ${cycle}: reconnects grew by ${reconnects} from arm to lift (limit ${reconnectsLimit})`);
+  assert.equal(problems.length, 0, `cycle ${cycle}: ${problems.join("; ")}`);
+}
+
 async function runImpairmentCycles() {
   const participantNames = pages.map((_, index) => `Soak${index + 1}`);
   const pagesByName = new Map(pages.map((page, index) => [`P${index + 1}`, page]));
@@ -370,9 +422,13 @@ async function runImpairmentCycles() {
     // (after a settle so the tiers have bitten), so both profiles measure
     // the cost of impairment itself rather than the aftermath.
     netemTiers.installRoomQdisc();
-    const armer = netemTiers.armParticipantTiers(
-      { P2: "moderate", P3: "severe", P4: "capped" }, pagesByName);
+    const tierByRole = { P2: "moderate", P3: "severe", P4: "capped" };
+    const countersAtArm = netemTiers.tierClassCounters();
+    const armer = netemTiers.armParticipantTiers(tierByRole, pagesByName);
+    const armedAt = Date.now();
+    const metricsAtArm = await metricsSnapshot();
     let cpuWindow;
+    let countersAtLift;
     try {
       await delay(10000);
       cpuWindow = await captureProfile(`cpu-window${cycle}`, profileSeconds);
@@ -381,10 +437,20 @@ async function runImpairmentCycles() {
       metricsTimeline.push({ window: `cycle-${cycle}-impaired`, ...impairedMetrics });
       fs.writeFileSync(path.join(artifactsDir, `metrics-cycle${cycle}-impaired.txt`),
         await (await fetch(`${server.url}/metrics`)).text());
+      if (soakStrict) {
+        // Strict runs honour SOAK_IMPAIR_WINDOW_SECONDS: the default path
+        // lifts as soon as its checks finish, about a third of the window.
+        const remaining = impairWindowSeconds * 1000 - (Date.now() - armedAt);
+        if (remaining > 0) await delay(remaining);
+      }
     } finally {
       armer.stopped = true;
+      countersAtLift = netemTiers.tierClassCounters();
     }
+    const liftedAt = Date.now();
     netemTiers.clearRoomProfiles();
+    assertSoakShaping(cycle, tierByRole, countersAtArm, countersAtLift);
+    if (soakStrict) await assertSoakContinuity(cycle, armedAt + 10000, liftedAt, metricsAtArm, reconnectsLimitPerWindow);
     if (cycle === 1) cpu1 = cpuWindow;
     else cpu2 = cpuWindow;
 
@@ -481,6 +547,9 @@ function formatBytes(bytes) {
     }
     await Promise.all(pages.map((page) => enableMedia(page)));
     await waitForFlowingMedia();
+    if (impairment && soakStrict) {
+      for (const page of pages) await audioContinuity.installAudioContinuity(page, { intervalMs: 250 });
+    }
 
     // 1s per-participant audio timeline: the raw material for blackout
     // attribution. Each sample records every participant's cumulative
