@@ -139,51 +139,19 @@ what should change. Fixing an issue means flipping that assertion.
 - **B4 — FPS gate decimates a source at the cap.** With capture-time jitter,
   a source running at exactly the configured frame-rate cap loses about
   half its frames. Pinned in `TestBitrateLimiterFPSGateAtSourceRate`.
-- **B9 — a camera turned on after a resume never reaches the room.** In
-  `sharer-reconnect-mid-share` the share owner's signaling drops and resumes
-  mid-share; when it later turns its camera back on, every viewer receives
-  exactly one packet of that camera and then nothing (inbound video
-  `framesDecoded/packetsReceived` = `1/1`), while a participant that shared
-  without a resume gets its camera back normally. Seen in every run,
-  including one after B7 was fixed, so B7 is not the cause. The server log
-  of that run shows what a browser resume really is: the client closes its
-  old peer connection when it reconnects, the SFU's reads of the owner's
-  old publications end with `EOF` about 2 s after the disconnect and the
-  publications are removed, and the resume (6 ms later) republishes from
-  scratch with a room-wide renegotiation. The publication swap that
-  `reclaim` and `migrateTargetsLocked` exist for never runs for a browser.
-  The scenario logs `KNOWN ISSUE B9` and rejoins the owner afresh so later
-  scenarios start clean; with `SLOWMEET_KNOWN_FAILING=1` that rejoin is
-  skipped and the owner's audio stays dead for the rest of the group.
-
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
   another leaves and rejoins; when the held `participant_left`,
   `participant_joined` and offers arrive in one burst, the departed tile
   ("Participant left") has stayed next to the rejoined one for more than
-  20 s instead of being removed after 1.2 s. Seen in one of the two runs
-  that reached the check, so timing-dependent. The scenario logs `KNOWN ISSUE B10`.
-- **B11 — a resumed participant is not heard.** After a participant
-  resumes over an impaired link (`reconnect-under-impairment-isolated`,
-  `sharer-reconnect-mid-share-impaired`, `rapid-flap-link`), every other
-  browser keeps receiving its audio packets, but the participant's tile has
-  no audio track bound to its `<audio>` element, which is what plays it, so
-  the room no longer hears that participant. Seen in three runs where the
-  resume followed earlier scenarios in the same room (it then persisted
-  until the participant rejoined), and not in two runs that started from a
-  fresh room, so it depends on earlier state.
-  The first hypothesis (the resume swaps the publication without a
-  renegotiation, so no `ontrack` rebinds the cleared tile) is ruled out:
-  a browser resume republishes and renegotiates (see B9). What is left to
-  explain is why the `ontrack` of the republished audio does not end up on
-  the tile. One candidate is the order of the tile reset in
-  `addParticipant` (which clears `audio.srcObject` when the participant
-  returns inside the 1.2 s removal window) against the renegotiation that
-  delivers the new track. The CI scenario `reconnect-under-impairment` does
-  not catch it because its per-pair check runs only with
-  `MEDIA_E2E_FOUR_STRICT=1`.
+  20 s instead of being removed after 1.2 s. Seen once, in the first two
+  runs that reached the check, and not since. The `participant_left`
+  handler now schedules the tile's removal before its UI updates, so an
+  exception in one of them can no longer leave the tile behind; whether
+  that was the cause is unproven, so the scenario keeps logging
+  `KNOWN ISSUE B10` if it ever reproduces.
 
-- **Fixed: B5–B8.** Their tests now enforce the fix without a gate.
+- **Fixed: B5–B9 and B11.** Their tests now enforce the fix without a gate.
   - B5, a peer announced twice when admissions overlap: `admit` now
     broadcasts the joiner's `participant_joined` and replays only
     participants the room already knows (the hub's `announced` set) under
@@ -195,8 +163,6 @@ what should change. Fixing an issue means flipping that assertion.
   - B7, receiver feedback going to a resumed publisher's old peer: each
     receiver's relay reads a feedback route (peer and SSRC) that a
     publication swap replaces. `TestRouterResumedCameraPublisherRebindsThreeReceivers`.
-    Browsers never take the swap path (see B9), so this matters for
-    clients that keep their peer connection across a signaling resume.
   - B8, a lossy thin uplink starving its own audio: the documented cause
     (NACKs for frames the SFU drops on purpose) was only part of it.
     Every receiver NACKed each packet lost on the publisher's uplink, on
@@ -209,6 +175,34 @@ what should change. Fixing an issue means flipping that assertion.
     uplink loss. Audio rose from 107–164 to 264–288 of ~300 packets.
     `TestWeakNetImpairedPublisherUplinkReachesEverySubscriber/lossy_uplink`,
     `TestSubscriberKeyFrameRequestsFanInToPublisher`.
+  - B9, a camera turned on after a mid-share resume never shown (viewers got
+    one packet, then nothing): a browser closes its old peer connection
+    when it reconnects, so the SFU's reads of its publications ended with
+    `EOF` about 2 s after the drop and the publications were removed. The
+    resume then republished onto whichever free transceivers pion's
+    `AddTrack` picked; the owner's new screen took the receivers' old camera
+    transceiver and its camera the old screen one. A browser keeps a
+    receiver's `track.id` from that transceiver's first use, so the client
+    saw the camera as `|screen` and showed nothing. Now the SFU keeps a
+    publication whose media ends while its publisher is in the grace window
+    or has resumed onto a new peer (`HoldPublications`,
+    `keepStoppedPublicationLocked`), and the resume swaps into the same
+    senders and transceivers (`migrateTargetsLocked`): track IDs stay right
+    and the room is not renegotiated (the scenario went from 34 s to 15 s).
+    `TestKeepStoppedPublicationAcrossResume`, `sharer-reconnect-mid-share`.
+  - B11, a resumed participant not heard: two causes on that swap path.
+    No `ontrack` fires for a swap, so the tile that `participant_left`
+    cleared stayed unbound; the client now remembers each participant's
+    bound tracks and binds the live ones again on `participant_joined`
+    (`web/js/remote-track-memory.js`, `rebindRememberedTracks`). And the
+    receiver's sender keeps its SSRC while the source becomes the resumed
+    publisher with unrelated RTP sequence numbers and timestamps, which a
+    browser's audio receiver dropped as out of sequence; a swapped audio
+    target now continues the receiver's stream (`audioRebase`).
+    `TestAudioRebaseContinuesSwappedStream`,
+    `scripts/test-remote-track-memory.js`,
+    `sharer-reconnect-mid-share-impaired`,
+    `reconnect-under-impairment-isolated`.
 
   A `knownIssue("Bn", ...)` check in the browser suite logs `KNOWN ISSUE
   Bn still present` and fails only with `SLOWMEET_KNOWN_FAILING=1`.
