@@ -33,6 +33,14 @@ func knownFailing(t *testing.T, reason string) {
 // before the server starts, so it may shorten the hub's timings.
 func newFourSeatHub(t *testing.T, reconnectTimeout time.Duration, configure ...func(*Hub)) (*Hub, string) {
 	t.Helper()
+	return serveFourSeatHub(t, reconnectTimeout, nil, configure...)
+}
+
+// serveFourSeatHub is newFourSeatHub with an optional listener: a test that
+// needs particular socket options on the hub's side of each connection passes
+// its own.
+func serveFourSeatHub(t *testing.T, reconnectTimeout time.Duration, listener net.Listener, configure ...func(*Hub)) (*Hub, string) {
+	t.Helper()
 	cfg := config.Config{
 		HTTPAddr: ":8080", MaxParticipants: 4, DefaultVideoQuality: "low",
 		DefaultVideoFPS: 15, MaxVideoFPS: 30, DefaultAudioBitrate: 32000,
@@ -43,7 +51,12 @@ func newFourSeatHub(t *testing.T, reconnectTimeout time.Duration, configure ...f
 	for _, apply := range configure {
 		apply(hub)
 	}
-	server := httptest.NewServer(hub)
+	server := httptest.NewUnstartedServer(hub)
+	if listener != nil {
+		server.Listener.Close()
+		server.Listener = listener
+	}
+	server.Start()
 	t.Cleanup(func() {
 		hub.Close()
 		server.Close()
@@ -67,7 +80,12 @@ type testParticipant struct {
 // dialAndJoin joins name (resuming token when set) and reads the join
 // response. It returns errors instead of failing so goroutines may call it.
 func dialAndJoin(socketURL, name, token string) (*testParticipant, Message, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	return dialAndJoinWith(websocket.DefaultDialer, socketURL, name, token)
+}
+
+// dialAndJoinWith is dialAndJoin through a chosen dialer.
+func dialAndJoinWith(dialer *websocket.Dialer, socketURL, name, token string) (*testParticipant, Message, error) {
+	conn, _, err := dialer.Dial(socketURL, nil)
 	if err != nil {
 		return nil, Message{}, err
 	}
