@@ -113,9 +113,12 @@ const optInTiers = {
   "thin-uplink": { classID: "1:90", handle: "90:", rate: "300kbit", delay: "50ms", loss: "8%", limit: "20", uplinkOnly: true },
   // Bursty loss (Gilbert-Elliott: ~1% chance to enter a bad state that drops
   // 70% while it lasts, ~10% chance per packet to leave it) with 25%
-  // reordering and 2% duplication, the way congested Wi-Fi misbehaves.
+  // reordering, the way congested Wi-Fi misbehaves. No duplication: the
+  // kernel refuses a duplicating netem anywhere in a tree that holds other
+  // netems ("cannot mix duplicating netems with other netems in tree"); the
+  // Go weak-net suite covers duplication with a single root netem.
   bursty: { classID: "1:a0", handle: "a0:", rate: "10gbit", delay: "40ms", loss: "gemodel 1% 10% 70% 0.1%",
-    extra: ["reorder", "25%", "50%", "duplicate", "2%"] },
+    extra: ["reorder", "25%", "50%"] },
   // Loss and delay on a TCP path (the TURN/TCP relay leg), applied with
   // applyTcpPortTier.
   "relay-lossy": { classID: "1:b0", handle: "b0:", rate: "10gbit", delay: "50ms", loss: "2%" },
@@ -193,7 +196,14 @@ function roomQdiscCommands(tierNames = defaultTierNames) {
 function installRoomQdisc({ include = [] } = {}) {
   for (const name of include) tierNamed(name);
   const names = [...defaultTierNames, ...include.filter((name) => !defaultTierNames.includes(name))];
-  for (const command of roomQdiscCommands(names)) tcRun(command);
+  try {
+    for (const command of roomQdiscCommands(names)) tcRun(command);
+  } catch (error) {
+    // A half-built tree makes every later `qdisc replace root` fail; tear
+    // it down so one bad tier cannot cascade into the following scenarios.
+    clearRoomProfiles();
+    throw error;
+  }
 }
 
 // IPv4: u32 ip sport/dport selectors. IPv6: the UDP ports sit at byte 40
@@ -342,28 +352,30 @@ function classCounterDelta(before, after, classID) {
 // class; the catch-all at prio 60000 (evaluated after every auto-prio tier
 // filter, which start at 49152 and count down) sends any other UDP — the
 // isolated participant's, on whatever port it rebinds to — into the tier.
-function isolationAllowCommands(port) {
+// mask (default 0xffff, one port) lets a single entry allowlist an aligned
+// port range, such as a TURN relay's 20480-20543 (port 20480, mask 0xffc0).
+function isolationAllowCommands(port, mask = "0xffff") {
   const p = String(port);
   return [
-    ["protocol", "ip", "u32", "match", "ip", "sport", p, "0xffff"],
-    ["protocol", "ip", "u32", "match", "ip", "dport", p, "0xffff"],
-    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "40"],
-    ["protocol", "ipv6", "u32", "match", "u16", p, "0xffff", "at", "42"]
-  ].map(([proto, family, ...rest]) => ["filter", "add", "dev", "lo", proto, family, "prio", "1", ...rest, "flowid", "1:10"]);
+    ["protocol", "ip", "u32", "match", "ip", "sport", p, mask],
+    ["protocol", "ip", "u32", "match", "ip", "dport", p, mask],
+    ["protocol", "ipv6", "u32", "match", "u16", p, mask, "at", "40"],
+    ["protocol", "ipv6", "u32", "match", "u16", p, mask, "at", "42"]
+  ].map(([proto, family, ...rest]) => ["filter", "add", "dev", "lo", proto, family, "prio", family === "ipv6" ? "2" : "1", ...rest, "flowid", "1:10"]);
 }
 
 function isolationCatchAllCommands(tierName) {
   const tier = tierNamed(tierName);
   return [
     ["filter", "add", "dev", "lo", "protocol", "ip", "prio", "60000", "u32", "match", "ip", "protocol", "17", "0xff", "flowid", tier.classID],
-    ["filter", "add", "dev", "lo", "protocol", "ipv6", "prio", "60000", "u32", "match", "u8", "17", "0xff", "at", "6", "flowid", tier.classID]
+    ["filter", "add", "dev", "lo", "protocol", "ipv6", "prio", "60001", "u32", "match", "u8", "17", "0xff", "at", "6", "flowid", tier.classID]
   ];
 }
 
 function isolationLiftCommands() {
   return [
     ["filter", "del", "dev", "lo", "protocol", "ip", "prio", "60000"],
-    ["filter", "del", "dev", "lo", "protocol", "ipv6", "prio", "60000"]
+    ["filter", "del", "dev", "lo", "protocol", "ipv6", "prio", "60001"]
   ];
 }
 
@@ -374,7 +386,10 @@ function isolationLiftCommands() {
 // own must not be allowlisted, or they would be shaped clean). lift()
 // removes the catch-all; the allowlist entries are harmless leftovers that
 // clearRoomProfiles removes with the root.
-function armRoleUdpIsolation(targetRole, tierName, pages, { allowRoles, readPorts = pageGatheredIcePorts, intervalMs = 250, log = console.log } = {}) {
+// allowPortMasks ([{port, mask}]) allowlists fixed ranges up front, such as
+// the built-in TURN relay's allocation ports, whose UDP to the SFU must stay
+// clean while the participant's own UDP is blocked.
+function armRoleUdpIsolation(targetRole, tierName, pages, { allowRoles, allowPortMasks = [], readPorts = pageGatheredIcePorts, intervalMs = 250, log = console.log } = {}) {
   const roles = (allowRoles || [...pages.keys()]).filter((role) => role !== targetRole);
   const state = { stopped: false, allowed: new Map(), errors: [], events: [] };
   const allow = async () => {
@@ -392,7 +407,12 @@ function armRoleUdpIsolation(targetRole, tierName, pages, { allowRoles, readPort
       }
     }
   };
+  // Everything that can fail runs inside ready, so a caller's finally (lift,
+  // clearRoomProfiles) always gets the chance to clean up.
   state.ready = (async () => {
+    for (const { port, mask } of allowPortMasks) {
+      for (const command of isolationAllowCommands(port, mask)) tcRun(command);
+    }
     await allow();
     for (const command of isolationCatchAllCommands(tierName)) tcRun(command);
     log(`[netem] isolated ${targetRole}'s UDP into the ${tierName} tier; allowlisted ${roles.join(", ")}`);

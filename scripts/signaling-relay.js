@@ -65,11 +65,19 @@ function startSignalingRelay({ target, host = "127.0.0.1", port = 0 } = {}) {
     send(connection, direction, chunk);
   };
 
+  // A close from either end is also held while blackholed: a dead link
+  // carries no FIN either. It is delivered after the held bytes on resume.
   const flush = (connection) => {
     if (connection.upstreamReady) {
       for (const chunk of connection.heldUp.splice(0)) send(connection, "up", chunk);
+      if (connection.pendingUpstreamEnd && !connection.upstream.destroyed) connection.upstream.end();
     }
     for (const chunk of connection.heldDown.splice(0)) send(connection, "down", chunk);
+    if (connection.pendingClientEnd && !connection.client.destroyed) {
+      const end = () => connection.client.end();
+      if (state.delayMs > 0) setTimeout(end, state.delayMs);
+      else end();
+    }
   };
 
   const destroy = (connection, hard) => {
@@ -92,6 +100,10 @@ function startSignalingRelay({ target, host = "127.0.0.1", port = 0 } = {}) {
     upstream.on("data", (chunk) => relay(connection, "down", chunk));
     upstream.on("error", () => destroy(connection, false));
     upstream.on("close", () => {
+      if (state.mode === "blackhole") {
+        connection.pendingClientEnd = true;
+        return;
+      }
       if (!connection.client.destroyed) connection.client.end();
       connections.delete(connection);
     });
@@ -110,6 +122,10 @@ function startSignalingRelay({ target, host = "127.0.0.1", port = 0 } = {}) {
     client.on("data", (chunk) => relay(connection, "up", chunk));
     client.on("error", () => destroy(connection, false));
     client.on("close", () => {
+      if (state.mode === "blackhole") {
+        connection.pendingUpstreamEnd = true;
+        return;
+      }
       if (connection.upstream && !connection.upstream.destroyed) connection.upstream.end();
       connections.delete(connection);
     });

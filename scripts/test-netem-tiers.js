@@ -77,10 +77,19 @@ assert.deepEqual(withOptIn.slice(expectedInstall.length), [
   "class add dev lo parent 1: classid 1:90 htb rate 300kbit ceil 300kbit",
   "qdisc add dev lo parent 1:90 handle 90: netem delay 50ms loss 8% limit 20",
   "class add dev lo parent 1: classid 1:a0 htb rate 10gbit ceil 10gbit",
-  "qdisc add dev lo parent 1:a0 handle a0: netem delay 40ms loss gemodel 1% 10% 70% 0.1% reorder 25% 50% duplicate 2%"
+  "qdisc add dev lo parent 1:a0 handle a0: netem delay 40ms loss gemodel 1% 10% 70% 0.1% reorder 25% 50%"
 ]);
 assert.throws(() => netem.installRoomQdisc({ include: ["nope"] }), /unknown participant tier/);
 assert.equal(take().length, 0, "an unknown tier must fail before any tc call");
+
+// A tc failure mid-install tears the half-built tree down.
+netem.__setTcRunner((args) => {
+  calls.push(args.join(" "));
+  if (args.includes("1:30") && args[0] === "qdisc") throw new Error("netem refused");
+}, () => classShow);
+assert.throws(() => netem.installRoomQdisc(), /netem refused/);
+assert.equal(take().at(-1), "qdisc del dev lo root");
+netem.__setTcRunner((args) => calls.push(args.join(" ")), () => classShow);
 
 // Uplink-only shapes only what the participant sends.
 netem.applyParticipantTier(4000, "thin-uplink");
@@ -111,12 +120,16 @@ assert.deepEqual(take(), [
 assert.deepEqual(netem.isolationAllowCommands(5000).map((args) => args.join(" ")), [
   "filter add dev lo protocol ip prio 1 u32 match ip sport 5000 0xffff flowid 1:10",
   "filter add dev lo protocol ip prio 1 u32 match ip dport 5000 0xffff flowid 1:10",
-  "filter add dev lo protocol ipv6 prio 1 u32 match u16 5000 0xffff at 40 flowid 1:10",
-  "filter add dev lo protocol ipv6 prio 1 u32 match u16 5000 0xffff at 42 flowid 1:10"
+  "filter add dev lo protocol ipv6 prio 2 u32 match u16 5000 0xffff at 40 flowid 1:10",
+  "filter add dev lo protocol ipv6 prio 2 u32 match u16 5000 0xffff at 42 flowid 1:10"
+]);
+assert.deepEqual(netem.isolationAllowCommands(20480, "0xffc0").map((args) => args.join(" ")).slice(0, 2), [
+  "filter add dev lo protocol ip prio 1 u32 match ip sport 20480 0xffc0 flowid 1:10",
+  "filter add dev lo protocol ip prio 1 u32 match ip dport 20480 0xffc0 flowid 1:10"
 ]);
 assert.deepEqual(netem.isolationCatchAllCommands("blackout").map((args) => args.join(" ")), [
   "filter add dev lo protocol ip prio 60000 u32 match ip protocol 17 0xff flowid 1:50",
-  "filter add dev lo protocol ipv6 prio 60000 u32 match u8 17 0xff at 6 flowid 1:50"
+  "filter add dev lo protocol ipv6 prio 60001 u32 match u8 17 0xff at 6 flowid 1:50"
 ]);
 
 // Class counters.

@@ -12,7 +12,11 @@ function startEcho() {
   return new Promise((resolve) => {
     const server = net.createServer((socket) => {
       socket.on("error", () => {});
-      socket.on("data", (chunk) => socket.write(chunk));
+      socket.on("data", (chunk) => {
+        socket.write(chunk);
+        // "close-later" makes the server close this connection 200 ms later.
+        if (String(chunk).includes("close-later")) setTimeout(() => socket.end(), 200);
+      });
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
   });
@@ -99,6 +103,21 @@ function waitForClose(socket, ms) {
   assert.ok(delayedReply < 400, `delay removed: round trip ${delayedReply} ms`);
   assert.ok(Date.now() - sentAt >= 300);
 
+  // A close from the server during a blackhole reaches the participant only
+  // after resume, after any bytes held before it.
+  const closing = await dial(relay.port);
+  let ended = false;
+  closing.on("end", () => { ended = true; });
+  closing.write("close-later");
+  assert.equal(await receive(closing, 100), "close-later");
+  relay.blackhole();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(ended, false, "the server's close must not reach the participant during a blackhole");
+  relay.resume();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(ended, true, "the server's close reaches the participant after resume");
+  closing.destroy();
+
   // Reset: every live connection dies with a reset.
   relay.reset();
   assert.equal(await waitForClose(first, BOUND_MS), true, "reset must close the participant's socket");
@@ -118,7 +137,7 @@ function waitForClose(socket, ms) {
   const again = await dial(relay.port);
   again.write("back");
   assert.equal(await receive(again, 300), "back");
-  assert.deepEqual(relay.stats().transitions.map((step) => step.mode), ["blackhole", "forward", "refuse", "forward"]);
+  assert.deepEqual(relay.stats().transitions.map((step) => step.mode), ["blackhole", "forward", "blackhole", "forward", "refuse", "forward"]);
 
   again.destroy();
   await relay.close();
