@@ -166,9 +166,6 @@ func TestRouterResumedCameraPublisherRebindsThreeReceivers(t *testing.T) {
 	}
 
 	t.Run("receiver keyframe requests reach the resumed publisher", func(t *testing.T) {
-		knownFailing(t, "B7: after a publisher resume, receivers' RTCP feedback is still relayed to the superseded "+
-			"peer: relayRTCP keeps the source peer captured at subscription and migrateTargetsLocked only "+
-			"updates the SSRC holder")
 		if !keyFrameRequestReaches(t, room.members["p1"], fresh, 3*time.Second) {
 			t.Fatal("p1's PLI for p2's camera never reached p2's resumed peer")
 		}

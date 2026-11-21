@@ -183,7 +183,7 @@ func (r *Router) removeTargetLocked(pub *publication, targetID string) {
 	delete(pub.tracks, targetID)
 	delete(pub.senders, targetID)
 	if sender != nil {
-		delete(r.senderSourceSSRC, sender)
+		delete(r.senderFeedback, sender)
 	}
 	if target != nil {
 		target.stop()
@@ -239,14 +239,15 @@ type Router struct {
 	videoSubscriptionsSet map[string]bool
 	cameraLayers          map[string]string
 	videoKeyFrameRetries  map[videoKeyFrameRequestKey]*videoKeyFrameRetry
-	// senderSourceSSRC keeps the publisher ingress SSRC each relay goroutine
-	// rewrites RTCP feedback with. Publication swaps reuse the receiver's
-	// sender and update the holder in place, so the long-lived relay goroutine
-	// always targets the current source track.
-	senderSourceSSRC map[*pion.RTPSender]*atomic.Uint32
-	limits           Limits
-	audioDrops       metrics.AudioDrops
-	rtcpRelay        metrics.RTCPRelay
+	// senderFeedback holds where each relay goroutine sends a receiver's RTCP
+	// feedback: the publisher peer and its ingress SSRC. Publication swaps
+	// reuse the receiver's sender and replace the route in place, so the
+	// long-lived relay goroutine always targets the current source — the
+	// resumed publisher, not the peer it superseded (B7).
+	senderFeedback map[*pion.RTPSender]*atomic.Pointer[feedbackRoute]
+	limits         Limits
+	audioDrops     metrics.AudioDrops
+	rtcpRelay      metrics.RTCPRelay
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -262,7 +263,7 @@ func NewRouter(config ...Limits) *Router {
 		videoSubscriptionsSet: make(map[string]bool),
 		cameraLayers:          make(map[string]string),
 		videoKeyFrameRetries:  make(map[videoKeyFrameRequestKey]*videoKeyFrameRetry),
-		senderSourceSSRC:      make(map[*pion.RTPSender]*atomic.Uint32),
+		senderFeedback:        make(map[*pion.RTPSender]*atomic.Pointer[feedbackRoute]),
 		limits:                limits,
 	}
 }
@@ -843,8 +844,8 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 		target := r.newTarget(local, replacement)
 		replacement.tracks[targetID] = target
 		replacement.senders[targetID] = sender
-		if holder := r.senderSourceSSRC[sender]; holder != nil {
-			holder.Store(uint32(replacement.remote.SSRC()))
+		if route := r.senderFeedback[sender]; route != nil {
+			route.Store(newFeedbackRoute(replacement))
 		}
 		go target.writePackets(replacement.stoppedChannel())
 		// The old target's writer exits through stop; any packets still in its
@@ -907,11 +908,11 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 			op.pub.tracks[op.targetID] = target
 			op.pub.senders[op.targetID] = sender
 			if op.pub.source != nil && op.pub.remote != nil {
-				sourceSSRC := &atomic.Uint32{}
-				sourceSSRC.Store(uint32(op.pub.remote.SSRC()))
-				r.senderSourceSSRC[sender] = sourceSSRC
+				route := &atomic.Pointer[feedbackRoute]{}
+				route.Store(newFeedbackRoute(op.pub))
+				r.senderFeedback[sender] = route
 				go target.writePackets(op.pub.stoppedChannel())
-				go relayRTCP(sender, op.pub.source, sourceSSRC, &r.rtcpRelay)
+				go relayRTCP(sender, route, &r.rtcpRelay)
 			}
 		}
 		r.mu.Unlock()
@@ -965,28 +966,42 @@ func dispatchOffers(offers map[string]Offerer) {
 	wg.Wait()
 }
 
-// relayRTCP forwards receiver feedback to the publication's source. The SSRC
-// holder is read per batch so a publication swap that reuses this sender
-// retargets the feedback to the new source track without restarting the
-// goroutine (the sender keeps one RTCP reader for its whole lifetime).
-func relayRTCP(sender *pion.RTPSender, source *webrtc.Peer, sourceSSRC *atomic.Uint32, relayed *metrics.RTCPRelay) {
+// feedbackRoute is where one receiver's RTCP feedback goes: the publisher's
+// peer and the ingress SSRC to rewrite the feedback with. It is replaced as a
+// whole on a publication swap, never mutated.
+type feedbackRoute struct {
+	source *webrtc.Peer
+	ssrc   uint32
+}
+
+func newFeedbackRoute(pub *publication) *feedbackRoute {
+	return &feedbackRoute{source: pub.source, ssrc: uint32(pub.remote.SSRC())}
+}
+
+// relayRTCP forwards receiver feedback to the publication's source. The route
+// is read per batch so a publication swap that reuses this sender retargets
+// the feedback to the new source peer and track without restarting the
+// goroutine (the sender keeps one RTCP reader for its whole lifetime). A
+// failed write does not end the relay: it can be the superseded peer closing
+// just before a swap moves the route, and the goroutine still exits when the
+// sender itself stops.
+func relayRTCP(sender *pion.RTPSender, route *atomic.Pointer[feedbackRoute], relayed *metrics.RTCPRelay) {
 	buf := make([]byte, receiveMTU)
 	for {
 		packets, err := readSenderRTCP(sender, buf)
 		if err != nil {
 			return
 		}
-		routed := routeRTCPFeedback(packets, sourceSSRC.Load())
+		current := route.Load()
+		routed := routeRTCPFeedback(packets, current.ssrc)
 		relayed.Observe(packets)
-		if len(routed) == 0 {
+		if len(routed) == 0 || current.source == nil {
 			// Nothing in the batch concerns the publisher; skip the
 			// encrypt-and-send entirely.
 			continue
 		}
 		relayed.ForwardedBatches.Add(1)
-		if err := source.WriteRTCP(routed); err != nil {
-			return
-		}
+		_ = current.source.WriteRTCP(routed)
 	}
 }
 
