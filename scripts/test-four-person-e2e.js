@@ -30,6 +30,13 @@ const browserNames = new Map(roles.map((role, index) => [role,
 // the per-participant room classifiers: without it, in a plain run, the
 // netns.* scenarios are skipped because shaping the host loopback is forbidden.
 const netnsRoom = process.env.MEDIA_E2E_FOUR_NETNS === "1";
+// MEDIA_E2E_FOUR_STRICT=1 turns the stricter checks inside existing scenarios
+// (per-pair audio gaps, full-mesh media after a recovery) into assertions;
+// without it they only log. SLOWMEET_KNOWN_FAILING=1 runs the scenarios and
+// assertions that pin a documented defect ("Known issues pinned by tests" in
+// docs/network-testing.md) instead of skipping or logging them.
+const strictMode = process.env.MEDIA_E2E_FOUR_STRICT === "1";
+const knownFailingEnabled = process.env.SLOWMEET_KNOWN_FAILING === "1";
 const contexts = [];
 const traces = new Set();
 const pages = new Map();
@@ -38,43 +45,114 @@ const browsers = [];
 let server;
 let activeScenario = "startup";
 
-async function startServer() {
+async function freePort(protocol = "tcp") {
+  if (protocol === "udp") {
+    const dgram = require("node:dgram");
+    const socket = dgram.createSocket("udp4");
+    await new Promise((resolve, reject) => socket.bind(0, "127.0.0.1", resolve).once("error", reject));
+    const { port } = socket.address();
+    await new Promise((resolve) => socket.close(resolve));
+    return port;
+  }
   const portServer = net.createServer();
   await new Promise((resolve, reject) => portServer.listen(0, "127.0.0.1", resolve).once("error", reject));
-  const port = portServer.address().port;
+  const { port } = portServer.address();
   await new Promise((resolve) => portServer.close(resolve));
-  const configPath = path.join(os.tmpdir(), `slowmeet-four-e2e-${process.pid}.json`);
-  fs.writeFileSync(configPath, JSON.stringify({ retain_chat_history: true }));
-  const output = [];
-  const child = spawn("go", ["run", "."], {
-    cwd: root,
-    env: { ...process.env, HTTP_ADDR: `127.0.0.1:${port}`, MAX_PARTICIPANTS: "4",
-      RECONNECT_TIMEOUT_SECONDS: String(reconnectGraceSeconds), MEETING_PASSWORD: "",
-      ADMIN_PASSWORD: adminPassword, CONFIG_FILE: configPath,
-      // In the namespace the server's only interface is loopback; without
-      // the NAT 1-to-1 loopback path the SFU gathers no candidates at all.
-      ...(netnsRoom ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
-      GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-four-e2e-gocache" },
-    detached: true, stdio: ["ignore", "pipe", "pipe"]
-  });
-  child.stdout.on("data", (data) => output.push(data.toString()));
-  child.stderr.on("data", (data) => output.push(data.toString()));
-  const url = `http://127.0.0.1:${port}`;
-  let ready = false;
-  for (let i = 0; i < 120; i += 1) {
-    try { if ((await fetch(`${url}/health`)).ok) { ready = true; break; } } catch (_) {}
-    if (child.exitCode !== null) break;
-    await delay(250);
-  }
-  assert.ok(ready, `local server did not become ready\n${output.join("").slice(-8000)}`);
-  return { child, output, url, async stop() {
-    try { process.kill(-child.pid, "SIGTERM"); } catch (_) { child.kill("SIGTERM"); }
-    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(5000)]);
-    fs.rmSync(configPath, { force: true });
-  } };
+  return port;
 }
 
-async function createParticipant(role, name, expectRejected = false, skipJoin = false) {
+// The TURN relay's port range for the "turn" server profile, kept clear of
+// the browsers' and the SFU's ephemeral UDP ports so tier filters never
+// catch a relay socket by accident.
+const turnRelayRange = { min: 20480, max: 20543 };
+const turnSecret = "slowmeet-four-e2e-turn-secret";
+
+// A port that is free for both TCP and UDP and outside the relay range.
+async function freeTurnPort() {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const port = await freePort("tcp");
+    if (port >= turnRelayRange.min && port <= turnRelayRange.max) continue;
+    try {
+      const dgram = require("node:dgram");
+      const socket = dgram.createSocket("udp4");
+      await new Promise((resolve, reject) => socket.bind(port, "127.0.0.1", resolve).once("error", reject));
+      await new Promise((resolve) => socket.close(resolve));
+      return port;
+    } catch (_) {}
+  }
+  throw new Error("no port free for both TCP and UDP");
+}
+
+// startServer({ profile }) starts a server; "default" is the plain room and
+// "turn" adds the built-in TURN relay (UDP and TCP on one port). The result's
+// restart({ downMs }) stops the process and starts it again on the same
+// port and config file, the way a deploy or crash restarts it.
+async function startServer({ profile = "default", port } = {}) {
+  const httpPort = port || await freePort();
+  const configPath = path.join(os.tmpdir(), `slowmeet-four-e2e-${process.pid}-${httpPort}.json`);
+  fs.writeFileSync(configPath, JSON.stringify({ retain_chat_history: true }));
+  const turnPort = profile === "turn" ? await freeTurnPort() : undefined;
+  const turnEnv = profile === "turn" ? {
+    TURN_SERVER_ENABLED: "true", TURN_SERVER_PORT: String(turnPort), TURN_SERVER_TLS_PORT: "0",
+    TURN_SERVER_TLS_CERT_FILE: "", TURN_SERVER_TLS_KEY_FILE: "", TURN_SERVER_REALM: "",
+    TURN_SERVER_RELAY_PORT_MIN: String(turnRelayRange.min), TURN_SERVER_RELAY_PORT_MAX: String(turnRelayRange.max),
+    TURN_SERVER_RELAY_IP: "", TURN_URL: "",
+    TURN_URLS: `turn:127.0.0.1:${turnPort}?transport=udp,turn:127.0.0.1:${turnPort}?transport=tcp`,
+    TURN_SHARED_SECRET: turnSecret, TURN_CREDENTIAL_TTL_SECONDS: "", ICE_TRANSPORT_POLICY: "all",
+    ICE_PUBLIC_IP: "127.0.0.1"
+  } : {};
+  const url = `http://127.0.0.1:${httpPort}`;
+  const handle = { url, port: httpPort, profile, turnPort, relayRange: profile === "turn" ? turnRelayRange : undefined, output: [] };
+  const spawnServer = async () => {
+    const child = spawn("go", ["run", "."], {
+      cwd: root,
+      env: { ...process.env, HTTP_ADDR: `127.0.0.1:${httpPort}`, MAX_PARTICIPANTS: "4",
+        RECONNECT_TIMEOUT_SECONDS: String(reconnectGraceSeconds), MEETING_PASSWORD: "",
+        ADMIN_PASSWORD: adminPassword, CONFIG_FILE: configPath,
+        // In the namespace the server's only interface is loopback; without
+        // the NAT 1-to-1 loopback path the SFU gathers no candidates at all.
+        ...(netnsRoom ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
+        ...turnEnv,
+        GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-four-e2e-gocache" },
+      detached: true, stdio: ["ignore", "pipe", "pipe"]
+    });
+    child.stdout.on("data", (data) => handle.output.push(data.toString()));
+    child.stderr.on("data", (data) => handle.output.push(data.toString()));
+    let ready = false;
+    for (let i = 0; i < 120; i += 1) {
+      try { if ((await fetch(`${url}/health`)).ok) { ready = true; break; } } catch (_) {}
+      if (child.exitCode !== null) break;
+      await delay(250);
+    }
+    assert.ok(ready, `local server did not become ready\n${handle.output.join("").slice(-8000)}`);
+    handle.child = child;
+  };
+  const stopChild = async () => {
+    const child = handle.child;
+    if (!child) return;
+    try { process.kill(-child.pid, "SIGTERM"); } catch (_) { child.kill("SIGTERM"); }
+    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(5000)]);
+    handle.child = undefined;
+  };
+  await spawnServer();
+  handle.stop = async () => {
+    await stopChild();
+    fs.rmSync(configPath, { force: true });
+  };
+  handle.restart = async ({ downMs = 0 } = {}) => {
+    await stopChild();
+    const stoppedAt = Date.now();
+    if (downMs > 0) await delay(downMs);
+    await spawnServer();
+    return { stoppedAt, readyAt: Date.now() };
+  };
+  return handle;
+}
+
+// options.baseURL loads the app from another origin than the server's, such
+// as a participant's own signaling relay (scripts/signaling-relay.js).
+async function createParticipant(role, name, expectRejected = false, skipJoin = false, { baseURL } = {}) {
+  const origin = baseURL || server.url;
   const browserName = browserNames.get(role) || "chromium";
   const browserType = browserName === "firefox" ? firefox : chromium;
   const configuredPath = browserName === "firefox"
@@ -102,7 +180,7 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
             "--force-webrtc-ip-handling-policy=default_public_interface_only",
             "--disable-features=WebRtcHideLocalIpsWithMdns",
             "--allow-loopback-in-peer-connection",
-            `--unsafely-treat-insecure-origin-as-secure=${server.url}`] : [])] })
+            `--unsafely-treat-insecure-origin-as-secure=${origin}`] : [])] })
   });
   browsers.push(browser);
   const context = await browser.newContext({ viewport: netnsRoom
@@ -111,7 +189,7 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
   contexts.push(context);
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   traces.add(context);
-  if (browserName === "chromium") await context.grantPermissions(["camera", "microphone"], { origin: server.url });
+  if (browserName === "chromium") await context.grantPermissions(["camera", "microphone"], { origin });
   if (netnsRoom) {
     // The 2-core CI runner cannot feed four 360p encoders plus 1440x900
     // compositing in real time: receivers stop draining their sockets, the
@@ -125,15 +203,28 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
   await context.addInitScript(() => {
     const nativePeer = window.RTCPeerConnection;
     const nativeSocket = window.WebSocket;
-    window.__slowMeetTest = { peerConnections: [], sockets: [], socketEvents: [] };
+    // socketCreates and peerStates are timestamped histories for the
+    // resilience scenarios; they are separate from socketEvents so readers
+    // that slice or filter socketEvents keep their meaning.
+    window.__slowMeetTest = { peerConnections: [], sockets: [], socketEvents: [], socketCreates: [], peerStates: [] };
     window.RTCPeerConnection = new Proxy(nativePeer, { construct(target, args, newTarget) {
       const peer = Reflect.construct(target, args, newTarget);
+      const index = window.__slowMeetTest.peerConnections.length;
+      peer.__createdAt = Date.now();
       window.__slowMeetTest.peerConnections.push(peer);
+      peer.addEventListener("connectionstatechange", () => {
+        const at = Date.now();
+        if (peer.connectionState === "connected" && !peer.__connectedAt) peer.__connectedAt = at;
+        window.__slowMeetTest.peerStates.push({ at, peer: index, state: peer.connectionState });
+      });
       return peer;
     } });
     window.WebSocket = new Proxy(nativeSocket, { construct(target, args, newTarget) {
       const socket = Reflect.construct(target, args, newTarget);
       window.__slowMeetTest.sockets.push(socket);
+      window.__slowMeetTest.socketCreates.push({ at: Date.now(), url: String(args[0]) });
+      socket.addEventListener("open", () => { socket.__openedAt = Date.now(); });
+      socket.addEventListener("close", () => { socket.__closedAt = Date.now(); });
       const record = (direction, value) => {
         let message = value;
         if (typeof value === "string") {
@@ -142,7 +233,7 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
             message = { type: parsed.type, participant_id: parsed.participant_id,
               screen_share_active: parsed.screen_share_active, screen_share_owner: parsed.screen_share_owner,
               screen_share_enabled: parsed.screen_share_enabled, max_video_bitrate: parsed.max_video_bitrate,
-              reconnect_token: parsed.reconnect_token,
+              reconnect_token: parsed.reconnect_token, participant: parsed.participant?.id,
               hand_raised: parsed.hand_raised, audio_enabled: parsed.audio_enabled,
               video_enabled: parsed.video_enabled, error: parsed.error };
           } catch (_) { message = value.slice(0, 200); }
@@ -174,7 +265,7 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
   page.on("console", (message) => events.get(role).push({ type: "console", text: message.text() }));
   page.on("pageerror", (error) => events.get(role).push({ type: "pageerror", text: error.message }));
   page.on("requestfailed", (request) => events.get(role).push({ type: "requestfailed", url: request.url(), error: request.failure()?.errorText }));
-  await page.goto(server.url);
+  await page.goto(origin);
   await page.locator("#join-form").waitFor({ timeout: 15000 });
   if (skipJoin) return page;
   await page.locator("#name").fill(name);
@@ -411,8 +502,58 @@ const { tiers: fourPersonTiers, pageLocalIcePorts, pageGatheredIcePorts } = nete
 const installRoomQdisc = netemTiers.installRoomQdisc;
 const clearRoomProfiles = netemTiers.clearRoomProfiles;
 
+// Every armer also records proof that its tiers reached traffic: class
+// counters when it is armed and again when the scenario stops it (scenarios
+// stop the armer before clearing the qdisc). The runner checks the proofs
+// after a scenario passes (assertScenarioShaping), so a classifier that never
+// matched a port fails the scenario instead of passing it unimpaired.
+const shapingProofs = [];
 function armParticipantTiers(tierByRole, readPorts) {
-  return netemTiers.armParticipantTiers(tierByRole, pages, readPorts);
+  const armer = netemTiers.armParticipantTiers(tierByRole, pages, readPorts);
+  const proof = {
+    tiers: [...new Set(Object.values(tierByRole).filter((tier) => tier !== "clean"))],
+    before: netemTiers.tierClassCounters(), after: undefined, armer
+  };
+  shapingProofs.push(proof);
+  let stopped = false;
+  Object.defineProperty(armer, "stopped", {
+    get: () => stopped,
+    set: (value) => {
+      if (value && !stopped && !proof.after) proof.after = netemTiers.tierClassCounters();
+      stopped = value;
+    }
+  });
+  return armer;
+}
+
+function assertScenarioShaping() {
+  const proofs = shapingProofs.splice(0);
+  proofs.forEach((proof, index) => {
+    if (!proof.after) {
+      proof.armer.stopped = true;
+      return;
+    }
+    const label = `armer-${index + 1}`;
+    if (!Object.keys(proof.after).length) {
+      console.log(`[netem] ${label}: class counters unreadable, shaping proof skipped`);
+      return;
+    }
+    const deltas = {};
+    for (const name of proof.tiers) {
+      const tier = fourPersonTiers[name];
+      if (!tier) continue;
+      const delta = netemTiers.classCounterDelta(proof.before, proof.after, tier.classID);
+      deltas[name] = delta;
+      assert.ok(delta.sentPackets + delta.dropped >= 20,
+        `${label}: the ${name} tier (${tier.classID}) carried ${delta.sentPackets} packets and dropped ${delta.dropped} while armed: the classifier never matched the participant's traffic`);
+      const lossy = /^[1-9]/.test(String(tier.loss)) || String(tier.loss).startsWith("gemodel");
+      if (lossy && delta.sentPackets + delta.dropped >= 200) {
+        assert.ok(delta.dropped >= 1, `${label}: the lossy ${name} tier dropped nothing over ${delta.sentPackets} packets`);
+      }
+    }
+    recordEvidence(`shaping-${label}`, { tiers: deltas, classified: Object.fromEntries([...proof.armer.applied].map(([role, ports]) => [role, [...ports]])), errors: proof.armer.errors });
+    console.log(`[netem] ${label}: ${Object.entries(deltas).map(([name, delta]) => `${name} sent=${delta.sentPackets} dropped=${delta.dropped}`).join(", ")}`);
+  });
 }
 
 // A tile counts as degraded when its protect-audio pause fired or its
@@ -1086,11 +1227,20 @@ async function scenarioSimultaneousDepartures() {
 async function scenarioSignalingReconnect() {
   await setupRoom();
   const reconnecting = pages.get("P1");
+  const p1ID = await participantIDFor(pages.get("P2"), names[0]);
   const socketCount = await reconnecting.evaluate(() => window.__slowMeetTest.sockets.length);
   await reconnecting.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "four-person reconnect check"));
   await reconnecting.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
     window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
   for (const page of pages.values()) await roster(page, names);
+  // Inside the grace window the reconnect is a token resume: the other three
+  // keep seeing the same participant, not a newcomer with the same name.
+  if (reconnectGraceSeconds >= 3) {
+    for (const role of ["P2", "P3", "P4"]) {
+      assert.equal(await participantIDFor(pages.get(role), names[0]), p1ID,
+        `${role} sees ${names[0]} under a new identity after a signaling reconnect inside the grace window`);
+    }
+  }
   await assertMedia();
 }
 
@@ -2005,11 +2155,18 @@ async function scenarioReconnectUnderImpairment() {
     const before = new Map();
     for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
     const reconnecting = pages.get("P2");
+    const p2ID = await participantIDFor(pages.get("P1"), names[1]);
     const socketCount = await reconnecting.evaluate(() => window.__slowMeetTest.sockets.length);
     await reconnecting.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "reconnect under impairment"));
     await reconnecting.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
       window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
     for (const page of pages.values()) await roster(page, names);
+    // The grace window (5 s here) is longer than the client's first 2 s
+    // retry, so this is a token resume: the same participant comes back.
+    for (const role of ["P1", "P3", "P4"]) {
+      assert.equal(await participantIDFor(pages.get(role), names[1]), p2ID,
+        `${role} sees ${names[1]} under a new identity after a resume inside the grace window`);
+    }
     for (const role of ["P1", "P3", "P4"]) {
       // Replacement-proof flow poll: a starved-tier participant can rebuild
       // its own peer mid-wait (counters restart at zero), so a fixed
@@ -2042,6 +2199,7 @@ async function scenarioReconnectUnderImpairment() {
   }
   console.log("[reconnect] media fully recovered after the impaired reconnect");
   await assertMedia();
+  await assertFullMeshMedia({ label: "after impaired reconnect" });
 }
 
 // An impaired participant's manual ICE restart must renegotiate in place —
@@ -2104,6 +2262,7 @@ async function scenarioReconnectAfterExpiryUnderImpairment() {
     armer = armParticipantTiers(tierByRole);
     await delay(10000);
     const victim = pages.get("P3");
+    const oldP3ID = await participantIDFor(pages.get("P1"), names[2]);
     const victimContext = victim.context();
     await victimContext.close();
     pages.delete("P3");
@@ -2121,6 +2280,9 @@ async function scenarioReconnectAfterExpiryUnderImpairment() {
       document.querySelector("#camera")?.getAttribute("aria-pressed") === "true",
     null, { timeout: 15000 });
     for (const page of pages.values()) await roster(page, names);
+    // The seat expired, so the rejoin is a fresh participant, not a resume.
+    assert.notEqual(await participantIDFor(pages.get("P1"), names[2]), oldP3ID,
+      `${names[2]} rejoined after the grace window under the expired identity`);
     const before = await pageMediaSnapshot(p3Page);
     // The fresh joiner's inbound media takes a negotiation round to start;
     // wait until audio bytes are actually arriving before measuring the delta.
@@ -2147,6 +2309,7 @@ async function scenarioReconnectAfterExpiryUnderImpairment() {
   const p3ID = await participantIDFor(pages.get("P1"), names[2]);
   await waitForTileState(pages.get("P1"), p3ID, "camera", "on", 90000);
   await assertMedia();
+  await assertFullMeshMedia({ label: "after impaired rejoin" });
 }
 
 // Complete the join flow on a page opened with skipJoin: the welcome form is
@@ -2638,6 +2801,158 @@ function recordEvidence(name, evidence) {
   const directory = path.join(path.resolve(parent), activeScenario);
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, `${name}.json`), JSON.stringify(evidence, null, 2));
+}
+
+// --- Resilience helpers -----------------------------------------------------
+
+// The active scenario's registry entry (set by the runner).
+let activeScenarioEntry;
+
+// A check that pins a documented defect (Bn in docs/network-testing.md). It
+// asserts only under SLOWMEET_KNOWN_FAILING=1; otherwise it logs that the
+// defect is still present and keeps the evidence, so the scenario stays
+// green while the defect stays visible.
+function knownIssue(id, ok, message, evidence) {
+  if (ok) {
+    if (!knownFailingEnabled) console.log(`[known-issue] ${id} did not reproduce this run: ${message}`);
+    return true;
+  }
+  if (evidence !== undefined) recordEvidence(`known-issue-${id}`, evidence);
+  if (knownFailingEnabled) assert.fail(`KNOWN ISSUE ${id}: ${message}`);
+  console.log(`KNOWN ISSUE ${id} still present | ${activeScenario} | ${message}`);
+  return false;
+}
+
+// A stricter check inside an existing CI scenario: asserts only under
+// MEDIA_E2E_FOUR_STRICT=1 (or always, in an opt-in resilience scenario),
+// otherwise logs. knownIssue routes a strict failure through knownIssue.
+function expectStrict(ok, message, { knownIssue: issue, evidence } = {}) {
+  if (ok) return true;
+  if (issue) return knownIssue(issue, false, message, evidence);
+  if (evidence !== undefined) recordEvidence(`strict-${Date.now()}`, evidence);
+  if (strictMode || activeScenarioEntry?.group) assert.fail(message);
+  console.log(`STRICT-ONLY | ${activeScenario} | ${message}`);
+  return false;
+}
+
+// Inbound bytes on the observer's receiver for one remote participant's
+// audio, matched through the tile's <audio> element, or -1 when the tile, its
+// track or its receiver is missing.
+async function tileAudioBytes(page, participantID) {
+  return page.evaluate(async (id) => {
+    const audio = document.querySelector(`li[data-participant-id='${id}'] audio`);
+    const track = audio?.srcObject?.getAudioTracks?.()[0];
+    if (!track) return -1;
+    const peers = [...(window.__slowMeetTest?.peerConnections || [])].filter((pc) => pc.connectionState !== "closed");
+    for (const peer of peers.reverse()) {
+      const receiver = peer.getReceivers().find((item) => item.track?.id === track.id);
+      if (!receiver) continue;
+      let bytes = -1;
+      (await receiver.getStats()).forEach((stat) => {
+        if (stat.type === "inbound-rtp") bytes = stat.bytesReceived || 0;
+      });
+      return bytes;
+    }
+    return -1;
+  }, participantID);
+}
+
+// The observer's inbound-rtp stats for one remote participant's camera or
+// audio (owner = the SFU egress track "<id>|camera" / "<id>|audio").
+async function tileInboundRtp(page, participantID, kind = "video") {
+  return page.evaluate(async ({ id, kind }) => {
+    const role = kind === "video" ? "camera" : "audio";
+    const peers = [...(window.__slowMeetTest?.peerConnections || [])].filter((pc) => pc.connectionState !== "closed");
+    for (const peer of peers.reverse()) {
+      const receiver = peer.getReceivers().find((item) => item.track?.kind === kind &&
+        (item.track.id === `${id}|${role}` || item.track.id.startsWith(`${id}|${role}`)));
+      if (!receiver) continue;
+      let result = null;
+      (await receiver.getStats()).forEach((stat) => {
+        if (stat.type === "inbound-rtp") {
+          result = { packetsReceived: stat.packetsReceived || 0, packetsLost: stat.packetsLost || 0,
+            nackCount: stat.nackCount || 0, framesDecoded: stat.framesDecoded || 0, bytesReceived: stat.bytesReceived || 0 };
+        }
+      });
+      return result;
+    }
+    return null;
+  }, { id: participantID, kind });
+}
+
+// Every observer receives audio (and, with video, camera frames) from every
+// other participant: the per-pair check behind "after a reconnect, each of
+// the other three hears and sees the returning participant". In an opt-in
+// resilience scenario it always asserts; in the CI scenarios it asserts only
+// under MEDIA_E2E_FOUR_STRICT=1.
+async function assertFullMeshMedia({ label = "full mesh", roleList = [...pages.keys()], video = true, skipVideoFrom = [], skipAudioFrom = [], timeoutMs = 45000 } = {}) {
+  // Twelve pairs sampled for up to timeoutMs is a real cost; the CI
+  // scenarios pay it only when the strict checks are asked for.
+  if (!strictMode && !activeScenarioEntry?.group) return true;
+  const pending = [];
+  for (const observer of roleList) {
+    const page = pages.get(observer);
+    for (const sender of roleList) {
+      if (sender === observer) continue;
+      const id = await participantIDFor(page, names[roles.indexOf(sender)]);
+      if (!skipAudioFrom.includes(sender)) pending.push({ observer, sender, page, id, kind: "audio" });
+      if (video && !skipVideoFrom.includes(sender)) pending.push({ observer, sender, page, id, kind: "video" });
+    }
+  }
+  const sample = (pair) => pair.kind === "audio" ? tileAudioBytes(pair.page, pair.id) : tileVideoFrames(pair.page, pair.id);
+  const deadline = Date.now() + timeoutMs;
+  let remaining = pending;
+  const last = new Map();
+  for (const pair of remaining) last.set(pair, await sample(pair));
+  while (remaining.length && Date.now() < deadline) {
+    await delay(1000);
+    const next = [];
+    for (const pair of remaining) {
+      const value = await sample(pair);
+      const before = last.get(pair);
+      if (!(before >= 0 && value > before)) next.push(pair);
+      last.set(pair, value);
+    }
+    remaining = next;
+  }
+  const missing = remaining.map((pair) => `${pair.observer} gets no ${pair.kind} from ${pair.sender} (last=${last.get(pair)})`);
+  recordEvidence(`full-mesh-${label}`, { pairs: pending.length, missing });
+  return expectStrict(missing.length === 0, `${label}: ${missing.join("; ")}`);
+}
+
+// Per-remote audio continuity on every page (scripts/audio-continuity.js).
+// Installed only for strict or opt-in runs: four 100 ms getStats loops are a
+// real cost on the 2-core CI runner.
+const audioContinuity = require("./audio-continuity");
+async function startScenarioContinuity(roleList = [...pages.keys()]) {
+  if (!strictMode && !activeScenarioEntry?.group) return false;
+  for (const role of roleList) await audioContinuity.installAudioContinuity(pages.get(role));
+  return true;
+}
+
+// Longest per-remote audio gap each observer saw over [from, to], checked
+// against budgetMs (a number, or role -> number). Returns the summary.
+async function evaluateAudioGaps(label, from, to, budgetMs, roleList = [...pages.keys()]) {
+  const summaries = {};
+  const problems = [];
+  for (const observer of roleList) {
+    const page = pages.get(observer);
+    const history = await audioContinuity.readAudioContinuity(page);
+    if (!history) continue;
+    const owners = [];
+    for (const sender of roleList) {
+      if (sender !== observer) owners.push(await participantIDFor(page, names[roles.indexOf(sender)]).catch(() => sender));
+    }
+    const summary = audioContinuity.summarize(history, { from, to, owners });
+    summaries[observer] = summary;
+    const budget = typeof budgetMs === "object" ? budgetMs[observer] : budgetMs;
+    if (budget !== undefined && summary.worstGapMs > budget) {
+      problems.push(`${observer} longest audio gap ${summary.worstGapMs} ms > ${budget} ms (${JSON.stringify(summary.perOwnerGapMs)})`);
+    }
+  }
+  recordEvidence(`audio-gaps-${label}`, { from, to, budgetMs, summaries });
+  if (Object.keys(summaries).length) expectStrict(problems.length === 0, `${label}: ${problems.join("; ")}`);
+  return summaries;
 }
 
 // An automatic pause left behind by an earlier scenario persists across
@@ -3210,6 +3525,846 @@ async function scenarioAllFourImpaired() {
   await assertMedia();
 }
 
+// --- Opt-in resilience scenarios ---------------------------------------------
+//
+// Grouped "resilience" / "resilience-slow": never part of a default or CI
+// selection (see scenarioFilter). Each one proves its fault reached the
+// participant (class counters, relay byte counts, or the isolation filters)
+// and asserts recovery per pair with assertFullMeshMedia.
+
+const { startSignalingRelay } = require("./signaling-relay");
+
+const offlineText = "Offline. Select Leave to try again.";
+
+async function currentPeerState(page) {
+  return page.evaluate(async () => {
+    const peers = window.__slowMeetTest?.peerConnections || [];
+    const peer = peers.at(-1);
+    if (!peer) return { count: 0 };
+    const ports = [];
+    let pair = null;
+    try {
+      const report = await peer.getStats();
+      const byID = new Map([...report.values()].map((stat) => [stat.id, stat]));
+      report.forEach((stat) => {
+        if (stat.type === "local-candidate" && stat.port) ports.push(Number(stat.port));
+        if (stat.type === "transport" && stat.selectedCandidatePairId) {
+          const selected = byID.get(stat.selectedCandidatePairId);
+          const local = selected && byID.get(selected.localCandidateId);
+          if (local) pair = { candidateType: local.candidateType, protocol: local.protocol, relayProtocol: local.relayProtocol || null, port: local.port };
+        }
+      });
+    } catch (_) {}
+    return { count: peers.length, state: peer.connectionState, ports, pair, sockets: window.__slowMeetTest.sockets.length,
+      socketOpen: window.__slowMeetTest.sockets.at(-1)?.readyState === WebSocket.OPEN };
+  });
+}
+
+async function waitForCurrentPeerConnected(page, label, timeoutMs) {
+  await page.waitForFunction(() => {
+    const peer = (window.__slowMeetTest?.peerConnections || []).at(-1);
+    return Boolean(peer) && peer.connectionState === "connected";
+  }, null, { timeout: timeoutMs }).catch(async () => {
+    assert.fail(`${label}: the current peer connection never reached connected within ${timeoutMs} ms (${JSON.stringify(await currentPeerState(page))})`);
+  });
+}
+
+async function isOffline(page) {
+  return page.evaluate((text) => document.body.innerText.includes(text), offlineText);
+}
+
+// Audio bytes from one sender's tile grow on the observer within timeoutMs.
+async function waitForSenderAudio(observerRole, senderRole, label, timeoutMs = 20000) {
+  const observer = pages.get(observerRole);
+  const id = await participantIDFor(observer, names[roles.indexOf(senderRole)]);
+  const deadline = Date.now() + timeoutMs;
+  let previous = await tileAudioBytes(observer, id);
+  while (Date.now() < deadline) {
+    await delay(1000);
+    const current = await tileAudioBytes(observer, id);
+    if (previous >= 0 && current > previous) return;
+    previous = current;
+  }
+  assert.fail(`${label}: ${observerRole} received no audio from ${senderRole} within ${timeoutMs} ms`);
+}
+
+async function assertRoomKeepsTalking(roleList, label) {
+  for (const observer of roleList) {
+    for (const sender of roleList) {
+      if (sender !== observer) await waitForSenderAudio(observer, sender, label);
+    }
+  }
+}
+
+async function identities(observerRole) {
+  const page = pages.get(observerRole);
+  const result = {};
+  for (const name of names) result[name] = await participantIDFor(page, name).catch(() => null);
+  return result;
+}
+
+// Takes one participant's browser out of the room entirely.
+async function retireParticipant(role) {
+  const page = pages.get(role);
+  if (!page) return;
+  if (await page.locator("#meeting").isVisible().catch(() => false)) {
+    await page.locator("#leave").click({ timeout: 5000 }).catch(() => {});
+    await page.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 }).catch(() => {});
+  }
+  const context = page.context();
+  const browser = context.browser();
+  traces.delete(context);
+  await context.close().catch(() => {});
+  if (browser) await browser.close().catch(() => {});
+  const contextIndex = contexts.indexOf(context);
+  if (contextIndex >= 0) contexts.splice(contextIndex, 1);
+  const browserIndex = browsers.indexOf(browser);
+  if (browserIndex >= 0) browsers.splice(browserIndex, 1);
+  pages.delete(role);
+  events.delete(role);
+}
+
+async function enableCamera(page) {
+  if (await page.locator("#camera").getAttribute("aria-pressed") !== "true") await page.locator("#camera").click();
+  await page.waitForFunction(() => document.querySelector("#camera")?.getAttribute("aria-pressed") === "true", null, { timeout: 15000 });
+}
+
+// Runs fn with one participant re-joined through its own signaling relay,
+// then puts the participant back on a direct connection.
+async function withRelayedParticipant(role, fn) {
+  const relay = await startSignalingRelay({ target: server.url });
+  await retireParticipant(role);
+  for (const page of pages.values()) await roster(page, names.filter((_, index) => roles[index] !== role));
+  await delay(reconnectGraceSeconds * 1000 + 1000);
+  await createParticipant(role, names[roles.indexOf(role)], false, false, { baseURL: relay.url });
+  await enableCamera(pages.get(role));
+  await unmuteAllForAudioGuarantee();
+  for (const page of pages.values()) await roster(page, names);
+  try {
+    return await fn(relay);
+  } catch (error) {
+    // The failure report is written after this participant is put back on a
+    // direct connection, so keep the relayed page's own state here.
+    const page = pages.get(role);
+    if (page) {
+      recordEvidence(`relayed-${role}-at-failure`, {
+        peer: await currentPeerState(page).catch((cause) => ({ error: cause.message })),
+        offline: await isOffline(page).catch(() => null),
+        tiles: await page.evaluate(() => [...document.querySelectorAll("li[data-participant-id]")].map((tile) => ({
+          id: tile.dataset.participantId, name: tile.textContent.slice(0, 20), camera: tile.dataset.camera,
+          connection: tile.dataset.connection, audioTrack: Boolean(tile.querySelector("audio")?.srcObject?.getAudioTracks?.().length)
+        }))).catch(() => []),
+        socketEvents: await page.evaluate(() => (window.__slowMeetTest?.socketEvents || []).slice(-80)).catch(() => []),
+        socketCreates: await page.evaluate(() => window.__slowMeetTest?.socketCreates || []).catch(() => []),
+        peerStates: await page.evaluate(() => window.__slowMeetTest?.peerStates || []).catch(() => []),
+        console: (events.get(role) || []).slice(-60)
+      });
+    }
+    throw error;
+  } finally {
+    recordEvidence(`relay-${role}`, relay.stats());
+    await retireParticipant(role);
+    await relay.close();
+    await delay(reconnectGraceSeconds * 1000 + 1000);
+    await join(role);
+    await enableCamera(pages.get(role));
+  }
+}
+
+async function screenDecodesOn(page, label, timeoutMs = 30000) {
+  await page.waitForFunction(() => [...document.querySelectorAll("li[data-sharing='true'] video.screen-video")]
+    .some((video) => video.videoWidth > 0 && video.currentTime > 0), null, { timeout: timeoutMs })
+    .catch(() => assert.fail(`${label}: the shared screen never decoded`));
+}
+
+async function noSharerOn(page, label, timeoutMs = 15000) {
+  await page.waitForFunction(() => ![...document.querySelectorAll("li[data-participant-id]")]
+    .some((tile) => tile.dataset.sharing === "true"), null, { timeout: timeoutMs })
+    .catch(() => assert.fail(`${label}: a tile still shows a live share`));
+}
+
+// The share owner's signaling drops and resumes inside the grace window: the
+// share must end cleanly for every viewer (no frozen tile left "sharing"),
+// the lease must be free for someone else, and the owner can share again.
+async function runSharerReconnectMidShare(impaired) {
+  await setupRoom();
+  const sharerRole = "P3";
+  const sharer = pages.get(sharerRole);
+  const viewers = roles.filter((role) => role !== sharerRole);
+  const before = await identities("P1");
+  let armer;
+  if (impaired) {
+    installRoomQdisc();
+    armer = armParticipantTiers({ [sharerRole]: "moderate" });
+    await delay(8000);
+  }
+  try {
+    await sharer.locator("#screen").click();
+    await waitForScreenButton(sharer, "true");
+    for (const page of pages.values()) await assertSingleSharer(page, names[2]);
+    // On a 200 kbit uplink the share need not decode (impaired-sharer-screen-
+    // share asserts decoding only after the lift); the lease is what counts.
+    if (!impaired) {
+      for (const role of viewers) await screenDecodesOn(pages.get(role), `${role} before the reconnect`);
+    }
+    const socketCount = await sharer.evaluate(() => window.__slowMeetTest.sockets.length);
+    await sharer.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "sharer reconnect mid-share"));
+    await sharer.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+      window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+    for (const page of pages.values()) await roster(page, names);
+    assert.equal((await identities("P1"))[names[2]], before[names[2]], "the sharer resumed under a new identity");
+    for (const role of viewers) await noSharerOn(pages.get(role), `${role} after the sharer's reconnect`);
+    await waitForScreenButton(sharer, "false");
+  } finally {
+    if (armer) armer.stopped = true;
+    if (impaired) clearRoomProfiles();
+  }
+  // The lease is free: someone else can share, and then the owner again.
+  const other = pages.get("P2");
+  await other.locator("#screen").click();
+  await waitForScreenButton(other, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[1]);
+  await other.locator("#screen").click();
+  await waitForScreenButton(other, "false");
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "true");
+  for (const page of pages.values()) await assertSingleSharer(page, names[2]);
+  for (const role of viewers) await screenDecodesOn(pages.get(role), `${role} after the owner shares again`);
+  await sharer.locator("#screen").click();
+  await waitForScreenButton(sharer, "false");
+  // Starting a share turns the sharer's camera off and stopping it does not
+  // turn it back on (startScreenShare restores it only when the share fails
+  // to start), so both sharers switch their cameras back on by hand.
+  await enableCamera(other);
+  await enableCamera(sharer);
+  // The owner resumed mid-share; a camera it turns on afterwards has reached
+  // viewers as a single packet and then nothing (keyframe requests go to the
+  // superseded peer, see B7), so its camera is checked on its own here.
+  const sharerID = await participantIDFor(pages.get("P1"), names[2]);
+  const framesAt = async () => tileVideoFrames(pages.get("P1"), sharerID);
+  const startFrames = await framesAt();
+  let sharerCameraFlows = false;
+  for (let attempt = 0; attempt < 20 && !sharerCameraFlows; attempt++) {
+    await delay(1000);
+    sharerCameraFlows = (await framesAt()) > Math.max(0, startFrames) + 5;
+  }
+  const cameraOK = knownIssue("B9", sharerCameraFlows,
+    "a camera turned on after a mid-share resume never reaches the viewers",
+    { sharerID, startFrames, endFrames: await framesAt(), inbound: await tileInboundRtp(pages.get("P1"), sharerID, "video") });
+  // After a resume over a weak link the viewers have been seen to keep
+  // receiving the owner's audio packets with no track bound to the owner's
+  // tile, which is what plays it: the owner is silent for the room.
+  const audioBound = [];
+  for (const role of viewers) audioBound.push(await tileAudioBytes(pages.get(role), await participantIDFor(pages.get(role), names[2])));
+  const audioOK = knownIssue("B11", audioBound.every((bytes) => bytes >= 0),
+    "after a resume the viewers' tile for the owner has no audio track, so the owner is not heard",
+    { viewers, audioBound });
+  await assertMedia();
+  await assertFullMeshMedia({ label: "after the sharer reconnect", skipVideoFrom: cameraOK ? [] : [sharerRole],
+    skipAudioFrom: audioOK ? [] : [sharerRole] });
+  // The owner rejoins afresh either way, so a defect seen here cannot leak
+  // into the next scenario.
+  await stopAnyShare();
+  await retireParticipant(sharerRole);
+  await delay(reconnectGraceSeconds * 1000 + 1000);
+  await join(sharerRole);
+  await enableCamera(pages.get(sharerRole));
+}
+
+// B11: after a resume the viewers have been seen to keep receiving the
+// resumed participant's audio packets with no track bound to its tile (the
+// element that plays it). Checks that on every other page, records the
+// known issue, runs the per-pair check without that participant's audio
+// when it reproduced, and then rejoins the participant afresh so the
+// defect cannot leak into later scenarios.
+async function assertResumedParticipantHeard(role, label) {
+  const others = [...pages.keys()].filter((candidate) => candidate !== role);
+  const bound = {};
+  for (const observer of others) {
+    const page = pages.get(observer);
+    bound[observer] = await tileAudioBytes(page, await participantIDFor(page, names[roles.indexOf(role)]));
+  }
+  const heard = knownIssue("B11", Object.values(bound).every((bytes) => bytes >= 0),
+    `after ${role}'s resume the other tiles for ${role} have no audio track, so ${role} is not heard`, { role, bound });
+  await assertFullMeshMedia({ label, skipAudioFrom: heard ? [] : [role] });
+  if (!heard) {
+    await retireParticipant(role);
+    await delay(reconnectGraceSeconds * 1000 + 1000);
+    await join(role);
+    await enableCamera(pages.get(role));
+  }
+}
+
+// A share left running (camera disabled while sharing) would block the next
+// scenario's setup, so every exit path stops any share still on.
+async function stopAnyShare() {
+  for (const page of pages.values()) {
+    if (await page.locator("#screen").getAttribute("aria-pressed").catch(() => null) === "true") {
+      await page.locator("#screen").click().catch(() => {});
+      await waitForScreenButton(page, "false").catch(() => {});
+    }
+  }
+}
+
+async function scenarioSharerReconnectMidShare() {
+  try { await runSharerReconnectMidShare(false); } finally { await stopAnyShare(); }
+}
+async function scenarioSharerReconnectMidShareImpaired() {
+  try { await runSharerReconnectMidShare(true); } finally { await stopAnyShare(); }
+}
+
+// Counts participant_joined events each page received per participant since
+// a mark (socketEvents index), keyed by page role.
+async function joinedCounts(marks) {
+  const counts = {};
+  for (const [role, page] of pages) {
+    counts[role] = await page.evaluate((mark) => {
+      const result = {};
+      for (const event of (window.__slowMeetTest?.socketEvents || []).slice(mark)) {
+        if (event.direction === "receive" && event.message?.type === "participant_joined" && event.message.participant) {
+          result[event.message.participant] = (result[event.message.participant] || 0) + 1;
+        }
+      }
+      return result;
+    }, marks[role] || 0);
+  }
+  return counts;
+}
+
+async function socketEventMarks() {
+  const marks = {};
+  for (const [role, page] of pages) marks[role] = await page.evaluate(() => window.__slowMeetTest.socketEvents.length);
+  return marks;
+}
+
+// Two, then all four participants lose signaling in the same instant (an
+// office Wi-Fi blip, a proxy reload) and resume together.
+async function scenarioSimultaneousReconnect() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const before = await identities("P1");
+  for (const dropped of [["P2", "P3"], [...roles]]) {
+    const marks = await socketEventMarks();
+    const counts = {};
+    for (const role of dropped) counts[role] = await pages.get(role).evaluate(() => window.__slowMeetTest.sockets.length);
+    await Promise.all(dropped.map((role) => pages.get(role).evaluate(() =>
+      window.__slowMeetTest.sockets.at(-1).close(4001, "simultaneous reconnect"))));
+    for (const role of dropped) {
+      await pages.get(role).waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+        window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, counts[role], { timeout: 30000 });
+    }
+    for (const page of pages.values()) await roster(page, names);
+    for (const role of roles) {
+      const seen = await identities(role);
+      for (const name of names) {
+        if (name === names[roles.indexOf(role)]) continue;
+        assert.equal(seen[name], before[name], `${role} sees ${name} under a new identity after ${dropped.length} simultaneous resumes`);
+      }
+    }
+    for (const role of dropped) await waitForCurrentPeerConnected(pages.get(role), `${role} after the simultaneous resume`, 45000);
+    await delay(2000);
+    const joined = await joinedCounts(marks);
+    const duplicates = Object.entries(joined).flatMap(([role, byID]) =>
+      Object.entries(byID).filter(([, count]) => count > 1).map(([id, count]) => `${role} got participant_joined for ${id} x${count}`));
+    knownIssue("B5", duplicates.length === 0,
+      `concurrent resumes announced a participant more than once (${duplicates.join("; ")})`, joined);
+    await assertFullMeshMedia({ label: `after ${dropped.length} simultaneous resumes` });
+  }
+}
+
+// The server process restarts under a live room (a deploy, a crash). Every
+// browser redials with a token the new process has never seen and must come
+// back as a fresh participant; the room ends up whole, with media.
+async function scenarioServerRestartRejoin() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const before = await identities("P1");
+  const restart = await server.restart({ downMs: 3000 });
+  console.log(`[restart] server was down for ${restart.readyAt - restart.stoppedAt} ms`);
+  for (const page of pages.values()) {
+    await page.waitForFunction((count) => {
+      const sockets = window.__slowMeetTest.sockets;
+      return sockets.at(-1)?.readyState === WebSocket.OPEN && (sockets.at(-1).__openedAt || 0) > count;
+    }, restart.stoppedAt, { timeout: 90000 });
+  }
+  for (const page of pages.values()) await roster(page, names);
+  for (const [role, page] of pages) {
+    assert.equal(await isOffline(page), false, `${role} went Offline across a server restart`);
+  }
+  const after = await identities("P1");
+  for (const name of names.slice(1)) {
+    assert.notEqual(after[name], before[name], `${name} kept an identity the restarted server could not know`);
+  }
+  for (const role of roles) await waitForCurrentPeerConnected(pages.get(role), `${role} after the restart`, 60000);
+  await assertFullMeshMedia({ label: "after the server restart" });
+}
+
+// A participant's current UDP path dies and stays dead (Wi-Fi to a hotspot,
+// a NAT rebinding): only the ports it uses now are blackholed, once. The
+// client must find a working path on its own, without a reload, keeping its
+// identity, while the other three keep talking.
+async function scenarioPathChangeAutoIceRestart() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const moverRole = "P3";
+  const mover = pages.get(moverRole);
+  const before = await identities("P1");
+  const deadPorts = await netemTiers.pageLocalIcePorts(mover);
+  assert.ok(deadPorts.length > 0, "the moving participant has no live ICE port to kill");
+  installRoomQdisc();
+  const countersBefore = netemTiers.tierClassCounters();
+  const killedAt = Date.now();
+  for (const port of deadPorts) netemTiers.applyParticipantTier(port, "blackout");
+  console.log(`[path-change] blackholed ${moverRole}'s ports ${deadPorts.join(", ")} for good`);
+  try {
+    await delay(4000);
+    const blackout = netemTiers.classCounterDelta(countersBefore, netemTiers.tierClassCounters(), fourPersonTiers.blackout.classID);
+    assert.ok(blackout.dropped >= 20, `the old path's blackout dropped only ${blackout.dropped} packets: the fault never reached it`);
+    await assertRoomKeepsTalking(["P1", "P2", "P4"], "while P3's path is dead");
+    await mover.waitForFunction(async (dead) => {
+      const peer = (window.__slowMeetTest?.peerConnections || []).at(-1);
+      if (!peer || peer.connectionState !== "connected") return false;
+      const report = await peer.getStats();
+      const byID = new Map([...report.values()].map((stat) => [stat.id, stat]));
+      for (const stat of report.values()) {
+        if (stat.type !== "transport" || !stat.selectedCandidatePairId) continue;
+        const local = byID.get(byID.get(stat.selectedCandidatePairId)?.localCandidateId);
+        if (local && !dead.includes(Number(local.port))) return true;
+      }
+      return false;
+    }, deadPorts, { timeout: 120000 }).catch(async () =>
+      assert.fail(`P3 never moved to a working path while its old one stayed dead (${JSON.stringify(await currentPeerState(mover))})`));
+    const recoveredMs = Date.now() - killedAt;
+    const state = await currentPeerState(mover);
+    recordEvidence("path-change", { deadPorts, recoveredMs, state });
+    console.log(`[path-change] P3 recovered on port ${state.pair?.port} after ${recoveredMs} ms (sockets=${state.sockets})`);
+    assert.equal(await isOffline(mover), false, "P3 went Offline instead of finding a new path");
+  } finally {
+    clearRoomProfiles();
+  }
+  for (const page of pages.values()) await roster(page, names);
+  assert.equal((await identities("P1"))[names[2]], before[names[2]], "P3 came back under a new identity");
+  await assertFullMeshMedia({ label: "after the path change" });
+}
+
+// Shared shape of the "hold a tier, check, lift, check recovery" scenarios.
+async function holdTiers({ tierByRole, include = [], holdMs, during }) {
+  installRoomQdisc({ include });
+  let armer;
+  try {
+    armer = armParticipantTiers(tierByRole);
+    await delay(holdMs);
+    await during();
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+}
+
+async function waitForCamerasOn(observerRole, senderRoles, timeoutMs = 90000) {
+  const observer = pages.get(observerRole);
+  for (const role of senderRoles) {
+    const id = await participantIDFor(observer, names[roles.indexOf(role)]);
+    await waitForTileState(observer, id, "camera", "on", timeoutMs);
+  }
+}
+
+// One participant's upload alone is thin and lossy (300 kbit, 8%): the room
+// still hears it, its camera degrades for the others instead of freezing
+// the room, and its own clean download keeps every other camera sharp.
+async function scenarioSlowUplinkRoom() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const p2IDOnP1 = await participantIDFor(pages.get("P1"), names[1]);
+  await holdTiers({ tierByRole: { P2: "thin-uplink" }, include: ["thin-uplink"], holdMs: 20000, during: async () => {
+    for (const role of ["P1", "P3", "P4"]) await waitForSenderAudio(role, "P2", "P2's audio over a thin uplink");
+    await waitForDegradedCameraTile([pages.get("P1"), pages.get("P4")], p2IDOnP1);
+    const p2 = pages.get("P2");
+    const p1IDOnP2 = await participantIDFor(p2, names[0]);
+    const start = await tileVideoFrames(p2, p1IDOnP2);
+    await delay(5000);
+    const end = await tileVideoFrames(p2, p1IDOnP2);
+    assert.ok(end - start >= 25, `P2's clean download decoded only ${end - start} of P1's frames in 5 s: the uplink impairment leaked into its downlink`);
+    for (const role of ["P1", "P4"]) {
+      const other = role === "P1" ? "P4" : "P1";
+      const id = await participantIDFor(pages.get(role), names[roles.indexOf(other)]);
+      await waitForTileState(pages.get(role), id, "camera", "on", 10000);
+    }
+  } });
+  await waitForCamerasOn("P1", ["P2"]);
+  await assertFullMeshMedia({ label: "after the thin uplink lifts" });
+}
+
+// One participant's link loses packets in bursts and reorders and
+// duplicates them (congested Wi-Fi). Audio to and from it must keep flowing
+// with no long hole, and the room recovers when the link clears.
+async function scenarioBurstyLinkRoom() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await startScenarioContinuity();
+  let from;
+  await holdTiers({ tierByRole: { P4: "bursty" }, include: ["bursty"], holdMs: 2000, during: async () => {
+    from = Date.now();
+    await delay(20000);
+    for (const role of ["P1", "P2", "P3"]) {
+      await waitForSenderAudio(role, "P4", "P4's audio over a bursty link");
+      await waitForSenderAudio("P4", role, "audio to P4 over a bursty link");
+    }
+    await evaluateAudioGaps("bursty window", from, Date.now(), 3000);
+  } });
+  await assertFullMeshMedia({ label: "after the bursty link clears" });
+}
+
+// Nobody has a good link, and every link is bad differently: moderate, a
+// thin uplink, severe, and a capped downlink, held past the 20-40 s horizon
+// where a starved queue kills ICE consent. Everybody keeps hearing
+// somebody, nobody is pushed Offline or into a reconnect storm, the severe
+// camera degrades, and the room recovers.
+async function scenarioAllImpairedRoom() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const socketsBefore = {};
+  for (const [role, page] of pages) socketsBefore[role] = await page.evaluate(() => window.__slowMeetTest.sockets.length);
+  await holdTiers({ tierByRole: { P1: "moderate", P2: "thin-uplink", P3: "severe", P4: "capped" }, include: ["thin-uplink"],
+    holdMs: 40000, during: async () => {
+      for (const [role, page] of pages) {
+        await waitForAudioFlow(page, `${role} receiving audio with every link impaired`, 30000);
+        assert.equal(await isOffline(page), false, `${role} went Offline with every link impaired`);
+        const sockets = await page.evaluate(() => window.__slowMeetTest.sockets.length);
+        assert.ok(sockets - socketsBefore[role] <= 1, `${role} reconnected its signaling ${sockets - socketsBefore[role]} times under impairment`);
+      }
+      const p3ID = await participantIDFor(pages.get("P1"), names[2]);
+      await waitForDegradedCameraTile([pages.get("P1")], p3ID);
+    } });
+  await waitForCamerasOn("P1", ["P2", "P3", "P4"]);
+  await assertFullMeshMedia({ label: "after every link clears" });
+}
+
+// The impaired resume of reconnect-under-impairment, shaped by construction:
+// all of P2's UDP — including the ports its resumed peer opens — sits in the
+// moderate tier, so the resume's ICE, DTLS and first keyframe all cross the
+// bad link. The resume must finish inside the superseded-peer close delay
+// (10 s) so the room is not dragged through a renegotiation.
+async function scenarioReconnectUnderImpairmentIsolated() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const p2 = pages.get("P2");
+  const before = await identities("P1");
+  installRoomQdisc();
+  const isolation = netemTiers.armRoleUdpIsolation("P2", "moderate", pages);
+  try {
+    await isolation.ready;
+    await delay(8000);
+    const countersBefore = netemTiers.tierClassCounters();
+    const socketCount = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+    const peerCount = await p2.evaluate(() => window.__slowMeetTest.peerConnections.length);
+    const closedAt = Date.now();
+    await p2.evaluate(() => window.__slowMeetTest.sockets.at(-1).close(4001, "isolated impaired resume"));
+    await p2.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
+      window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+    await p2.waitForFunction((count) => {
+      const peers = window.__slowMeetTest.peerConnections;
+      return peers.length > count && peers.at(-1).connectionState === "connected";
+    }, peerCount, { timeout: 60000 }).catch(async () =>
+      assert.fail(`P2's resumed peer never connected over the moderate link (${JSON.stringify(await currentPeerState(p2))})`));
+    const resumeMs = Date.now() - closedAt;
+    const moderate = netemTiers.classCounterDelta(countersBefore, netemTiers.tierClassCounters(), fourPersonTiers.moderate.classID);
+    recordEvidence("isolated-resume", { resumeMs, moderate, isolationErrors: isolation.errors });
+    console.log(`[isolated-resume] P2 resumed in ${resumeMs} ms over the moderate link (moderate sent=${moderate.sentPackets} dropped=${moderate.dropped})`);
+    assert.ok(moderate.sentPackets >= 50, `the moderate tier carried only ${moderate.sentPackets} packets during the resume: the handshake was not shaped`);
+    expectStrict(resumeMs < 10000, `P2's impaired resume took ${resumeMs} ms, past the 10 s superseded-peer close delay`);
+    for (const page of pages.values()) await roster(page, names);
+    for (const role of ["P1", "P3", "P4"]) {
+      assert.equal((await identities(role))[names[1]], before[names[1]], `${role} sees P2 under a new identity after the resume`);
+    }
+    await assertRoomKeepsTalking(["P1", "P3", "P4"], "while P2 resumes over a moderate link");
+  } finally {
+    await isolation.lift();
+    clearRoomProfiles();
+  }
+  await waitForCamerasOn("P1", ["P2"]);
+  await assertResumedParticipantHeard("P2", "after the isolated resume");
+}
+
+// One participant's link flaps: 2 s up / 2 s down for a minute, then 3 s up
+// / 8 s down. The other three must keep talking throughout, and the flapping
+// participant must end up connected with its identity, not Offline.
+async function scenarioRapidFlapLink() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const before = await identities("P1");
+  installRoomQdisc({ include: ["flap"] });
+  let armer;
+  try {
+    armer = armParticipantTiers({ P2: "flap" });
+    await delay(4000);
+    const fast = netemTiers.flapTier("flap", { onMs: 2000, offMs: 2000, untilMs: 60000 });
+    const flapStartedAt = Date.now();
+    while (Date.now() - flapStartedAt < 50000) {
+      await assertRoomKeepsTalking(["P1", "P3", "P4"], "while P2's link flaps every 2 s");
+      await delay(5000);
+    }
+    await fast.done;
+    const slow = netemTiers.flapTier("flap", { schedule: [{ link: {}, ms: 3000 }, { link: { loss: "100%" }, ms: 8000 }], cycles: 3 });
+    await assertRoomKeepsTalking(["P1", "P3", "P4"], "while P2's link is mostly down");
+    await slow.done;
+    recordEvidence("flap", { fast: fast.transitions.length, slow: slow.transitions.length, errors: [...fast.errors, ...slow.errors] });
+    assert.ok(fast.transitions.length >= 25, `the fast flap made only ${fast.transitions.length} transitions`);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  const p2 = pages.get("P2");
+  await waitForCurrentPeerConnected(p2, "P2 after the flapping stops", 120000);
+  assert.equal(await isOffline(p2), false, "P2 went Offline after its link flapped");
+  for (const page of pages.values()) await roster(page, names);
+  assert.equal((await identities("P1"))[names[1]], before[names[1]], "P2 came back under a new identity after the flapping");
+  await assertResumedParticipantHeard("P2", "after the link stops flapping");
+}
+
+// A whole-link outage for one participant: its signaling (through its relay)
+// and its media UDP die together, with no FIN and no RST, then return.
+async function linkOutage(outageMs) {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await withRelayedParticipant("P2", async (relay) => {
+    const p2 = pages.get("P2");
+    const before = await identities("P1");
+    const p2SocketsBefore = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+    installRoomQdisc();
+    const isolation = netemTiers.armRoleUdpIsolation("P2", "blackout", pages);
+    let lifted = false;
+    try {
+      await isolation.ready;
+      relay.blackhole();
+      const startedAt = Date.now();
+      const countersBefore = netemTiers.tierClassCounters();
+      while (Date.now() - startedAt < outageMs) {
+        await assertRoomKeepsTalking(["P1", "P3", "P4"], "while P2's link is down");
+        await delay(Math.min(10000, Math.max(0, outageMs - (Date.now() - startedAt))));
+      }
+      const blackout = netemTiers.classCounterDelta(countersBefore, netemTiers.tierClassCounters(), fourPersonTiers.blackout.classID);
+      const relayStats = relay.stats();
+      recordEvidence("outage", { outageMs, blackout, relay: relayStats, isolationErrors: isolation.errors });
+      assert.ok(blackout.dropped >= 20, `P2's media blackout dropped only ${blackout.dropped} packets`);
+      if (outageMs >= 70000) {
+        // Past the hub's 60 s pong deadline the server gives up on P2 and,
+        // past the grace window, frees the seat.
+        for (const role of ["P1", "P3", "P4"]) await roster(pages.get(role), [names[0], names[2], names[3]]);
+      }
+      relay.resume();
+      await isolation.lift();
+      lifted = true;
+    } finally {
+      if (!lifted) {
+        relay.resume();
+        await isolation.lift();
+      }
+      clearRoomProfiles();
+    }
+    await waitForCurrentPeerConnected(p2, "P2 after its link returns", 120000);
+    for (const page of pages.values()) await roster(page, names);
+    assert.equal(await isOffline(p2), false, "P2 went Offline after its link returned");
+    const after = await identities("P1");
+    if (outageMs < 30000) {
+      assert.equal(after[names[1]], before[names[1]], "P2 came back under a new identity after a short outage");
+    } else {
+      assert.notEqual(after[names[1]], before[names[1]], "P2 kept its identity after the server had freed its seat");
+    }
+    recordEvidence("outage-sockets", { before: p2SocketsBefore, after: await p2.evaluate(() => window.__slowMeetTest.sockets.length) });
+    await assertFullMeshMedia({ label: `after a ${outageMs / 1000} s link outage` });
+  });
+}
+
+async function scenarioLinkOutageShort() { await linkOutage(15000); }
+async function scenarioLinkOutageLong() { await linkOutage(75000); }
+
+// P2's signaling stalls (its media keeps flowing) while P4 leaves and
+// rejoins: every offer and roster change for P2 is held, then delivered at
+// once. P2 keeps hearing the room through the stall and converges on the
+// new room afterwards.
+async function scenarioSignalingStallDuringChurn() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await withRelayedParticipant("P2", async (relay) => {
+    relay.blackhole();
+    try {
+      await retireParticipant("P4");
+      await assertRoomKeepsTalking(["P1", "P2", "P3"], "while P2's signaling stalls");
+      await delay(reconnectGraceSeconds * 1000 + 1000);
+      await join("P4");
+      await enableCamera(pages.get("P4"));
+      await unmuteAllForAudioGuarantee();
+      await waitForSenderAudio("P2", "P1", "P2 hearing P1 through the stall");
+      assert.ok(relay.stats().heldDownBytes > 0, "nothing was held for P2 during the stall: the relay never blackholed it");
+    } finally {
+      relay.resume();
+    }
+    for (const role of ["P1", "P3", "P4"]) await roster(pages.get(role), names);
+    // P2 gets the held left/joined/offer burst at once. Its departed tile
+    // for the old Drew has been seen to stay up as a "Participant left"
+    // ghost next to the rejoined Drew instead of disappearing after 1.2 s.
+    const p2 = pages.get("P2");
+    let ghosts = [];
+    for (let attempt = 0; attempt < 15; attempt++) {
+      ghosts = await p2.evaluate(() => [...document.querySelectorAll("#meeting-layout-host .participant-tile")]
+        .filter((tile) => !tile.closest("#layout-parking") && tile.dataset.connection === "left")
+        .map((tile) => ({ id: tile.dataset.participantId, text: tile.textContent.slice(0, 40) })));
+      if (!ghosts.length) break;
+      await delay(1000);
+    }
+    knownIssue("B10", ghosts.length === 0,
+      "a departed participant's tile stays as a ghost after a stalled signaling session delivers left/joined in one burst", ghosts);
+    await p2.waitForFunction((expected) => expected.every((name) =>
+      [...document.querySelectorAll("#meeting-layout-host .participant-tile")]
+        .some((tile) => tile.dataset.connection !== "left" && tile.textContent.includes(name))), names, { timeout: 20000 });
+    await waitForCurrentPeerConnected(pages.get("P2"), "P2 after the stall", 60000);
+    await assertFullMeshMedia({ label: "after the signaling stall" });
+  });
+}
+
+// One participant's media is dead for minutes while its signaling lives:
+// the client spends its retry budget (ICE restarts, then reconnects backing
+// off 2/4/8/16/30 s) and goes Offline, and stays Offline once the path
+// returns until the user leaves and rejoins. The others keep talking.
+async function scenarioLongBlackoutRetryBudget() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const p2 = pages.get("P2");
+  const socketsBefore = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+  installRoomQdisc();
+  const isolation = netemTiers.armRoleUdpIsolation("P2", "blackout", pages);
+  let offlineAt;
+  try {
+    await isolation.ready;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 300000) {
+      await assertRoomKeepsTalking(["P1", "P3", "P4"], "while P2's media is dead");
+      if (await isOffline(p2)) {
+        offlineAt = Date.now() - startedAt;
+        break;
+      }
+      await delay(10000);
+    }
+    const sockets = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+    recordEvidence("retry-budget", { offlineAfterMs: offlineAt, socketsOpened: sockets - socketsBefore,
+      creates: await p2.evaluate(() => window.__slowMeetTest.socketCreates.map((entry) => entry.at)) });
+    assert.ok(offlineAt, "P2 never went Offline in 300 s of dead media");
+    console.log(`[retry-budget] P2 went Offline after ${offlineAt} ms and ${sockets - socketsBefore} signaling sessions`);
+    assert.ok(sockets - socketsBefore >= 5, `P2 opened only ${sockets - socketsBefore} signaling sessions before going Offline`);
+  } finally {
+    await isolation.lift();
+    clearRoomProfiles();
+  }
+  // Offline is final until the user acts: the path is back, nothing retries.
+  const socketsAtLift = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+  await delay(15000);
+  assert.equal(await isOffline(p2), true, "P2 left the Offline state on its own");
+  assert.equal(await p2.evaluate(() => window.__slowMeetTest.sockets.length), socketsAtLift, "P2 kept retrying after going Offline");
+  await p2.locator("#leave").click();
+  await p2.locator("#meeting").waitFor({ state: "hidden", timeout: 10000 });
+  await p2.locator("#meeting-ended").waitFor({ state: "visible", timeout: 10000 });
+  await p2.locator("#rejoin").click();
+  await p2.locator("#join-form").waitFor({ state: "visible", timeout: 10000 });
+  await p2.locator("#join").click();
+  await p2.locator("#meeting").waitFor({ state: "visible", timeout: 20000 });
+  await enableCamera(p2);
+  await unmuteAllForAudioGuarantee();
+  for (const page of pages.values()) await roster(page, names);
+  await assertFullMeshMedia({ label: "after Leave and Rejoin" });
+}
+
+// With the built-in TURN relay available, one participant's UDP is blocked
+// mid-call (policed UDP). On Automatic its client must hand off to TURN/TCP
+// while UDP stays dead, and nobody else may be dragged off their path.
+async function scenarioUdpBlockedRelayFailover() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const p4 = pages.get("P4");
+  await waitForCurrentPeerConnected(p4, "P4 before UDP is blocked", 30000);
+  const others = {};
+  for (const role of ["P1", "P2", "P3"]) others[role] = await currentPeerState(pages.get(role));
+  installRoomQdisc();
+  const isolation = netemTiers.armRoleUdpIsolation("P4", "blackout", pages, {
+    allowPortMasks: [{ port: server.relayRange.min, mask: "0xffc0" }]
+  });
+  try {
+    await isolation.ready;
+    await p4.waitForFunction(async () => {
+      const peer = (window.__slowMeetTest?.peerConnections || []).at(-1);
+      if (!peer || peer.connectionState !== "connected") return false;
+      const report = await peer.getStats();
+      const byID = new Map([...report.values()].map((stat) => [stat.id, stat]));
+      for (const stat of report.values()) {
+        if (stat.type !== "transport" || !stat.selectedCandidatePairId) continue;
+        const local = byID.get(byID.get(stat.selectedCandidatePairId)?.localCandidateId);
+        if (local?.candidateType === "relay" && local.relayProtocol === "tcp") return true;
+      }
+      return false;
+    }, null, { timeout: 120000 }).catch(async () =>
+      assert.fail(`P4 never moved to TURN/TCP while its UDP was blocked (${JSON.stringify(await currentPeerState(p4))})`));
+    recordEvidence("relay-failover", { p4: await currentPeerState(p4) });
+    for (const role of ["P1", "P2", "P3"]) {
+      await waitForSenderAudio(role, "P4", "P4's audio over TURN/TCP");
+      await waitForSenderAudio("P4", role, "audio to P4 over TURN/TCP");
+      const now = await currentPeerState(pages.get(role));
+      assert.equal(now.sockets, others[role].sockets, `${role} reconnected its signaling because of P4's failover`);
+      assert.equal(now.pair?.candidateType, "host", `${role} left its direct path because of P4's failover`);
+    }
+  } finally {
+    await isolation.lift();
+    clearRoomProfiles();
+  }
+  await assertFullMeshMedia({ label: "after the relay failover" });
+}
+
+// A participant pinned to TURN/TCP sees 2% loss and 50 ms on the relay leg
+// (TCP turns the loss into head-of-line stalls). Audio must keep flowing
+// both ways and the room must recover when the leg clears.
+async function scenarioRelayPathUnderLoss() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const p4 = pages.get("P4");
+  await openSettingsPanel(p4);
+  // Switching to a relay method may rebuild the media path in place or over
+  // a new signaling session; either way the newest peer must end up
+  // connected through a TURN/TCP relay.
+  await p4.locator("#settings-connection-method").selectOption("turn-tcp", { force: true });
+  await p4.waitForFunction(async () => {
+    const peer = (window.__slowMeetTest?.peerConnections || []).at(-1);
+    if (!peer || peer.connectionState !== "connected") return false;
+    const report = await peer.getStats();
+    const byID = new Map([...report.values()].map((stat) => [stat.id, stat]));
+    for (const stat of report.values()) {
+      if (stat.type !== "transport" || !stat.selectedCandidatePairId) continue;
+      const local = byID.get(byID.get(stat.selectedCandidatePairId)?.localCandidateId);
+      if (local?.candidateType === "relay" && local.relayProtocol === "tcp") return true;
+    }
+    return false;
+  }, null, { timeout: 60000 }).catch(async () =>
+    assert.fail(`P4 never connected through TURN/TCP after choosing it (${JSON.stringify(await currentPeerState(p4))})`));
+  installRoomQdisc({ include: ["relay-lossy"] });
+  const countersBefore = netemTiers.tierClassCounters();
+  netemTiers.applyTcpPortTier(server.turnPort, "relay-lossy");
+  try {
+    await delay(20000);
+    for (const role of ["P1", "P2", "P3"]) {
+      await waitForSenderAudio(role, "P4", "P4's audio over a lossy TURN/TCP leg");
+      await waitForSenderAudio("P4", role, "audio to P4 over a lossy TURN/TCP leg");
+    }
+    const lossy = netemTiers.classCounterDelta(countersBefore, netemTiers.tierClassCounters(), fourPersonTiers["relay-lossy"].classID);
+    recordEvidence("relay-lossy", lossy);
+    assert.ok(lossy.sentPackets >= 100, `the relay leg's tier carried only ${lossy.sentPackets} packets`);
+    assert.equal(await isOffline(p4), false, "P4 went Offline on a lossy relay leg");
+  } finally {
+    clearRoomProfiles();
+  }
+  await openSettingsPanel(p4);
+  await p4.locator("#settings-connection-method").selectOption("auto", { force: true });
+  await waitForCurrentPeerConnected(p4, "P4 back on Automatic", 60000);
+  await assertFullMeshMedia({ label: "after the relay leg clears" });
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
@@ -3245,6 +4400,7 @@ const scenarios = [
   { name: "departure-and-rejoin", description: "Drew leaves without a ghost tile, then rejoins the four-person roster.", run: scenarioDepartureAndRejoin },
   { name: "rejoin-via-button", description: "Drew rejoins through the post-leave Rejoin action with the name preserved and media re-establishes.", run: scenarioRejoinViaButton },
   { name: "simultaneous-departures", description: "Two participants leaving at once converge every roster to the same two members and both slots are reusable.", run: scenarioSimultaneousDepartures },
+  { name: "signaling-reconnect", description: "One participant's signaling socket closes on a healthy link and reconnects: the roster settles on all four, the other three keep seeing the same participant identity, and media flows everywhere.", run: scenarioSignalingReconnect },
   { name: "grace-window-churn", description: "During a member's reconnect grace window the other browsers see the left state, then the room recovers — same identity on resume with the default grace, a fresh identity after expiry with a 1s grace.", run: scenarioGraceWindowChurn },
   { name: "token-takeover", description: "A second socket presenting the live reconnect token takes over the seat and the displaced client reclaims it with identity and media intact.", run: scenarioTokenTakeover },
   { name: "late-joiner-replay", description: "A member who rejoins rebuilds mic state, the active sharer, and the sharer's screen video purely from the server replay.", run: scenarioLateJoinerReplay },
@@ -3273,15 +4429,47 @@ const scenarios = [
   { name: "delay-and-jitter-links", description: "A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.", run: scenarioDelayAndJitterLinks, netns: true },
   { name: "all-fast-link-top-quality", description: "All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.", run: scenarioAllFastLinkTopQuality, netns: true },
   { name: "one-fast-three-bad-uplinks", description: "One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.", run: scenarioOneFastThreeBadUplinks, netns: true },
-  { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true }
+  { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true },
+  // Opt-in resilience scenarios: MEDIA_E2E_FOUR_GROUP=resilience (or
+  // resilience-slow), or each by its exact name. Never in CI.
+  { name: "sharer-reconnect-mid-share", group: "resilience", description: "The screen-share owner's signaling drops and resumes inside the grace window: the share ends cleanly for all three viewers, the lease is free for someone else, and the owner can share again.", run: scenarioSharerReconnectMidShare },
+  { name: "simultaneous-reconnect", group: "resilience", description: "Two, then all four participants lose signaling in the same instant and resume together with their identities, and every participant hears and sees every other one afterwards.", run: scenarioSimultaneousReconnect },
+  { name: "server-restart-rejoin", group: "resilience", description: "The server restarts under a live four-person room: every browser rejoins on its own as a fresh participant, nobody goes Offline, and the room's media comes back pair by pair.", run: scenarioServerRestartRejoin },
+  { name: "path-change-auto-ice-restart", group: "resilience", description: "One participant's current UDP path dies for good: the client finds a working path on its own without a reload, keeps its identity, and the other three keep talking.", run: scenarioPathChangeAutoIceRestart, netns: true },
+  { name: "slow-uplink-room", group: "resilience", description: "One participant's upload alone is thin and lossy: the room still hears it, its camera degrades for the others, and its clean download keeps everyone else's camera sharp.", run: scenarioSlowUplinkRoom, netns: true },
+  { name: "bursty-link-room", group: "resilience", description: "One participant's link drops packets in bursts and reorders and duplicates them: audio both ways keeps flowing with no gap over 3 s, and the room recovers.", run: scenarioBurstyLinkRoom, netns: true },
+  { name: "all-impaired-room", group: "resilience", description: "Every link is bad and bad differently (moderate, thin uplink, severe, capped) for 40 s: everyone keeps hearing someone, nobody goes Offline or into a reconnect storm, and the room recovers.", run: scenarioAllImpairedRoom, netns: true },
+  { name: "sharer-reconnect-mid-share-impaired", group: "resilience", description: "The screen-share owner on a moderate link drops signaling mid-share: the share ends cleanly everywhere and the lease is free again.", run: scenarioSharerReconnectMidShareImpaired, netns: true },
+  { name: "reconnect-under-impairment-isolated", group: "resilience", description: "A signaling resume whose new ICE, DTLS and first media all cross a moderate link: identity kept, resume inside the superseded-peer close delay, room keeps talking.", run: scenarioReconnectUnderImpairmentIsolated, netns: true },
+  { name: "rapid-flap-link", group: "resilience", description: "One participant's link flaps 2 s on / 2 s off for a minute, then 3 s on / 8 s off: the others keep talking and the flapping participant ends up connected with its identity.", run: scenarioRapidFlapLink, netns: true },
+  { name: "link-outage-short", group: "resilience", description: "One participant's signaling and media die together for 15 s with no FIN or RST: the room keeps talking and the participant comes back on its own with its identity.", run: scenarioLinkOutageShort, netns: true },
+  { name: "signaling-stall-during-churn", group: "resilience", description: "One participant's signaling stalls while its media flows and another participant leaves and rejoins: it keeps hearing the room and converges on the new room afterwards.", run: scenarioSignalingStallDuringChurn, netns: true },
+  { name: "udp-blocked-relay-failover", group: "resilience", server: "turn", description: "With the built-in TURN relay, one participant's UDP is blocked mid-call: Automatic hands it off to TURN/TCP while the other three stay on their direct paths.", run: scenarioUdpBlockedRelayFailover, netns: true },
+  { name: "relay-path-under-loss", group: "resilience", server: "turn", description: "A participant on TURN/TCP sees 2% loss and 50 ms on the relay leg: audio flows both ways and the room recovers.", run: scenarioRelayPathUnderLoss, netns: true },
+  { name: "link-outage-long", group: "resilience-slow", description: "A 75 s outage of one participant's signaling and media: the server frees the seat, the room keeps talking, and the participant rejoins on its own once the link returns.", run: scenarioLinkOutageLong, netns: true },
+  { name: "long-blackout-retry-budget", group: "resilience-slow", description: "One participant's media is dead for minutes while signaling lives: it spends its retry budget and goes Offline, stays Offline when the path returns, and Leave then Rejoin restores it.", run: scenarioLongBlackoutRetryBudget, netns: true }
 ];
 
+// A scenario with a `group` is opt-in: it never runs in a default or
+// substring-filtered selection. It runs when MEDIA_E2E_FOUR_GROUP names its
+// group, or when MEDIA_E2E_FOUR_SCENARIO names it exactly.
 function scenarioFilter() {
-  const raw = (process.env.MEDIA_E2E_FOUR_SCENARIO || "").split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
-  if (!raw.length) return scenarios;
-  const selected = scenarios.filter(({ name }) => raw.some((entry) => name === entry || name.includes(entry)));
-  assert.ok(selected.length, `no scenario matches MEDIA_E2E_FOUR_SCENARIO=${process.env.MEDIA_E2E_FOUR_SCENARIO}; known scenarios:\n  ${scenarios.map((scenario) => scenario.name).join("\n  ")}`);
+  const split = (value) => (value || "").split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+  const raw = split(process.env.MEDIA_E2E_FOUR_SCENARIO);
+  const groups = split(process.env.MEDIA_E2E_FOUR_GROUP);
+  if (!raw.length && !groups.length) return scenarios.filter((scenario) => !scenario.group);
+  const selected = scenarios.filter(({ name, group }) =>
+    (group && groups.includes(group)) ||
+    raw.some((entry) => group ? name === entry : (name === entry || name.includes(entry))));
+  assert.ok(selected.length, `no scenario matches MEDIA_E2E_FOUR_SCENARIO=${process.env.MEDIA_E2E_FOUR_SCENARIO || ""} MEDIA_E2E_FOUR_GROUP=${process.env.MEDIA_E2E_FOUR_GROUP || ""}; known scenarios:\n  ${scenarios.map((scenario) => scenario.name).join("\n  ")}`);
   return selected;
+}
+
+function reproductionFor(scenario) {
+  if (!scenario) return "make test-media-e2e-four";
+  const known = scenario.knownFailing ? "SLOWMEET_KNOWN_FAILING=1 " : "";
+  if (scenario.netns) return `${known}MEDIA_E2E_FOUR_SCENARIO=${scenario.name} make test-media-e2e-four-netns`;
+  return `${known}MEDIA_E2E_FOUR_SCENARIO=${scenario.name} make test-media-e2e-four-scenario`;
 }
 
 async function saveFailure(error) {
@@ -3289,7 +4477,7 @@ async function saveFailure(error) {
   const directory = parent ? path.join(path.resolve(parent), activeScenario) : fs.mkdtempSync(path.join(os.tmpdir(), "slowmeet-four-person-e2e-failure-"));
   fs.mkdirSync(directory, { recursive: true });
   const expectedByScenario = new Map(scenarios.map(({ name, description }) => [name, description]));
-  const report = { scenario: activeScenario, reproduction: "make test-media-e2e-four",
+  const report = { scenario: activeScenario, reproduction: reproductionFor(scenarios.find(({ name }) => name === activeScenario)),
     expected: expectedByScenario.get(activeScenario) || "Four participants join, synchronize room state, exchange media, and reject a fifth join.",
     actual: error.message, failureType: /launch|executable doesn't exist|permission|eperm|eacces|address already in use|did not become ready/i.test(error.message) ? "environment-or-browser" : "application-or-assertion",
     participants: names.map((name, index) => ({ role: roles[index], name })), artifactDirectory: directory, serverLogs: server?.output.slice(-1500),
@@ -3342,7 +4530,10 @@ async function saveFailure(error) {
 (async () => {
   const selected = scenarioFilter();
   if (process.env.MEDIA_E2E_FOUR_LIST === "1") {
-    for (const { name, description } of scenarios) console.log(`${name} — ${description}`);
+    for (const { name, description, group, knownFailing } of scenarios) {
+      const tags = [group && `opt-in: ${group}`, knownFailing && `known failing: ${knownFailing.finding}`].filter(Boolean);
+      console.log(`${name} — ${description}${tags.length ? ` [${tags.join("; ")}]` : ""}`);
+    }
     return;
   }
   console.log(`[engines] ${engineMode}; [scenarios] ${selected.map((scenario) => scenario.name).join(", ")}`);
@@ -3358,11 +4549,31 @@ async function saveFailure(error) {
         skipped += 1;
         continue;
       }
+      if (scenario.knownFailing && !knownFailingEnabled) {
+        console.log(`SKIP | ${scenario.name} | known failing ${scenario.knownFailing.finding}: ${scenario.knownFailing.reason} (SLOWMEET_KNOWN_FAILING=1 to run)`);
+        skipped += 1;
+        continue;
+      }
+      // A scenario that needs another server profile (the built-in TURN
+      // relay) gets a fresh room on a fresh server; the next scenario that
+      // needs the default profile gets it back the same way.
+      const profile = scenario.server || "default";
+      if (server.profile !== profile) {
+        await leaveSharedRoom();
+        await server.stop();
+        server = await startServer({ profile });
+      }
       activeScenario = scenario.name;
+      activeScenarioEntry = scenario;
       const startedAt = Date.now();
+      shapingProofs.length = 0;
       try {
         await scenario.run();
+        assertScenarioShaping();
         ran += 1;
+        if (scenario.knownFailing) {
+          console.log(`UNEXPECTED PASS | ${scenario.name} | known failing ${scenario.knownFailing.finding} did not reproduce; remove the knownFailing mark if it is fixed`);
+        }
         console.log(`[pass] ${scenario.name} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
       } catch (error) {
         failed += 1;
