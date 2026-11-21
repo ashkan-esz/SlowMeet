@@ -498,7 +498,11 @@ func (h *Hub) disconnect(c *client) {
 	}
 	h.mu.Unlock()
 
-	if !graceEligible {
+	// A superseded client's media belongs to the takeover now: reclaim already
+	// scheduled its peer to close after supersededCloseDelay so the new
+	// connection can re-bind the publications by swap, and unregistering here
+	// would drop the participant the new connection is about to register.
+	if !graceEligible && !superseded {
 		h.teardownClientMedia(c)
 	}
 

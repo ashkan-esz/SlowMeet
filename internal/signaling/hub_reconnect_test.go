@@ -599,11 +599,6 @@ func TestResumeSupersededPeerCloseDelay(t *testing.T) {
 				p.reset()
 				waitWithin(t, 3*time.Second, "grace entry", func() bool { return pendingCount(hub) == 1 })
 			}
-			if mode == "takeover" {
-				knownFailing(t, "B6: a takeover closes the superseded peer at once: disconnect sees the old client as "+
-					"superseded, so it is not grace-eligible and teardownClientMedia closes its peer, bypassing "+
-					"the supersededCloseDelay that reclaim scheduled")
-			}
 			resumedAt := time.Now()
 			back := joinTestParticipant(t, socketURL, "Avery", p.token)
 			if back.id != p.id {
