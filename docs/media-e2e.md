@@ -188,7 +188,7 @@ Knobs:
   scenarios (per-pair audio gaps, every pair's media after a recovery) into
   assertions; without it they log `STRICT-ONLY` lines.
 - `SLOWMEET_KNOWN_FAILING=1` — runs scenarios marked known-failing and makes
-  `knownIssue` checks for documented defects (B1–B8 in
+  `knownIssue` checks for documented defects (B1–B11 in
   `docs/network-testing.md`) fail instead of logging `KNOWN ISSUE`.
 - `MEDIA_E2E_FOUR_ENGINES` — `mixed` (default, 2 Chromium + 2 Firefox) or
   `chromium` to run every participant on Chromium.
@@ -201,7 +201,9 @@ Knobs:
   `ice-restart-under-impairment`,
   `reconnect-after-expiry-under-impairment`, `cold-join-under-impairment`,
   `blackout-and-recovery`, `all-distinct-qualities`,
-  `impaired-sharer-screen-share`, `delay-and-jitter-links`). Set
+  `impaired-sharer-screen-share`, `delay-and-jitter-links`,
+  `all-fast-link-top-quality`, `one-fast-three-bad-uplinks`,
+  `all-four-impaired`) and the shaped opt-in resilience scenarios. Set
   automatically by `make test-media-e2e-four-netns`; without it those
   scenarios are skipped because shaping the host loopback is forbidden.
 - `MEDIA_E2E_HEADED`, `MEDIA_E2E_ARTIFACT_DIR` — shared with the two-person
