@@ -22,6 +22,13 @@ func (h *Hub) expireAdmission(c *client) {
 // under one h.mu hold: no broadcast can interleave between the join ack and
 // the replay, so the joiner can never have a live update overwritten by an
 // older replayed state or miss one recorded in the window.
+//
+// The joiner's own participant_joined announcement goes out in the same hold,
+// and the roster replay lists only members already in the room fan-out (and
+// so already announced). That makes "announce me" and "tell me who is here"
+// one step: of two participants admitted at the same moment, the second
+// learns about the first from the replay and the first learns about the
+// second from its announcement, never both (B5 in docs/network-testing.md).
 func (h *Hub) admit(c *client, participant meeting.Participant, response Message, activeTakeover bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -29,6 +36,15 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 		return errors.New("admission expired")
 	}
 	h.roomMembers[c] = struct{}{}
+	if !activeTakeover {
+		// A takeover's peers never saw this participant leave, so they get no
+		// second announcement.
+		h.broadcastExceptLocked(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
+	}
+	// Announced from here on, so a departure must broadcast participant_left
+	// even if the rest of the admission fails.
+	h.announced[participant.ID] = struct{}{}
+	c.announced = true
 	// The chat replay is taken while holding h.mu immediately after the client
 	// joins the room fan-out: every chat recorded up to this point is included
 	// here, and anything recorded afterwards is delivered by the ordinary
@@ -39,17 +55,15 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 	if err := c.write(response); err != nil {
 		return err
 	}
-	// Roster replay: participants inside their reconnect grace window were
-	// already announced as departed and re-announce when they return.
-	pendingIDs := make(map[string]struct{}, len(h.pending))
-	for _, reconnect := range h.pending {
-		pendingIDs[reconnect.participant.ID] = struct{}{}
-	}
+	// Roster replay, in meeting order, of the participants the room knows as
+	// present. Participants inside their reconnect grace window were already
+	// announced as departed and re-announce when they return; participants
+	// still being admitted announce themselves when their own admit runs.
 	for _, existing := range h.Meeting.List() {
 		if existing.ID == participant.ID {
 			continue
 		}
-		if _, pending := pendingIDs[existing.ID]; pending {
+		if _, ok := h.announced[existing.ID]; !ok {
 			continue
 		}
 		_ = c.write(Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &existing})

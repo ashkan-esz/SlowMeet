@@ -178,11 +178,17 @@ type Hub struct {
 	// passwordLimiter throttles failed meeting-password attempts per client IP.
 	passwordLimiter *ratelimit.Limiter
 
-	mu                    sync.RWMutex
-	clients               map[*client]struct{}
-	roomMembers           map[*client]struct{}
-	router                *media.Router
-	pending               map[string]*pendingReconnect
+	mu          sync.RWMutex
+	clients     map[*client]struct{}
+	roomMembers map[*client]struct{}
+	router      *media.Router
+	pending     map[string]*pendingReconnect
+	// announced holds the participant IDs the room currently knows as
+	// present: added when admit broadcasts participant_joined, removed just
+	// before participant_left goes out. The roster replay lists exactly these,
+	// so a joiner never hears about a peer both from the replay and from that
+	// peer's own announcement (B5). A takeover keeps its ID throughout.
+	announced             map[string]struct{}
 	activeTokens          map[string]*client
 	mediaStates           map[string]Message
 	metrics               *metrics.Metrics
@@ -323,6 +329,7 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		clients:      make(map[*client]struct{}),
 		roomMembers:  make(map[*client]struct{}),
 		pending:      make(map[string]*pendingReconnect),
+		announced:    make(map[string]struct{}),
 		activeTokens: make(map[string]*client),
 		mediaStates:  make(map[string]Message),
 		chatHistory:  make(map[string]*roomChatHistory),
@@ -525,6 +532,7 @@ func (h *Hub) disconnect(c *client) {
 		client:      c,
 	}
 	h.pending[c.reconnectToken] = pending
+	delete(h.announced, c.participant.ID)
 	h.mu.Unlock()
 
 	left := Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &c.participant}
@@ -715,6 +723,11 @@ func (h *Hub) reclaim(c *client, token string) (meeting.Participant, bool, bool)
 
 func (h *Hub) removeParticipant(participant meeting.Participant) {
 	h.forgetMediaState(participant.ID)
+	// Unannounce before the broadcast: a joiner admitted in between then gets
+	// neither the replay nor the left event, instead of a replayed ghost.
+	h.mu.Lock()
+	delete(h.announced, participant.ID)
+	h.mu.Unlock()
 	if h.Meeting.Leave(participant.ID) {
 		h.broadcast(Message{Version: ProtocolVersion, Type: TypeLeft, Participant: &participant})
 		h.scheduleChatHistoryExpiry(chatRoomID)
@@ -1156,12 +1169,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		admissionTimer.Stop()
 		releasePending()
-		if !activeTakeover {
-			h.broadcastExcept(c, Message{Version: ProtocolVersion, Type: TypeJoined, Participant: &participant})
-		}
 		h.Logger.Info("participant_joined", "participant_id", participant.ID, "name", participant.Name)
 		c.joined = true
-		c.announced = true
 		h.metrics.PeerJoined()
 		if resumed {
 			h.metrics.Reconnected()
@@ -1640,6 +1649,17 @@ func (h *Hub) broadcastExcept(excluded *client, msg Message) {
 		}
 	}
 	h.mu.RUnlock()
+}
+
+// broadcastExceptLocked is broadcastExcept for a caller that already holds
+// h.mu (read or write).
+func (h *Hub) broadcastExceptLocked(excluded *client, msg Message) {
+	msg.prepare()
+	for c := range h.roomMembers {
+		if c != excluded {
+			_ = c.writePrepared(&msg)
+		}
+	}
 }
 
 func (h *Hub) broadcastToRoom(msg Message) {

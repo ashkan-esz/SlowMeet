@@ -476,10 +476,6 @@ func TestHubSimultaneousReconnect(t *testing.T) {
 				}
 
 				t.Run("announces each peer exactly once", func(t *testing.T) {
-					if drop > 1 && mode == "grace" {
-						knownFailing(t, "B5: concurrent admissions announce a peer twice: admit replays every "+
-							"member no longer in h.pending, and that member's own resume also broadcasts participant_joined")
-					}
 					time.Sleep(300 * time.Millisecond)
 					for _, p := range resumed {
 						for _, other := range othersOf(p) {
@@ -563,8 +559,6 @@ func TestHubRestartRejoinWithStaleTokensFillsExactlyFourSeats(t *testing.T) {
 		}
 	}
 	t.Run("announces each peer exactly once", func(t *testing.T) {
-		knownFailing(t, "B5: concurrent admissions announce a peer twice: admit replays every meeting member, and "+
-			"that member's own join also broadcasts participant_joined to the newcomer")
 		time.Sleep(300 * time.Millisecond)
 		for _, p := range rejoined {
 			for _, other := range rejoined {
