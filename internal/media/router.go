@@ -868,11 +868,11 @@ func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoK
 }
 
 func (r *Router) writeVideoKeyFrame(pub *publication, onError func(error)) {
-	if !pub.allowKeyFrameRequest(time.Now()) {
-		// A request reached this publisher within the last interval; the
-		// keyframe it produces serves this request too.
-		return
-	}
+	// The SFU's own requests are already bounded to one series per
+	// publication and are always sent: a completed negotiation needs its
+	// keyframe now. They do mark the publication's budget, so receivers'
+	// PLIs that follow within the interval are not relayed on top.
+	pub.lastKeyFrameRequest.Store(time.Now().UnixNano())
 	err := pub.source.WriteRTCP([]rtcp.Packet{
 		&rtcp.PictureLossIndication{MediaSSRC: uint32(pub.remote.SSRC())},
 	})
