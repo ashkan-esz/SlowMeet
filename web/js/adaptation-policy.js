@@ -371,18 +371,43 @@ function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, 
 // packets in the window are too noisy to trust (and suspended streams report
 // none at all), so they are skipped; with no qualifying stream, fall back to
 // the pooled loss / the caller's previous jitter signal.
-function selectOwnLinkMeasurements(streams, { pooledLossPct = null, fallbackJitterMs = null, minimumPackets = 5 } = {}) {
+//
+// The minimum still blames the receiver when every remote sender is on a bad
+// uplink (B1 in docs/network-testing.md). senderUplink(participantID), when
+// given, returns that sender's own reported uplink ({ lossPct, jitterMs },
+// relayed by the server as source_quality) or null; each stream is then
+// discounted by its sender's share before the minimum is taken: the loss the
+// receiver's own path adds is 1 - (1 - observed) / (1 - senderUplinkLoss),
+// and its jitter is what remains above the sender's uplink jitter. Streams
+// without a sender report are taken as they are.
+function selectOwnLinkMeasurements(streams, {
+  pooledLossPct = null,
+  fallbackJitterMs = null,
+  minimumPackets = 5,
+  senderUplink = null
+} = {}) {
   let bestLoss = null;
   let bestJitter = null;
   for (const stream of Array.isArray(streams) ? streams : []) {
     if (!stream || !Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
-    if (Number.isFinite(stream.lossPct) && stream.lossPct >= 0 &&
-        (bestLoss === null || stream.lossPct < bestLoss)) {
-      bestLoss = stream.lossPct;
+    const uplink = typeof senderUplink === "function" && stream.participantID ? senderUplink(stream.participantID) : null;
+    let lossPct = stream.lossPct;
+    if (Number.isFinite(lossPct) && lossPct >= 0 && Number.isFinite(uplink?.lossPct) &&
+        uplink.lossPct > 0 && uplink.lossPct < 100) {
+      const ownDelivery = (1 - lossPct / 100) / (1 - uplink.lossPct / 100);
+      lossPct = Math.max(0, Math.round((1 - ownDelivery) * 1000) / 10);
     }
-    if (Number.isFinite(stream.jitterMs) && stream.jitterMs >= 0 &&
-        (bestJitter === null || stream.jitterMs < bestJitter)) {
-      bestJitter = stream.jitterMs;
+    let jitterMs = stream.jitterMs;
+    if (Number.isFinite(jitterMs) && jitterMs >= 0 && Number.isFinite(uplink?.jitterMs) && uplink.jitterMs > 0) {
+      jitterMs = Math.max(0, jitterMs - uplink.jitterMs);
+    }
+    if (Number.isFinite(lossPct) && lossPct >= 0 &&
+        (bestLoss === null || lossPct < bestLoss)) {
+      bestLoss = lossPct;
+    }
+    if (Number.isFinite(jitterMs) && jitterMs >= 0 &&
+        (bestJitter === null || jitterMs < bestJitter)) {
+      bestJitter = jitterMs;
     }
   }
   return {

@@ -19,19 +19,23 @@ type ChatHistoryEntry struct {
 }
 
 const (
-	ProtocolVersion        = 1
-	TypeJoin               = "join"
-	TypeLeave              = "leave"
-	TypeParticipant        = "participant"
-	TypeJoined             = "participant_joined"
-	TypeLeft               = "participant_left"
-	TypeOffer              = "offer"
-	TypeAnswer             = "answer"
-	TypeCandidate          = "candidate"
-	TypeICERestart         = "ice_restart"
-	TypeMediaState         = "media_state"
-	TypeHandState          = "hand_state"
-	TypeNetworkState       = "network_state"
+	ProtocolVersion  = 1
+	TypeJoin         = "join"
+	TypeLeave        = "leave"
+	TypeParticipant  = "participant"
+	TypeJoined       = "participant_joined"
+	TypeLeft         = "participant_left"
+	TypeOffer        = "offer"
+	TypeAnswer       = "answer"
+	TypeCandidate    = "candidate"
+	TypeICERestart   = "ice_restart"
+	TypeMediaState   = "media_state"
+	TypeHandState    = "hand_state"
+	TypeNetworkState = "network_state"
+	// TypeSourceQuality is sent by the server only: another participant's
+	// reported uplink loss and jitter, so receivers do not charge a sender's
+	// bad uplink to their own link.
+	TypeSourceQuality      = "source_quality"
 	TypeVideoSubscriptions = "set_video_subscriptions"
 	TypeScreenShare        = "screen_share"
 	TypeScreenState        = "screen_share_state"
@@ -100,11 +104,16 @@ type Message struct {
 	JitterMs           int                  `json:"jitter_ms,omitempty"`
 	VideoKbps          int                  `json:"video_kbps,omitempty"`
 	AudioKbps          int                  `json:"audio_kbps,omitempty"`
-	ScreenShareActive  *bool                `json:"screen_share_active,omitempty"`
-	ScreenShareOwner   string               `json:"screen_share_owner,omitempty"`
-	ChatText           string               `json:"text,omitempty"`
-	Emoji              string               `json:"emoji,omitempty"`
-	ChatHistory        []ChatHistoryEntry   `json:"chat_history,omitempty"`
+	// UplinkLoss10 and UplinkJitterMs are the sender's own uplink loss (tenths
+	// of a percent) and jitter as the SFU's receiver reports describe them;
+	// -1 when unknown. Reported in network_state, relayed in source_quality.
+	UplinkLoss10      int                `json:"uplink_loss10,omitempty"`
+	UplinkJitterMs    int                `json:"uplink_jitter_ms,omitempty"`
+	ScreenShareActive *bool              `json:"screen_share_active,omitempty"`
+	ScreenShareOwner  string             `json:"screen_share_owner,omitempty"`
+	ChatText          string             `json:"text,omitempty"`
+	Emoji             string             `json:"emoji,omitempty"`
+	ChatHistory       []ChatHistoryEntry `json:"chat_history,omitempty"`
 
 	// flush is an internal sentinel that is never serialized: the writer
 	// goroutine closes it after every queued message before it has been
@@ -181,7 +190,8 @@ func (m Message) Validate() error {
 		if m.RTTMs < -1 || m.PacketLoss10 < -1 || m.PacketLoss10 > 1000 ||
 			m.JitterMs < -1 || m.VideoKbps < -1 || m.AudioKbps < -1 ||
 			m.RTTMs > 120000 || m.JitterMs > 120000 ||
-			m.VideoKbps > maxReportedVideoKbps || m.AudioKbps > maxReportedAudioKbps {
+			m.VideoKbps > maxReportedVideoKbps || m.AudioKbps > maxReportedAudioKbps ||
+			m.UplinkLoss10 < -1 || m.UplinkLoss10 > 1000 || m.UplinkJitterMs < -1 || m.UplinkJitterMs > 120000 {
 			return fmt.Errorf("network state contains invalid values")
 		}
 	case TypeVideoSubscriptions:

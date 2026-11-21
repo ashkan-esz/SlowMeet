@@ -188,9 +188,12 @@ type Hub struct {
 	// before participant_left goes out. The roster replay lists exactly these,
 	// so a joiner never hears about a peer both from the replay and from that
 	// peer's own announcement (B5). A takeover keeps its ID throughout.
-	announced             map[string]struct{}
-	activeTokens          map[string]*client
-	mediaStates           map[string]Message
+	announced    map[string]struct{}
+	activeTokens map[string]*client
+	mediaStates  map[string]Message
+	// sourceQuality is each participant's last reported uplink loss and
+	// jitter, relayed to the room as source_quality (see noteSourceQuality).
+	sourceQuality         map[string]*sourceQualityState
 	metrics               *metrics.Metrics
 	screenSharer          *client
 	chatHistory           map[string]*roomChatHistory
@@ -325,15 +328,16 @@ func NewHub(m *meeting.Meeting, cfg *config.Store, logger *slog.Logger) *Hub {
 		// repetitive text, and the rotating TURN methods exchange a pair every
 		// TURN_TCP_ROTATE_SECONDS per participant. Compressed they are about a
 		// tenth of that, which matters on the slow links this app targets.
-		Upgrader:     websocket.Upgrader{CheckOrigin: sameOrigin, EnableCompression: true},
-		clients:      make(map[*client]struct{}),
-		roomMembers:  make(map[*client]struct{}),
-		pending:      make(map[string]*pendingReconnect),
-		announced:    make(map[string]struct{}),
-		activeTokens: make(map[string]*client),
-		mediaStates:  make(map[string]Message),
-		chatHistory:  make(map[string]*roomChatHistory),
-		metrics:      &metrics.Metrics{},
+		Upgrader:      websocket.Upgrader{CheckOrigin: sameOrigin, EnableCompression: true},
+		clients:       make(map[*client]struct{}),
+		roomMembers:   make(map[*client]struct{}),
+		pending:       make(map[string]*pendingReconnect),
+		announced:     make(map[string]struct{}),
+		activeTokens:  make(map[string]*client),
+		mediaStates:   make(map[string]Message),
+		sourceQuality: make(map[string]*sourceQualityState),
+		chatHistory:   make(map[string]*roomChatHistory),
+		metrics:       &metrics.Metrics{},
 		router: media.NewRouter(media.Limits{
 			MaxAudioBitrate: snapshot.MaxAudioBitrate,
 			MaxVideoBitrate: snapshot.MaxVideoBitrate,
@@ -761,6 +765,73 @@ func (h *Hub) removeClientParticipant(c *client) {
 func (h *Hub) forgetMediaState(participantID string) {
 	h.mu.Lock()
 	delete(h.mediaStates, participantID)
+	delete(h.sourceQuality, participantID)
+	h.mu.Unlock()
+}
+
+// sourceQualityState is one participant's reported uplink, and what the room
+// was last told about it.
+type sourceQualityState struct {
+	loss10, jitterMs         int
+	sentLoss10, sentJitterMs int
+	sentAt                   time.Time
+}
+
+const (
+	// sourceQualityMinInterval bounds how often one participant's uplink is
+	// relayed to the room; sourceQualityLossStep (tenths of a percent) and
+	// sourceQualityJitterStepMs are the smallest changes worth relaying.
+	sourceQualityMinInterval  = time.Second
+	sourceQualityLossStep     = 10
+	sourceQualityJitterStepMs = 10
+)
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// sourceQualityMessage is the source_quality broadcast for participantID.
+func sourceQualityMessage(participantID string, loss10, jitterMs int) Message {
+	return Message{Version: ProtocolVersion, Type: TypeSourceQuality, ParticipantID: participantID,
+		UplinkLoss10: loss10, UplinkJitterMs: jitterMs}
+}
+
+// noteSourceQuality records a participant's reported uplink loss and jitter
+// and relays them to the rest of the room when they changed enough. Every
+// stream a receiver gets carries its sender's uplink loss and queueing on top
+// of the receiver's own downlink, and the receiver cannot tell them apart:
+// with every remote sender on a lossy uplink, a participant on a clean link
+// used to read its own link as poor, step its camera down and pause it (B1 in
+// docs/network-testing.md). Knowing each sender's uplink, the receiver
+// discounts it (selectOwnLinkMeasurements in web/js/adaptation-policy.js).
+func (h *Hub) noteSourceQuality(c *client, loss10, jitterMs int, now time.Time) {
+	h.mu.Lock()
+	participantID := c.participant.ID
+	if participantID == "" {
+		h.mu.Unlock()
+		return
+	}
+	state := h.sourceQuality[participantID]
+	first := state == nil
+	if first {
+		state = &sourceQualityState{}
+		h.sourceQuality[participantID] = state
+	}
+	state.loss10, state.jitterMs = loss10, jitterMs
+	changed := first || absInt(loss10-state.sentLoss10) >= sourceQualityLossStep ||
+		absInt(jitterMs-state.sentJitterMs) >= sourceQualityJitterStepMs ||
+		(loss10 < 0) != (state.sentLoss10 < 0)
+	if !changed || (!first && now.Sub(state.sentAt) < sourceQualityMinInterval) {
+		h.mu.Unlock()
+		return
+	}
+	state.sentLoss10, state.sentJitterMs, state.sentAt = loss10, jitterMs, now
+	if _, admitted := h.roomMembers[c]; admitted {
+		h.broadcastExceptLocked(c, sourceQualityMessage(participantID, loss10, jitterMs))
+	}
 	h.mu.Unlock()
 }
 
@@ -1008,6 +1079,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == TypeNetworkState {
 				msg.ParticipantID = c.participant.ID
 				h.metrics.ObserveNetwork(msg.RTTMs, msg.PacketLoss10, msg.JitterMs, msg.VideoKbps, msg.AudioKbps)
+				h.noteSourceQuality(c, msg.UplinkLoss10, msg.UplinkJitterMs, time.Now())
 				continue
 			}
 			if msg.Type == TypeScreenShare {

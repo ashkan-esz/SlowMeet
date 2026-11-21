@@ -147,7 +147,8 @@ function runLadder(ticks, sampleAt, {
       streamLossSamples.push({
         lossPct: packetLossPercentFromDeltas(stream.lost, stream.received),
         receivedDelta: stream.received,
-        jitterMs: stream.jitterMs ?? null
+        jitterMs: stream.jitterMs ?? null,
+        participantID: stream.participantID
       });
       if (stream.kind === "camera") {
         cameraLostSincePreviousSample += stream.lost;
@@ -179,7 +180,10 @@ function runLadder(ticks, sampleAt, {
         lostPacketsSincePreviousSample,
         receivedPacketsSincePreviousSample
       ),
-      fallbackJitterMs: values.jitterMs
+      fallbackJitterMs: values.jitterMs,
+      // What the server's source_quality relay delivers: each remote
+      // sender's own reported uplink (absent for an older server).
+      senderUplink: (participantID) => sample.senderUplinks?.get(participantID) || null
     });
     values.packetLoss = ownLink.lossPct;
     if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
@@ -516,8 +520,27 @@ function roomStreams(uplinks, options) {
   });
 }
 
+// The senders' own uplink reports, keyed like roomStreams' participants, as
+// each sender measures its uplink and the server relays it (source_quality).
+// A stream's jitter in this model is the sender's uplink queueing plus the
+// receiver's own path (ownPathJitterMs, remoteSender's default 3 ms), so a
+// queueing sender reports the part above the receiver's path.
+function senderReports(uplinks, ownPathJitterMs = 3) {
+  return new Map(uplinks.map((uplink, index) => {
+    const { lossPct, jitterMs } = typeof uplink === "number" ? { lossPct: uplink } : uplink;
+    return [`remote-${index + 1}`, { lossPct, jitterMs: jitterMs === undefined ? 0 : Math.max(0, jitterMs - ownPathJitterMs) }];
+  }));
+}
+
 const goodParticipantLink = { rttMs: 20, availableOutgoingKbps: 5000 };
 const goodParticipantSample = (uplinkLossPcts) => ({
+  ...goodParticipantLink,
+  streams: roomStreams(uplinkLossPcts),
+  senderUplinks: senderReports(uplinkLossPcts)
+});
+// The same room seen without the senders' reports (an older server or
+// clients): the receiver can only take the cleanest stream as its own link.
+const goodParticipantSampleWithoutReports = (uplinkLossPcts) => ({
   ...goodParticipantLink,
   streams: roomStreams(uplinkLossPcts)
 });
@@ -551,24 +574,18 @@ for (const [name, uplinkLossPcts] of [
 // 1 good / 3 bad: every remote sender has a lossy uplink, so the good
 // participant has no clean inbound stream at all.
 //
-// KNOWN ISSUE (B1): own-link loss is the minimum per-stream inbound loss, and
-// loss on the three senders' uplinks reaches the good participant exactly as
-// loss on its own downlink would. The good participant therefore reads its own
-// perfect link as poor, walks 3 -> 0, and pauses its own camera once the
-// cleanest remote uplink loses more than 10 %. Desired: remote uplink loss is
-// not charged to the receiver's link; the good participant holds level 3 and
-// keeps sending video. When that is fixed, the `expected` rows of
-// `allBadUplinkRows` flip to { ownLinkPoor: false, ownLinkCritical: false,
-// stepDowns: [], levelWhileBad: 3, pauses: [], suspendedWhileBad: false,
-// resumes: [] } and the heal-phase climbs become empty; the "indistinguishable"
-// assertion flips to notDeepEqual (the own-downlink run still walks to the
-// floor, the remote-uplink run no longer does); and the at-the-floor pause
-// after the table flips to [].
+// Loss and queueing on the three senders' uplinks reach the good participant
+// exactly as its own downlink's would. Each sender now reports its own uplink
+// and the server relays it (source_quality), so the good participant
+// discounts it: its own-link sample stays good, it holds level 3 and keeps
+// sending video. Before (B1), and still without the reports, it read its own
+// perfect link as poor, walked 3 -> 0, and paused its camera once the
+// cleanest remote uplink lost more than 10 %.
 {
-  // The two causes get the same verdict today: three lossy remote uplinks
-  // seen over a clean own link, and three clean senders seen over an own
-  // downlink that really loses 8 %, drive the ladder identically. Stepping
-  // down is right for the second and wrong for the first.
+  // Three lossy remote uplinks seen over a clean own link, and three clean
+  // senders seen over an own downlink that really loses 8 %, now get
+  // different verdicts: stepping down is right for the second only. Without
+  // the senders' reports the two remain indistinguishable.
   const verdictOf = (run) => ({
     stepDowns: run.stepDowns,
     levels: run.levels,
@@ -581,57 +598,26 @@ for (const [name, uplinkLossPcts] of [
     streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: 8 })
   }), { startLevel: topLevel, uplinkLossPct: 0 });
   assert.equal(lossyOwnDownlink.level, 0, "an own downlink that loses 8 % must walk the ladder to the floor");
-  assert.deepEqual(verdictOf(lossyRemoteUplinks), verdictOf(lossyOwnDownlink),
-    "remote uplink loss and own downlink loss are indistinguishable to the ladder");
+  assert.notDeepEqual(verdictOf(lossyRemoteUplinks), verdictOf(lossyOwnDownlink),
+    "with the senders' reports, remote uplink loss must not read as own downlink loss");
+  assert.equal(lossyRemoteUplinks.level, topLevel, "lossy remote uplinks must leave the good participant at the top level");
+  const unreportedRemoteUplinks = runLadder(30, () => goodParticipantSampleWithoutReports([8, 12, 9]),
+    { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.deepEqual(verdictOf(unreportedRemoteUplinks), verdictOf(lossyOwnDownlink),
+    "without the senders' reports remote uplink loss still reads as own downlink loss");
 
   const healAt = 61;
+  // With the senders' reports every row holds: the own-link sample stays good,
+  // nothing steps down or pauses, and the good participant stays at the top
+  // through a minute of bad remote uplinks and their healing.
   const allBadUplinkRows = [
+    { name: "moderate bad uplinks (8/12/9 %)", uplinkLossPcts: [8, 12, 9] },
+    { name: "severe bad uplinks (11/12/14 %)", uplinkLossPcts: [11, 12, 14] },
     {
-      name: "moderate bad uplinks (8/12/9 %)",
-      uplinkLossPcts: [8, 12, 9],
-      ownLinkLossPct: 8,
-      ownLinkJitterMs: 3,
-      expected: {
-        ownLinkPoor: true,
-        ownLinkCritical: false,
-        stepDowns: [{ tick: 2, from: 3, to: 2 }, { tick: 4, from: 2, to: 1 }, { tick: 6, from: 1, to: 0 }],
-        levelWhileBad: 0,
-        pauses: [],
-        suspendedWhileBad: false,
-        resumes: []
-      }
-    },
-    {
-      name: "severe bad uplinks (11/12/14 %)",
-      uplinkLossPcts: [11, 12, 14],
-      ownLinkLossPct: 11,
-      ownLinkJitterMs: 3,
-      expected: {
-        ownLinkPoor: true,
-        ownLinkCritical: true,
-        stepDowns: [{ tick: 2, from: 3, to: 2 }, { tick: 4, from: 2, to: 1 }, { tick: 6, from: 1, to: 0 }],
-        levelWhileBad: 0,
-        pauses: [6],
-        suspendedWhileBad: true,
-        resumes: [65]
-      }
-    },
-    {
-      // The jitter estimate is a per-stream minimum too: uplinks that queue
-      // without dropping anything are charged to the receiver the same way.
+      // Uplinks that queue without dropping anything: the jitter estimate
+      // discounts the senders' reported uplink jitter the same way.
       name: "queueing bad uplinks (no loss, jitter 60/90/70 ms)",
-      uplinkLossPcts: [{ lossPct: 0, jitterMs: 60 }, { lossPct: 0, jitterMs: 90 }, { lossPct: 0, jitterMs: 70 }],
-      ownLinkLossPct: 0,
-      ownLinkJitterMs: 60,
-      expected: {
-        ownLinkPoor: true,
-        ownLinkCritical: false,
-        stepDowns: [{ tick: 2, from: 3, to: 2 }, { tick: 4, from: 2, to: 1 }, { tick: 6, from: 1, to: 0 }],
-        levelWhileBad: 0,
-        pauses: [],
-        suspendedWhileBad: false,
-        resumes: []
-      }
+      uplinkLossPcts: [{ lossPct: 0, jitterMs: 60 }, { lossPct: 0, jitterMs: 90 }, { lossPct: 0, jitterMs: 70 }]
     }
   ];
   for (const row of allBadUplinkRows) {
@@ -639,73 +625,66 @@ for (const [name, uplinkLossPcts] of [
     const run = runLadder(120, (tick) => goodParticipantSample(tick < healAt ? row.uplinkLossPcts : [0, 0, 0]),
       { startLevel: topLevel, uplinkLossPct: 0 });
     const whileBad = run.samples.slice(0, healAt - 1);
-    assert.ok(whileBad.every((sample) => sample.packetLoss === row.ownLinkLossPct),
-      `${row.name}: the own-link loss estimate is the cleanest remote uplink's loss`);
-    assert.ok(whileBad.every((sample) => sample.jitterMs === row.ownLinkJitterMs),
-      `${row.name}: the own-link jitter estimate is the calmest remote uplink's jitter`);
-    assert.ok(whileBad.every((sample) => sample.poor === row.expected.ownLinkPoor),
-      `${row.name}: the good participant's own-link sample reads poor`);
-    assert.ok(whileBad.every((sample) => sample.critical === row.expected.ownLinkCritical),
-      `${row.name}: own-link critical verdict`);
-    assert.deepEqual(run.stepDowns, row.expected.stepDowns,
-      `${row.name}: the good participant walks from the top level to the floor`);
-    assert.equal(levelAt(run, healAt - 1), row.expected.levelWhileBad,
-      `${row.name}: the good participant's level while the remote uplinks are bad`);
-    assert.deepEqual(run.pauses, row.expected.pauses, `${row.name}: automatic video pauses of the good participant`);
-    assert.equal(sampleOf(run, healAt - 1).videoSuspended, row.expected.suspendedWhileBad,
-      `${row.name}: whether the good participant's video is suspended while the remote uplinks are bad`);
-
-    // Once the remote uplinks heal the good participant recovers on its own:
-    // no climb failed, so it is five samples per level, and a paused camera
-    // resumes with the first climb.
-    assert.deepEqual(run.climbs, [
-      { tick: 65, from: 0, to: 1 }, { tick: 70, from: 1, to: 2 }, { tick: 75, from: 2, to: 3 }
-    ], `${row.name}: the good participant climbs back once the remote uplinks heal`);
-    assert.deepEqual(run.resumes, row.expected.resumes, `${row.name}: video resumes once the remote uplinks heal`);
-    assert.equal(run.level, topLevel, `${row.name}: the good participant ends back at the top level`);
+    assert.ok(whileBad.every((sample) => sample.packetLoss === 0),
+      `${row.name}: once the senders' uplink loss is discounted the own-link loss reads 0`);
+    assert.ok(whileBad.every((sample) => sample.jitterMs === 3),
+      `${row.name}: once the senders' uplink jitter is discounted the own-link jitter is the own path's`);
+    assert.ok(whileBad.every((sample) => !sample.poor && !sample.critical),
+      `${row.name}: the good participant's own-link sample stays good`);
+    assert.deepEqual(run.stepDowns, [], `${row.name}: the good participant never steps down`);
+    assert.ok(run.levels.every((level) => level === topLevel), `${row.name}: the good participant holds the top level`);
+    assert.deepEqual(run.pauses, [], `${row.name}: the good participant never pauses its video`);
+    assert.deepEqual(run.resumes, [], `${row.name}: there is nothing to resume`);
+    assert.deepEqual(run.climbs, [], `${row.name}: there is nothing to climb back`);
     assert.equal(run.videoSuspended, false, `${row.name}: the good participant ends with video sending`);
-    assert.equal(run.threshold, 5, `${row.name}: the climb threshold is never lengthened`);
   }
 
-  // In the rows above the pause waits for the walk to the floor. A good
-  // participant that is already at the floor when the remote uplinks turn
-  // critical loses its camera on the third sample.
+  // A good participant already at the floor when the remote uplinks turn
+  // critical keeps its camera too; without the reports it used to lose it on
+  // the third sample.
   const atFloor = runLadder(10, () => goodParticipantSample([11, 12, 14]), { startLevel: 0, uplinkLossPct: 0 });
-  assert.deepEqual(atFloor.pauses, [3],
-    "at the floor, three critical samples of remote uplink loss pause the good participant's video");
+  assert.deepEqual(atFloor.pauses, [],
+    "at the floor, critical remote uplink loss must not pause the good participant's video");
+  const atFloorUnreported = runLadder(10, () => goodParticipantSampleWithoutReports([11, 12, 14]),
+    { startLevel: 0, uplinkLossPct: 0 });
+  assert.deepEqual(atFloorUnreported.pauses, [3],
+    "without the senders' reports, three critical samples of remote uplink loss still pause the video");
 }
 
 // 4 bad: here the observed participant's own link really is lossy (8 % each
 // way, 120 ms round trip), so stepping down to the floor is the right answer.
 //
-// KNOWN ISSUE (B1): the same attribution also overstates a bad link. Each
-// inbound stream compounds the sender's uplink loss with the observer's own
-// 8 % downlink loss, so the minimum reads about 15 %, which is critical, and
-// the observer's camera is paused although its own link alone (8 %) is only
-// poor. Desired: own-link loss reads 8 %, the ladder rests at the floor
-// without pausing. When that is fixed, `pauses` flips to [] and the
-// `critical`/`packetLoss > 10` assertions flip to not critical / 8.
+// Each inbound stream compounds the sender's uplink loss with the observer's
+// own 8 % downlink loss (about 15 %, critical). With the senders' reports the
+// observer discounts their share and reads its own 8 %: poor, at the floor,
+// and not paused. Before (B1) the compounded estimate paused its camera.
 {
   const badParticipantSample = {
     rttMs: 120,
     availableOutgoingKbps: 400,
     uplinkLossPct: 8,
-    streams: roomStreams([8, 12, 9], { ownDownlinkLossPct: 8, jitterMs: 12 })
+    streams: roomStreams([8, 12, 9], { ownDownlinkLossPct: 8, jitterMs: 12 }),
+    senderUplinks: senderReports([8, 12, 9])
   };
   const allBad = runLadder(120, () => badParticipantSample, { startLevel: topLevel });
   assert.deepEqual(ticksOf(allBad.stepDowns), [2, 4, 6], "4 bad: a participant on a lossy link must walk to the floor");
   assert.ok(allBad.levels.slice(5).every((level) => level === 0), "4 bad: a participant on a lossy link must stay at the floor");
   assert.deepEqual(allBad.climbs, [], "4 bad: a participant on a lossy link must not attempt a climb");
-  assert.ok(allBad.samples.every((sample) => sample.packetLoss > 10 && sample.critical),
-    "4 bad: the compounded own-link estimate reads critical although the own link loses 8 %");
-  assert.deepEqual(allBad.pauses, [6], "4 bad: the compounded estimate pauses video on reaching the floor");
-  assert.equal(allBad.videoSuspended, true, "4 bad: video stays paused while the room stays bad");
+  assert.ok(allBad.samples.every((sample) => sample.packetLoss >= 7 && sample.packetLoss <= 9 && !sample.critical),
+    "4 bad: with the senders' uplink loss discounted the own-link estimate reads the own link's 8 %");
+  assert.deepEqual(allBad.pauses, [], "4 bad: an own link losing 8 % rests at the floor without pausing video");
+  assert.equal(allBad.videoSuspended, false, "4 bad: video keeps sending at the floor");
+  const allBadUnreported = runLadder(120, () => ({ ...badParticipantSample, senderUplinks: undefined }),
+    { startLevel: topLevel });
+  assert.deepEqual(allBadUnreported.pauses, [6],
+    "4 bad without the senders' reports: the compounded estimate still pauses video on reaching the floor");
 
   // The own link alone at the same 8 % (clean remote senders): poor, at the
-  // floor, and not paused. This is what the row above should also read.
+  // floor, and not paused, which is what the row above now reads too.
   const ownLinkOnly = runLadder(120, () => ({
     ...badParticipantSample,
-    streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: 8, jitterMs: 12 })
+    streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: 8, jitterMs: 12 }),
+    senderUplinks: senderReports([0, 0, 0])
   }), { startLevel: topLevel });
   assert.ok(ownLinkOnly.samples.every((sample) => sample.packetLoss === 8 && sample.poor && !sample.critical),
     "an 8 % own link alone reads poor, not critical");
@@ -757,20 +736,17 @@ for (const [name, uplinkLossPcts] of [
   assert.equal(sampleOf(badgesFor([0, 3, 12]), 2).badges["remote-2"], "degraded",
     "a sender losing 3 % must be marked degraded, not poor");
 
-  // KNOWN ISSUE (B1): four-person room, all three remote senders bad. The
-  // badges are right (three poor senders, and the local tile, judged on RTT
-  // alone, good), but the ladder's own-link verdict on the same samples is
-  // poor and the good participant has already lost two levels. Desired: the
-  // own-link verdict stays good and the level stays 3; when that is fixed the
-  // `poor` assertion flips to not poor and the level to `topLevel`. The badge
-  // assertions stay as they are.
+  // Four-person room, all three remote senders bad: the badges mark the three
+  // senders poor and the local tile good, and with the senders' reports the
+  // ladder's own-link verdict agrees with the local tile (B1: it used to read
+  // poor and step the good participant down twice in five samples).
   const threeBad = badgesFor([8, 12, 9]);
   assert.deepEqual(sampleOf(threeBad, 5).badges,
     { local: "good", "remote-1": "poor", "remote-2": "poor", "remote-3": "poor" },
     "three bad senders must wear the warning while the local tile reads good");
-  assert.ok(threeBad.samples.every((sample) => sample.poor && !sample.good),
-    "with no clean stream the own-link verdict reads poor on the samples whose local tile reads good");
-  assert.equal(threeBad.level, 1, "with no clean stream the good participant has stepped down twice in five samples");
+  assert.ok(threeBad.samples.every((sample) => !sample.poor),
+    "with no clean stream but the senders' reports, the own-link verdict must not read poor");
+  assert.equal(threeBad.level, topLevel, "with the senders' reports the good participant holds the top level");
 }
 
 // The simulcast layer on a perfect link: the requested camera layer starts at

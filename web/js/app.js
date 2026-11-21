@@ -2327,6 +2327,13 @@ const cameraUplinkReportMaxAgeMs = 3000;
 const remoteTrackOwners = new Map();
 const remoteTrackRoles = new Map();
 const remoteReceiverOwners = new Map();
+// Each remote sender's own uplink loss and jitter, as it reported them and the
+// server relayed them (source_quality). The own-link estimate discounts them,
+// so a sender's bad uplink is not charged to this participant's link (B1).
+const remoteSourceQuality = new Map();
+// The camera uplink's jitter from the latest SFU receiver report, reported in
+// network_state alongside the uplink loss.
+let cameraUplinkJitterMs = null;
 // Every track event bound to a remote participant's tile, kept so a resumed
 // participant's still-live tracks can be bound again (remote-track-memory.js).
 const remoteTrackMemory = typeof createRemoteTrackMemory === "function" ? createRemoteTrackMemory() : null;
@@ -3902,6 +3909,14 @@ function connectSocket(name, password) {
         startWebRTC();
       }
     }
+    if (message.type === "source_quality" && message.participant_id) {
+      const loss10 = Number(message.uplink_loss10 ?? 0);
+      const jitterMs = Number(message.uplink_jitter_ms ?? 0);
+      remoteSourceQuality.set(message.participant_id, {
+        lossPct: Number.isFinite(loss10) && loss10 >= 0 ? loss10 / 10 : null,
+        jitterMs: Number.isFinite(jitterMs) && jitterMs >= 0 ? jitterMs : null
+      });
+    }
     if (message.type === "participant_left" && message.participant?.id) {
       const leftParticipant = message.participant;
       addChatSystem(`${leftParticipant.name || "A participant"} left the room`);
@@ -4002,6 +4017,7 @@ function resetMediaConnection() {
   participants.replaceChildren();
   participantElements.clear();
   remoteTrackMemory?.clear();
+  remoteSourceQuality.clear();
   participantOrder.splice(0);
   pendingHandState = undefined;
   updateRaisedHandsUI();
@@ -5204,7 +5220,10 @@ async function updateDiagnostics() {
 // camera encoding by default, so the camera sender's video outbound entry
 // is the uplink signal.
 async function sampleCameraUplinkLoss() {
-  if (!cameraSender || typeof cameraSender.getStats !== "function") return null;
+  if (!cameraSender || typeof cameraSender.getStats !== "function") {
+    cameraUplinkJitterMs = null;
+    return null;
+  }
   let report;
   try {
     report = await cameraSender.getStats();
@@ -5248,6 +5267,7 @@ async function sampleCameraUplinkLoss() {
     if (sentDelta > 0 && lostDelta >= 0) lossPct = packetLossPercentFromDeltas(lostDelta, sentDelta);
   }
   cameraUplinkSamples.set(outbound.id, { sent, lost, reportedAt, seenAt: outbound.timestamp, lossPct });
+  cameraUplinkJitterMs = Number.isFinite(remoteInbound?.jitter) ? remoteInbound.jitter * 1000 : null;
   return lossPct;
 }
 
@@ -5328,7 +5348,8 @@ async function runDiagnosticsUpdate() {
       streamLossSamples.push({
         lossPct: packetLossPercentFromDeltas(deltas.lost, deltas.received),
         receivedDelta: deltas.received,
-        jitterMs: stat.jitter != null ? Math.round(stat.jitter * 1000) : null
+        jitterMs: stat.jitter != null ? Math.round(stat.jitter * 1000) : null,
+        participantID: participantForInboundStat(stat, trackStatsOwners)
       });
     }
     return deltas;
@@ -5481,7 +5502,8 @@ async function runDiagnosticsUpdate() {
       lostPacketsSincePreviousSample,
       receivedPacketsSincePreviousSample
     ),
-    fallbackJitterMs: values.jitterMs
+    fallbackJitterMs: values.jitterMs,
+    senderUplink: (participantID) => remoteSourceQuality.get(participantID) || null
   });
   values.packetLoss = ownLink.lossPct;
   // The in-loop assignments above keep the video-wins/audio-fills fallback;
@@ -5740,7 +5762,9 @@ async function runDiagnosticsUpdate() {
       packet_loss10: normalizePacketLoss10(values.packetLoss),
       jitter_ms: values.jitterMs ?? -1,
       video_kbps: values.outboundKbps == null ? -1 : Math.max(0, values.outboundKbps),
-      audio_kbps: values.outboundAudioKbps == null ? -1 : Math.max(0, values.outboundAudioKbps)
+      audio_kbps: values.outboundAudioKbps == null ? -1 : Math.max(0, values.outboundAudioKbps),
+      uplink_loss10: uplinkLossPct == null ? -1 : normalizePacketLoss10(uplinkLossPct),
+      uplink_jitter_ms: cameraUplinkJitterMs == null ? -1 : Math.min(120000, Math.max(0, Math.round(cameraUplinkJitterMs)))
     }));
   }
 }

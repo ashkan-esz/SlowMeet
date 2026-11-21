@@ -71,6 +71,17 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 	for _, state := range h.mediaStates {
 		_ = c.write(state)
 	}
+	// Each sender's reported uplink, so the joiner does not charge a bad
+	// sender uplink to its own link while waiting for the next change.
+	for participantID, quality := range h.sourceQuality {
+		if participantID == participant.ID {
+			continue
+		}
+		if _, ok := h.announced[participantID]; !ok {
+			continue
+		}
+		_ = c.write(sourceQualityMessage(participantID, quality.sentLoss10, quality.sentJitterMs))
+	}
 	screenOwner := ""
 	if h.screenSharer != nil {
 		screenOwner = h.screenSharer.participant.ID

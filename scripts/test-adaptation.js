@@ -723,6 +723,28 @@ if (singleLayout.columns !== 1 || singleLayout.rows !== 1 || singleLayout.tileWi
     [{ lossPct: 0, receivedDelta: 2 }, { lossPct: 8, receivedDelta: 120 }],
     { pooledLossPct: 7.5 }
   ).lossPct, 8, "a tiny window must not be treated as a trustworthy clean signal");
+
+  // B1: with each sender's reported uplink, its share is discounted before the
+  // minimum, so senders that all have bad uplinks do not make a clean
+  // receiver's link read bad; streams without a report count as they are.
+  const reports = new Map([["a", { lossPct: 10, jitterMs: 40 }], ["b", { lossPct: 20, jitterMs: 0 }]]);
+  const senderUplink = (id) => reports.get(id) || null;
+  const allBadSenders = [
+    { participantID: "a", lossPct: 10, jitterMs: 43, receivedDelta: 200 },
+    { participantID: "b", lossPct: 20, jitterMs: 3, receivedDelta: 200 }
+  ];
+  assert.deepEqual(selectOwnLinkMeasurements(allBadSenders, { senderUplink }), { lossPct: 0, jitterMs: 3 },
+    "senders' reported uplink loss and jitter must not be charged to a clean receiver");
+  assert.deepEqual(selectOwnLinkMeasurements(allBadSenders), { lossPct: 10, jitterMs: 3 },
+    "without reports the cleanest stream is still taken as the own link");
+  // Compounded: 10 % sender uplink and an 8 % own downlink deliver 82.8 %.
+  assert.equal(selectOwnLinkMeasurements(
+    [{ participantID: "a", lossPct: 17.2, receivedDelta: 200 }], { senderUplink }
+  ).lossPct, 8, "the receiver's own 8 % must be recovered from a compounded stream");
+  assert.equal(selectOwnLinkMeasurements(
+    [{ participantID: "unknown", lossPct: 12, receivedDelta: 200 }, { participantID: "b", lossPct: 20, receivedDelta: 200 }],
+    { senderUplink }
+  ).lossPct, 0, "a reported sender proves the own path even when an unreported one is lossy");
   assert.equal(selectOwnLinkMeasurements([{ lossPct: 0, receivedDelta: 1 }], { pooledLossPct: 7.5 }).lossPct,
     7.5, "with no qualifying stream, fall back to the pooled measurement");
   assert.equal(selectOwnLinkMeasurements([], { pooledLossPct: 3.3 }).lossPct, 3.3,
