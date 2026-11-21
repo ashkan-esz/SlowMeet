@@ -171,6 +171,24 @@ test-media-e2e-four-list: ## List the four-person suite scenarios
 test-media-e2e-four-netns: ## Run the four-person mixed-quality room scenarios in an isolated network namespace
 	./scripts/test-four-person-e2e-netns.sh
 
+# Keep in sync with the four-person list in .github/workflows/ci.yml.
+FOUR_NETNS_CI_SCENARIOS = mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired
+
+test-media-e2e-four-netns-strict: ## Run the CI four-person netns scenarios with their strict checks (per-pair audio gaps, full-mesh media after recovery)
+	MEDIA_E2E_FOUR_STRICT=1 MEDIA_E2E_FOUR_SCENARIO="$(FOUR_NETNS_CI_SCENARIOS)" ./scripts/test-four-person-e2e-netns.sh
+
+test-media-e2e-four-resilience: ## Run the opt-in four-person resilience scenarios (link outages, simultaneous reconnects, relay failover, flapping, bursty and thin links; ~35 min)
+	MEDIA_E2E_FOUR_GROUP=resilience ./scripts/test-four-person-e2e-netns.sh
+
+test-media-e2e-four-resilience-slow: ## Run the slow opt-in resilience scenarios (75 s link outage, retry budget to Offline; ~15 min)
+	MEDIA_E2E_FOUR_GROUP=resilience-slow ./scripts/test-four-person-e2e-netns.sh
+
+test-media-e2e-four-reconnect: ## Run the clean-link four-person reconnect, identity and replay scenarios on the host (default 5 s grace)
+	MEDIA_E2E_FOUR_SCENARIO="signaling-reconnect,chat-unread-and-history,abrupt-close-no-resume,grace-window-churn,token-takeover,late-joiner-replay" $(NODE) scripts/test-four-person-e2e.js
+
+test-media-e2e-four-reconnect-expiry: ## Run the grace-expiry branch of the reconnect scenarios on the host (1 s grace)
+	MEDIA_E2E_FOUR_RECONNECT_GRACE=1 MEDIA_E2E_FOUR_SCENARIO="grace-window-churn,signaling-reconnect" $(NODE) scripts/test-four-person-e2e.js
+
 test-connection-methods-e2e: ## Verify live connection method switching and admin policy refresh
 	MEDIA_E2E_SCENARIO="connection method switch and admin policy refresh" $(NODE) scripts/test-media-e2e.js
 
@@ -180,6 +198,13 @@ test-media-e2e-netns: ## Test media quality degradation and recovery in an isola
 test-weaknet: ## Run the Go weak-network integration suite in an isolated network namespace
 	./scripts/test-go-weaknet.sh
 
+test-weaknet-extended: ## Run the Go weak-network suite including the extended tests (thin uplinks, all-impaired mesh, burst loss)
+	SLOWMEET_EXTENDED=1 ./scripts/test-go-weaknet.sh
+
+test-known-failing-go: ## Run the Go tests that pin documented defects (B5-B8 in docs/network-testing.md); expected to fail until fixed
+	SLOWMEET_KNOWN_FAILING=1 SLOWMEET_EXTENDED=1 $(GO) test -race -count=1 -run 'TestHubSimultaneousReconnect|TestHubRestartRejoin|TestResumeSupersededPeerCloseDelay|TestRouterResumedCameraPublisher' ./internal/signaling/ ./internal/media/
+	SLOWMEET_KNOWN_FAILING=1 SLOWMEET_EXTENDED=1 SLOWMEET_WEAKNET_RUN='^TestWeakNetImpairedPublisherUplink' ./scripts/test-go-weaknet.sh
+
 .PHONY: test-soak
 test-soak: ## Run a sustained synthetic-meeting soak with server CPU/heap profiles: SOAK_PARTICIPANTS=4 SOAK_SECONDS=30
 	$(NODE) scripts/test-soak.js
@@ -187,6 +212,9 @@ test-soak: ## Run a sustained synthetic-meeting soak with server CPU/heap profil
 .PHONY: test-soak-netns
 test-soak-netns: ## Run the weak-network soak (4 participants, cycling impairment tiers) in an isolated namespace: SOAK_SECONDS=300
 	./scripts/test-soak-netns.sh
+
+test-soak-netns-strict: ## Run the weak-network soak with full impaired windows, per-participant audio continuity and reconnects counted from arm time (~7 min)
+	SOAK_STRICT=1 ./scripts/test-soak-netns.sh
 
 test-media-e2e-screen-share: ## Run headed generated-content screen-share scenarios
 	MEDIA_E2E_PROFILE=screen-share MEDIA_E2E_HEADED=1 MEDIA_E2E_SCREEN_SHARE=1 $(NODE) scripts/test-media-e2e.js

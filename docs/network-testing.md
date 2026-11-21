@@ -139,6 +139,79 @@ what should change. Fixing an issue means flipping that assertion.
 - **B4 — FPS gate decimates a source at the cap.** With capture-time jitter,
   a source running at exactly the configured frame-rate cap loses about
   half its frames. Pinned in `TestBitrateLimiterFPSGateAtSourceRate`.
+- **B5 — concurrent admissions announce a peer twice.** When two or more
+  participants join or resume at the same moment, `admit` replays every
+  meeting member that is no longer in the grace map, and each of those
+  members' own join also broadcasts `participant_joined` to the newcomer,
+  so a peer arrives twice. Reproduced on every run by
+  `TestHubSimultaneousReconnect` (grace resumes of 2, 3 or 4 participants)
+  and `TestHubRestartRejoinWithStaleTokensFillsExactlyFourSeats` (four
+  rejoins after a restart); the browser's `simultaneous-reconnect` scenario
+  checks the same thing per page.
+- **B6 — a takeover closes the superseded peer at once.** `reclaim` keeps
+  the superseded peer open for `supersededPeerCloseDelay` (10 s) so the
+  resume can re-bind its publications without a room-wide renegotiation,
+  but on a takeover (a new socket presents the token while the old one
+  still looks alive) `disconnect` sees the old client as superseded, treats
+  it as not grace-eligible and `teardownClientMedia` closes its peer
+  immediately. Pinned in `TestResumeSupersededPeerCloseDelay/takeover`.
+- **B7 — receiver feedback still goes to a resumed publisher's old peer.**
+  `relayRTCP` writes subscribers' PLI/NACK to the source peer it captured
+  at subscription, and a publication swap (`migrateTargetsLocked`) only
+  updates the SSRC holder. After a publisher resumes, the other three
+  participants' keyframe and retransmission requests go to the superseded
+  peer (and stop entirely once it closes). Pinned in
+  `TestRouterResumedCameraPublisherRebindsThreeReceivers`, whose control
+  check shows the same request does reach the publisher before the resume.
+- **B8 — NACKs for deliberately dropped video reach the publisher.** The
+  SFU forwards video with the publisher's sequence numbers, so every frame
+  the FPS gate or bitrate limiter drops leaves a gap; receivers NACK the
+  gap and `routeRTCPFeedback` relays the NACK to the publisher, which
+  retransmits packets the SFU will drop again. On a 1 Mbit uplink with 3–8%
+  loss that retransmission load starved the publisher's own audio to about
+  a third (107 of ~300 packets per 8 s in five of five runs; the same link
+  without the 1 Mbit cap carried ~298). Pinned in
+  `TestWeakNetImpairedPublisherUplinkReachesEverySubscriber/lossy_uplink`.
+
+- **B9 — a camera turned on after a resume never reaches the room.** In
+  `sharer-reconnect-mid-share` the share owner's signaling drops and resumes
+  mid-share; when it later turns its camera back on, every viewer receives
+  exactly one packet of that camera and then nothing (inbound video
+  `framesDecoded/packetsReceived` = `1/1`), while a participant that shared
+  without a resume gets its camera back normally. This fits B7: the
+  keyframe requests that would start forwarding go to the superseded peer.
+  Seen in two of two runs; the scenario logs `KNOWN ISSUE B9` and rejoins
+  the owner afresh so later scenarios start clean.
+
+- **B10 — a ghost tile after a signaling stall.** In
+  `signaling-stall-during-churn` one participant's signaling is held while
+  another leaves and rejoins; when the held `participant_left`,
+  `participant_joined` and offers arrive in one burst, the departed tile
+  ("Participant left") has stayed next to the rejoined one for more than
+  20 s instead of being removed after 1.2 s. Seen in one of the two runs
+  that reached the check, so timing-dependent. The scenario logs `KNOWN ISSUE B10`.
+- **B11 — a resumed participant is not heard.** After a participant
+  resumes over an impaired link (`reconnect-under-impairment-isolated`,
+  `sharer-reconnect-mid-share-impaired`, `rapid-flap-link`), every other
+  browser keeps receiving its audio packets, but the participant's tile has
+  no audio track bound to its `<audio>` element, which is what plays it, so
+  the room no longer hears that participant. Seen in three runs where the
+  resume followed earlier scenarios in the same room (it then persisted
+  until the participant rejoined), and not in two runs that started from a
+  fresh room, so it depends on earlier state.
+  Working hypothesis, not yet confirmed: the grace-window
+  `participant_left` makes the other clients drop the tile's remote tracks
+  (`forgetRemoteTracks`), and the resume swaps the publication onto the new
+  peer without a renegotiation, so no `ontrack` ever rebinds them; B9 may be
+  the same cause for the camera. The CI scenario
+  `reconnect-under-impairment` does not catch it because its per-pair check
+  runs only with `MEDIA_E2E_FOUR_STRICT=1`.
+
+  The Go tests for B5–B8 skip their pinned assertion unless
+  `SLOWMEET_KNOWN_FAILING=1`; `make test-known-failing-go` runs them all and
+  is expected to fail until the defects are fixed. The browser suite uses
+  the same variable: a `knownIssue("Bn", ...)` check logs `KNOWN ISSUE Bn
+  still present` without it and fails with it.
 
   Run the whole gated set the way CI does:
 
@@ -160,7 +233,71 @@ what should change. Fixing an issue means flipping that assertion.
   window. `SOAK_SECONDS=300` (default) runs two full cycles; the plain
   clean soak (`make test-soak`) is unchanged. Gated in the weaknet CI
   job; locally it stays opt-in for shorter or clean soaks (`SOAK_SECONDS`,
-  `SOAK_IMPAIRMENT=0`).
+  `SOAK_IMPAIRMENT=0`). Each impaired window must show traffic in every
+  tier's class (a classifier that never matched a port fails the soak).
+  The default path lifts each window once its checks finish (about 35 s);
+  `make test-soak-netns-strict` (`SOAK_STRICT=1`) holds the full
+  `SOAK_IMPAIR_WINDOW_SECONDS`, measures per-participant audio continuity
+  (no participant may hear total silence from the room for more than
+  `SOAK_STRICT_ROOM_SILENCE_MS`, default 3000) and counts reconnects from
+  the moment the tiers are armed.
+
+### Opt-in resilience tests
+
+These cover what the CI set does not: whole-link outages, several
+participants reconnecting at once, server restarts, path changes, flapping,
+bursty and upload-only links, rooms where nobody has a good link, and the
+TURN/TCP fallback. None of them runs in CI.
+
+| Target | What it runs | Time |
+| --- | --- | --- |
+| `make test-media-e2e-four-resilience` | the `resilience` scenarios below, in the netns | ~35 min |
+| `make test-media-e2e-four-resilience-slow` | `link-outage-long`, `long-blackout-retry-budget` | ~15 min |
+| `make test-media-e2e-four-netns-strict` | the CI scenarios with their strict checks (per-pair audio gaps, every pair's media after a recovery) | ~30 min |
+| `make test-media-e2e-four-reconnect` | clean-link reconnect, identity, takeover and chat-replay scenarios, on the host | ~6 min |
+| `make test-media-e2e-four-reconnect-expiry` | the same with a 1 s grace (fresh identity after expiry) | ~2 min |
+| `make test-weaknet-extended` | the Go weak-net suite plus thin uplinks, an all-impaired mesh and burst loss | ~5 min |
+| `make test-known-failing-go` | the Go assertions pinning B5–B8 (expected to fail) | ~2 min |
+| `make test-soak-netns-strict` | the weak-network soak with full windows and continuity | ~7 min |
+
+Run one scenario with `MEDIA_E2E_FOUR_SCENARIO=<exact name> make
+test-media-e2e-four-netns`. Grouped scenarios never match a substring, so
+the CI list cannot pick them up by accident.
+
+`resilience` scenarios: `sharer-reconnect-mid-share` (and `-impaired`),
+`simultaneous-reconnect`, `server-restart-rejoin`,
+`path-change-auto-ice-restart`, `slow-uplink-room`, `bursty-link-room`,
+`all-impaired-room`, `reconnect-under-impairment-isolated`,
+`rapid-flap-link`, `link-outage-short`, `signaling-stall-during-churn`,
+`udp-blocked-relay-failover` and `relay-path-under-loss` (both start a
+server with the built-in TURN relay).
+
+How the faults are made:
+
+- **One participant's signaling.** tc cannot single out one browser's
+  WebSocket: every browser talks to the server's one TCP port on loopback.
+  The scenario re-joins that participant through `scripts/signaling-relay.js`,
+  a local TCP relay that can blackhole the connection (hold every byte and
+  every close, the way a dead radio looks from both ends), refuse new
+  connections, reset live ones, or add delay.
+- **All of one participant's UDP.** `armRoleUdpIsolation` in
+  `scripts/netem-tiers.js` allowlists the other participants' ports and
+  sends every other UDP packet into a tier, so ports the participant opens
+  later (a rebuilt peer, an ICE restart) are caught too.
+- **New tiers** (`thin-uplink`, `bursty`, `relay-lossy`, `flap`) are
+  installed only when a scenario names them, so the CI scenarios keep
+  issuing exactly the tc commands pinned by `scripts/test-netem-tiers.js`.
+- **Proof of fault.** Every armed tier must show traffic in its class
+  counters when the scenario stops it; resilience scenarios also check the
+  relay's held bytes or the blackout class's drops.
+
+What the timings pin: the signaling hub evicts a silent participant after
+the 60 s pong wait; a takeover or grace-window resume keeps the identity and
+a resume after the grace window gets a new one; a restarted server forgets
+every reconnect token, so everyone rejoins as a new participant and the
+chat history is gone; a client whose media never connects goes Offline
+after five failed signaling sessions (2, 4, 8, 16, 30 s apart) and stays
+Offline until Leave and Rejoin.
 
 Inspect the active interface first:
 

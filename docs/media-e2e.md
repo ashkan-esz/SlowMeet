@@ -178,7 +178,18 @@ Scenario names match exactly or by substring, case-insensitively;
 
 Knobs:
 
-- `MEDIA_E2E_FOUR_SCENARIO` — comma-separated scenario filter (default: all).
+- `MEDIA_E2E_FOUR_SCENARIO` — comma-separated scenario filter (default: all
+  ungrouped scenarios). Entries match by substring, except for grouped
+  (opt-in) scenarios, which match only by exact name.
+- `MEDIA_E2E_FOUR_GROUP` — runs every scenario of the named opt-in groups
+  (`resilience`, `resilience-slow`); see "Opt-in resilience tests" in
+  `docs/network-testing.md`.
+- `MEDIA_E2E_FOUR_STRICT=1` — turns the stricter checks in the existing
+  scenarios (per-pair audio gaps, every pair's media after a recovery) into
+  assertions; without it they log `STRICT-ONLY` lines.
+- `SLOWMEET_KNOWN_FAILING=1` — runs scenarios marked known-failing and makes
+  `knownIssue` checks for documented defects (B1–B8 in
+  `docs/network-testing.md`) fail instead of logging `KNOWN ISSUE`.
 - `MEDIA_E2E_FOUR_ENGINES` — `mixed` (default, 2 Chromium + 2 Firefox) or
   `chromium` to run every participant on Chromium.
 - `MEDIA_E2E_FOUR_RECONNECT_GRACE` — server reconnect grace seconds for the
