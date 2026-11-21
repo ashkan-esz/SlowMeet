@@ -50,6 +50,9 @@ type publication struct {
 	limiter      *bitrateLimiter
 	lastPacketAt atomic.Int64
 	paused       atomic.Bool
+	// lastKeyFrameRequest is when (Unix nanoseconds) a keyframe request last
+	// reached this publication's publisher; see allowKeyFrameRequest.
+	lastKeyFrameRequest atomic.Int64
 
 	// layerKeys caches the publication key of every camera simulcast quality
 	// for this source so the per-packet layer selection never builds strings.
@@ -808,8 +811,15 @@ func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
 	}
 }
 
+// scheduleVideoKeyFrameRetryLocked starts a keyframe retry series for pub, or
+// returns nil if one is already running. There is one series per publication,
+// not per receiver: one keyframe from the publisher's encoder reaches every
+// receiver of it, and receivers that switch to the same layer in one frame
+// used to start one series each against that single encoder (B2 in
+// docs/network-testing.md). receiverID only names who asked.
 func (r *Router) scheduleVideoKeyFrameRetryLocked(pub *publication, receiverID string, onError func(error)) *videoKeyFrameRetry {
-	key := videoKeyFrameRequestKey{receiverID: receiverID, publicationKey: pub.key}
+	_ = receiverID
+	key := videoKeyFrameRequestKey{publicationKey: pub.key}
 	if existing := r.videoKeyFrameRetries[key]; existing != nil {
 		if existing.publication == pub {
 			return nil
@@ -858,6 +868,11 @@ func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoK
 }
 
 func (r *Router) writeVideoKeyFrame(pub *publication, onError func(error)) {
+	if !pub.allowKeyFrameRequest(time.Now()) {
+		// A request reached this publisher within the last interval; the
+		// keyframe it produces serves this request too.
+		return
+	}
 	err := pub.source.WriteRTCP([]rtcp.Packet{
 		&rtcp.PictureLossIndication{MediaSSRC: uint32(pub.remote.SSRC())},
 	})
@@ -1088,14 +1103,37 @@ func dispatchOffers(offers map[string]Offerer) {
 type feedbackRoute struct {
 	source *webrtc.Peer
 	ssrc   uint32
+	// pub is the publication the feedback is about; its keyframe-request
+	// budget is shared by every receiver (allowKeyFrameRequest).
+	pub *publication
 	// videoTarget is the receiver's egress target for a video publication,
 	// whose mailbox-loss record decides which NACKed packets only the
 	// publisher can resend; nil for audio, whose NACKs relay unfiltered.
 	videoTarget *publicationTarget
 }
 
+// keyFrameRequestInterval is the shortest gap between two keyframe requests
+// that reach one publisher. It is below videoKeyFrameRetryDelay so a retry
+// series still runs, and long enough that subscribers asking in the same
+// moment — they all lost the picture to the same cause — share one keyframe.
+const keyFrameRequestInterval = 200 * time.Millisecond
+
+// allowKeyFrameRequest reports whether a keyframe request (a receiver's PLI or
+// FIR, or the SFU's own) may reach this publication's publisher now. The
+// keyframe a request produces is forwarded to every receiver, so requests in
+// the same interval are redundant: relaying each subscriber's and running a
+// retry series per subscriber made N lossy receivers cost N times the
+// keyframes on one encoder (B2 in docs/network-testing.md).
+func (pub *publication) allowKeyFrameRequest(now time.Time) bool {
+	last := pub.lastKeyFrameRequest.Load()
+	if last != 0 && now.UnixNano()-last < int64(keyFrameRequestInterval) {
+		return false
+	}
+	return pub.lastKeyFrameRequest.CompareAndSwap(last, now.UnixNano())
+}
+
 func newFeedbackRoute(pub *publication, target *publicationTarget) *feedbackRoute {
-	route := &feedbackRoute{source: pub.source, ssrc: uint32(pub.remote.SSRC())}
+	route := &feedbackRoute{source: pub.source, ssrc: uint32(pub.remote.SSRC()), pub: pub}
 	if pub.remote.Kind() == pion.RTPCodecTypeVideo {
 		route.videoTarget = target
 	}
@@ -1135,7 +1173,12 @@ func relayRTCP(sender *pion.RTPSender, route *atomic.Pointer[feedbackRoute], rel
 			return
 		}
 		current := route.Load()
-		routed := routeFilteredRTCPFeedback(packets, current.ssrc, current.publisherResendable(time.Now()))
+		now := time.Now()
+		var keyFrameAllowed func() bool
+		if current.pub != nil {
+			keyFrameAllowed = func() bool { return current.pub.allowKeyFrameRequest(now) }
+		}
+		routed := routeFilteredRTCPFeedback(packets, current.ssrc, current.publisherResendable(now), keyFrameAllowed)
 		relayed.Observe(packets)
 		if len(routed) == 0 || current.source == nil {
 			// Nothing in the batch concerns the publisher; skip the
@@ -1172,21 +1215,30 @@ func readSenderRTCP(sender interface {
 // docs/vps-regression-diagnostics.md), each one an SRTCP encrypt, a send, and
 // bytes on the publisher's downlink.
 func routeRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32) []rtcp.Packet {
-	return routeFilteredRTCPFeedback(packets, sourceSSRC, nil)
+	return routeFilteredRTCPFeedback(packets, sourceSSRC, nil, nil)
 }
 
 // routeFilteredRTCPFeedback is routeRTCPFeedback that keeps, in each NACK,
-// only the sequence numbers resendable accepts; a NACK left with nothing is
-// not relayed at all. A nil resendable keeps every NACK whole.
-func routeFilteredRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32, resendable func(uint16) bool) []rtcp.Packet {
+// only the sequence numbers resendable accepts (a NACK left with nothing is
+// not relayed at all), and relays a keyframe request (PLI or FIR) only when
+// keyFrameAllowed grants it. Nil filters keep everything.
+func routeFilteredRTCPFeedback(packets []rtcp.Packet, sourceSSRC uint32, resendable func(uint16) bool,
+	keyFrameAllowed func() bool,
+) []rtcp.Packet {
 	var routed []rtcp.Packet
 	for _, packet := range packets {
 		switch feedback := packet.(type) {
 		case *rtcp.PictureLossIndication:
+			if keyFrameAllowed != nil && !keyFrameAllowed() {
+				continue
+			}
 			copy := *feedback
 			copy.MediaSSRC = sourceSSRC
 			routed = append(routed, &copy)
 		case *rtcp.FullIntraRequest:
+			if keyFrameAllowed != nil && !keyFrameAllowed() {
+				continue
+			}
 			copy := *feedback
 			copy.MediaSSRC = sourceSSRC
 			copy.FIR = append([]rtcp.FIREntry(nil), feedback.FIR...)

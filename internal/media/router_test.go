@@ -683,8 +683,8 @@ func TestForwardPacketSelectsActiveLayerAndRequestsKeyframeOnTransition(t *testi
 		t.Fatal("selected layer packet was not enqueued for the receiver")
 	}
 	key, request := onlyVideoKeyFrameRetry(t, router)
-	if key.receiverID != "receiver" || key.publicationKey != medium.key || request.publication != medium {
-		t.Fatalf("layer entry keyframe request key = %+v, want a receiver-scoped retry on the medium publication", key)
+	if key.receiverID != "" || key.publicationKey != medium.key || request.publication != medium {
+		t.Fatalf("layer entry keyframe request key = %+v, want the medium publication's one retry series", key)
 	}
 
 	// The receiver's preference moves to low: medium stops forwarding, clears

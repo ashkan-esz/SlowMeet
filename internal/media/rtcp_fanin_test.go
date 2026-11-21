@@ -244,17 +244,11 @@ func testSubscriberKeyFrameRequestsFanIn(t *testing.T, subscriberCount int) {
 		}
 	}
 
-	// KNOWN ISSUE (B2): relayRTCP forwards every subscriber's keyframe request
-	// to the publisher as it arrives, with no throttle and no coalescing
-	// across the subscribers of one publication, so N simultaneous PLIs cost
-	// the publisher's encoder N keyframe requests. Desired: requests for the
-	// same publication that arrive together are merged into a single PLI.
-	// When that is fixed the multi-subscriber rows fail the wait below ("read
-	// 1 PLIs from N subscribers, want N"): set wantPublisherPLIs to 1 for every
-	// row, and make the sender SSRC comparison accept the one merged request.
-	// (Setting it to 1 today makes those rows fail the "more than" check.) The
-	// relay metric counts what subscribers sent and stays at subscriberCount.
-	wantPublisherPLIs := subscriberCount
+	// Keyframe requests that reach one publisher in the same moment are merged:
+	// the keyframe one produces reaches every subscriber, and relaying each of
+	// them used to cost the publisher's encoder N keyframes (B2). The relay
+	// metric still counts what the subscribers sent.
+	const wantPublisherPLIs = 1
 
 	var gotSenders []uint32
 	for len(gotSenders) < wantPublisherPLIs {
@@ -276,9 +270,8 @@ func testSubscriberKeyFrameRequestsFanIn(t *testing.T, subscriberCount int) {
 			wantPublisherPLIs, subscriberCount, pli)
 	case <-time.After(rtcpFanInQuietWindow):
 	}
-	slices.Sort(gotSenders)
-	if !slices.Equal(gotSenders, wantSenders) {
-		t.Fatalf("PLI sender SSRCs at the publisher = %v, want one from each subscriber %v", gotSenders, wantSenders)
+	if !slices.Contains(wantSenders, gotSenders[0]) {
+		t.Fatalf("PLI sender SSRC at the publisher = %d, want one of the subscribers' %v", gotSenders[0], wantSenders)
 	}
 	if got := router.RTCPRelay().PLI; got != uint64(subscriberCount) {
 		t.Fatalf("relay counted %d subscriber PLIs, want %d", got, subscriberCount)
@@ -475,17 +468,12 @@ func TestLayerTransitionKeyFrameRetriesPerReceiver(t *testing.T) {
 		wantRequests int
 	}{
 		{name: "one receiver", receivers: []string{"receiver-1"}, wantSeries: 1, wantRequests: videoKeyFrameRequestCount},
-		// KNOWN ISSUE (B2): keyframe retries are keyed per (receiver,
-		// publication), so receivers that step down to the same layer in the
-		// same frame each start their own series against the one encoder that
-		// feeds them all: three receivers cost 3 PLIs at once and 9 within
-		// two retry delays. Desired: one series per publication no matter how
-		// many receivers switched together. When that is fixed, wantSeries
-		// becomes 1 and wantRequests becomes videoKeyFrameRequestCount in the
-		// two rows below, and the per-receiver key lookup in the loop at the
-		// end of this test has to follow the new key.
-		{name: "two receivers", receivers: []string{"receiver-1", "receiver-2"}, wantSeries: 2, wantRequests: 2 * videoKeyFrameRequestCount},
-		{name: "three receivers", receivers: []string{"receiver-1", "receiver-2", "receiver-3"}, wantSeries: 3, wantRequests: 3 * videoKeyFrameRequestCount},
+		// Receivers that step down to the same layer in the same frame share
+		// one series against the one encoder that feeds them all; they used to
+		// start one each, three receivers costing 3 PLIs at once and 9 within
+		// two retry delays (B2).
+		{name: "two receivers", receivers: []string{"receiver-1", "receiver-2"}, wantSeries: 1, wantRequests: videoKeyFrameRequestCount},
+		{name: "three receivers", receivers: []string{"receiver-1", "receiver-2", "receiver-3"}, wantSeries: 1, wantRequests: videoKeyFrameRequestCount},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var low *publication
@@ -527,15 +515,13 @@ func TestLayerTransitionKeyFrameRetriesPerReceiver(t *testing.T) {
 			if requests != test.wantRequests {
 				t.Fatalf("the transition budgets %d PLIs to the low layer's publisher, want %d", requests, test.wantRequests)
 			}
-			for _, receiverID := range test.receivers {
-				request := retries[videoKeyFrameRequestKey{receiverID: receiverID, publicationKey: low.key}]
-				if request == nil {
-					t.Fatalf("no retry series for %s on %s: %+v", receiverID, low.key, slices.Collect(maps.Keys(retries)))
-				}
-				if request.publication != low || request.remaining != videoKeyFrameRequestCount-1 {
-					t.Fatalf("retry series for %s = publication %q with %d retries left, want %q with %d",
-						receiverID, request.publication.key, request.remaining, low.key, videoKeyFrameRequestCount-1)
-				}
+			request := retries[videoKeyFrameRequestKey{publicationKey: low.key}]
+			if request == nil {
+				t.Fatalf("no retry series on %s: %+v", low.key, slices.Collect(maps.Keys(retries)))
+			}
+			if request.publication != low || request.remaining != videoKeyFrameRequestCount-1 {
+				t.Fatalf("retry series = publication %q with %d retries left, want %q with %d",
+					request.publication.key, request.remaining, low.key, videoKeyFrameRequestCount-1)
 			}
 		})
 	}
@@ -602,8 +588,8 @@ func TestSimulcastMixedLayersAcrossFourReceivers(t *testing.T) {
 	// The step down asks only the low layer's encoder for a keyframe, and the
 	// step back up only the high layer's on behalf of the receivers that
 	// re-entered it. Neither transition schedules anything for the receiver
-	// that stayed on high, and nothing ever targets the medium layer. (How
-	// many series the weak receivers start is pinned as B2 in
+	// that stayed on high, and nothing ever targets the medium layer. (That
+	// the weak receivers share one series is checked in
 	// TestLayerTransitionKeyFrameRetriesPerReceiver, not here.)
 	for _, transition := range []struct {
 		name    string
