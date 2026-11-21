@@ -201,7 +201,7 @@ test-weaknet: ## Run the Go weak-network integration suite in an isolated networ
 test-weaknet-extended: ## Run the Go weak-network suite including the extended tests (thin uplinks, all-impaired mesh, burst loss)
 	SLOWMEET_EXTENDED=1 ./scripts/test-go-weaknet.sh
 
-test-known-failing-go: ## Run the Go tests that pin documented defects (B5-B8 in docs/network-testing.md); expected to fail until fixed
+test-known-failing-go: ## Run the Go tests that pinned B5-B8 (fixed; see docs/network-testing.md) with every known-failing gate open
 	SLOWMEET_KNOWN_FAILING=1 SLOWMEET_EXTENDED=1 $(GO) test -race -count=1 -run 'TestHubSimultaneousReconnect|TestHubRestartRejoin|TestResumeSupersededPeerCloseDelay|TestRouterResumedCameraPublisher' ./internal/signaling/ ./internal/media/
 	SLOWMEET_KNOWN_FAILING=1 SLOWMEET_EXTENDED=1 SLOWMEET_WEAKNET_RUN='^TestWeakNetImpairedPublisherUplink' ./scripts/test-go-weaknet.sh
 

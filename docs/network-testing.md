@@ -139,49 +139,22 @@ what should change. Fixing an issue means flipping that assertion.
 - **B4 — FPS gate decimates a source at the cap.** With capture-time jitter,
   a source running at exactly the configured frame-rate cap loses about
   half its frames. Pinned in `TestBitrateLimiterFPSGateAtSourceRate`.
-- **B5 — concurrent admissions announce a peer twice.** When two or more
-  participants join or resume at the same moment, `admit` replays every
-  meeting member that is no longer in the grace map, and each of those
-  members' own join also broadcasts `participant_joined` to the newcomer,
-  so a peer arrives twice. Reproduced on every run by
-  `TestHubSimultaneousReconnect` (grace resumes of 2, 3 or 4 participants)
-  and `TestHubRestartRejoinWithStaleTokensFillsExactlyFourSeats` (four
-  rejoins after a restart); the browser's `simultaneous-reconnect` scenario
-  checks the same thing per page.
-- **B6 — a takeover closes the superseded peer at once.** `reclaim` keeps
-  the superseded peer open for `supersededPeerCloseDelay` (10 s) so the
-  resume can re-bind its publications without a room-wide renegotiation,
-  but on a takeover (a new socket presents the token while the old one
-  still looks alive) `disconnect` sees the old client as superseded, treats
-  it as not grace-eligible and `teardownClientMedia` closes its peer
-  immediately. Pinned in `TestResumeSupersededPeerCloseDelay/takeover`.
-- **B7 — receiver feedback still goes to a resumed publisher's old peer.**
-  `relayRTCP` writes subscribers' PLI/NACK to the source peer it captured
-  at subscription, and a publication swap (`migrateTargetsLocked`) only
-  updates the SSRC holder. After a publisher resumes, the other three
-  participants' keyframe and retransmission requests go to the superseded
-  peer (and stop entirely once it closes). Pinned in
-  `TestRouterResumedCameraPublisherRebindsThreeReceivers`, whose control
-  check shows the same request does reach the publisher before the resume.
-- **B8 — NACKs for deliberately dropped video reach the publisher.** The
-  SFU forwards video with the publisher's sequence numbers, so every frame
-  the FPS gate or bitrate limiter drops leaves a gap; receivers NACK the
-  gap and `routeRTCPFeedback` relays the NACK to the publisher, which
-  retransmits packets the SFU will drop again. On a 1 Mbit uplink with 3–8%
-  loss that retransmission load starved the publisher's own audio to about
-  a third (107 of ~300 packets per 8 s in five of five runs; the same link
-  without the 1 Mbit cap carried ~298). Pinned in
-  `TestWeakNetImpairedPublisherUplinkReachesEverySubscriber/lossy_uplink`.
-
 - **B9 — a camera turned on after a resume never reaches the room.** In
   `sharer-reconnect-mid-share` the share owner's signaling drops and resumes
   mid-share; when it later turns its camera back on, every viewer receives
   exactly one packet of that camera and then nothing (inbound video
   `framesDecoded/packetsReceived` = `1/1`), while a participant that shared
-  without a resume gets its camera back normally. This fits B7: the
-  keyframe requests that would start forwarding go to the superseded peer.
-  Seen in two of two runs; the scenario logs `KNOWN ISSUE B9` and rejoins
-  the owner afresh so later scenarios start clean.
+  without a resume gets its camera back normally. Seen in every run,
+  including one after B7 was fixed, so B7 is not the cause. The server log
+  of that run shows what a browser resume really is: the client closes its
+  old peer connection when it reconnects, the SFU's reads of the owner's
+  old publications end with `EOF` about 2 s after the disconnect and the
+  publications are removed, and the resume (6 ms later) republishes from
+  scratch with a room-wide renegotiation. The publication swap that
+  `reclaim` and `migrateTargetsLocked` exist for never runs for a browser.
+  The scenario logs `KNOWN ISSUE B9` and rejoins the owner afresh so later
+  scenarios start clean; with `SLOWMEET_KNOWN_FAILING=1` that rejoin is
+  skipped and the owner's audio stays dead for the rest of the group.
 
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
@@ -199,19 +172,46 @@ what should change. Fixing an issue means flipping that assertion.
   resume followed earlier scenarios in the same room (it then persisted
   until the participant rejoined), and not in two runs that started from a
   fresh room, so it depends on earlier state.
-  Working hypothesis, not yet confirmed: the grace-window
-  `participant_left` makes the other clients drop the tile's remote tracks
-  (`forgetRemoteTracks`), and the resume swaps the publication onto the new
-  peer without a renegotiation, so no `ontrack` ever rebinds them; B9 may be
-  the same cause for the camera. The CI scenario
-  `reconnect-under-impairment` does not catch it because its per-pair check
-  runs only with `MEDIA_E2E_FOUR_STRICT=1`.
+  The first hypothesis (the resume swaps the publication without a
+  renegotiation, so no `ontrack` rebinds the cleared tile) is ruled out:
+  a browser resume republishes and renegotiates (see B9). What is left to
+  explain is why the `ontrack` of the republished audio does not end up on
+  the tile. One candidate is the order of the tile reset in
+  `addParticipant` (which clears `audio.srcObject` when the participant
+  returns inside the 1.2 s removal window) against the renegotiation that
+  delivers the new track. The CI scenario `reconnect-under-impairment` does
+  not catch it because its per-pair check runs only with
+  `MEDIA_E2E_FOUR_STRICT=1`.
 
-  The Go tests for B5–B8 skip their pinned assertion unless
-  `SLOWMEET_KNOWN_FAILING=1`; `make test-known-failing-go` runs them all and
-  is expected to fail until the defects are fixed. The browser suite uses
-  the same variable: a `knownIssue("Bn", ...)` check logs `KNOWN ISSUE Bn
-  still present` without it and fails with it.
+- **Fixed: B5–B8.** Their tests now enforce the fix without a gate.
+  - B5, a peer announced twice when admissions overlap: `admit` now
+    broadcasts the joiner's `participant_joined` and replays only
+    participants the room already knows (the hub's `announced` set) under
+    one lock hold. `TestHubSimultaneousReconnect`,
+    `TestHubRestartRejoinWithStaleTokensFillsExactlyFourSeats`.
+  - B6, a takeover closing the superseded peer at once: `disconnect` leaves
+    a superseded client's media to the takeover, which closes the old peer
+    after `supersededCloseDelay`. `TestResumeSupersededPeerCloseDelay`.
+  - B7, receiver feedback going to a resumed publisher's old peer: each
+    receiver's relay reads a feedback route (peer and SSRC) that a
+    publication swap replaces. `TestRouterResumedCameraPublisherRebindsThreeReceivers`.
+    Browsers never take the swap path (see B9), so this matters for
+    clients that keep their peer connection across a signaling resume.
+  - B8, a lossy thin uplink starving its own audio: the documented cause
+    (NACKs for frames the SFU drops on purpose) was only part of it.
+    Every receiver NACKed each packet lost on the publisher's uplink, on
+    top of the SFU's own NACK generator, so the publisher resent each loss
+    up to four times and filled the link (its netem class dropped ~5,400
+    packets in 8 s against ~145 from the configured loss). A receiver's
+    NACK now reaches the publisher only for packets the SFU dropped from
+    that receiver's mailbox, the one loss only the publisher can repair;
+    the SFU's NACK responder answers downlink loss and its generator
+    uplink loss. Audio rose from 107–164 to 264–288 of ~300 packets.
+    `TestWeakNetImpairedPublisherUplinkReachesEverySubscriber/lossy_uplink`,
+    `TestSubscriberKeyFrameRequestsFanInToPublisher`.
+
+  A `knownIssue("Bn", ...)` check in the browser suite logs `KNOWN ISSUE
+  Bn still present` and fails only with `SLOWMEET_KNOWN_FAILING=1`.
 
   Run the whole gated set the way CI does:
 
@@ -257,7 +257,7 @@ TURN/TCP fallback. None of them runs in CI.
 | `make test-media-e2e-four-reconnect` | clean-link reconnect, identity, takeover and chat-replay scenarios, on the host | ~6 min |
 | `make test-media-e2e-four-reconnect-expiry` | the same with a 1 s grace (fresh identity after expiry) | ~2 min |
 | `make test-weaknet-extended` | the Go weak-net suite plus thin uplinks, an all-impaired mesh and burst loss | ~5 min |
-| `make test-known-failing-go` | the Go assertions pinning B5–B8 (expected to fail) | ~2 min |
+| `make test-known-failing-go` | the Go tests that pinned B5–B8, all fixed (expected to pass) | ~2 min |
 | `make test-soak-netns-strict` | the weak-network soak with full windows and continuity | ~7 min |
 
 Run one scenario with `MEDIA_E2E_FOUR_SCENARIO=<exact name> make
