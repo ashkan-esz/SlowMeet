@@ -95,13 +95,10 @@ func TestVideoFrameBufferMaxPacketsBoundary(t *testing.T) {
 }
 
 func TestBitrateLimiterFPSGateAtSourceRate(t *testing.T) {
-	// KNOWN ISSUE (B4): the FPS gate drops any frame whose RTP timestamp delta
-	// from the last allowed frame is below 90000/maxFPS. A source that captures
-	// at exactly the cap with ±1 ms (±90 tick) capture jitter alternates
-	// short/long deltas, and every short one is dropped: about half the frames
-	// are lost although the average rate equals the cap. Desired: jitter around
-	// the cap is tolerated. When fixed, the jittered rows' wantAllowed changes to
-	// fastLinkFPSFrames (and the >= 99% check applies to every row).
+	// A source at the cap passes in full, including one whose ±1 ms (±90 tick)
+	// capture jitter alternates short and long gaps: the gate used to drop
+	// every short gap and lost half such a source's frames (B4). A source
+	// faster than the cap is still held to the cap on average.
 	const fastLinkFPSFrames = 600
 	const fullRate = fastLinkFPSFrames * 99 / 100
 	exact := func(ticks uint64) func(int) uint32 {
@@ -120,15 +117,19 @@ func TestBitrateLimiterFPSGateAtSourceRate(t *testing.T) {
 		name        string
 		maxFPS      int
 		timestamp   func(int) uint32
-		wantAllowed int // exact pinned count; 0 means "at least fullRate"
+		wantAllowed int // expected count (±2); 0 means "at least fullRate"
 	}{
 		{name: "cap 60 exact 1500 ticks", maxFPS: 60, timestamp: exact(1_500)},
 		{name: "cap 60 at 59.94 fps", maxFPS: 60, timestamp: func(i int) uint32 {
 			return uint32(90_000 + uint64(i)*90_000*1_001/60_000)
 		}},
 		{name: "cap 30 exact", maxFPS: 30, timestamp: exact(3_000)},
-		{name: "cap 60 with alternating 1ms jitter", maxFPS: 60, timestamp: jittered(1_500), wantAllowed: 300},
-		{name: "cap 30 with alternating 1ms jitter", maxFPS: 30, timestamp: jittered(3_000), wantAllowed: 300},
+		{name: "cap 60 with alternating 1ms jitter", maxFPS: 60, timestamp: jittered(1_500)},
+		{name: "cap 30 with alternating 1ms jitter", maxFPS: 30, timestamp: jittered(3_000)},
+		// Over the cap: 120 fps at a 60 cap keeps half, 45 fps at a 30 cap keeps two thirds.
+		{name: "cap 60 with a 120 fps source", maxFPS: 60, timestamp: exact(750), wantAllowed: 300},
+		{name: "cap 30 with a 45 fps source", maxFPS: 30, timestamp: exact(2_000), wantAllowed: 400},
+		{name: "cap 30 with a jittered 60 fps source", maxFPS: 30, timestamp: jittered(1_500), wantAllowed: 300},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -154,8 +155,8 @@ func TestBitrateLimiterFPSGateAtSourceRate(t *testing.T) {
 				}
 				return
 			}
-			if allowed != test.wantAllowed {
-				t.Fatalf("allowed %d of %d jittered frames, want the pinned %d (KNOWN ISSUE B4)",
+			if allowed < test.wantAllowed-2 || allowed > test.wantAllowed+2 {
+				t.Fatalf("allowed %d of %d frames from a source over the cap, want %d (the cap's share)",
 					allowed, fastLinkFPSFrames, test.wantAllowed)
 			}
 		})

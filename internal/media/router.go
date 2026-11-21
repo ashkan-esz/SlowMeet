@@ -1679,10 +1679,12 @@ type bitrateLimiter struct {
 	initialized bool
 	// pacerTimer is owned by the publication's single pacer goroutine and
 	// reused across waitForBytes calls instead of allocating one per packet.
-	pacerTimer          *time.Timer
-	maxFPS              int
-	haveFrame           bool
-	lastFrameTimestamp  uint32
+	pacerTimer *time.Timer
+	maxFPS     int
+	haveFrame  bool
+	// nextFrameDue is the RTP timestamp at which the FPS gate's schedule
+	// expects the next frame; see allowFrame.
+	nextFrameDue        uint32
 	currentFrame        uint32
 	currentFrameAllowed bool
 }
@@ -1821,16 +1823,35 @@ func (l *bitrateLimiter) allowFrame(timestamp uint32) bool {
 		return l.currentFrameAllowed
 	}
 
+	// The gate keeps a schedule rather than a minimum gap. Each passed frame
+	// books the next slot one frame interval later, and a frame passes when it
+	// reaches its slot within a quarter of an interval. Capture jitter around
+	// the cap then moves frames within the slack instead of failing every
+	// short gap (B4 in docs/network-testing.md: a source at exactly the cap
+	// with ±1 ms jitter lost half its frames), while a faster source still
+	// cannot pass more than one frame per interval on average.
 	allowed := true
-	if l.haveFrame {
-		delta := timestamp - l.lastFrameTimestamp
-		minTicks := uint32(90000 / l.maxFPS)
-		if minTicks > 0 && delta < minTicks {
+	minTicks := uint32(90000 / l.maxFPS)
+	slack := minTicks / 4
+	if l.haveFrame && minTicks > 0 {
+		early := int32(l.nextFrameDue - timestamp)
+		switch {
+		case early > int32(90000):
+			// More than a second behind its slot: the source restarted its
+			// timestamps. Start a new schedule rather than block it.
+			l.nextFrameDue = timestamp + minTicks
+		case early > int32(slack):
 			allowed = false
+		default:
+			due := l.nextFrameDue
+			if int32(timestamp-slack-due) > 0 {
+				// Late (a gap in the source): never bank the missed slots.
+				due = timestamp - slack
+			}
+			l.nextFrameDue = due + minTicks
 		}
-	}
-	if allowed || !l.haveFrame {
-		l.lastFrameTimestamp = timestamp
+	} else {
+		l.nextFrameDue = timestamp + minTicks
 	}
 	l.haveFrame = true
 	l.currentFrame = timestamp
