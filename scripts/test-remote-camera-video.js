@@ -2,7 +2,29 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const bindRemoteCameraTrack = require("../web/js/remote-camera-video.js");
-const { remoteMediaRole, remoteCameraLayer, signaledTrackID } = require("../web/js/remote-media-identity.js");
+const { remoteMediaRole, remoteCameraLayer, signaledTrackID, routeRemoteVideo } = require("../web/js/remote-media-identity.js");
+
+// While "sharer" shares: a past sharer's idle screen track that names its own
+// participant must stay with it, or it can replace the live share on the
+// sharer's tile (late-joiner-replay). Ambiguous tracks still go to the sharer.
+for (const [input, expected, why] of [
+  [{ participantID: "past", role: "screen", known: true, streamID: "slowmeet-past-screen", trackID: "past|screen" },
+    { participantID: "past", role: "screen" }, "a named screen track stays with its own participant"],
+  [{ participantID: "sharer", role: "screen", known: true, streamID: "slowmeet-sharer-screen", trackID: "{random}" },
+    { participantID: "sharer", role: "screen" }, "the sharer's named screen track stays the sharer's"],
+  [{ participantID: "", role: "camera", known: false, streamID: "", trackID: "{random}" },
+    { participantID: "sharer", role: "screen" }, "an unattributable video track is the sharer's screen"],
+  [{ participantID: "ghost", role: "screen", known: false, streamID: "slowmeet-ghost-screen", trackID: "" },
+    { participantID: "sharer", role: "screen" }, "a screen track naming no known participant goes to the sharer"],
+  [{ participantID: "sharer", role: "camera", known: true, streamID: "", trackID: "{random}" },
+    { participantID: "sharer", role: "screen" }, "an ambiguous track of the sharer is its screen"],
+  [{ participantID: "other", role: "camera", known: true, streamID: "slowmeet-other-camera", trackID: "other|camera|low" },
+    { participantID: "other", role: "camera" }, "an explicit camera track is never rerouted"],
+]) {
+  assert.deepEqual(routeRemoteVideo({ ...input, screenShareOwner: "sharer", localParticipantID: "me" }), expected, why);
+}
+assert.deepEqual(routeRemoteVideo({ participantID: "x", role: "camera", known: true, screenShareOwner: "me", localParticipantID: "me" }),
+  { participantID: "x", role: "camera" }, "my own share reroutes nothing");
 
 // B12: a reused transceiver keeps its first track.id, so identity is read
 // from the m-line's signaled msid instead.

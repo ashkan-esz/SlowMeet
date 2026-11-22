@@ -1612,7 +1612,30 @@ async function scenarioLateJoinerReplay() {
   await fresh.waitForFunction(() => {
     const video = document.querySelector("li[data-sharing='true'] video.screen-video");
     return Boolean(video) && video.videoWidth > 0 && video.currentTime > 0;
-  }, null, { timeout: 20000 });
+  }, null, { timeout: 20000 }).catch(async () => {
+    // Dump what the fresh page bound where, so an intermittent miss names
+    // its cause: which receiver carries the screen, and which element shows it.
+    const state = await fresh.evaluate(async () => {
+      const describe = (video) => {
+        const track = video?.srcObject?.getVideoTracks?.()[0];
+        return video ? `${track ? track.id.slice(0, 24) : "none"} ${video.videoWidth}x${video.videoHeight} t=${video.currentTime.toFixed(1)}` : "no element";
+      };
+      const tiles = [...document.querySelectorAll("li[data-participant-id]")].map((tile) =>
+        `${tile.dataset.participantId.slice(0, 6)} sharing=${tile.dataset.sharing} camera=[${describe(tile.querySelector("video:not(.screen-video)"))}] screen=[${describe(tile.querySelector("video.screen-video"))}]`);
+      const receivers = [];
+      for (const transceiver of peer.getTransceivers()) {
+        const track = transceiver.receiver.track;
+        if (track?.kind !== "video") continue;
+        let inbound = "";
+        (await transceiver.receiver.getStats())?.forEach((report) => {
+          if (report.type === "inbound-rtp") inbound = `${report.frameWidth}x${report.frameHeight} ${report.bytesReceived}B`;
+        });
+        receivers.push(`mid=${transceiver.mid} ${transceiver.currentDirection} track=${track.id.slice(0, 24)} signaled=${signaledRemoteTrackID(transceiver.receiver)} owner=${remoteTrackOwners.get(track.id)?.slice(0, 6)} role=${remoteTrackRoles.get(track.id)} ${track.muted ? "muted " : ""}${inbound}`);
+      }
+      return { screenShareOwner: screenShareOwner?.slice(0, 6), remoteScreens: [...remoteScreenTracks.keys()].map((id) => id.slice(0, 6)), tiles, receivers };
+    });
+    assert.fail(`the late joiner never decoded the active screen share: ${JSON.stringify(state)}`);
+  });
   await p2.locator("#mic").click();
   await p3.locator("#screen").click();
   await waitForScreenButton(p3, "false");

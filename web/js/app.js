@@ -3093,19 +3093,21 @@ function bindRemoteTrack({ streams, track, receiver }) {
   let participantID = remoteParticipantID(streams, identity);
   let role = remoteMediaRole(streams, identity);
   let element = participantElements.get(participantID);
-  if (track.kind === "video" && screenShareOwner && screenShareOwner !== localParticipantID) {
-    const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
-    const trackID = identity?.id || "";
-    const explicitCameraTrack = /-camera$/.test(streamID) ||
-      /\|camera(?:\|(low|medium|high))?$/.test(trackID);
-    const explicitScreenTrack = /-screen$/.test(streamID) || /\|screen$/.test(trackID);
-    // Some browsers deliver screen tracks without stream metadata; the active
-    // owner is the signaling source of truth when the track IDs are ambiguous.
-    if (!explicitCameraTrack && (explicitScreenTrack || !element || participantID === screenShareOwner)) {
-      participantID = screenShareOwner;
-      role = "screen";
-      element = participantElements.get(participantID);
-    }
+  if (track.kind === "video") {
+    // While someone else shares, an ambiguous video track is the sharer's
+    // screen; one that names its participant stays with it (routeRemoteVideo).
+    const routed = routeRemoteVideo({
+      participantID,
+      role,
+      known: Boolean(element),
+      streamID: streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "",
+      trackID: identity?.id || "",
+      screenShareOwner,
+      localParticipantID
+    });
+    if (routed.participantID !== participantID) element = participantElements.get(routed.participantID);
+    participantID = routed.participantID;
+    role = routed.role;
   }
   if (!element) return;
   rememberRemoteTrack(participantID, track, receiver);
