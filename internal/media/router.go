@@ -62,6 +62,9 @@ type publication struct {
 	// forwardLoss measures the publisher's packets the SFU did not forward
 	// (forward_loss.go).
 	forwardLoss forwardLoss
+	// forwardJitter measures the jitter of what the SFU forwards
+	// (forward_jitter.go).
+	forwardJitter forwardJitter
 
 	// layerKeys caches the publication key of every camera simulcast quality
 	// for this source so the per-packet layer selection never builds strings.
@@ -1499,7 +1502,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 					// Repairs go to the few receivers whose mailbox dropped the
 					// packet; only the main forward path describes the stream
 					// every receiver gets.
-					pub.forwardLoss.observe(packet.SequenceNumber, time.Now())
+					now := time.Now()
+					pub.forwardLoss.observe(packet.SequenceNumber, now)
+					pub.forwardJitter.observe(packet.Timestamp, pub.codec.ClockRate, now)
 				}
 				for _, target := range targets {
 					if frame.repairTargets == nil || target.hasVideoLoss(packet) {
@@ -1540,7 +1545,9 @@ func (r *Router) forwardAudioPacket(pub *publication, packet *rtp.Packet) {
 	}
 	pub.targetScratch = targets
 	r.mu.RUnlock()
-	pub.forwardLoss.observe(packet.SequenceNumber, time.Now())
+	now := time.Now()
+	pub.forwardLoss.observe(packet.SequenceNumber, now)
+	pub.forwardJitter.observe(packet.Timestamp, pub.codec.ClockRate, now)
 	for _, target := range targets {
 		target.enqueue(packet)
 	}

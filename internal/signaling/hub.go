@@ -827,8 +827,9 @@ func sourceQualityMessage(participantID string, state *sourceQualityState) Messa
 // participant's packets it did not forward (media.Router.ForwardLoss),
 // because a sender's own uplink report reads 0 % when the SFU's NACKs
 // recover its packets too late to forward them; the sender's report is the
-// fallback when nothing was measured, and its uplink jitter is relayed as
-// reported. Receivers discount both (selectOwnLinkMeasurements in
+// fallback when nothing was measured. The jitter is likewise the SFU's
+// measurement of what it forwards (media.Router.ForwardJitter), with the
+// sender's report as the fallback. Receivers discount both (selectOwnLinkMeasurements in
 // web/js/adaptation-policy.js). Relayed when something changed enough, at
 // most once per sourceQualityMinInterval.
 func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs, audioJitterMs int, now time.Time) {
@@ -839,6 +840,17 @@ func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs, audioJitter
 	audioLoss10, videoLoss10 := h.router.ForwardLoss(participantID)
 	if videoLoss10 < 0 {
 		videoLoss10 = reportedLoss10
+	}
+	// The jitter is the SFU's own measurement too (media.Router.ForwardJitter):
+	// the sender's report, from the SFU's receiver reports, read 0-1 ms while
+	// its audio reached receivers with 30-60 ms of uplink queueing (B13). The
+	// report stays the fallback for a kind the SFU has not measured yet.
+	audioForwardJitterMs, videoForwardJitterMs := h.router.ForwardJitter(participantID)
+	if videoForwardJitterMs >= 0 {
+		jitterMs = videoForwardJitterMs
+	}
+	if audioForwardJitterMs >= 0 {
+		audioJitterMs = audioForwardJitterMs
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
