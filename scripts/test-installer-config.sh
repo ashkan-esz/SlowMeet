@@ -567,4 +567,11 @@ detect_caddy_tls_mode "$caddyfile"
     || fail "a conflict on 443 was not kept for a default Caddy: mode=$caddy_tls_mode reason=$https_reason"
 unset -f ss systemctl
 
+# Camera simulcast stays off: the shipped example, and the fresh install that
+# copies it, both switch it off explicitly.
+grep -qx 'SIMULCAST_ENABLED=false' .env.example \
+    || fail '.env.example must ship SIMULCAST_ENABLED=false'
+grep -qx 'set_env SIMULCAST_ENABLED false' "$INSTALLER" \
+    || fail 'a fresh install must write SIMULCAST_ENABLED=false'
+
 printf 'Installer configuration checks passed.\n'

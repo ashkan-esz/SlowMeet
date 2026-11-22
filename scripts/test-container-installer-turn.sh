@@ -170,6 +170,8 @@ assert_contains "$ENV_FILE" 'ICE_UDP_PORT_MAX=50100'
 # The default answer is no relay.
 new_env '' '' ''
 assert_not_contains "$ENV_FILE" 'TURN_SERVER_ENABLED'
+# Camera simulcast is written off explicitly.
+assert_contains "$ENV_FILE" 'SIMULCAST_ENABLED=false'
 
 # Built-in relay: switched on, with a generated secret and URLs for the host
 # browsers were told, which defaults to the ICE public IP.

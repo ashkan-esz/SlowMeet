@@ -2873,6 +2873,9 @@ set_admin_password "$admin_password"
 set_env MEETING_PASSWORD "$meeting_password"
 set_env HTTP_PUBLISH_ADDRESS 127.0.0.1
 set_env HTTP_PUBLISH_PORT "$app_port"
+# Camera simulcast stays off on a fresh install: each publisher would upload
+# three encodings, which hurts weak uplinks. Operators opt in after staging.
+set_env SIMULCAST_ENABLED false
 set_env ICE_PUBLIC_IP "$public_ipv4"
 enable_host_network_if_supported
 if [[ "$enable_turn" == yes ]]; then

@@ -250,6 +250,7 @@ ICE_UDP_PORT_MIN=50000
 ICE_UDP_PORT_MAX=50100
 ICE_PUBLIC_IP=$ice_public_ip
 STUN_SERVERS=$stun_servers
+SIMULCAST_ENABLED=false
 $turn_settings
 EOF
     chmod 0600 "$ENV_FILE"
