@@ -113,6 +113,9 @@ async function startServer({ profile = "default", port } = {}) {
         // the NAT 1-to-1 loopback path the SFU gathers no candidates at all.
         ...(netnsRoom ? { ICE_PUBLIC_IP: "127.0.0.1" } : {}),
         ...turnEnv,
+        // The "simulcast" profile turns on camera simulcast (low/medium/high
+        // layers per publisher, a layer chosen per receiver).
+        ...(profile === "simulcast" ? { SIMULCAST_ENABLED: "true" } : {}),
         GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-four-e2e-gocache" },
       detached: true, stdio: ["ignore", "pipe", "pipe"]
     });
@@ -4386,6 +4389,112 @@ async function scenarioRelayPathUnderLoss() {
   await assertFullMeshMedia({ label: "after the relay leg clears" });
 }
 
+// Simulcast (the "simulcast" server profile): every publisher sends low,
+// medium and high camera layers and each receiver picks one. A receiver on a
+// capped downlink must fall to a lower layer than one on a fast link, keep
+// decoding every camera through the switch, and climb back when the cap
+// lifts.
+async function scenarioSimulcastMixedRoom() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const layerRank = { low: 0, medium: 1, high: 2 };
+  const layerOf = (role) => pages.get(role).evaluate(() => cameraLayer);
+  for (const role of roles) {
+    assert.equal(await pages.get(role).evaluate(() => simulcastEnabled), true, `${role} did not get simulcast from the server`);
+  }
+  installRoomQdisc();
+  let armer;
+  try {
+    armer = armParticipantTiers({ P1: "fast", P2: "moderate", P3: "capped" });
+    await waitForShapedLink("P2", 300);
+    try {
+      await pages.get("P3").waitForFunction(() => cameraLayer === "low", null, { timeout: 60000 });
+    } catch (_) {
+      assert.fail(`P3 on the capped downlink never stepped down to the low camera layer (still ${await layerOf("P3")})`);
+    }
+    const fastLayer = await layerOf("P1");
+    assert.ok(layerRank[fastLayer] > layerRank.low,
+      `P1 on the fast tier is on the ${fastLayer} camera layer, no higher than the capped P3's low layer`);
+    await assertFullMeshMedia({ label: "with P3 on the low camera layer" });
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+  }
+  try {
+    await pages.get("P3").waitForFunction(() => cameraLayer !== "low", null, { timeout: 60000 });
+  } catch (_) {
+    assert.fail(`P3 stayed on the low camera layer after its downlink cap lifted (${await layerOf("P3")})`);
+  }
+  await assertFullMeshMedia({ label: "after P3's camera layer climbed back" });
+}
+
+// Each resume of a participant now swaps its media onto the room's existing
+// senders (held publications, an audio rebase, a client rebind). Five TCP
+// resets of one participant's signaling in a row must each resume the same
+// identity with everyone hearing and seeing it, so that chained swaps do not
+// accumulate damage.
+async function scenarioRepeatedSignalingResumes() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await withRelayedParticipant("P2", async (relay) => {
+    const p2 = pages.get("P2");
+    const before = await identities("P1");
+    for (let round = 1; round <= 5; round++) {
+      const socketsBefore = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+      const acceptedBefore = relay.stats().accepted;
+      relay.reset();
+      await p2.waitForFunction((count) => {
+        const sockets = window.__slowMeetTest.sockets;
+        return sockets.length > count && sockets.at(-1).readyState === WebSocket.OPEN;
+      }, socketsBefore, { timeout: 30000 });
+      assert.ok(relay.stats().accepted > acceptedBefore, `round ${round}: P2 did not reconnect through the relay`);
+      await waitForCurrentPeerConnected(p2, `P2 after resume ${round}`, 60000);
+      for (const page of pages.values()) await roster(page, names);
+      const after = await identities("P1");
+      assert.equal(after[names[1]], before[names[1]], `round ${round}: P2's resume became a rejoin under a new identity`);
+      await assertResumedParticipantHeard("P2", `after resume ${round}`);
+      await delay(3000);
+    }
+  });
+}
+
+// A participant leaves for good and a new one takes the seat (a new
+// identity). The SFU reuses the departed participant's freed transceivers for
+// the newcomer, and a browser keeps a receiver's track ID from its first use,
+// so every page must still bind the newcomer's audio and camera to the
+// newcomer's tile (and, with simulcast, the right layer), and the departed
+// tile must be gone.
+async function scenarioSeatHandoverChurn() {
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  const observers = ["P1", "P2", "P3"];
+  const oldID = await participantIDFor(pages.get("P1"), names[3]);
+  await retireParticipant("P4");
+  await delay(reconnectGraceSeconds * 1000 + 1000);
+  for (const role of observers) await roster(pages.get(role), names.slice(0, 3));
+  await join("P4");
+  await enableCamera(pages.get("P4"));
+  await unmuteAllForAudioGuarantee();
+  for (const page of pages.values()) await roster(page, names);
+  for (const role of observers) {
+    const page = pages.get(role);
+    const newID = await participantIDFor(page, names[3]);
+    assert.notEqual(newID, oldID, `${role} sees the newcomer under the departed participant's identity`);
+    await page.waitForFunction((id) => !document.querySelector(`li[data-participant-id='${id}']`), oldID, { timeout: 10000 })
+      .catch(() => assert.fail(`${role} still shows the departed participant's tile`));
+    const framesAt = () => tileVideoFrames(page, newID);
+    const startFrames = await framesAt();
+    let flowing = false;
+    for (let attempt = 0; attempt < 20 && !flowing; attempt++) {
+      await delay(1000);
+      flowing = (await framesAt()) > Math.max(0, startFrames) + 5;
+    }
+    assert.ok(flowing, `${role} never decoded the newcomer's camera on the newcomer's tile`);
+    assert.ok(await tileAudioBytes(page, newID) >= 0, `${role}'s tile for the newcomer has no audio track`);
+  }
+  await assertFullMeshMedia({ label: "after the seat handover" });
+}
+
 const scenarios = [
   { name: "staggered-and-simultaneous-joins", description: "All four named participants appear in each roster and connect to the room.", run: scenarioStaggeredJoins },
   { name: "enable-generated-cameras", description: "All participants enable generated cameras and receive advancing decoded video frames.", run: scenarioEnableCameras },
@@ -4467,6 +4576,12 @@ const scenarios = [
   { name: "signaling-stall-during-churn", group: "resilience", description: "One participant's signaling stalls while its media flows and another participant leaves and rejoins: it keeps hearing the room and converges on the new room afterwards.", run: scenarioSignalingStallDuringChurn, netns: true },
   { name: "udp-blocked-relay-failover", group: "resilience", server: "turn", description: "With the built-in TURN relay, one participant's UDP is blocked mid-call: Automatic hands it off to TURN/TCP while the other three stay on their direct paths.", run: scenarioUdpBlockedRelayFailover, netns: true },
   { name: "relay-path-under-loss", group: "resilience", server: "turn", description: "A participant on TURN/TCP sees 2% loss and 50 ms on the relay leg: audio flows both ways and the room recovers.", run: scenarioRelayPathUnderLoss, netns: true },
+  { name: "simulcast-mixed-room", group: "resilience", server: "simulcast",
+    knownFailing: { finding: "B12", reason: "with simulcast on, cameras of participants on impaired links (even a downlink-only cap) stop reaching every receiver" },
+    description: "With simulcast on, a receiver on a capped downlink falls to the low camera layer below a fast receiver's, keeps decoding every camera, and climbs back once the cap lifts.", run: scenarioSimulcastMixedRoom, netns: true },
+  { name: "repeated-signaling-resumes", group: "resilience", description: "One participant's signaling is reset five times in a row: each time it resumes under the same identity and the room keeps hearing and seeing it.", run: scenarioRepeatedSignalingResumes, netns: true },
+  { name: "seat-handover-churn", group: "resilience", description: "A participant leaves for good and a new one takes the seat: every page binds the newcomer's audio and camera to the newcomer's tile and drops the departed tile.", run: scenarioSeatHandoverChurn, netns: true },
+  { name: "seat-handover-churn-simulcast", group: "resilience", server: "simulcast", description: "The seat handover with simulcast on, where a receiver also reads the newcomer's camera layer from the reused track.", run: scenarioSeatHandoverChurn, netns: true },
   { name: "link-outage-long", group: "resilience-slow", description: "A 75 s outage of one participant's signaling and media: the server frees the seat, the room keeps talking, and the participant rejoins on its own once the link returns.", run: scenarioLinkOutageLong, netns: true },
   { name: "long-blackout-retry-budget", group: "resilience-slow", description: "One participant's media is dead for minutes while signaling lives: it spends its retry budget and goes Offline, stays Offline when the path returns, and Leave then Rejoin restores it.", run: scenarioLongBlackoutRetryBudget, netns: true }
 ];

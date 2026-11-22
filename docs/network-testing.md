@@ -120,6 +120,16 @@ namespace:
 These tests pin today's behaviour and say in a `KNOWN ISSUE (Bn)` comment
 what should change. Fixing an issue means flipping that assertion.
 
+- **B12 — with simulcast on, impaired participants' cameras reach no one.**
+  `simulcast-mixed-room` (`SIMULCAST_ENABLED=true`, P1 fast, P2 moderate,
+  P3 capped downlink, P4 clean) failed in 3 of 3 runs: the cameras of P2
+  and P3 stop reaching every receiver (frames stall at 0–46). That includes
+  P3, whose uplink is clean and only its downlink is capped. In one run the
+  fast P1 also sat on the low camera layer. Without simulcast the same tiers
+  pass (`mixed-quality-room`). The scenario is marked known-failing (skipped
+  unless `SLOWMEET_KNOWN_FAILING=1`). Not yet investigated; candidates are
+  the per-receiver layer selection (`selectedCameraLayerLocked`) and how a
+  layer whose packets pause is treated as inactive.
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
   another leaves and rejoins; when the held `participant_left`,
@@ -261,7 +271,20 @@ what should change. Fixing an issue means flipping that assertion.
 These cover what the CI set does not: whole-link outages, several
 participants reconnecting at once, server restarts, path changes, flapping,
 bursty and upload-only links, rooms where nobody has a good link, and the
-TURN/TCP fallback. None of them runs in CI.
+TURN/TCP fallback. None of them runs in CI. They also cover:
+
+- `repeated-signaling-resumes`: five TCP resets of one participant's
+  signaling in a row, each resuming the same identity.
+- `seat-handover-churn` and `seat-handover-churn-simulcast`: a new
+  participant taking a departed one's seat, with every page binding the
+  newcomer to its own tile.
+- `simulcast-mixed-room`: per-receiver camera layers under mixed links
+  (known-failing, B12). It and `seat-handover-churn-simulcast` run on a
+  server with `SIMULCAST_ENABLED=true`.
+
+Firefox is not covered under impairment: its candidate gathering stalls in
+the network namespace, so the netns runner uses Chromium for all four
+participants.
 
 | Target | What it runs | Time |
 | --- | --- | --- |
