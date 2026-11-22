@@ -130,7 +130,14 @@ what should change. Fixing an issue means flipping that assertion.
   handler now schedules the tile's removal before its UI updates, so an
   exception in one of them can no longer leave the tile behind; whether
   that was the cause is unproven, so the scenario keeps logging
-  `KNOWN ISSUE B10` if it ever reproduces.
+  `KNOWN ISSUE B10` if it ever reproduces. A dedicated hunt with that
+  change in place found no ghost in 12 runs with
+  `SLOWMEET_KNOWN_FAILING=1`. Those were 10 runs of the scenario alone and 2
+  of the whole `resilience` group, with every tile's add, remove and
+  connection change logged on the stalled page. Earlier runs had not shown
+  it either. If it comes back, log P2's tiles the same way (a
+  `MutationObserver` on `li[data-participant-id]` in the
+  `createParticipant` init script) to see what kept the tile.
 
 - **Fixed: B1–B9 and B11.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
