@@ -11,6 +11,7 @@ const {
   countLadderRecoverySamples,
   shouldRecoverVideo,
   chooseCameraLayer,
+  planCameraSimulcast,
   applyServerDefaults,
   resolveCodecName,
   profileNameForQuality,
@@ -181,6 +182,22 @@ for (let sample = 0; sample < 3; sample += 1) {
 }
 if (flapQuality.quality !== "good") {
   throw new Error("warning clearance still requires five consecutive healthy samples across flapping windows");
+}
+
+// B12: Chrome keeps only the lowest simulcast encodings a capture size allows
+// (one below 480x270, two below 960x540). The plan must match that cap and
+// put the top active layer at the full capture size, so a 240p camera is one
+// full-size layer, not a 90x60 quarter-scale one.
+const simulcastPlanCases = [
+  { size: [360, 240], count: 1, scales: [1, 1, 1], active: [true, false, false], shares: [1, 0, 0] },
+  { size: [426, 240], count: 1, scales: [1, 1, 1], active: [true, false, false], shares: [1, 0, 0] },
+  { size: [640, 360], count: 2, scales: [2, 1, 1], active: [true, true, false], shares: [0.3, 0.7, 0] },
+  { size: [854, 480], count: 2, scales: [2, 1, 1], active: [true, true, false], shares: [0.3, 0.7, 0] },
+  { size: [1280, 720], count: 3, scales: [4, 2, 1], active: [true, true, true], shares: [0.15, 0.3, 0.55] },
+  { size: [undefined, undefined], count: 1, scales: [1, 1, 1], active: [true, false, false], shares: [1, 0, 0] }
+];
+for (const { size, ...expected } of simulcastPlanCases) {
+  require("node:assert").deepStrictEqual(planCameraSimulcast(...size), expected, `simulcast plan for ${size.join("x")}`);
 }
 
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
@@ -899,9 +916,8 @@ if (!appSource.includes("const currentPeer = new RTCPeerConnection({ iceServers:
 for (const behavior of [
   "config.ice_transport_policy",
   "config.simulcast_enabled === true",
-  'rid: "low"',
-  'rid: "medium"',
-  'rid: "high"',
+  '["low", "medium", "high"].map((rid, index) => ({',
+  "planCameraSimulcast(settings.width, settings.height)",
   "message.camera_layer = cameraLayer",
   "cameraPacketLossPct",
   "cameraDroppedFramesPct"
@@ -935,7 +951,7 @@ if (!/\.device-preview\s*\{[^}]*transform:\s*scaleX\(-1\);[^}]*\}/s.test(styleSo
 if (!appSource.includes('const streamPrefix = "slowmeet-";') ||
     !appSource.includes('return track.id?.split("|")[0] || "";') ||
     !appSource.includes("const stream = new MediaStream();") ||
-    !appSource.includes("let participantID = remoteParticipantID(streams, track);") ||
+    !appSource.includes("let participantID = remoteParticipantID(streams, identity);") ||
     !appSource.includes("element.video.play().catch(() => {});")) {
   throw new Error("remote video tracks must resolve and start playback");
 }

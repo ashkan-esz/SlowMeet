@@ -137,6 +137,12 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	}
 	ciphers := &cipherReport{}
 	settingEngine.SetDTLSServerHelloMessageHook(ciphers.serverHello)
+	// Which simulcast layers run is the publisher's choice. pion otherwise
+	// repeats the pause marks (`~rid`) of the browser's first offer in every
+	// later `a=simulcast:recv`, and Chrome applies them to its encodings, so
+	// each renegotiation switched off a layer the publisher had enabled since
+	// (B12 in docs/network-testing.md).
+	settingEngine.SetIgnoreRidPauseForRecv(true)
 	if portMin != 0 || portMax != 0 {
 		if portMin < 1 || portMin > 65535 || portMax < 1 || portMax > 65535 || portMin > portMax {
 			return nil, fmt.Errorf("ICE UDP port range must be between 1 and 65535 with minimum <= maximum")

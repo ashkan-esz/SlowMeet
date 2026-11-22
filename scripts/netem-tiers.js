@@ -124,7 +124,12 @@ const optInTiers = {
   "relay-lossy": { classID: "1:b0", handle: "b0:", rate: "10gbit", delay: "50ms", loss: "2%" },
   // A link whose state a scenario switches at run time with setTierLink and
   // flapTier; it starts up (no loss).
-  flap: { classID: "1:c0", handle: "c0:", rate: "10gbit", delay: "20ms", loss: "0%" }
+  flap: { classID: "1:c0", handle: "c0:", rate: "10gbit", delay: "20ms", loss: "0%" },
+  // A DOWNLOAD that fits the room's low simulcast camera layers but not the
+  // full-size ones: three 360p cameras on the normal profile forward ~840
+  // kbps at the top layer and ~360 kbps at the low one. Only receiving is
+  // shaped, like the capped tier.
+  "narrow-downlink": { classID: "1:d0", handle: "d0:", rate: "700kbit", delay: "50ms", loss: "0%", downlinkOnly: true, limit: "30" }
 };
 for (const [name, tier] of Object.entries(optInTiers)) {
   tiers[name] = { ...tier, optIn: true };

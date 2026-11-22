@@ -2044,6 +2044,9 @@ let goodSamples = 0;
 // seconds (see createClimbBackoff).
 const climbBackoff = createClimbBackoff();
 let cameraLayer = "medium";
+// Track IDs of remote video receivers that took packets in the last stats
+// sample; the camera layer shown is the one the SFU is forwarding (B12).
+let flowingRemoteVideoTrackIDs = new Set();
 let cameraLayerPoorSamples = 0;
 let cameraLayerGoodSamples = 0;
 let criticalSamples = 0;
@@ -2799,11 +2802,16 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
     if (typeof currentPeer.addTransceiver === "function") {
       const transceiverOptions = { direction: "sendonly", streams: [stream] };
       if (simulcastEnabled) {
-        transceiverOptions.sendEncodings = [
-          { rid: "low", scaleResolutionDownBy: 4, maxBitrate: 90000 },
-          { rid: "medium", scaleResolutionDownBy: 2, maxBitrate: 180000 },
-          { rid: "high", scaleResolutionDownBy: 1, maxBitrate: 400000 }
-        ];
+        // Fit the layers to the capture (see planCameraSimulcast); the
+        // profile pass refits them whenever the capture size changes.
+        const settings = track.getSettings?.() || {};
+        const plan = planCameraSimulcast(settings.width, settings.height);
+        transceiverOptions.sendEncodings = ["low", "medium", "high"].map((rid, index) => ({
+          rid,
+          active: plan.active[index],
+          scaleResolutionDownBy: plan.scales[index],
+          maxBitrate: Math.max(30000, Math.floor(400000 * (plan.shares[index] || 0.15)))
+        }));
       }
       try {
         cameraSender = currentPeer.addTransceiver(track, transceiverOptions).sender;
@@ -2992,6 +3000,13 @@ function ensureAudioContext() {
   return audioContext;
 }
 
+function signaledRemoteTrackID(receiver) {
+  if (!receiver || !peer || typeof signaledTrackID !== "function") return "";
+  const transceiver = peer.getTransceivers?.().find((item) => item.receiver === receiver);
+  if (!transceiver?.mid) return "";
+  return signaledTrackID(peer.remoteDescription?.sdp, transceiver.mid);
+}
+
 function remoteParticipantID(streams, track) {
   const streamID = streams?.[0]?.id || "";
   const streamPrefix = "slowmeet-";
@@ -3017,14 +3032,30 @@ function showSelectedRemoteCamera(element) {
   const participantID = element.item.dataset.participantId;
   const tracks = remoteCameraLayerTracks.get(participantID);
   if (!tracks) return false;
-  const track = bindRemoteCameraTrack.selectLayer(tracks, cameraLayer);
+  const track = bindRemoteCameraTrack.selectLayer(tracks, cameraLayer,
+    (candidate) => flowingRemoteVideoTrackIDs.has(candidate.id));
   if (track) {
-    bindRemoteCameraTrack(element.cameraVideo, track, () => updateParticipantVideoVisibility(element));
+    // Rebinding the track already shown would restart its playback.
+    if (element.cameraVideo.srcObject?.getVideoTracks?.()[0] !== track) {
+      bindRemoteCameraTrack(element.cameraVideo, track, () => updateParticipantVideoVisibility(element));
+    }
   } else {
     bindRemoteCameraTrack.clear(element.cameraVideo);
   }
   updateParticipantVideoVisibility(element);
   return true;
+}
+
+// updateFlowingCameraLayers re-picks the shown layer of every remote camera
+// whose set of packet-receiving layer tracks changed since the last sample.
+function updateFlowingCameraLayers(flowing) {
+  const previous = flowingRemoteVideoTrackIDs;
+  flowingRemoteVideoTrackIDs = flowing;
+  remoteCameraLayerTracks.forEach((tracks, participantID) => {
+    const changed = [...tracks.values()].some((track) => previous.has(track.id) !== flowing.has(track.id));
+    const element = participantElements.get(participantID);
+    if (changed && element) showSelectedRemoteCamera(element);
+  });
 }
 
 function setCameraLayer(layer) {
@@ -3053,12 +3084,18 @@ function rememberRemoteTrack(participantID, track, receiver) {
 // the peer connection's ontrack handler and also the rebind path for a
 // participant that resumes onto the same receivers (rebindRememberedTracks).
 function bindRemoteTrack({ streams, track, receiver }) {
-  let participantID = remoteParticipantID(streams, track);
-  let role = remoteMediaRole(streams, track);
+  // Identity comes from the ID the SFU signaled for this receiver's m-line,
+  // not track.id, which a reused transceiver keeps from its first use (B12).
+  const signaledID = signaledRemoteTrackID(receiver);
+  const identity = signaledID && signaledID !== track.id
+    ? { id: signaledID, kind: track.kind, streamId: track.streamId }
+    : track;
+  let participantID = remoteParticipantID(streams, identity);
+  let role = remoteMediaRole(streams, identity);
   let element = participantElements.get(participantID);
   if (track.kind === "video" && screenShareOwner && screenShareOwner !== localParticipantID) {
     const streamID = streams?.[0]?.id || track?.streamId || track?.StreamID?.() || "";
-    const trackID = track?.id || "";
+    const trackID = identity?.id || "";
     const explicitCameraTrack = /-camera$/.test(streamID) ||
       /\|camera(?:\|(low|medium|high))?$/.test(trackID);
     const explicitScreenTrack = /-screen$/.test(streamID) || /\|screen$/.test(trackID);
@@ -3075,7 +3112,7 @@ function bindRemoteTrack({ streams, track, receiver }) {
   remoteTrackMemory?.remember(participantID, { streams, track, receiver });
   const stream = remoteMediaStream(streams, track);
   if (track.kind === "video") {
-    const layer = role === "camera" ? remoteCameraLayer(track) : "";
+    const layer = role === "camera" ? remoteCameraLayer(identity) : "";
     const video = role === "screen" ? element.screenVideo : element.cameraVideo;
     if (layer) {
       const tracks = remoteCameraLayerTracks.get(participantID) || new Map();
@@ -5322,6 +5359,7 @@ async function runDiagnosticsUpdate() {
   let hasCameraFrameStats = false;
   let timestamp = 0;
   let hasInboundVideo = false;
+  const flowingVideoTrackIDs = new Set();
   const codecById = new Map();
   const candidatesById = new Map();
   const videoReceiversByTrackID = new Map();
@@ -5414,6 +5452,7 @@ async function runDiagnosticsUpdate() {
       const lostPackets = normalizePacketCounter(stat.packetsLost);
       const receivedPackets = normalizePacketCounter(stat.packetsReceived);
       const packetDeltas = recordPacketCounters(stat, lostPackets, receivedPackets);
+      if (packetDeltas?.received > 0 && stat.trackIdentifier) flowingVideoTrackIDs.add(stat.trackIdentifier);
       hasInboundVideo = true;
       receivedBytes += stat.bytesReceived || 0;
       values.receivedFps = stat.framesPerSecond ?? null;
@@ -5458,6 +5497,7 @@ async function runDiagnosticsUpdate() {
       recordParticipantPacketDeltas(participantID, packetDeltas);
     }
   });
+  if (previousStats) updateFlowingCameraLayers(flowingVideoTrackIDs);
   if (selectedPair) {
     const localCandidate = candidatesById.get(selectedPair.localCandidateId);
     const remoteCandidate = candidatesById.get(selectedPair.remoteCandidateId);
@@ -5850,9 +5890,15 @@ async function doApplyProfile(name, targetPeer, targetStream, options = {}) {
       continue;
     }
     if (sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3) {
-      const shares = [0.15, 0.3, 0.55];
+      // Refit the layers to the capture actually running (B12): a paused
+      // camera stays paused, a sending one sends exactly the planned layers.
+      const settings = sender.track.getSettings?.() || {};
+      const plan = planCameraSimulcast(settings.width || width, settings.height || height);
+      const sending = parameters.encodings.some((encoding) => encoding.active !== false);
       parameters.encodings.forEach((encoding, index) => {
-        encoding.maxBitrate = Math.max(30000, Math.floor(bitrate * shares[index]));
+        encoding.active = sending && plan.active[index];
+        encoding.scaleResolutionDownBy = plan.scales[index];
+        encoding.maxBitrate = Math.max(30000, Math.floor(bitrate * (plan.shares[index] || 0.15)));
         encoding.maxFramerate = fps;
       });
     } else {
@@ -6155,15 +6201,63 @@ async function setVideoSending(enabled, automatic = false) {
   sendMediaState();
 }
 
-async function setSenderEncodingActive(sender, enabled) {
-  if (!sender) return true;
+// The pause and resume write joins the profile pass's serialized chain: both
+// read-modify-write the camera's encodings, and a resume that read the
+// capture size before a profile change applied could otherwise land last and
+// switch off a simulcast layer the profile pass had just enabled.
+function setSenderEncodingActive(sender, enabled) {
+  if (!sender) return Promise.resolve(true);
+  const run = () => writeSenderEncodingActive(sender, enabled);
+  senderParameterChain = senderParameterChain.then(run, run);
+  return senderParameterChain;
+}
+
+// Chrome applies a remote description's simulcast pause marks (`~rid`) to
+// the sender's encodings on every renegotiation, so the SDP, not this
+// client, would decide which camera layers run: a layer paused when the
+// camera was first offered was switched off again by each later offer, and
+// one switched on by a renegotiation could undo the protect-audio pause
+// (B12). After each negotiation the camera's layers are put back to what the
+// client wants: the planned layers while it sends, none while it is paused.
+function reconcileCameraSimulcast(targetPeer) {
+  if (!simulcastEnabled || !cameraSender || cameraSenderPeer !== targetPeer) return Promise.resolve();
+  const run = async () => {
+    const sender = cameraSender;
+    if (!sender?.track || cameraSenderPeer !== targetPeer) return;
+    const parameters = sender.getParameters();
+    if (!parameters.encodings || parameters.encodings.length < 3) return;
+    const settings = sender.track.getSettings?.() || {};
+    const plan = planCameraSimulcast(settings.width, settings.height);
+    const sending = cameraRequested && !videoSuspended;
+    let changed = false;
+    parameters.encodings.forEach((encoding, index) => {
+      const active = sending && plan.active[index];
+      if (encoding.active !== active) {
+        encoding.active = active;
+        changed = true;
+      }
+    });
+    if (changed) await sender.setParameters(parameters).catch(() => {});
+  };
+  senderParameterChain = senderParameterChain.then(run, run);
+  return senderParameterChain;
+}
+
+async function writeSenderEncodingActive(sender, enabled) {
   const parameters = sender.getParameters();
   parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
   // Every encoding must flip: a simulcast camera carries three, and pausing
   // only the first leaves the medium and high layers streaming — the
   // protect-audio pause would recover a fraction of the uplink exactly when
   // it matters most.
-  for (const encoding of parameters.encodings) encoding.active = enabled;
+  // A simulcast camera resumes only the layers its capture supports
+  // (planCameraSimulcast); the others stay off.
+  const plan = sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3
+    ? planCameraSimulcast(sender.track?.getSettings?.().width, sender.track?.getSettings?.().height)
+    : null;
+  parameters.encodings.forEach((encoding, index) => {
+    encoding.active = enabled && (!plan || plan.active[index]);
+  });
   try {
     await sender.setParameters(parameters);
     return true;
@@ -6503,6 +6597,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         })));
       const answer = await currentPeer.createAnswer();
       await currentPeer.setLocalDescription(answer);
+      reconcileCameraSimulcast(currentPeer);
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) return;
       currentSocket.send(JSON.stringify({
         version: 1, type: "answer", sdp: currentPeer.localDescription.sdp
@@ -6543,6 +6638,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         return;
       }
       await currentPeer.setRemoteDescription({ type: "answer", sdp: applyOpusDTXChoice(message.sdp) });
+      reconcileCameraSimulcast(currentPeer);
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
       await Promise.allSettled(pendingCandidates.splice(0).map((candidate) =>

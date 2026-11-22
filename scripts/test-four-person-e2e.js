@@ -4389,43 +4389,176 @@ async function scenarioRelayPathUnderLoss() {
   await assertFullMeshMedia({ label: "after the relay leg clears" });
 }
 
-// Simulcast (the "simulcast" server profile): every publisher sends low,
-// medium and high camera layers and each receiver picks one. A receiver on a
-// capped downlink must fall to a lower layer than one on a fast link, keep
-// decoding every camera through the switch, and climb back when the cap
-// lifts.
+// Simulcast (the "simulcast" server profile). Each publisher sends as many
+// camera layers as its capture supports (planCameraSimulcast): a 360p capture
+// is two layers, 320x180 and 640x360. Before B12 was fixed, the layers kept
+// fixed 4/2/1 scales and Chrome dropped all but the first, so every receiver
+// got one 90x60 layer. Here every publisher must send both layers at those
+// sizes; a receiver whose downlink fits only the low layers must step down,
+// keep decoding every camera at the low size while a fast receiver keeps the
+// full size, and climb back once its cap lifts. An impaired participant's own
+// camera may take the protect-audio pause (the contract every tier scenario
+// keeps), so the full-mesh checks skip suspended publishers.
+async function cameraLayerHeights(page) {
+  return page.evaluate(async () => {
+    const heights = {};
+    if (!cameraSender) return heights;
+    (await cameraSender.getStats()).forEach((report) => {
+      if (report.type === "outbound-rtp" && report.rid && report.frameHeight) heights[report.rid] = report.frameHeight;
+    });
+    return heights;
+  });
+}
+
+async function tileVideoHeight(page, participantID) {
+  return page.evaluate((id) =>
+    document.querySelector(`li[data-participant-id='${id}'] video:not(.screen-video)`)?.videoHeight ?? -1, participantID);
+}
+
+// describeCameraLayers reports, for one remote participant on a page, the
+// preferred layer, each layer track (state, whether it is bound to the
+// tile, inbound size and bytes) and every video receiver with the track ID
+// it carries, so a wrong binding or a missing layer shows in the failure.
+async function describeCameraLayers(page, participantID) {
+  return page.evaluate(async (participantID) => {
+    const tracks = remoteCameraLayerTracks.get(participantID);
+    const bound = participantElements.get(participantID)?.cameraVideo?.srcObject?.getVideoTracks?.()[0];
+    const out = { preferred: cameraLayer };
+    for (const [layer, track] of tracks || []) {
+      const receiver = peer.getReceivers().find((item) => item.track === track);
+      let inbound = "";
+      (await receiver?.getStats())?.forEach((report) => {
+        if (report.type === "inbound-rtp") inbound = `${report.frameHeight}p ${report.bytesReceived}B`;
+      });
+      out[layer] = `${track.readyState}${track.muted ? " muted" : ""}${track === bound ? " bound" : ""} ${inbound}`;
+    }
+    out.receivers = [];
+    for (const transceiver of peer.getTransceivers()) {
+      const track = transceiver.receiver.track;
+      if (track?.kind !== "video" || transceiver.direction === "sendonly") continue;
+      let inbound = "";
+      (await transceiver.receiver.getStats())?.forEach((report) => {
+        if (report.type === "inbound-rtp") inbound = `${report.frameHeight}p ${report.bytesReceived}B`;
+      });
+      out.receivers.push(`${transceiver.mid} ${transceiver.currentDirection} ${track.id} ${track.readyState}${track.muted ? " muted" : ""} owner=${remoteTrackOwners.get(track.id)?.slice(0, 6)} ${inbound}`);
+    }
+    return out;
+  }, participantID);
+}
+
+async function waitForTileVideoHeight(observer, sender, accept, description, timeoutMs = 30000) {
+  const page = pages.get(observer);
+  const id = await participantIDFor(page, names[roles.indexOf(sender)]);
+  const deadline = Date.now() + timeoutMs;
+  let height = -1;
+  while (Date.now() < deadline) {
+    height = await tileVideoHeight(page, id);
+    if (accept(height)) return height;
+    await delay(1000);
+  }
+  const layers = await describeCameraLayers(page, id);
+  assert.fail(`${observer} decodes ${sender}'s camera at ${height} px, not ${description}: ${JSON.stringify(layers)}`);
+}
+
+async function suspendedPublishers() {
+  const suspended = [];
+  for (const [role, page] of pages) {
+    if (await page.evaluate(() => window.__slowMeetTest?.adaptationState?.videoSuspended === true)) suspended.push(role);
+  }
+  return suspended;
+}
+
 async function scenarioSimulcastMixedRoom() {
   await setupRoom();
   await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
   const layerRank = { low: 0, medium: 1, high: 2 };
   const layerOf = (role) => pages.get(role).evaluate(() => cameraLayer);
-  for (const role of roles) {
-    assert.equal(await pages.get(role).evaluate(() => simulcastEnabled), true, `${role} did not get simulcast from the server`);
+  const restore = new Map();
+  for (const [role, page] of pages) {
+    assert.equal(await page.evaluate(() => simulcastEnabled), true, `${role} did not get simulcast from the server`);
+    restore.set(role, await page.evaluate(() => ({
+      quality: document.querySelector("#camera-quality").value,
+      profile: document.querySelector("#profile").value
+    })));
+    await openSettingsPanel(page);
+    await page.selectOption("#camera-quality", "360p");
+    await openSettingsPanel(page);
+    await page.selectOption("#profile", "normal");
   }
-  installRoomQdisc();
-  let armer;
   try {
-    armer = armParticipantTiers({ P1: "fast", P2: "moderate", P3: "capped" });
-    await waitForShapedLink("P2", 300);
-    try {
-      await pages.get("P3").waitForFunction(() => cameraLayer === "low", null, { timeout: 60000 });
-    } catch (_) {
-      assert.fail(`P3 on the capped downlink never stepped down to the low camera layer (still ${await layerOf("P3")})`);
+    for (const [role, page] of pages) {
+      const deadline = Date.now() + 30000;
+      let heights = {};
+      while (Date.now() < deadline) {
+        heights = await cameraLayerHeights(page);
+        if (heights.low === 180 && heights.medium === 360 && !heights.high) break;
+        await delay(1000);
+      }
+      const senderDetail = await page.evaluate(async () => {
+        const detail = { encodings: cameraSender?.getParameters?.().encodings?.map((e) => `${e.rid}:${e.active}:${e.scaleResolutionDownBy}:${e.maxBitrate}`), capture: localCameraTrack?.getSettings?.() };
+        const reports = await cameraSender?.getStats?.();
+        reports?.forEach((report) => {
+          if (report.type === "outbound-rtp") detail[report.rid] = `${report.frameWidth}x${report.frameHeight} ${report.qualityLimitationReason} ${report.bytesSent}`;
+          if (report.type === "candidate-pair" && report.nominated) detail.availableOutgoingBitrate = report.availableOutgoingBitrate;
+        });
+        detail.localSim = (peer.localDescription?.sdp || "").split("\r\n").filter((l) => /^a=simulcast/.test(l));
+        detail.remoteSim = (peer.remoteDescription?.sdp || "").split("\r\n").filter((l) => /^a=simulcast/.test(l));
+        detail.localType = peer.localDescription?.type;
+        return detail;
+      });
+      assert.deepEqual(heights, { low: 180, medium: 360 },
+        `${role}'s 360p camera does not send a 180 px and a 360 px layer (B12): ${JSON.stringify(senderDetail)}`);
     }
-    const fastLayer = await layerOf("P1");
-    assert.ok(layerRank[fastLayer] > layerRank.low,
-      `P1 on the fast tier is on the ${fastLayer} camera layer, no higher than the capped P3's low layer`);
-    await assertFullMeshMedia({ label: "with P3 on the low camera layer" });
+    installRoomQdisc({ include: ["narrow-downlink"] });
+    let armer;
+    try {
+      armer = armParticipantTiers({ P1: "fast", P3: "narrow-downlink" });
+      try {
+        await pages.get("P3").waitForFunction(() => cameraLayer === "low", null, { timeout: 60000 });
+      } catch (_) {
+        assert.fail(`P3 on the narrow downlink never stepped down to the low camera layer (still ${await layerOf("P3")})`);
+      }
+      const fastLayer = await layerOf("P1");
+      assert.ok(layerRank[fastLayer] > layerRank.low,
+        `P1 on the fast tier is on the ${fastLayer} camera layer, no higher than P3's low layer`);
+      // The SFU forwards P3 the low layer of P1's camera while the fast P1
+      // and the clean P4 keep each other's full-size layer.
+      await waitForTileVideoHeight("P3", "P1", (height) => height === 180, "the 180 px low layer");
+      await waitForTileVideoHeight("P4", "P1", (height) => height === 360, "the 360 px top layer");
+      await waitForTileVideoHeight("P1", "P4", (height) => height === 360, "the 360 px top layer");
+      try {
+        await assertFullMeshMedia({ label: "with P3 on the low camera layer", skipVideoFrom: await suspendedPublishers() });
+      } catch (error) {
+        const detail = { suspended: await suspendedPublishers() };
+        for (const [observer, sender] of [["P1", "P3"], ["P4", "P3"], ["P1", "P2"]]) {
+          const page = pages.get(observer);
+          detail[`${observer}<-${sender}`] = await describeCameraLayers(page, await participantIDFor(page, names[roles.indexOf(sender)]));
+        }
+        error.message += ` ${JSON.stringify(detail)}`;
+        throw error;
+      }
+    } finally {
+      if (armer) armer.stopped = true;
+      clearRoomProfiles();
+    }
+    try {
+      await pages.get("P3").waitForFunction(() => cameraLayer !== "low", null, { timeout: 60000 });
+    } catch (_) {
+      assert.fail(`P3 stayed on the low camera layer after its downlink cap lifted (${await layerOf("P3")})`);
+    }
+    await waitForTileVideoHeight("P3", "P1", (height) => height === 360, "the 360 px top layer after the cap lifted");
+    await clearStaleVideoSuspensions();
+    await assertFullMeshMedia({ label: "after P3's camera layer climbed back" });
   } finally {
-    if (armer) armer.stopped = true;
-    clearRoomProfiles();
+    for (const [role, page] of pages) {
+      const { quality, profile } = restore.get(role);
+      await openSettingsPanel(page).catch(() => {});
+      await page.selectOption("#camera-quality", quality).catch(() => {});
+      await openSettingsPanel(page).catch(() => {});
+      await page.selectOption("#profile", profile).catch(() => {});
+    }
   }
-  try {
-    await pages.get("P3").waitForFunction(() => cameraLayer !== "low", null, { timeout: 60000 });
-  } catch (_) {
-    assert.fail(`P3 stayed on the low camera layer after its downlink cap lifted (${await layerOf("P3")})`);
-  }
-  await assertFullMeshMedia({ label: "after P3's camera layer climbed back" });
 }
 
 // Each resume of a participant now swaps its media onto the room's existing
@@ -4577,8 +4710,7 @@ const scenarios = [
   { name: "udp-blocked-relay-failover", group: "resilience", server: "turn", description: "With the built-in TURN relay, one participant's UDP is blocked mid-call: Automatic hands it off to TURN/TCP while the other three stay on their direct paths.", run: scenarioUdpBlockedRelayFailover, netns: true },
   { name: "relay-path-under-loss", group: "resilience", server: "turn", description: "A participant on TURN/TCP sees 2% loss and 50 ms on the relay leg: audio flows both ways and the room recovers.", run: scenarioRelayPathUnderLoss, netns: true },
   { name: "simulcast-mixed-room", group: "resilience", server: "simulcast",
-    knownFailing: { finding: "B12", reason: "with simulcast on, cameras of participants on impaired links (even a downlink-only cap) stop reaching every receiver" },
-    description: "With simulcast on, a receiver on a capped downlink falls to the low camera layer below a fast receiver's, keeps decoding every camera, and climbs back once the cap lifts.", run: scenarioSimulcastMixedRoom, netns: true },
+    description: "With simulcast on, every 360p camera sends a 180 px and a 360 px layer (B12); a receiver whose downlink fits only the low layers falls to them below a fast receiver's, keeps decoding every camera, and climbs back once the cap lifts.", run: scenarioSimulcastMixedRoom, netns: true },
   { name: "repeated-signaling-resumes", group: "resilience", description: "One participant's signaling is reset five times in a row: each time it resumes under the same identity and the room keeps hearing and seeing it.", run: scenarioRepeatedSignalingResumes, netns: true },
   { name: "seat-handover-churn", group: "resilience", description: "A participant leaves for good and a new one takes the seat: every page binds the newcomer's audio and camera to the newcomer's tile and drops the departed tile.", run: scenarioSeatHandoverChurn, netns: true },
   { name: "seat-handover-churn-simulcast", group: "resilience", server: "simulcast", description: "The seat handover with simulcast on, where a receiver also reads the newcomer's camera layer from the reused track.", run: scenarioSeatHandoverChurn, netns: true },

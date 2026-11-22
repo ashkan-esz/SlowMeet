@@ -120,16 +120,6 @@ namespace:
 These tests pin today's behaviour and say in a `KNOWN ISSUE (Bn)` comment
 what should change. Fixing an issue means flipping that assertion.
 
-- **B12 — with simulcast on, impaired participants' cameras reach no one.**
-  `simulcast-mixed-room` (`SIMULCAST_ENABLED=true`, P1 fast, P2 moderate,
-  P3 capped downlink, P4 clean) failed in 3 of 3 runs: the cameras of P2
-  and P3 stop reaching every receiver (frames stall at 0–46). That includes
-  P3, whose uplink is clean and only its downlink is capped. In one run the
-  fast P1 also sat on the low camera layer. Without simulcast the same tiers
-  pass (`mixed-quality-room`). The scenario is marked known-failing (skipped
-  unless `SLOWMEET_KNOWN_FAILING=1`). Not yet investigated; candidates are
-  the per-receiver layer selection (`selectedCameraLayerLocked`) and how a
-  layer whose packets pause is treated as inactive.
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
   another leaves and rejoins; when the held `participant_left`,
@@ -149,7 +139,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9, B11 and B12.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -233,6 +223,38 @@ what should change. Fixing an issue means flipping that assertion.
     `scripts/test-remote-track-memory.js`,
     `sharer-reconnect-mid-share-impaired`,
     `reconnect-under-impairment-isolated`.
+  - B12, simulcast cameras stuck on one tiny layer. With
+    `SIMULCAST_ENABLED=true` every camera reached receivers as a single
+    90x60 layer, so per-receiver layer selection had nothing to choose
+    from. First reported as "impaired participants' cameras reach no one";
+    that part was the protect-audio pause, which happens the same way with
+    simulcast off. Four causes, all fixed:
+    - The three encodings had fixed 4/2/1 scales. Chrome caps simulcast
+      layers by capture size (one below 480x270, two below 960x540) and
+      keeps the lowest, so a 240p or 360p camera sent only the quarter-scale
+      layer at 15 % of the bitrate. `planCameraSimulcast` now fits the
+      layer count, scales and bitrate shares to the capture, the same way
+      in every browser.
+    - pion repeated the pause marks of the browser's first offer
+      (`a=simulcast:recv low;~medium;~high`) in every later offer, and
+      Chrome applies them to its encodings, so each renegotiation switched
+      the upper layer off again. The SFU now sets
+      `SetIgnoreRidPauseForRecv`, and the client puts its layers back to
+      what it wants after every negotiation (`reconcileCameraSimulcast`).
+      The pause and resume write also joined the serialized
+      sender-parameter chain, so a stale write cannot land last.
+    - The SFU can deliver a layer on a transceiver whose browser track ID
+      is not the signaled one (the page's own first video transceiver, or
+      one reused from another source). The client now reads each
+      receiver's identity from the remote description's `a=msid`
+      (`signaledTrackID`), not from `track.id`.
+    - The client picked the shown layer by the browser's `muted` flag,
+      which lags the SFU's switch by seconds. It now shows the layer track
+      that is receiving packets (`selectLayer`'s `isFlowing`, sampled each
+      stats tick).
+    `TestSFUDoesNotEchoSimulcastPauseMarks`, `scripts/test-adaptation.js`
+    (`planCameraSimulcast`), `scripts/test-remote-camera-video.js`,
+    `simulcast-mixed-room`.
 
   A `knownIssue("Bn", ...)` check in the browser suite logs `KNOWN ISSUE
   Bn still present` and fails only with `SLOWMEET_KNOWN_FAILING=1`.
@@ -278,9 +300,12 @@ TURN/TCP fallback. None of them runs in CI. They also cover:
 - `seat-handover-churn` and `seat-handover-churn-simulcast`: a new
   participant taking a departed one's seat, with every page binding the
   newcomer to its own tile.
-- `simulcast-mixed-room`: per-receiver camera layers under mixed links
-  (known-failing, B12). It and `seat-handover-churn-simulcast` run on a
-  server with `SIMULCAST_ENABLED=true`.
+- `simulcast-mixed-room`: every 360p camera sends a 180 px and a 360 px
+  layer (B12); a receiver on the `narrow-downlink` tier (700 kbit, fits
+  only the low layers) steps down and decodes every camera at 180 px while
+  the fast and clean receivers keep 360 px, then climbs back once the cap
+  lifts. It and `seat-handover-churn-simulcast` run on a server with
+  `SIMULCAST_ENABLED=true`.
 
 Firefox is not covered under impairment: its candidate gathering stalls in
 the network namespace, so the netns runner uses Chromium for all four
@@ -321,7 +346,8 @@ How the faults are made:
   `scripts/netem-tiers.js` allowlists the other participants' ports and
   sends every other UDP packet into a tier, so ports the participant opens
   later (a rebuilt peer, an ICE restart) are caught too.
-- **New tiers** (`thin-uplink`, `bursty`, `relay-lossy`, `flap`) are
+- **New tiers** (`thin-uplink`, `bursty`, `relay-lossy`, `flap`,
+  `narrow-downlink`) are
   installed only when a scenario names them, so the CI scenarios keep
   issuing exactly the tc commands pinned by `scripts/test-netem-tiers.js`.
 - **Proof of fault.** Every armed tier must show traffic in its class

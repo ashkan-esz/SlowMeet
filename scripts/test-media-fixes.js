@@ -225,12 +225,17 @@ console.log("Media fix checks passed (adaptation recovery)");
 // Pass 4: the protect-audio pause must deactivate every simulcast encoding,
 // not just the first — a camera carries three and the pause exists to free
 // uplink on weak connections.
+// A simulcast camera resumes only the layers its capture supports (B12), and
+// the write joins the profile pass's serialized chain.
 const setSenderEncodingActiveSource = appSource.slice(
-  appSource.indexOf("async function setSenderEncodingActive("),
+  appSource.indexOf("function setSenderEncodingActive("),
   appSource.indexOf("\nasync function setVideoSenderActive("));
 assert.match(setSenderEncodingActiveSource,
-  /for \(const encoding of parameters\.encodings\) encoding\.active = enabled;/,
+  /parameters\.encodings\.forEach\(\(encoding, index\) => \{\n\s+encoding\.active = enabled && \(!plan \|\| plan\.active\[index\]\);/,
   "pausing a sender must flip all of its encodings");
+assert.match(setSenderEncodingActiveSource,
+  /senderParameterChain = senderParameterChain\.then\(run, run\);/,
+  "the pause and resume write must join the serialized sender-parameter chain");
 
 // Video recovery must not be gated on the BWE threshold inside `good`: at the
 // floor profile, recovered loss/RTT/jitter are enough.

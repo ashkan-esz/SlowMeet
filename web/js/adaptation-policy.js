@@ -174,6 +174,30 @@ function chooseCameraLayer(layer, poorSamples, goodSamples, packetLossPct, dropp
   return { layer: current, poorSamples: 0, goodSamples: 0 };
 }
 
+// planCameraSimulcast fits the camera's three simulcast encodings (rids low,
+// medium, high) to the capture size. Chrome caps the number of simulcast
+// layers by input resolution (three from 960x540, two from 480x270, one
+// below that) and keeps the LOWEST encodings: with fixed 4/2/1 scale factors,
+// a 360x240 capture became a single 90x60 layer carrying 15% of the bitrate
+// for every receiver (B12 in docs/network-testing.md). The plan keeps the
+// same cap so every browser sends the same layers, scales the top active
+// layer to the full capture size, and gives the active layers the whole
+// bitrate.
+function planCameraSimulcast(width, height) {
+  const pixels = Number(width) * Number(height);
+  let count = 1;
+  if (Number.isFinite(pixels) && pixels >= 960 * 540) count = 3;
+  else if (Number.isFinite(pixels) && pixels >= 480 * 270) count = 2;
+  const sharesByCount = { 1: [1], 2: [0.3, 0.7], 3: [0.15, 0.3, 0.55] };
+  const shares = sharesByCount[count];
+  return {
+    count,
+    active: [0, 1, 2].map((index) => index < count),
+    scales: [0, 1, 2].map((index) => index < count ? 2 ** (count - 1 - index) : 1),
+    shares: [0, 1, 2].map((index) => shares[index] || 0)
+  };
+}
+
 function applyServerDefaults(profile, defaults, enabled) {
   if (!enabled || !profile) return profile;
   return {
@@ -493,6 +517,7 @@ if (typeof module !== "undefined") {
     createClimbBackoff,
     shouldRecoverVideo,
     chooseCameraLayer,
+    planCameraSimulcast,
     applyServerDefaults,
     resolveCodecName,
     profileNameForQuality,
