@@ -373,9 +373,10 @@ function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, 
 // the pooled loss / the caller's previous jitter signal.
 //
 // The minimum still blames the receiver when every remote sender is on a bad
-// uplink (B1 in docs/network-testing.md). senderUplink(participantID), when
-// given, returns that sender's own reported uplink ({ lossPct, jitterMs },
-// relayed by the server as source_quality) or null; each stream is then
+// uplink (B1 in docs/network-testing.md). senderUplink(participantID, stream),
+// when given, returns what that sender's stream loses and queues before it
+// leaves the SFU ({ lossPct, jitterMs }, relayed by the server as
+// source_quality; the loss is per stream kind) or null; each stream is then
 // discounted by its sender's share before the minimum is taken: the loss the
 // receiver's own path adds is 1 - (1 - observed) / (1 - senderUplinkLoss),
 // and its jitter is what remains above the sender's uplink jitter. Streams
@@ -390,7 +391,9 @@ function selectOwnLinkMeasurements(streams, {
   let bestJitter = null;
   for (const stream of Array.isArray(streams) ? streams : []) {
     if (!stream || !Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
-    const uplink = typeof senderUplink === "function" && stream.participantID ? senderUplink(stream.participantID) : null;
+    const uplink = typeof senderUplink === "function" && stream.participantID
+      ? senderUplink(stream.participantID, stream)
+      : null;
     let lossPct = stream.lossPct;
     if (Number.isFinite(lossPct) && lossPct >= 0 && Number.isFinite(uplink?.lossPct) &&
         uplink.lossPct > 0 && uplink.lossPct < 100) {

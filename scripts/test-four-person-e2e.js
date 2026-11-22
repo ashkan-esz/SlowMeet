@@ -3388,24 +3388,16 @@ async function scenarioOneFastThreeBadUplinks() {
     clearRoomProfiles();
     if (sampler) {
       const sampled = await sampler.stop();
-      // KNOWN ISSUE (B1): the client estimates its own link as the MINIMUM
-      // per-stream inbound loss (selectOwnLinkMeasurements). With three lossy
-      // remote uplinks there is no clean inbound stream, so P1 — whose own
-      // link is the fast tier, with a clean uplink — can read its own link as
-      // poor, step its ladder down from the top level, and at level 0 pause
-      // its own camera once the minimum exceeds 10%. Desired: P1 holds level
-      // 3 and never auto-pauses, because remote-uplink loss is not its link's.
-      // Whether a given run crosses the 5% / 10% bars depends on how much of
-      // the injected loss NACK repair hides, so P1's own profileLevel /
-      // videoSuspended / networkQuality timeline is SAMPLED here as evidence
-      // and NOT asserted. Measured in the netns runner (2026-11): P1 read
-      // 20-70% own-link loss and a critical verdict from the first impaired
-      // second, stepped 3 -> 0 in ~5 s, and paused its camera at ~6 s for
-      // the rest of the window — so the "degradation reaction" P2/P3/P4 see
-      // on P1's camera above is P1's own B1 pause, not its fast link.
-      // When B1 is fixed, promote the two logged values to
-      // assertions on the window before P3 left: minLevel === 3
-      // (topAutomaticLevel) and suspendedSamples === 0.
+      // B1: the client estimates its own link as the minimum per-stream
+      // inbound loss (selectOwnLinkMeasurements). With three lossy remote
+      // uplinks there is no clean inbound stream, so P1 — on the fast tier,
+      // with a clean uplink — read 20-70 % own-link loss, stepped 3 -> 0 in
+      // about 5 s and paused its camera for the rest of the window. Most of
+      // that loss is created at the SFU (late retransmissions over a slow
+      // uplink are never forwarded), and the SFU now relays its measurement
+      // of it per sender (source_quality) for P1 to discount. P1's
+      // profileLevel / videoSuspended / networkQuality timeline is sampled
+      // here; after the samples, the pause is asserted and the level logged.
       const p1Samples = sampled.timeline.get("P1");
       const p3LeftAtSec = sampled.marks.find((mark) => mark.label === "P3 left")?.t ?? null;
       const beforeP3Left = p3LeftAtSec == null ? p1Samples : p1Samples.filter((sample) => sample.t < p3LeftAtSec);
@@ -3422,11 +3414,18 @@ async function scenarioOneFastThreeBadUplinks() {
       console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
     }
   }
-  // The B1 values are evidence, not assertions, but the evidence itself must
-  // exist: a sampler that silently read nothing would leave B1 unobserved.
-  // The three-bad-uplinks window is held open for 40 s.
+  // The evidence must exist: a sampler that silently read nothing would leave
+  // B1 unobserved. The three-bad-uplinks window is held open for 40 s.
   assert.ok(b1Evidence && b1Evidence.p1ThreeBadUplinks.samples >= 20,
     `the B1 evidence sampler recorded only ${b1Evidence?.p1ThreeBadUplinks.samples ?? 0} P1 samples before P3 left`);
+  // B1: the SFU relays what each bad sender's streams lose before it forwards
+  // them (source_quality), and P1 discounts that from its own-link estimate,
+  // so P1 — on the fast tier — must keep sending its camera. It used to pause
+  // it for most of the window. P1's level is still only logged: in the first
+  // second or two, before the first measurement reaches it, P1 can step down
+  // once.
+  assert.equal(b1Evidence.p1ThreeBadUplinks.suspendedSamples, 0,
+    `P1 on the fast tier paused its camera in ${b1Evidence.p1ThreeBadUplinks.suspendedSamples} samples with three bad uplinks (B1)`);
 
   // Recovery. The cameras that were live through the window return first —
   // P1's own camera included, since B1 may have paused it — then a fresh

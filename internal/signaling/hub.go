@@ -772,9 +772,8 @@ func (h *Hub) forgetMediaState(participantID string) {
 // sourceQualityState is one participant's reported uplink, and what the room
 // was last told about it.
 type sourceQualityState struct {
-	loss10, jitterMs         int
-	sentLoss10, sentJitterMs int
-	sentAt                   time.Time
+	sentLoss10, sentAudioLoss10, sentJitterMs int
+	sentAt                                    time.Time
 }
 
 const (
@@ -794,45 +793,53 @@ func absInt(value int) int {
 }
 
 // sourceQualityMessage is the source_quality broadcast for participantID.
-func sourceQualityMessage(participantID string, loss10, jitterMs int) Message {
+func sourceQualityMessage(participantID string, state *sourceQualityState) Message {
 	return Message{Version: ProtocolVersion, Type: TypeSourceQuality, ParticipantID: participantID,
-		UplinkLoss10: loss10, UplinkJitterMs: jitterMs}
+		UplinkLoss10: state.sentLoss10, AudioLoss10: state.sentAudioLoss10, UplinkJitterMs: state.sentJitterMs}
 }
 
-// noteSourceQuality records a participant's reported uplink loss and jitter
-// and relays them to the rest of the room when they changed enough. Every
-// stream a receiver gets carries its sender's uplink loss and queueing on top
-// of the receiver's own downlink, and the receiver cannot tell them apart:
-// with every remote sender on a lossy uplink, a participant on a clean link
-// used to read its own link as poor, step its camera down and pause it (B1 in
-// docs/network-testing.md). Knowing each sender's uplink, the receiver
-// discounts it (selectOwnLinkMeasurements in web/js/adaptation-policy.js).
-func (h *Hub) noteSourceQuality(c *client, loss10, jitterMs int, now time.Time) {
-	h.mu.Lock()
+// noteSourceQuality relays what one participant's streams lose before they
+// leave the SFU, so receivers do not charge it to their own links. Every
+// stream a receiver gets carries its sender's uplink trouble on top of the
+// receiver's own downlink, and the receiver cannot tell them apart: with
+// every remote sender on a lossy uplink, a participant on a clean link used
+// to read its own link as poor, step its camera down and pause it (B1 in
+// docs/network-testing.md). The loss is the SFU's own measurement of the
+// participant's packets it did not forward (media.Router.ForwardLoss),
+// because a sender's own uplink report reads 0 % when the SFU's NACKs
+// recover its packets too late to forward them; the sender's report is the
+// fallback when nothing was measured, and its uplink jitter is relayed as
+// reported. Receivers discount both (selectOwnLinkMeasurements in
+// web/js/adaptation-policy.js). Relayed when something changed enough, at
+// most once per sourceQualityMinInterval.
+func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs int, now time.Time) {
 	participantID := c.participant.ID
 	if participantID == "" {
-		h.mu.Unlock()
 		return
 	}
+	audioLoss10, videoLoss10 := h.router.ForwardLoss(participantID)
+	if videoLoss10 < 0 {
+		videoLoss10 = reportedLoss10
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	state := h.sourceQuality[participantID]
 	first := state == nil
 	if first {
 		state = &sourceQualityState{}
 		h.sourceQuality[participantID] = state
 	}
-	state.loss10, state.jitterMs = loss10, jitterMs
-	changed := first || absInt(loss10-state.sentLoss10) >= sourceQualityLossStep ||
+	changed := first || absInt(videoLoss10-state.sentLoss10) >= sourceQualityLossStep ||
+		absInt(audioLoss10-state.sentAudioLoss10) >= sourceQualityLossStep ||
 		absInt(jitterMs-state.sentJitterMs) >= sourceQualityJitterStepMs ||
-		(loss10 < 0) != (state.sentLoss10 < 0)
+		(videoLoss10 < 0) != (state.sentLoss10 < 0) || (audioLoss10 < 0) != (state.sentAudioLoss10 < 0)
 	if !changed || (!first && now.Sub(state.sentAt) < sourceQualityMinInterval) {
-		h.mu.Unlock()
 		return
 	}
-	state.sentLoss10, state.sentJitterMs, state.sentAt = loss10, jitterMs, now
+	state.sentLoss10, state.sentAudioLoss10, state.sentJitterMs, state.sentAt = videoLoss10, audioLoss10, jitterMs, now
 	if _, admitted := h.roomMembers[c]; admitted {
-		h.broadcastExceptLocked(c, sourceQualityMessage(participantID, loss10, jitterMs))
+		h.broadcastExceptLocked(c, sourceQualityMessage(participantID, state))
 	}
-	h.mu.Unlock()
 }
 
 func sameOrigin(r *http.Request) bool {

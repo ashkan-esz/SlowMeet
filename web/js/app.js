@@ -3910,10 +3910,16 @@ function connectSocket(name, password) {
       }
     }
     if (message.type === "source_quality" && message.participant_id) {
-      const loss10 = Number(message.uplink_loss10 ?? 0);
+      // Camera and audio loss before the SFU forwards them, as the SFU
+      // measures it, and the sender's own reported uplink jitter.
+      const percent = (value) => {
+        const tenths = Number(value ?? 0);
+        return Number.isFinite(tenths) && tenths >= 0 ? tenths / 10 : null;
+      };
       const jitterMs = Number(message.uplink_jitter_ms ?? 0);
       remoteSourceQuality.set(message.participant_id, {
-        lossPct: Number.isFinite(loss10) && loss10 >= 0 ? loss10 / 10 : null,
+        videoLossPct: percent(message.uplink_loss10),
+        audioLossPct: percent(message.audio_loss10),
         jitterMs: Number.isFinite(jitterMs) && jitterMs >= 0 ? jitterMs : null
       });
     }
@@ -5349,7 +5355,8 @@ async function runDiagnosticsUpdate() {
         lossPct: packetLossPercentFromDeltas(deltas.lost, deltas.received),
         receivedDelta: deltas.received,
         jitterMs: stat.jitter != null ? Math.round(stat.jitter * 1000) : null,
-        participantID: participantForInboundStat(stat, trackStatsOwners)
+        participantID: participantForInboundStat(stat, trackStatsOwners),
+        kind: stat.kind
       });
     }
     return deltas;
@@ -5503,7 +5510,11 @@ async function runDiagnosticsUpdate() {
       receivedPacketsSincePreviousSample
     ),
     fallbackJitterMs: values.jitterMs,
-    senderUplink: (participantID) => remoteSourceQuality.get(participantID) || null
+    senderUplink: (participantID, stream) => {
+      const source = remoteSourceQuality.get(participantID);
+      if (!source) return null;
+      return { lossPct: stream?.kind === "audio" ? source.audioLossPct : source.videoLossPct, jitterMs: source.jitterMs };
+    }
   });
   values.packetLoss = ownLink.lossPct;
   // The in-loop assignments above keep the video-wins/audio-fills fallback;

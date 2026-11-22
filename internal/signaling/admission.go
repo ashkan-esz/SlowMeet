@@ -80,7 +80,7 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 		if _, ok := h.announced[participantID]; !ok {
 			continue
 		}
-		_ = c.write(sourceQualityMessage(participantID, quality.sentLoss10, quality.sentJitterMs))
+		_ = c.write(sourceQualityMessage(participantID, quality))
 	}
 	screenOwner := ""
 	if h.screenSharer != nil {

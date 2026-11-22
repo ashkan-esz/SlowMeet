@@ -106,9 +106,13 @@ type Message struct {
 	AudioKbps          int                  `json:"audio_kbps,omitempty"`
 	// UplinkLoss10 and UplinkJitterMs are the sender's own uplink loss (tenths
 	// of a percent) and jitter as the SFU's receiver reports describe them;
-	// -1 when unknown. Reported in network_state, relayed in source_quality.
+	// -1 when unknown. Reported in network_state. In source_quality,
+	// UplinkLoss10 and AudioLoss10 are the share of the sender's camera and
+	// audio packets the SFU did not forward (its own measurement, falling back
+	// to the sender's report), and UplinkJitterMs is the sender's report.
 	UplinkLoss10      int                `json:"uplink_loss10,omitempty"`
 	UplinkJitterMs    int                `json:"uplink_jitter_ms,omitempty"`
+	AudioLoss10       int                `json:"audio_loss10,omitempty"`
 	ScreenShareActive *bool              `json:"screen_share_active,omitempty"`
 	ScreenShareOwner  string             `json:"screen_share_owner,omitempty"`
 	ChatText          string             `json:"text,omitempty"`

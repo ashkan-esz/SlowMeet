@@ -53,6 +53,9 @@ type publication struct {
 	// lastKeyFrameRequest is when (Unix nanoseconds) a keyframe request last
 	// reached this publication's publisher; see allowKeyFrameRequest.
 	lastKeyFrameRequest atomic.Int64
+	// forwardLoss measures the publisher's packets the SFU did not forward
+	// (forward_loss.go).
+	forwardLoss forwardLoss
 
 	// layerKeys caches the publication key of every camera simulcast quality
 	// for this source so the per-packet layer selection never builds strings.
@@ -1475,6 +1478,12 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 				if !pub.limiter.waitForBytes(packet.MarshalSize(), stop) {
 					return
 				}
+				if frame.repairTargets == nil {
+					// Repairs go to the few receivers whose mailbox dropped the
+					// packet; only the main forward path describes the stream
+					// every receiver gets.
+					pub.forwardLoss.observe(packet.SequenceNumber, time.Now())
+				}
 				for _, target := range targets {
 					if frame.repairTargets == nil || target.hasVideoLoss(packet) {
 						target.enqueueVideo(packet)
@@ -1514,6 +1523,7 @@ func (r *Router) forwardAudioPacket(pub *publication, packet *rtp.Packet) {
 	}
 	pub.targetScratch = targets
 	r.mu.RUnlock()
+	pub.forwardLoss.observe(packet.SequenceNumber, time.Now())
 	for _, target := range targets {
 		target.enqueue(packet)
 	}
