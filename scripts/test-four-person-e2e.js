@@ -1735,15 +1735,35 @@ async function scenarioAdminCapsAndChatReset() {
 }
 
 // Switching the connection method mid-meeting rebuilds the media path on that
-// browser while the other three keep flowing.
+// browser while the other three keep flowing. The switch is applied in place
+// (switchConnectionMethodInPlace): the live peer takes the new ICE
+// configuration and restarts ICE over the same signaling socket, so the
+// participant neither rejoins nor gets a new peer. Only a restart that has not
+// connected within methodSwitchFallbackMs falls back to a reconnect.
 async function scenarioConnectionMethodSwitch() {
   await setupRoom();
   const p2 = pages.get("P2");
-  const socketCount = await p2.evaluate(() => window.__slowMeetTest.sockets.length);
+  const before = await p2.evaluate(() => ({
+    sockets: window.__slowMeetTest.sockets.length,
+    peers: (window.__slowMeetTest.peerConnections || []).length,
+    ufrag: /a=ice-ufrag:(\S+)/.exec(peer?.localDescription?.sdp || "")?.[1] || ""
+  }));
+  assert.ok(before.ufrag, "P2 has no local ICE ufrag before the switch");
   await openSettingsPanel(p2);
   await p2.locator("#settings-connection-method").selectOption("direct", { force: true });
-  await p2.waitForFunction((count) => window.__slowMeetTest.sockets.length > count &&
-    window.__slowMeetTest.sockets.at(-1).readyState === WebSocket.OPEN, socketCount, { timeout: 20000 });
+  await p2.waitForFunction((previousUfrag) => {
+    const current = /a=ice-ufrag:(\S+)/.exec(peer?.localDescription?.sdp || "")?.[1] || "";
+    return appliedConnectionMethod === "direct" && current && current !== previousUfrag &&
+      peer.connectionState === "connected";
+  }, before.ufrag, { timeout: 20000 }).catch(async () =>
+    assert.fail(`P2 did not restart ICE onto the direct method in place (${JSON.stringify(await p2.evaluate(() => ({
+      applied: appliedConnectionMethod, state: peer?.connectionState })))})`));
+  const after = await p2.evaluate(() => ({
+    sockets: window.__slowMeetTest.sockets.length,
+    peers: (window.__slowMeetTest.peerConnections || []).length
+  }));
+  assert.equal(after.sockets, before.sockets, "the method switch reconnected signaling instead of switching in place");
+  assert.equal(after.peers, before.peers, "the method switch rebuilt the peer instead of restarting ICE on it");
   for (const page of pages.values()) await roster(page, names);
   await assertMedia();
 }
@@ -4672,7 +4692,7 @@ const scenarios = [
   { name: "admin-config-broadcast", description: "An admin policy change reaches all four browsers via config_update and the share control disables and re-enables room-wide.", run: scenarioAdminConfigBroadcast },
   { name: "admin-share-eviction", description: "Disabling screen sharing mid-share evicts the lease room-wide and the seat is reusable after re-enabling.", run: scenarioAdminShareEviction },
   { name: "admin-caps-and-chat-reset", description: "Admin bitrate caps and history-retention changes fan out to every browser and a reset empties what reconnect replays.", run: scenarioAdminCapsAndChatReset },
-  { name: "connection-method-switch", description: "Switching the connection method mid-meeting rebuilds that participant's media path while the others keep flowing.", run: scenarioConnectionMethodSwitch },
+  { name: "connection-method-switch", description: "Switching the connection method mid-meeting restarts that participant's ICE in place, on the same signaling socket and peer, while the others keep flowing.", run: scenarioConnectionMethodSwitch },
   { name: "metrics-endpoint", description: "The metrics endpoint reports four active participants and live network samples.", run: scenarioMetricsEndpoint },
   { name: "chat-dom-cap", description: "A four-sender flood cannot grow the chat rail past its 300-node cap.", run: scenarioChatDomCap },
   { name: "congestion-adaptation", description: "Injected packet loss drives automatic video pause room-wide and recovery restores it.", run: scenarioCongestionAdaptation },
