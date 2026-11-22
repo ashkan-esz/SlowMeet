@@ -3474,16 +3474,22 @@ async function scenarioOneFastThreeBadUplinks() {
       const p1Samples = sampled.timeline.get("P1");
       const p3LeftAtSec = sampled.marks.find((mark) => mark.label === "P3 left")?.t ?? null;
       const beforeP3Left = p3LeftAtSec == null ? p1Samples : p1Samples.filter((sample) => sample.t < p3LeftAtSec);
+      const p1Levels = beforeP3Left.map((sample) => sample.level).filter((level) => Number.isFinite(level));
       const evidence = {
-        issue: "B1", asserted: false, tiers: tierByRole, p3LeftAtSec,
-        p1ThreeBadUplinks: summarizeAdaptationTimeline(beforeP3Left),
+        issue: "B1", asserted: true, tiers: tierByRole, p3LeftAtSec,
+        p1ThreeBadUplinks: {
+          ...summarizeAdaptationTimeline(beforeP3Left),
+          stepDowns: p1Levels.filter((level, index) => index > 0 && level < p1Levels[index - 1]).length,
+          samplesAtTop: p1Levels.filter((level) => level === topAutomaticLevel).length,
+          levelSamples: p1Levels.length
+        },
         p1WholeWindow: summarizeAdaptationTimeline(p1Samples),
         marks: sampled.marks,
         timeline: Object.fromEntries(sampled.timeline)
       };
       b1Evidence = evidence;
       recordEvidence("b1-own-link-evidence", evidence);
-      console.log(`[${tag}] B1 evidence (pause asserted, level logged) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
+      console.log(`[${tag}] B1 evidence (pause, step count and final level asserted) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
       console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
     }
   }
@@ -3494,11 +3500,25 @@ async function scenarioOneFastThreeBadUplinks() {
   // B1: the SFU relays what each bad sender's streams lose before it forwards
   // them (source_quality), and P1 discounts that from its own-link estimate,
   // so P1 — on the fast tier — must keep sending its camera. It used to pause
-  // it for most of the window. P1's level is still only logged: in the first
-  // second or two, before the first measurement reaches it, P1 can step down
-  // once.
+  // it for most of the window.
   assert.equal(b1Evidence.p1ThreeBadUplinks.suspendedSamples, 0,
     `P1 on the fast tier paused its camera in ${b1Evidence.p1ThreeBadUplinks.suspendedSamples} samples with three bad uplinks (B1)`);
+  // Not pausing is not enough: P1 could sit at a low level for the whole
+  // window and still never pause. In the first second or two, before the
+  // first source_quality reaches it, P1 can step down once; after that it must
+  // climb back to the top level by the end of the window. With the per-kind
+  // jitter discount and the send-path climb backoff, five runs held the top
+  // for 39/39, 29/39, 40/40, 39/39 and 9/40 samples; before them, 2-21 of 40
+  // and twice stuck at level 2 to the end. The share at the top is logged,
+  // not asserted: 20-45 ms of jitter left over from the bad senders still
+  // reaches P1's estimate now and then and can delay the climb back by tens
+  // of seconds (KNOWN ISSUE B13 in docs/network-testing.md).
+  const p1Window = b1Evidence.p1ThreeBadUplinks;
+  assert.ok(p1Window.stepDowns <= 1,
+    `P1 on the fast tier stepped its ladder down ${p1Window.stepDowns} times with three bad uplinks (B1 allows one early step)`);
+  assert.equal(p1Window.finalLevel, topAutomaticLevel,
+    `P1 on the fast tier ended the three-bad-uplinks window at level ${p1Window.finalLevel}, not ${topAutomaticLevel} (B1)`);
+  console.log(`[${tag}] P1 at level ${topAutomaticLevel} in ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks (B13 when well under the whole window)`);
 
   // Recovery. The cameras that were live through the window return first —
   // P1's own camera included, since B1 may have paused it — then a fresh

@@ -110,14 +110,18 @@ type Message struct {
 	// UplinkLoss10 and AudioLoss10 are the share of the sender's camera and
 	// audio packets the SFU did not forward (its own measurement, falling back
 	// to the sender's report), and UplinkJitterMs is the sender's report.
-	UplinkLoss10      int                `json:"uplink_loss10,omitempty"`
-	UplinkJitterMs    int                `json:"uplink_jitter_ms,omitempty"`
-	AudioLoss10       int                `json:"audio_loss10,omitempty"`
-	ScreenShareActive *bool              `json:"screen_share_active,omitempty"`
-	ScreenShareOwner  string             `json:"screen_share_owner,omitempty"`
-	ChatText          string             `json:"text,omitempty"`
-	Emoji             string             `json:"emoji,omitempty"`
-	ChatHistory       []ChatHistoryEntry `json:"chat_history,omitempty"`
+	// AudioUplinkJitterMs is the same jitter for the sender's microphone
+	// stream: a sender that pauses its camera on a bad uplink has no camera
+	// report, but its audio still crosses the same queue.
+	UplinkLoss10        int                `json:"uplink_loss10,omitempty"`
+	UplinkJitterMs      int                `json:"uplink_jitter_ms,omitempty"`
+	AudioUplinkJitterMs int                `json:"audio_uplink_jitter_ms,omitempty"`
+	AudioLoss10         int                `json:"audio_loss10,omitempty"`
+	ScreenShareActive   *bool              `json:"screen_share_active,omitempty"`
+	ScreenShareOwner    string             `json:"screen_share_owner,omitempty"`
+	ChatText            string             `json:"text,omitempty"`
+	Emoji               string             `json:"emoji,omitempty"`
+	ChatHistory         []ChatHistoryEntry `json:"chat_history,omitempty"`
 
 	// flush is an internal sentinel that is never serialized: the writer
 	// goroutine closes it after every queued message before it has been
@@ -195,7 +199,8 @@ func (m Message) Validate() error {
 			m.JitterMs < -1 || m.VideoKbps < -1 || m.AudioKbps < -1 ||
 			m.RTTMs > 120000 || m.JitterMs > 120000 ||
 			m.VideoKbps > maxReportedVideoKbps || m.AudioKbps > maxReportedAudioKbps ||
-			m.UplinkLoss10 < -1 || m.UplinkLoss10 > 1000 || m.UplinkJitterMs < -1 || m.UplinkJitterMs > 120000 {
+			m.UplinkLoss10 < -1 || m.UplinkLoss10 > 1000 || m.UplinkJitterMs < -1 || m.UplinkJitterMs > 120000 ||
+			m.AudioUplinkJitterMs < -1 || m.AudioUplinkJitterMs > 120000 {
 			return fmt.Errorf("network state contains invalid values")
 		}
 	case TypeVideoSubscriptions:

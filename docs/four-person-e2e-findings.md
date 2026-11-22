@@ -1601,3 +1601,63 @@ true !== false
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/slowmeet-four-person-e2e-failure-ZlDVUq`
 - Cause: harness, not product. P4's meeting peer stayed connected; the closed "current peer" was the plain-relay probe's sender/echo pair, which the harness counted as the latest peer. Fixed by keeping probe peers out of `peerConnections`.
+
+## 2026-11-22T20:34:31.596Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier ended the three-bad-uplinks window at level 2, not 3 (B1)
+
+2 !== 3
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/cal2/one-fast-three-bad-uplinks`
+
+## 2026-11-22T20:43:12.921Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier was at level 3 in only 11 of 40 samples with three bad uplinks (B1 needs 75 %)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fix1/one-fast-three-bad-uplinks`
+
+## 2026-11-22T20:45:03.840Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier was at level 3 in only 21 of 39 samples with three bad uplinks (B1 needs 75 %)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fix2/one-fast-three-bad-uplinks`
+
+## 2026-11-22T20:47:12.232Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier ended the three-bad-uplinks window at level 2, not 3 (B1)
+
+2 !== 3
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fix3/one-fast-three-bad-uplinks`
+
+## 2026-11-22T20:52:49.683Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier was at level 3 in only 29 of 39 samples with three bad uplinks (B1 needs 75 %)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fixb2/one-fast-three-bad-uplinks`
+
+## 2026-11-22T21:03:41.732Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier was at level 3 in only 9 of 40 samples with three bad uplinks (B1 needs 65 %)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fixb5/one-fast-three-bad-uplinks`

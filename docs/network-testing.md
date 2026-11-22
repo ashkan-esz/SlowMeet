@@ -89,8 +89,9 @@ host interface:
     calibrate against. Audio advances for everyone, the bad cameras degrade
     on the fast participant, one bad participant leaving alone does not
     interrupt the rest, and everything recovers on lift. The fast
-    participant's own ladder and verdict are recorded as evidence for known
-    issue B1 below, not asserted.
+    participant's own camera must never pause, and its ladder may step down
+    at most once and must spend most of the window at, and end at, the top
+    level (fixed issue B1 below).
   - `all-four-impaired` — every participant on the moderate tier at once,
     each on its own copy of it (`moderate-2`…`moderate-4`, so four people do
     not share one 200 kbit queue), with no clean peer anywhere: audio keeps
@@ -139,6 +140,19 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
+- **B13 — leftover jitter slows a fast participant's climb back.** In
+  `one-fast-three-bad-uplinks`, after the fixes for B1 (per-sender forward
+  loss, per-kind uplink jitter, send-path climb backoff), the fast
+  participant's own-link jitter still reads 18–46 ms now and then on a
+  clean 20 ms link. Each such sample falls outside the healthy band (under
+  30 ms) and restarts the climb streak. Over five runs it held the top level
+  for 39/39, 29/39, 40/40, 39/39 and 9/40 samples; in the last it needed
+  about 30 s to climb back after one early step. The cause is not pinned
+  down: the senders' audio uplink jitter reports should cancel their queueing,
+  so either the reports lag the streams or the SFU adds jitter of its own on
+  the way out. The scenario logs the share at the top as `B13`; next step is
+  to record per-stream jitter beside each sender's report in its evidence.
+
 - **Fixed: B1–B9, B11 and B12.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
@@ -153,10 +167,27 @@ what should change. Fixing an issue means flipping that assertion.
     one-second windows) and relays it per sender and kind in
     `source_quality`, with the sender's own uplink jitter; receivers discount
     each stream by its sender's share before taking the minimum
-    (`selectOwnLinkMeasurements`). The fast participant now never pauses
-    (asserted in the scenario), reads 0 % in nearly every sample, and at
-    most steps down once in the first second or two, before the first
-    measurement reaches it. `TestForwardLossMeasuresUnforwardedSequences`,
+    (`selectOwnLinkMeasurements`). The fast participant now never pauses,
+    reads 0 % in nearly every sample, and at most steps down once in the
+    first second or two, before the first measurement reaches it. That early
+    step once left it at level 2 for the rest of the window: the bad senders
+    pause their cameras at the floor, a paused camera has no uplink jitter to
+    report, and their audio still carried 30–45 ms of their own uplink
+    queueing, which the fast participant read as its own jitter, so it never
+    counted a healthy sample to climb back. Senders now also report their
+    microphone's uplink jitter (`audio_uplink_jitter_ms` in `network_state`
+    and `source_quality`), and receivers discount each stream by its own
+    kind's report (`senderUplinkForStream`). The early step also used to
+    count as a failed climb (the fast participant had just climbed to the
+    top), doubling the healthy samples the next climb needed. A climb only
+    raises what a participant sends, so the climb backoff now doubles only
+    when the step-down shows on the send path: uplink loss above 5 %, a
+    round trip above the poor bar, or a send estimate below 220 kbps
+    (`sendPathPoor`, `noteStepDown(onSendPath)`). The scenario asserts no
+    pause, at most one step-down, and the top level at the end of the
+    window; how long it spends at the top is logged (see B13). `TestHubRelaysAudioUplinkJitter`
+    and the paused-camera case in `scripts/test-room-network-scenarios.js`
+    cover the relay and the discount. `TestForwardLossMeasuresUnforwardedSequences`,
     `TestHubRelaysReportedUplinkQuality`,
     `scripts/test-room-network-scenarios.js`, `one-fast-three-bad-uplinks`.
   - B2, keyframe requests not coalesced: one retry series per publication
@@ -262,7 +293,7 @@ what should change. Fixing an issue means flipping that assertion.
   Run the whole gated set the way CI does:
 
   ```sh
-  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired" make test-media-e2e-four-netns
+  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired,slow-uplink-room" make test-media-e2e-four-netns
   ```
 
 - `make test-soak-netns` runs the sustained weak-network soak: the same
@@ -324,7 +355,10 @@ participants.
 
 Run one scenario with `MEDIA_E2E_FOUR_SCENARIO=<exact name> make
 test-media-e2e-four-netns`. Grouped scenarios never match a substring, so
-the CI list cannot pick them up by accident.
+the CI list cannot pick them up by accident. The CI list names one of them
+exactly, `slow-uplink-room`: it is the mirror of `one-fast-three-bad-uplinks`
+(one participant with a thin lossy uplink, three clean), so the weaknet job
+covers both 1 good / 3 bad and 3 good / 1 bad.
 
 `resilience` scenarios: `sharer-reconnect-mid-share` (and `-impaired`),
 `simultaneous-reconnect`, `server-restart-rejoin`,

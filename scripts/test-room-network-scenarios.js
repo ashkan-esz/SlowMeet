@@ -10,6 +10,7 @@ const path = require("node:path");
 const {
   packetLossPercentFromDeltas,
   selectOwnLinkMeasurements,
+  senderUplinkForStream,
   classifyParticipantQuality,
   stabilizeParticipantQuality,
   chooseAdaptationLevel,
@@ -60,7 +61,8 @@ const localBadge = "local";
     "goodSamples = countLadderRecoverySamples(goodSamples, { transportHealthy, uplinkPoor });",
     "climbBackoff.tick();",
     "climbBackoff.threshold()",
-    "climbBackoff.noteStepDown();",
+    "senderUplink: (participantID, stream) => senderUplinkForStream(remoteSourceQuality.get(participantID), stream)",
+    "climbBackoff.noteStepDown(uplinkPoor || networkCondition.sendPathPoor);",
     "climbBackoff.noteClimb();",
     'const atFloorProfile = profile.value === "auto" && adaptationLevel === 0;',
     "const suspendedHealthy = videoSuspended && transportHealthy && !critical;",
@@ -148,7 +150,8 @@ function runLadder(ticks, sampleAt, {
         lossPct: packetLossPercentFromDeltas(stream.lost, stream.received),
         receivedDelta: stream.received,
         jitterMs: stream.jitterMs ?? null,
-        participantID: stream.participantID
+        participantID: stream.participantID,
+        kind: stream.kind
       });
       if (stream.kind === "camera") {
         cameraLostSincePreviousSample += stream.lost;
@@ -182,8 +185,10 @@ function runLadder(ticks, sampleAt, {
       ),
       fallbackJitterMs: values.jitterMs,
       // What the server's source_quality relay delivers: each remote
-      // sender's own reported uplink (absent for an older server).
-      senderUplink: (participantID) => sample.senderUplinks?.get(participantID) || null
+      // sender's own reported uplink (absent for an older server), picked
+      // per stream kind exactly as app.js does.
+      senderUplink: (participantID, stream) =>
+        senderUplinkForStream(sample.senderUplinks?.get(participantID), stream)
     });
     values.packetLoss = ownLink.lossPct;
     if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
@@ -238,7 +243,7 @@ function runLadder(ticks, sampleAt, {
       adaptationLevel = transition.level;
       poorSamples = 0;
       goodSamples = 0;
-      climbBackoff.noteStepDown();
+      climbBackoff.noteStepDown(uplinkPoor || networkCondition.sendPathPoor);
     } else if (transition.reset === "good") {
       result.climbs.push({ tick, from: adaptationLevel, to: transition.level });
       adaptationLevel = transition.level;
@@ -502,9 +507,11 @@ const poorLink = { rttMs: 400, packetLoss: 8, jitterMs: 20, availableOutgoingKbp
 // One remote sender as one tick of the stats loop sees it: a camera and an
 // audio inbound-rtp window that lost `uplinkLossPct` on the sender's uplink
 // and `ownDownlinkLossPct` on the receiver's own downlink.
-function remoteSender(participantID, uplinkLossPct, { ownDownlinkLossPct = 0, jitterMs = 3 } = {}) {
+function remoteSender(participantID, uplinkLossPct, { ownDownlinkLossPct = 0, jitterMs = 3, cameraPaused = false } = {}) {
   const delivered = (1 - uplinkLossPct / 100) * (1 - ownDownlinkLossPct / 100);
-  return [["camera", 200], ["audio", 100]].map(([kind, packets]) => {
+  // A sender whose camera is paused sends audio only.
+  const kinds = cameraPaused ? [["audio", 100]] : [["camera", 200], ["audio", 100]];
+  return kinds.map(([kind, packets]) => {
     const received = Math.round(packets * delivered);
     return { participantID, kind, lost: packets - received, received, jitterMs };
   });
@@ -528,7 +535,11 @@ function roomStreams(uplinks, options) {
 function senderReports(uplinks, ownPathJitterMs = 3) {
   return new Map(uplinks.map((uplink, index) => {
     const { lossPct, jitterMs } = typeof uplink === "number" ? { lossPct: uplink } : uplink;
-    return [`remote-${index + 1}`, { lossPct, jitterMs: jitterMs === undefined ? 0 : Math.max(0, jitterMs - ownPathJitterMs) }];
+    const reportedJitterMs = jitterMs === undefined ? 0 : Math.max(0, jitterMs - ownPathJitterMs);
+    // The app's source_quality shape: per-kind loss, camera and audio jitter.
+    return [`remote-${index + 1}`, {
+      videoLossPct: lossPct, audioLossPct: lossPct, jitterMs: reportedJitterMs, audioJitterMs: reportedJitterMs
+    }];
   }));
 }
 
@@ -786,6 +797,103 @@ for (const [name, uplinkLossPcts] of [
   assert.deepEqual([lossyDecoder.layers[0], lossyDecoder.layers[1], lossyDecoder.layers[3]],
     ["high", "medium", "low"], "frame drops alongside any measured packet loss lower the camera layer");
   assert.equal(lossyDecoder.cameraLayer, "low", "frame drops alongside measured packet loss hold the low camera layer");
+}
+
+// 1 good / 3 bad after the bad senders pause their cameras (seen in
+// one-fast-three-bad-uplinks). The impairment reaches the good participant a
+// second or two before the senders' updated reports do, so it steps down
+// once on stale reports. From then on the three bad senders, paused at the
+// floor, send audio only: their audio crosses the same queueing uplink, but
+// a paused camera has no jitter to report. With only the camera's report,
+// the good participant read that queueing (35-45 ms) as its own jitter, never
+// counted a transport-healthy sample again, and stayed below the top level
+// on a perfect link. Each sender now reports its microphone's uplink jitter
+// too, and the good participant climbs straight back.
+{
+  const pausedBadUplinks = [{ lossPct: 8, jitterMs: 40 }, { lossPct: 12, jitterMs: 45 }, { lossPct: 9, jitterMs: 35 }];
+  const withoutCameraJitter = (reports, { audioJitter }) => new Map([...reports].map(([id, report]) =>
+    [id, { ...report, jitterMs: null, audioJitterMs: audioJitter ? report.audioJitterMs : null }]));
+  const pausedRoom = ({ audioJitter }) => (tick) => tick <= 2
+    // The first impaired seconds: every stream already lossy, every report
+    // still the clean one sent just before.
+    ? { ...goodParticipantLink, streams: roomStreams([60, 60, 60]), senderUplinks: senderReports([0, 0, 0]) }
+    : {
+      ...goodParticipantLink,
+      streams: roomStreams(pausedBadUplinks, { cameraPaused: true }),
+      senderUplinks: withoutCameraJitter(senderReports(pausedBadUplinks), { audioJitter })
+    };
+
+  const reported = runLadder(120, pausedRoom({ audioJitter: true }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.deepEqual(ticksOf(reported.stepDowns), [2], "stale reports cost the good participant exactly one early step");
+  assert.deepEqual(reported.climbs.map(({ from, to }) => ({ from, to })), [{ from: topLevel - 1, to: topLevel }],
+    "with the senders' audio jitter reported, the good participant climbs straight back to the top");
+  assert.ok(reported.climbs[0].tick <= 2 + 10, `the climb back must come within ten samples (tick ${reported.climbs[0].tick})`);
+  assert.equal(reported.level, topLevel, "the good participant ends at the top level");
+  assert.ok(reported.samples.slice(2).every((sample) => sample.good && sample.jitterMs === 3),
+    "once the reports arrive, the good participant's own-link jitter is its own 3 ms");
+  assert.deepEqual(reported.pauses, [], "the good participant never pauses");
+
+  // Without the audio report (the camera report alone): stuck below the top.
+  const cameraOnly = runLadder(120, pausedRoom({ audioJitter: false }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.deepEqual(ticksOf(cameraOnly.stepDowns), [2], "the same early step happens without the audio report");
+  assert.deepEqual(cameraOnly.climbs, [], "without the audio report the good participant never climbs back");
+  assert.equal(cameraOnly.level, topLevel - 1, "without the audio report the good participant stays below the top");
+  assert.ok(cameraOnly.samples.slice(2).every((sample) => !sample.good && sample.jitterMs >= 30),
+    "without the audio report the senders' queueing reads as the good participant's own jitter");
+
+  // An audio stream with no audio report of its own still takes the camera's
+  // (a sender on an older client), and a stream kind's own loss is used.
+  assert.deepEqual(senderUplinkForStream({ videoLossPct: 4, audioLossPct: 1, jitterMs: 20, audioJitterMs: null }, { kind: "audio" }),
+    { lossPct: 1, jitterMs: 20 }, "an audio stream without an audio jitter report falls back to the camera's");
+  assert.deepEqual(senderUplinkForStream({ videoLossPct: 4, audioLossPct: 1, jitterMs: 20, audioJitterMs: 35 }, { kind: "audio" }),
+    { lossPct: 1, jitterMs: 35 }, "an audio stream takes the audio jitter report");
+  assert.deepEqual(senderUplinkForStream({ videoLossPct: 4, audioLossPct: 1, jitterMs: 20, audioJitterMs: 35 }, { kind: "video" }),
+    { lossPct: 4, jitterMs: 20 }, "a video stream takes the camera's report");
+  assert.equal(senderUplinkForStream(undefined, { kind: "audio" }), null, "no report means no discount");
+}
+
+// A step-down on inbound damage alone is not a failed climb. The good
+// participant joins at level 2 and climbs to the top on its fifth sample;
+// four samples later the three bad senders' impairment reaches it before
+// their reports do, and it steps down. A climb only raises what this
+// participant sends, so a failed one shows on the send path (its uplink loss,
+// a growing round trip, a starved send estimate). Here the round trip stays
+// at 20 ms and the uplink is clean, so the climb threshold stays at its base
+// and the participant is back at the top five samples after the reports
+// arrive. The same step with the round trip blown up counts as a failed
+// climb and doubles the threshold.
+{
+  const pausedBadUplinks = [{ lossPct: 8, jitterMs: 40 }, { lossPct: 12, jitterMs: 45 }, { lossPct: 9, jitterMs: 35 }];
+  const lateReportsRoom = ({ rttMs }) => (tick) => {
+    if (tick <= 7) return goodParticipantSample([0, 0, 0]);
+    if (tick <= 9) {
+      return { ...goodParticipantLink, rttMs, streams: roomStreams([60, 60, 60]), senderUplinks: senderReports([0, 0, 0]) };
+    }
+    return { ...goodParticipantLink, streams: roomStreams(pausedBadUplinks), senderUplinks: senderReports(pausedBadUplinks) };
+  };
+
+  const inboundOnly = runLadder(60, lateReportsRoom({ rttMs: 20 }), { uplinkLossPct: 0 });
+  assert.deepEqual(ticksOf(inboundOnly.climbs), [5, 14],
+    "after an inbound-only step the participant climbs back on the base threshold");
+  assert.deepEqual(ticksOf(inboundOnly.stepDowns), [9], "the late reports cost one step");
+  assert.ok(inboundOnly.thresholds.every((threshold) => threshold === 5),
+    "an inbound-only step must not double the climb threshold");
+  assert.equal(inboundOnly.level, topLevel, "the participant ends at the top level");
+
+  const sendPath = runLadder(60, lateReportsRoom({ rttMs: 400 }), { uplinkLossPct: 0 });
+  assert.deepEqual(ticksOf(sendPath.stepDowns), [9], "a step with the round trip blown up happens at the same tick");
+  assert.equal(sendPath.thresholds[8], 10, "a step on the send path right after a climb doubles the threshold");
+  assert.deepEqual(ticksOf(sendPath.climbs), [5, 19], "after a failed climb the next one waits for the doubled threshold");
+
+  // The classifier tells the two apart.
+  assert.equal(classifyNetworkSample({ rttMs: 20, packetLoss: 60, jitterMs: 3, availableOutgoingKbps: 5000 }).sendPathPoor, false,
+    "inbound loss alone is not send-path damage");
+  assert.equal(classifyNetworkSample({ rttMs: 400, packetLoss: 0, jitterMs: 3 }).sendPathPoor, true,
+    "a round trip above the poor bar is send-path damage");
+  assert.equal(classifyNetworkSample({ rttMs: 20, packetLoss: 0, jitterMs: 3, availableOutgoingKbps: 150 }).sendPathPoor, true,
+    "a send estimate below the poor bar is send-path damage");
+  assert.equal(classifyNetworkSample({ rttMs: 20, packetLoss: 0, jitterMs: 3, availableOutgoingKbps: 0 }).sendPathPoor, false,
+    "a warming-up (zero) send estimate is not send-path damage");
 }
 
 console.log("Room network scenario tests passed");

@@ -2337,6 +2337,10 @@ const remoteSourceQuality = new Map();
 // The camera uplink's jitter from the latest SFU receiver report, reported in
 // network_state alongside the uplink loss.
 let cameraUplinkJitterMs = null;
+// The microphone uplink's jitter from the SFU's receiver reports. A sender
+// that paused its camera on a bad uplink has no camera report, but its audio
+// still crosses the same queue, so receivers discount it per stream kind.
+let audioUplinkJitterMs = null;
 // Every track event bound to a remote participant's tile, kept so a resumed
 // participant's still-live tracks can be bound again (remote-track-memory.js).
 const remoteTrackMemory = typeof createRemoteTrackMemory === "function" ? createRemoteTrackMemory() : null;
@@ -3955,11 +3959,15 @@ function connectSocket(name, password) {
         const tenths = Number(value ?? 0);
         return Number.isFinite(tenths) && tenths >= 0 ? tenths / 10 : null;
       };
-      const jitterMs = Number(message.uplink_jitter_ms ?? 0);
+      const milliseconds = (value) => {
+        const ms = Number(value ?? 0);
+        return Number.isFinite(ms) && ms >= 0 ? ms : null;
+      };
       remoteSourceQuality.set(message.participant_id, {
         videoLossPct: percent(message.uplink_loss10),
         audioLossPct: percent(message.audio_loss10),
-        jitterMs: Number.isFinite(jitterMs) && jitterMs >= 0 ? jitterMs : null
+        jitterMs: milliseconds(message.uplink_jitter_ms),
+        audioJitterMs: milliseconds(message.audio_uplink_jitter_ms)
       });
     }
     if (message.type === "participant_left" && message.participant?.id) {
@@ -5264,6 +5272,33 @@ async function updateDiagnostics() {
 // per-layer encodings each report their own loss; SlowMeet sends a single
 // camera encoding by default, so the camera sender's video outbound entry
 // is the uplink signal.
+// The microphone uplink's jitter as the SFU reports it (remote-inbound-rtp
+// paired with the audio outbound-rtp), in ms, or null without a recent
+// report. Read from the peer's full stats report the diagnostics tick already
+// has; a report older than cameraUplinkReportMaxAgeMs (a muted or silent
+// microphone sends nothing to report on) is no longer evidence.
+function audioUplinkJitterFromReport(report) {
+  if (!report || typeof report.forEach !== "function") return null;
+  let outbound;
+  report.forEach((stat) => {
+    if (stat.type === "outbound-rtp" && (stat.kind === "audio" || stat.mediaType === "audio")) outbound = stat;
+  });
+  if (!outbound) return null;
+  let remoteInbound;
+  report.forEach((stat) => {
+    if (stat.type === "remote-inbound-rtp" &&
+        (stat.localId === outbound.id || (stat.ssrc != null && stat.ssrc === outbound.ssrc))) {
+      remoteInbound = stat;
+    }
+  });
+  if (!Number.isFinite(remoteInbound?.jitter)) return null;
+  if (Number.isFinite(outbound.timestamp) && Number.isFinite(remoteInbound.timestamp) &&
+      outbound.timestamp - remoteInbound.timestamp > cameraUplinkReportMaxAgeMs) {
+    return null;
+  }
+  return remoteInbound.jitter * 1000;
+}
+
 async function sampleCameraUplinkLoss() {
   if (!cameraSender || typeof cameraSender.getStats !== "function") {
     cameraUplinkJitterMs = null;
@@ -5323,6 +5358,7 @@ async function runDiagnosticsUpdate() {
   if (!report || peer !== currentPeer) return;
   lastDiagnosticsStats = { report, peer: currentPeer, atMs: Date.now() };
   const uplinkLossPct = await sampleCameraUplinkLoss();
+  audioUplinkJitterMs = audioUplinkJitterFromReport(report);
   const values = {
     rttMs: null,
     jitterMs: null,
@@ -5552,11 +5588,7 @@ async function runDiagnosticsUpdate() {
       receivedPacketsSincePreviousSample
     ),
     fallbackJitterMs: values.jitterMs,
-    senderUplink: (participantID, stream) => {
-      const source = remoteSourceQuality.get(participantID);
-      if (!source) return null;
-      return { lossPct: stream?.kind === "audio" ? source.audioLossPct : source.videoLossPct, jitterMs: source.jitterMs };
-    }
+    senderUplink: (participantID, stream) => senderUplinkForStream(remoteSourceQuality.get(participantID), stream)
   });
   values.packetLoss = ownLink.lossPct;
   // The in-loop assignments above keep the video-wins/audio-fills fallback;
@@ -5684,7 +5716,7 @@ async function runDiagnosticsUpdate() {
       adaptationLevel = transition.level;
       poorSamples = 0;
       goodSamples = 0;
-      climbBackoff.noteStepDown();
+      climbBackoff.noteStepDown(uplinkPoor || networkCondition.sendPathPoor);
       await applyProfile(profiles[adaptationLevel].name);
     } else if (transition.reset === "good") {
       adaptationLevel = transition.level;
@@ -5817,7 +5849,8 @@ async function runDiagnosticsUpdate() {
       video_kbps: values.outboundKbps == null ? -1 : Math.max(0, values.outboundKbps),
       audio_kbps: values.outboundAudioKbps == null ? -1 : Math.max(0, values.outboundAudioKbps),
       uplink_loss10: uplinkLossPct == null ? -1 : normalizePacketLoss10(uplinkLossPct),
-      uplink_jitter_ms: cameraUplinkJitterMs == null ? -1 : Math.min(120000, Math.max(0, Math.round(cameraUplinkJitterMs)))
+      uplink_jitter_ms: cameraUplinkJitterMs == null ? -1 : Math.min(120000, Math.max(0, Math.round(cameraUplinkJitterMs))),
+      audio_uplink_jitter_ms: audioUplinkJitterMs == null ? -1 : Math.min(120000, Math.max(0, Math.round(audioUplinkJitterMs)))
     }));
   }
 }

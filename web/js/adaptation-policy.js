@@ -93,6 +93,14 @@ function chooseAdaptationLevel(level, poorSamples, goodSamples, profileCount, cl
 // that is stepped back down within failedClimbWindowSamples doubles the
 // threshold for the next attempt, up to climbMaxSamples; a climb that holds
 // past that window restores the base threshold.
+//
+// A climb only raises what this participant sends, so it fails on the send
+// path: its own uplink loses packets or the round trip grows as the queue
+// fills (also on a link whose up and down directions share one queue). A
+// step-down on inbound loss or jitter alone — remote senders' uplinks, or
+// their reports arriving late — is not a failed climb, and doubling there
+// kept a participant on a fast link below the top level long after the
+// remote damage was discounted. noteStepDown(onSendPath) says which it was.
 function createClimbBackoff() {
   let samples = climbBaseSamples;
   let sinceClimb = null;
@@ -111,9 +119,9 @@ function createClimbBackoff() {
     noteClimb() {
       sinceClimb = 0;
     },
-    noteStepDown() {
+    noteStepDown(onSendPath = true) {
       if (sinceClimb === null) return;
-      samples = Math.min(climbMaxSamples, samples * 2);
+      if (onSendPath) samples = Math.min(climbMaxSamples, samples * 2);
       sinceClimb = null;
     },
     reset() {
@@ -378,7 +386,11 @@ function classifyNetworkSample({ rttMs, packetLoss, jitterMs, availableOutgoingK
   // metric must be measured — capacity alone cannot vouch for health.
   const transportHealthy = (rttKnown || lossKnown || jitterKnown) && !critical &&
     (!rttKnown || rttMs < healthyBelowMs) && (!lossKnown || packetLoss < 1) && (!jitterKnown || jitterMs < 30);
-  return { poor, critical, good, transportHealthy };
+  // The part of `poor` that this participant's own sending can cause: a
+  // queue building on its path (round trip) or a starved send estimate. Loss
+  // and jitter here are inbound, measured on what the others send.
+  const sendPathPoor = (rttKnown && rttMs > poorAboveMs) || (capacityKnown && isBelowBitrate(availableOutgoingKbps, 220));
+  return { poor, critical, good, transportHealthy, sendPathPoor };
 }
 
 function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, threshold = 3) {
@@ -442,6 +454,24 @@ function selectOwnLinkMeasurements(streams, {
       : (Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null),
     jitterMs: bestJitter !== null ? bestJitter
       : (Number.isFinite(fallbackJitterMs) && fallbackJitterMs >= 0 ? fallbackJitterMs : null)
+  };
+}
+
+// What one remote sender's stream loses and queues before it leaves the SFU,
+// for selectOwnLinkMeasurements' senderUplink: `source` is the sender's last
+// source_quality ({ videoLossPct, audioLossPct, jitterMs, audioJitterMs }, each
+// null when unknown) and `stream` the inbound window being discounted. Each
+// stream kind takes its own report: a sender that pauses its camera on a bad
+// uplink reports no camera jitter, yet its microphone still crosses the same
+// queue, and charging that queueing to the receiver's link kept a participant
+// on a fast link below the top level. An audio stream without its own jitter
+// report falls back to the camera's, as before audio jitter was reported.
+function senderUplinkForStream(source, stream) {
+  if (!source) return null;
+  const audio = stream?.kind === "audio";
+  return {
+    lossPct: audio ? source.audioLossPct : source.videoLossPct,
+    jitterMs: audio && Number.isFinite(source.audioJitterMs) ? source.audioJitterMs : source.jitterMs
   };
 }
 
@@ -511,6 +541,7 @@ if (typeof module !== "undefined") {
     packetCounterDeltas,
     packetLossPercentFromDeltas,
     selectOwnLinkMeasurements,
+    senderUplinkForStream,
     classifyParticipantQuality,
     stabilizeParticipantQuality,
     chooseAdaptationLevel,

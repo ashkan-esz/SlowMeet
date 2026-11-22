@@ -281,6 +281,18 @@ function stepAdaptationLadder(state, sample) {
   backoff.noteStepDown();
   backoff.reset();
   if (backoff.threshold() !== 5) throw new Error("reset must restore the base threshold");
+  // A step-down that does not show on the send path (inbound damage only)
+  // is not a failed climb: it ends the climb's probation without doubling.
+  backoff.noteClimb();
+  backoff.tick();
+  backoff.noteStepDown(false);
+  if (backoff.threshold() !== 5) throw new Error("an inbound-only step after a climb must not lengthen the next climb");
+  backoff.noteStepDown(true);
+  if (backoff.threshold() !== 5) throw new Error("the inbound-only step already ended the climb's probation");
+  backoff.noteClimb();
+  backoff.noteStepDown(true);
+  if (backoff.threshold() !== 10) throw new Error("a send-path step after a climb must double the next threshold");
+  backoff.reset();
   if (chooseAdaptationLevel(0, 0, 9, 4, 10).level !== 0 || chooseAdaptationLevel(0, 0, 10, 4, 10).level !== 1 ||
       chooseAdaptationLevel(0, 0, 5, 4).level !== 1) {
     throw new Error("the climb threshold must be honoured, and default to five samples");
@@ -890,7 +902,7 @@ if (!appSource.includes('stat.type === "remote-inbound-rtp"') ||
   throw new Error("uplink loss must come from the remote-inbound-rtp entry paired with the camera's outbound stream");
 }
 if (!/climbBackoff\.tick\(\);\s*const transition = chooseAdaptationLevel\([\s\S]{0,160}climbBackoff\.threshold\(\)\s*\);/.test(appSource) ||
-    !/transition\.reset === "poor"\) \{[\s\S]{0,120}poorSamples = 0;\s*goodSamples = 0;\s*climbBackoff\.noteStepDown\(\);/.test(appSource) ||
+    !/transition\.reset === "poor"\) \{[\s\S]{0,120}poorSamples = 0;\s*goodSamples = 0;\s*climbBackoff\.noteStepDown\(uplinkPoor \|\| networkCondition\.sendPathPoor\);/.test(appSource) ||
     !/transition\.reset === "good"\) \{[\s\S]{0,120}poorSamples = 0;\s*goodSamples = 0;\s*climbBackoff\.noteClimb\(\);/.test(appSource)) {
   throw new Error("every ladder transition must clear both streaks and feed the climb backoff");
 }

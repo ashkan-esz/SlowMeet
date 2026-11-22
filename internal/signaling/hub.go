@@ -772,8 +772,8 @@ func (h *Hub) forgetMediaState(participantID string) {
 // sourceQualityState is one participant's reported uplink, and what the room
 // was last told about it.
 type sourceQualityState struct {
-	sentLoss10, sentAudioLoss10, sentJitterMs int
-	sentAt                                    time.Time
+	sentLoss10, sentAudioLoss10, sentJitterMs, sentAudioJitterMs int
+	sentAt                                                       time.Time
 }
 
 const (
@@ -795,7 +795,8 @@ func absInt(value int) int {
 // sourceQualityMessage is the source_quality broadcast for participantID.
 func sourceQualityMessage(participantID string, state *sourceQualityState) Message {
 	return Message{Version: ProtocolVersion, Type: TypeSourceQuality, ParticipantID: participantID,
-		UplinkLoss10: state.sentLoss10, AudioLoss10: state.sentAudioLoss10, UplinkJitterMs: state.sentJitterMs}
+		UplinkLoss10: state.sentLoss10, AudioLoss10: state.sentAudioLoss10, UplinkJitterMs: state.sentJitterMs,
+		AudioUplinkJitterMs: state.sentAudioJitterMs}
 }
 
 // noteSourceQuality relays what one participant's streams lose before they
@@ -812,7 +813,7 @@ func sourceQualityMessage(participantID string, state *sourceQualityState) Messa
 // reported. Receivers discount both (selectOwnLinkMeasurements in
 // web/js/adaptation-policy.js). Relayed when something changed enough, at
 // most once per sourceQualityMinInterval.
-func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs int, now time.Time) {
+func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs, audioJitterMs int, now time.Time) {
 	participantID := c.participant.ID
 	if participantID == "" {
 		return
@@ -832,11 +833,13 @@ func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs int, now tim
 	changed := first || absInt(videoLoss10-state.sentLoss10) >= sourceQualityLossStep ||
 		absInt(audioLoss10-state.sentAudioLoss10) >= sourceQualityLossStep ||
 		absInt(jitterMs-state.sentJitterMs) >= sourceQualityJitterStepMs ||
+		absInt(audioJitterMs-state.sentAudioJitterMs) >= sourceQualityJitterStepMs ||
 		(videoLoss10 < 0) != (state.sentLoss10 < 0) || (audioLoss10 < 0) != (state.sentAudioLoss10 < 0)
 	if !changed || (!first && now.Sub(state.sentAt) < sourceQualityMinInterval) {
 		return
 	}
-	state.sentLoss10, state.sentAudioLoss10, state.sentJitterMs, state.sentAt = videoLoss10, audioLoss10, jitterMs, now
+	state.sentLoss10, state.sentAudioLoss10, state.sentJitterMs, state.sentAudioJitterMs, state.sentAt =
+		videoLoss10, audioLoss10, jitterMs, audioJitterMs, now
 	if _, admitted := h.roomMembers[c]; admitted {
 		h.broadcastExceptLocked(c, sourceQualityMessage(participantID, state))
 	}
@@ -1086,7 +1089,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if msg.Type == TypeNetworkState {
 				msg.ParticipantID = c.participant.ID
 				h.metrics.ObserveNetwork(msg.RTTMs, msg.PacketLoss10, msg.JitterMs, msg.VideoKbps, msg.AudioKbps)
-				h.noteSourceQuality(c, msg.UplinkLoss10, msg.UplinkJitterMs, time.Now())
+				h.noteSourceQuality(c, msg.UplinkLoss10, msg.UplinkJitterMs, msg.AudioUplinkJitterMs, time.Now())
 				continue
 			}
 			if msg.Type == TypeScreenShare {
