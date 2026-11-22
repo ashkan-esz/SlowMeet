@@ -124,21 +124,21 @@ what should change. Fixing an issue means flipping that assertion.
   is the minimum loss across inbound streams. When every remote sender has a
   lossy uplink, that minimum is high even though the receiver's link is
   clean, so a fast participant steps its own camera down and, above 10%,
-  pauses it. Pinned in `scripts/test-room-network-scenarios.js`. In
-  `one-fast-three-bad-uplinks` the fast participant fell from level 3 to 0
-  within about 5 s and paused its camera for most of the window in every
-  run so far.
-- **B2 — keyframe requests are not coalesced.** Every subscriber's PLI/FIR
-  reaches the publisher, and server keyframe retries run once per receiver,
-  so three lossy subscribers multiply keyframe requests on a shared
-  publisher. Pinned in `TestSubscriberKeyFrameRequestsFanInToPublisher` and
-  `TestLayerTransitionKeyFrameRetriesPerReceiver`.
-- **B3 — frames over 128 packets are dropped whole.** A large keyframe at
-  the default 3 Mbps cap can exceed the frame buffer's packet limit. Pinned
-  in `TestVideoFrameBufferMaxPacketsBoundary`.
-- **B4 — FPS gate decimates a source at the cap.** With capture-time jitter,
-  a source running at exactly the configured frame-rate cap loses about
-  half its frames. Pinned in `TestBitrateLimiterFPSGateAtSourceRate`.
+  pauses it. In `one-fast-three-bad-uplinks` the fast participant fell from
+  level 3 to 0 within about 5 s and paused its camera for most of the
+  window in every run so far (33–34 of 40 samples, up to 70 % loss, in the
+  three runs after the change below).
+  Partly addressed: each sender now reports its own uplink loss and jitter
+  in `network_state`, the server relays them as `source_quality`, and
+  `selectOwnLinkMeasurements` discounts each stream by its sender's report.
+  That fixes the room model (`scripts/test-room-network-scenarios.js`, whose
+  B1 rows now hold) but not the browser scenario: there the senders report
+  0 % uplink loss, because the SFU's NACKs recover their packets, while the
+  fast participant still sees ~70 % loss. The loss is created at the SFU, which
+  forwards a frame once complete or skips it, so retransmissions that
+  arrive late over a slow lossy uplink never reach receivers. The remaining
+  fix is for the SFU to measure each publication's forwarded-versus-expected
+  packets and relay that instead of, or with, the sender's own report.
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
   another leaves and rejoins; when the held `participant_left`,
@@ -151,7 +151,20 @@ what should change. Fixing an issue means flipping that assertion.
   that was the cause is unproven, so the scenario keeps logging
   `KNOWN ISSUE B10` if it ever reproduces.
 
-- **Fixed: B5–B9 and B11.** Their tests now enforce the fix without a gate.
+- **Fixed: B2–B9 and B11.** Their tests now enforce the fix without a gate.
+  - B2, keyframe requests not coalesced: one retry series per publication
+    (not per receiver), and relayed PLI/FIR share a 200 ms budget per
+    publication with the SFU's own requests, so N receivers losing the
+    picture together cost the encoder one keyframe.
+    `TestSubscriberKeyFrameRequestsFanInToPublisher`,
+    `TestLayerTransitionKeyFrameRetriesPerReceiver`.
+  - B3, frames over 128 packets dropped whole: `maxFramePackets` is 512, so a
+    1080p keyframe at 3 Mbps (~130 packets) is forwarded.
+    `TestVideoFrameBufferMaxPacketsBoundary`.
+  - B4, the FPS gate halving a jittered source at the cap: the gate keeps a
+    schedule with a quarter-interval slack instead of a minimum gap, so
+    capture jitter passes and faster sources are still held to the cap.
+    `TestBitrateLimiterFPSGateAtSourceRate`.
   - B5, a peer announced twice when admissions overlap: `admit` now
     broadcasts the joiner's `participant_joined` and replays only
     participants the room already knows (the hub's `announced` set) under
