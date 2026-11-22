@@ -204,6 +204,15 @@ func TestHubReplaysLatestMediaStateToLateJoiners(t *testing.T) {
 		Version: ProtocolVersion, Type: TypeMediaState, ParticipantID: firstJoined.Participant.ID,
 		AudioEnabled: &latestAudio, VideoEnabled: &latestVideo, VideoPaused: &latestPaused,
 	})
+	// The hub handles the first participant's messages on its own read
+	// goroutine; join the second only once the latest state is recorded, or
+	// the test races the hub instead of checking the replay.
+	waitWithin(t, 3*time.Second, "the hub records the first participant's latest media state", func() bool {
+		hub.mu.RLock()
+		defer hub.mu.RUnlock()
+		state, ok := hub.mediaStates[firstJoined.Participant.ID]
+		return ok && state.VideoPaused != nil && *state.VideoPaused
+	})
 
 	second := dialTestSocket(t, socketURL)
 	defer second.Close()
