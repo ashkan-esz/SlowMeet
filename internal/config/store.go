@@ -90,6 +90,8 @@ func unknownJSONKeys(data []byte) []string {
 		"screen_share_enabled":       {},
 		"retain_chat_history":        {},
 		"enabled_connection_methods": {},
+		"video_codecs":               {},
+		"default_video_codec":        {},
 		"connection_methods_version": {},
 	}
 	var unknown []string
@@ -129,6 +131,8 @@ type AdminUpdate struct {
 	ScreenShare              *bool     `json:"screen_share_enabled"`
 	RetainChatHistory        *bool     `json:"retain_chat_history"`
 	EnabledConnectionMethods *[]string `json:"enabled_connection_methods"`
+	VideoCodecs              *[]string `json:"video_codecs"`
+	DefaultVideoCodec        *string   `json:"default_video_codec"`
 	// ConnectionMethodsVersion marks which connection-method ids a persisted
 	// file knows about; see migrateConnectionMethods. Ignored on admin updates.
 	ConnectionMethodsVersion *int `json:"connection_methods_version,omitempty"`
@@ -211,6 +215,13 @@ func updatedConfig(current Config, update AdminUpdate) (Config, error) {
 		next.EnabledConnectionMethods = make([]string, len(*update.EnabledConnectionMethods))
 		copy(next.EnabledConnectionMethods, *update.EnabledConnectionMethods)
 	}
+	if update.VideoCodecs != nil {
+		next.VideoCodecs = make([]string, len(*update.VideoCodecs))
+		copy(next.VideoCodecs, *update.VideoCodecs)
+	}
+	if update.DefaultVideoCodec != nil {
+		next.DefaultVideoCodec = *update.DefaultVideoCodec
+	}
 	if err := next.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -231,6 +242,8 @@ func persist(cfg Config, path string) error {
 		ScreenShare:              boolPointer(cfg.EnableScreenShare),
 		RetainChatHistory:        boolPointer(cfg.RetainChatHistory),
 		EnabledConnectionMethods: stringSlicePointer(cfg.EffectiveEnabledConnectionMethods()),
+		VideoCodecs:              stringSlicePointer(cfg.EffectiveVideoCodecs()),
+		DefaultVideoCodec:        stringPointer(cfg.EffectiveDefaultVideoCodec()),
 		ConnectionMethodsVersion: intPointer(connectionMethodsVersion),
 	}, "", "  ")
 	if err != nil {

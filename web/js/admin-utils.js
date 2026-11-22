@@ -101,6 +101,14 @@
     } else if (Number.isFinite(defaultAudioBitrate) && values.max_audio_bitrate < defaultAudioBitrate) {
       errors.max_audio_bitrate = 'Maximum audio bitrate cannot be below the default audio bitrate.';
     }
+    if (values.video_codecs !== undefined || values.default_video_codec !== undefined) {
+      const videoCodecs = Array.isArray(values.video_codecs) ? values.video_codecs : [];
+      if (!videoCodecs.includes('vp8')) {
+        errors.default_video_codec = 'VP8 must stay enabled as the codec every browser can play.';
+      } else if (!videoCodecs.includes(values.default_video_codec)) {
+        errors.default_video_codec = 'The default codec must be one of the enabled codecs.';
+      }
+    }
     return errors;
   }
 

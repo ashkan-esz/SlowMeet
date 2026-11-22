@@ -36,13 +36,19 @@ type Limits struct {
 }
 
 type publication struct {
-	key          string
-	sourceID     string
-	role         SourceRole
-	layer        string
-	trackID      string
-	streamID     string
-	codec        pion.RTPCodecCapability
+	key      string
+	sourceID string
+	role     SourceRole
+	layer    string
+	trackID  string
+	streamID string
+	codec    pion.RTPCodecCapability
+	// codecName is the configuration name of a video publication's codec
+	// (video_codecs.go), empty for audio. payloadType is the ingress payload
+	// type that codec was read from; it changes when the publisher's browser
+	// switches codec on the same track.
+	codecName    string
+	payloadType  uint8
 	remote       *pion.TrackRemote
 	source       *webrtc.Peer
 	tracks       map[string]*publicationTarget
@@ -330,9 +336,14 @@ type Router struct {
 	// heldSources are publishers inside their reconnect grace window: their
 	// publications outlive the end of their media (see keepStoppedPublication).
 	heldSources map[string]struct{}
-	limits      Limits
-	audioDrops  metrics.AudioDrops
-	rtcpRelay   metrics.RTCPRelay
+	// receiverVideoCodecs is the video codecs each receiver's browser supports
+	// and allowedVideoCodecs the ones the server allows (video_codecs.go). A
+	// receiver without an entry, or a nil allowed set, is not filtered.
+	receiverVideoCodecs map[string]map[string]struct{}
+	allowedVideoCodecs  map[string]struct{}
+	limits              Limits
+	audioDrops          metrics.AudioDrops
+	rtcpRelay           metrics.RTCPRelay
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -484,6 +495,7 @@ func (r *Router) Unregister(id string) {
 	delete(r.heldSources, id)
 	delete(r.videoSubscriptions, id)
 	delete(r.videoSubscriptionsSet, id)
+	delete(r.receiverVideoCodecs, id)
 	delete(r.cameraLayers, id)
 	for _, subscriptions := range r.videoSubscriptions {
 		delete(subscriptions, id)
@@ -557,6 +569,8 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		trackID:     trackID,
 		streamID:    streamID,
 		codec:       remote.Codec().RTPCodecCapability,
+		codecName:   videoCodecNameForTrack(remote),
+		payloadType: uint8(remote.PayloadType()),
 		remote:      remote,
 		source:      source,
 		tracks:      make(map[string]*publicationTarget),
@@ -604,6 +618,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		r.removePublicationLocked(existing, offers, &ops)
 	}
 	r.pubs[key] = pub
+	r.warnIfVideoCodecNotAllowedLocked(pub)
 	for id := range r.peers {
 		if r.shouldSubscribeLocked(pub, id) && r.queueSubscriptionLocked(pub, id, &ops) {
 			if offerer := r.offerers[id]; offerer != nil {
@@ -639,29 +654,7 @@ func (r *Router) SetVideoSubscriptionsWithLayer(receiverID string, cameraPartici
 	r.videoSubscriptions[receiverID] = desired
 	r.videoSubscriptionsSet[receiverID] = true
 	r.cameraLayers[receiverID] = cameraLayer
-	for _, pub := range r.pubs {
-		if pub.sourceID == receiverID {
-			continue
-		}
-		_, subscribed := pub.tracks[receiverID]
-		if r.shouldSubscribeLocked(pub, receiverID) {
-			if r.queueSubscriptionLocked(pub, receiverID, &ops) {
-				changed = true
-			}
-			continue
-		}
-		if !subscribed {
-			continue
-		}
-		if sender := pub.senders[receiverID]; sender != nil {
-			if peer := r.peers[receiverID]; peer != nil {
-				ops = append(ops, pendingTrackOp{peer: peer, sender: sender})
-			}
-		}
-		r.removeTargetLocked(pub, receiverID)
-		r.cancelVideoKeyFramePublisherRetryWithoutSubscribersLocked(pub)
-		changed = true
-	}
+	changed = r.reconcileReceiverLocked(receiverID, &ops)
 	if changed {
 		offer = r.offerers[receiverID]
 	}
@@ -702,6 +695,9 @@ func publicationKey(sourceID string, role SourceRole, layer string) string {
 
 func (r *Router) shouldSubscribeLocked(pub *publication, receiverID string) bool {
 	if pub.sourceID == receiverID {
+		return false
+	}
+	if !r.videoCodecUsableLocked(pub, receiverID) {
 		return false
 	}
 	if pub.role != SourceRoleCamera || !r.videoSubscriptionsSet[receiverID] {
@@ -1032,6 +1028,15 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 		if err != nil {
 			continue
 		}
+		if !senderNegotiatedCodec(sender, op.pub.codec) {
+			// Starting a sender for a codec the receiver never negotiated
+			// fails its whole next description, not just this track.
+			slog.Default().Warn("media_subscription_codec_not_negotiated",
+				"source_id", op.pub.sourceID, "role", op.pub.role,
+				"receiver_id", op.targetID, "codec", op.pub.codec.MimeType)
+			_ = op.peer.RemoveTrack(sender)
+			continue
+		}
 		r.mu.Lock()
 		valid := r.pubs[op.pub.key] == op.pub &&
 			r.peers[op.targetID] == op.peer &&
@@ -1326,6 +1331,12 @@ func (r *Router) forwardVideo(pub *publication) {
 				return
 			default:
 			}
+			// A packet whose payload type the media engine does not know is
+			// dropped by pion after it was read; it says nothing about the
+			// transport, so the publication stays.
+			if errors.Is(err, pion.ErrCodecNotFound) {
+				continue
+			}
 			// The poll deadline expiring is the loop's wake-up signal, not a
 			// transport failure. Pion returns two distinct timeout values with
 			// the same "i/o timeout" message: os.ErrDeadlineExceeded from the
@@ -1345,6 +1356,12 @@ func (r *Router) forwardVideo(pub *publication) {
 			}
 			r.reportPublicationReadStop(pub, err)
 			return
+		}
+		if pub.payloadType != 0 && uint8(packet.PayloadType) != pub.payloadType {
+			if r.handleIngressCodecChange(pub, uint8(packet.PayloadType)) {
+				return
+			}
+			continue
 		}
 		pub.lastPacketAt.Store(time.Now().UnixNano())
 		if pub.paused.Load() {

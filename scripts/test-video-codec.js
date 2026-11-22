@@ -1,0 +1,180 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  codecNameFromMime, deviceCodecs, fallbackOrder, chooseSendCodec, preferVideoCodec,
+  cpuFallbackDue, isNewerCodec, codecLabel
+} = require("../web/js/video-codec.js");
+
+// --- SDP rewrite -----------------------------------------------------------
+
+const videoLine = "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 45 46 102 103 127 125";
+const sdp = [
+  "v=0",
+  "m=audio 9 UDP/TLS/RTP/SAVPF 111 63",
+  "a=rtpmap:111 opus/48000/2",
+  "a=fmtp:111 minptime=10;useinbandfec=1",
+  "a=rtpmap:63 red/48000/2",
+  videoLine,
+  "a=mid:1",
+  "a=rtpmap:96 VP8/90000",
+  "a=rtpmap:97 rtx/90000",
+  "a=fmtp:97 apt=96",
+  "a=rtpmap:98 VP9/90000",
+  "a=fmtp:98 profile-id=0",
+  "a=rtpmap:99 rtx/90000",
+  "a=fmtp:99 apt=98",
+  "a=rtpmap:100 VP9/90000",
+  "a=fmtp:100 profile-id=2",
+  "a=rtpmap:101 rtx/90000",
+  "a=fmtp:101 apt=100",
+  "a=rtpmap:45 AV1/90000",
+  "a=rtpmap:46 rtx/90000",
+  "a=fmtp:46 apt=45",
+  "a=rtpmap:102 H264/90000",
+  "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f",
+  "a=rtpmap:103 rtx/90000",
+  "a=fmtp:103 apt=102",
+  "a=rtpmap:127 H264/90000",
+  "a=fmtp:127 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+  "a=rtpmap:125 rtx/90000",
+  "a=fmtp:125 apt=127",
+  "m=video 9 UDP/TLS/RTP/SAVPF 96 97",
+  "a=mid:2",
+  "a=rtpmap:96 VP8/90000",
+  "a=rtpmap:97 rtx/90000",
+  "a=fmtp:97 apt=96",
+  ""
+].join("\r\n");
+
+function videoLines(text) {
+  return text.split(/\r?\n/).filter((line) => line.startsWith("m=video "));
+}
+
+function onlyVideoLinesChanged(before, after) {
+  const strip = (text) => text.split("\r\n").filter((line) => !line.startsWith("m=video ")).join("\r\n");
+  assert.equal(strip(after), strip(before), "only the video m-lines may change");
+}
+
+const av1 = preferVideoCodec(sdp, "av1");
+assert.equal(videoLines(av1)[0], "m=video 9 UDP/TLS/RTP/SAVPF 45 46 96 97 98 99 100 101 102 103 127 125",
+  "AV1 and its RTX move to the front, the rest keeps its order");
+assert.equal(videoLines(av1)[1], "m=video 9 UDP/TLS/RTP/SAVPF 96 97",
+  "a section that does not offer the codec is left alone");
+onlyVideoLinesChanged(sdp, av1);
+assert.equal(preferVideoCodec(av1, "av1"), av1, "the rewrite is idempotent");
+
+assert.equal(videoLines(preferVideoCodec(sdp, "vp9"))[0],
+  "m=video 9 UDP/TLS/RTP/SAVPF 98 99 96 97 100 101 45 46 102 103 127 125",
+  "only VP9 profile 0 is preferred; profile 2 stays where it was");
+assert.equal(videoLines(preferVideoCodec(sdp, "h264"))[0],
+  "m=video 9 UDP/TLS/RTP/SAVPF 102 103 127 125 96 97 98 99 100 101 45 46",
+  "every H.264 payload type moves, in its original order");
+assert.equal(preferVideoCodec(sdp, "vp8"), sdp, "a codec already in front changes nothing");
+assert.equal(videoLines(preferVideoCodec(av1, "vp8"))[0], "m=video 9 UDP/TLS/RTP/SAVPF 96 97 45 46 98 99 100 101 102 103 127 125",
+  "a later choice moves only its own payload types");
+
+for (const codec of [null, undefined, "auto", "h265", ""]) {
+  assert.equal(preferVideoCodec(sdp, codec), sdp, `codec ${String(codec)} leaves the SDP alone`);
+}
+assert.equal(preferVideoCodec(undefined, "av1"), undefined);
+const unixSDP = sdp.replace(/\r\n/g, "\n");
+assert.equal(preferVideoCodec(unixSDP, "av1"), av1.replace(/\r\n/g, "\n"), "bare newlines are preserved");
+assert.ok(!preferVideoCodec(unixSDP, "av1").includes("\r"));
+
+// --- Device capabilities ---------------------------------------------------
+
+assert.equal(codecNameFromMime("video/VP9", "profile-id=2"), null);
+assert.equal(codecNameFromMime("video/VP9"), "vp9");
+assert.equal(codecNameFromMime("video/AV1"), "av1");
+assert.equal(codecNameFromMime("video/rtx"), null);
+assert.equal(codecLabel("h264"), "H.264");
+assert.equal(codecLabel("nope"), "");
+
+const sender = {codecs: [
+  {mimeType: "video/VP8"}, {mimeType: "video/rtx"},
+  {mimeType: "video/VP9", sdpFmtpLine: "profile-id=0"},
+  {mimeType: "video/VP9", sdpFmtpLine: "profile-id=2"},
+  {mimeType: "video/H264", sdpFmtpLine: "packetization-mode=1;profile-level-id=42e01f"},
+  {mimeType: "video/AV1"}
+]};
+const receiverWithoutAV1 = {codecs: sender.codecs.filter((codec) => codec.mimeType !== "video/AV1")};
+assert.deepEqual(deviceCodecs(sender, sender), ["av1", "vp9", "vp8", "h264"]);
+assert.deepEqual(deviceCodecs(sender, receiverWithoutAV1), ["vp9", "vp8", "h264"],
+  "a codec counts only when the device both sends and receives it");
+assert.deepEqual(deviceCodecs({codecs: [{mimeType: "video/VP9", sdpFmtpLine: "profile-id=2"}, {mimeType: "video/VP8"}]}, sender),
+  ["vp8"], "VP9 without profile 0 is not VP9 support");
+assert.equal(deviceCodecs(undefined, sender), null);
+assert.equal(deviceCodecs({codecs: []}, sender), null);
+
+// --- Choice ----------------------------------------------------------------
+
+assert.deepEqual(fallbackOrder("av1"), ["av1", "vp9", "vp8", "h264"]);
+assert.deepEqual(fallbackOrder("vp9"), ["vp9", "vp8", "h264", "av1"]);
+assert.deepEqual(fallbackOrder("h264"), ["h264", "vp8", "vp9", "av1"]);
+assert.ok(isNewerCodec("av1", "vp8"));
+assert.ok(!isNewerCodec("vp8", "vp9"));
+assert.ok(!isNewerCodec(null, "vp9"));
+
+const all = ["av1", "vp9", "vp8", "h264"];
+const choices = [
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all}, "av1", "server default"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: ["vp9", "vp8"], device: all}, "vp9", "room without AV1 falls to VP9"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: ["vp8", "h264"]}, "vp8", "device without the new codecs falls to VP8"],
+  [{stored: "vp8", serverDefault: "av1", roomCodecs: all, device: all}, "vp8", "the participant may pick an older codec"],
+  [{stored: "av1", serverDefault: "vp8", roomCodecs: all, device: all}, "av1", "or a newer one than the default"],
+  [{stored: "av1", serverDefault: "vp8", roomCodecs: ["vp8", "h264"], device: all}, "vp8", "a pick the room cannot play falls back"],
+  [{stored: "h264", serverDefault: "av1", roomCodecs: ["av1", "vp9", "vp8"], device: all}, "vp8", "H.264 falls to VP8 before anything newer"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, avoid: new Set(["av1"])}, "vp9", "automatic skips a codec this device encodes poorly"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, avoid: ["av1", "vp9"]}, "vp8", "avoid may be an array"],
+  [{stored: "av1", serverDefault: "av1", roomCodecs: all, device: all, avoid: new Set(["av1"])}, "av1", "an explicit pick is not overridden"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: ["av1"], device: ["av1"], avoid: new Set(["av1"])}, "av1", "the only usable codec is used even when avoided"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcast: true}, "vp8", "simulcast stays on the older codecs"],
+  [{stored: "auto", serverDefault: "nope", roomCodecs: ["vp9", "vp8"], device: all}, "vp9", "an unknown default means the newest usable codec"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: null, device: all}, null, "no room list yet"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: null}, null, "browser without capabilities is left alone"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: ["av1"], device: ["vp8"]}, null, "nothing in common"]
+];
+for (const [options, expected, label] of choices) {
+  assert.equal(chooseSendCodec(options), expected, label);
+}
+assert.equal(chooseSendCodec(), null);
+
+// --- CPU fallback ----------------------------------------------------------
+
+assert.equal(cpuFallbackDue(Array(10).fill("cpu")), true);
+assert.equal(cpuFallbackDue(Array(9).fill("cpu")), false);
+assert.equal(cpuFallbackDue([...Array(9).fill("cpu"), "none"]), false);
+assert.equal(cpuFallbackDue(["none", ...Array(10).fill("cpu")]), true);
+assert.equal(cpuFallbackDue(["cpu", "cpu"], 2), true);
+assert.equal(cpuFallbackDue(null), false);
+
+// --- Wiring in the page ----------------------------------------------------
+
+const root = path.join(__dirname, "..");
+const appSource = fs.readFileSync(path.join(root, "web/js/app.js"), "utf8");
+const indexMarkup = fs.readFileSync(path.join(root, "web/index.html"), "utf8");
+
+const remoteDescriptions = appSource.match(/currentPeer\.setRemoteDescription\(\{[^}]*\}\)/g) || [];
+assert.equal(remoteDescriptions.length, 2, "the offer and the answer are the two remote descriptions");
+for (const call of remoteDescriptions) {
+  assert.match(call, /sdp: applyRemoteSDPChoices\(message\.sdp\)/,
+    "every remote description goes through the codec and DTX choices");
+}
+assert.match(appSource, /function applyRemoteSDPChoices\(sdp\) \{\s*return applyVideoCodecChoice\(applyOpusDTXChoice\(sdp\)\);/);
+assert.match(appSource, /function applyVideoCodecChoice\(sdp\) \{\s*return window\.SlowMeetVideoCodec\.preferVideoCodec\(sdp, videoCodecApplied\);/);
+assert.match(appSource, /let videoCodecStored = readStoredValue\("meeting\.videoCodec"\)/);
+assert.match(appSource, /writeStoredValue\("meeting\.videoCodec", videoCodecStored\)/);
+assert.match(appSource, /type: "join", name, password, reconnect_token: reconnectToken,\s*video_codecs: videoCodecsDevice \|\| undefined/,
+  "join tells the server which codecs this device supports");
+assert.match(appSource, /message\.type === "video_codec_state"[\s\S]{0,120}noteRoomVideoCodecs\(message\.room_video_codecs, false\)/);
+assert.match(appSource, /noteServerVideoCodecs\(config\.video_codecs, config\.default_video_codec\)/);
+assert.match(appSource, /noteServerVideoCodecs\(message\.video_codecs, message\.default_video_codec\)/);
+assert.match(indexMarkup, /<select id="video-codec"/);
+assert.match(indexMarkup, /id="video-codec-note"/);
+assert.match(indexMarkup, /id="metric-video-codec"/);
+assert.ok(indexMarkup.indexOf('src="/js/video-codec.js"') > 0 &&
+  indexMarkup.indexOf('src="/js/video-codec.js"') < indexMarkup.indexOf('src="/js/app.js"'),
+  "video-codec.js loads before app.js");
+
+console.log("video codec tests passed");

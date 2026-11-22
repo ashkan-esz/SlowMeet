@@ -17,6 +17,7 @@ const axeCore = (() => {
 })();
 const participantFlowScenarios = require("./media-e2e/participant-flows").scenarios;
 const mediaLifecycleScenarios = require("./media-e2e/media-lifecycle").scenarios;
+const videoCodecScenarios = require("./media-e2e/video-codec").scenarios;
 const { installCameraQualityRecorder, validateCameraQualityReports } = require("./media-e2e/camera-quality");
 
 const root = path.join(__dirname, "..");
@@ -3329,6 +3330,7 @@ async function main() {
   const scenarios = [
     ...participantFlowScenarios,
     ...mediaLifecycleScenarios,
+    ...videoCodecScenarios,
     {
       name: "connection method switch and admin policy refresh",
       when: "localCapacity",

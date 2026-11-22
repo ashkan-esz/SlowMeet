@@ -170,6 +170,22 @@
               <label class="checkbox-row" for="connection-turn-tcp-rotate"><input id="connection-turn-tcp-rotate" type="checkbox" checked> <span><strong>TURN over TCP (rotating)</strong><small>TURN over TCP that moves media to fresh connections every few seconds, for networks that degrade long-lived connections. Automatic prefers this when direct connections fail.</small></span></label>
               <label class="checkbox-row" for="connection-turn-tls-rotate"><input id="connection-turn-tls-rotate" type="checkbox" checked> <span><strong>TURN over TLS (rotating)</strong><small>Secure TURN that moves media to fresh connections every few seconds.</small></span></label>
             </fieldset>
+            <fieldset>
+              <legend>Video codecs</legend>
+              <p class="field-help">Codecs participants may send. A room only uses a codec every participant's device can play, so VP8 always stays on as the common fallback.</p>
+              <label class="checkbox-row" for="codec-av1"><input id="codec-av1" type="checkbox" checked> <span><strong>AV1</strong><small>Best quality on slow links. Heaviest on phone CPUs and missing on many phones.</small></span></label>
+              <label class="checkbox-row" for="codec-vp9"><input id="codec-vp9" type="checkbox" checked> <span><strong>VP9</strong><small>Better quality than VP8 at the same bitrate, supported by current browsers.</small></span></label>
+              <label class="checkbox-row" for="codec-vp8"><input id="codec-vp8" type="checkbox" checked disabled> <span><strong>VP8</strong><small>Works in every browser. Always enabled.</small></span></label>
+              <label class="checkbox-row" for="codec-h264"><input id="codec-h264" type="checkbox" checked> <span><strong>H.264</strong><small>Hardware-encoded on most phones.</small></span></label>
+              <label for="default-video-codec">Default codec</label>
+              <select id="default-video-codec">
+                <option value="av1">AV1</option>
+                <option value="vp9">VP9</option>
+                <option value="vp8">VP8</option>
+                <option value="h264">H.264</option>
+              </select>
+              <span class="field-help">Used unless a participant picks another codec or a device in the room cannot play it.</span>
+            </fieldset>
             <button id="save" class="button-primary" type="submit">Save settings</button>
             <p id="status" role="status" class="form-status"></p>
           </form>

@@ -59,7 +59,7 @@ const indexSource = fs.readFileSync(path.join(__dirname, "..", "web/index.html")
 const remoteDescriptions = appSource.match(/currentPeer\.setRemoteDescription\(\{[^}]*\}\)/g) || [];
 assert.equal(remoteDescriptions.length, 2, "the offer and the answer handler each apply one remote description");
 for (const call of remoteDescriptions) {
-  assert.match(call, /sdp: applyOpusDTXChoice\(message\.sdp\)/,
+  assert.match(call, /sdp: applyRemoteSDPChoices\(message\.sdp\)/,
     `a remote description must be rewritten with the DTX choice before it is applied: ${call}`);
 }
 assert.match(appSource, /function applyOpusDTXChoice\(sdp\) \{[\s\S]{0,200}applyOpusDTX\(sdp, opusDTXEffective\(\)\)/,

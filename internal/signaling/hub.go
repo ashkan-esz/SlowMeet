@@ -133,6 +133,9 @@ type client struct {
 	// opusDTX marks the SDP sent to this client so its browser sends
 	// discontinuous Opus; set once at join, before any description is sent.
 	opusDTX bool
+	// videoCodecs is the normalized list of video codecs this browser said it
+	// supports when it joined (see normalizeVideoCodecClaim).
+	videoCodecs []string
 	// plannedRestart is set while a browser-requested rotate/switch restart
 	// is in progress; it only lowers the log level of the resulting ICE state
 	// transitions.
@@ -191,6 +194,11 @@ type Hub struct {
 	announced    map[string]struct{}
 	activeTokens map[string]*client
 	mediaStates  map[string]Message
+	// videoCodecClaims is each participant's supported video codecs, kept from
+	// admission until the participant leaves (so through a reconnect grace
+	// window); roomVideoCodecs is the last list the room was told.
+	videoCodecClaims map[string][]string
+	roomVideoCodecs  []string
 	// sourceQuality is each participant's last reported uplink loss and
 	// jitter, relayed to the room as source_quality (see noteSourceQuality).
 	sourceQuality         map[string]*sourceQualityState
@@ -289,7 +297,11 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		h.screenSharer = nil
 		releasedScreenShare = true
 	}
+	// Publishers hear the new room list before the router starts refusing a
+	// codec the administrator just removed, so they switch first.
+	h.refreshRoomVideoCodecsLocked(cfg.EffectiveVideoCodecs(), nil)
 	h.mu.Unlock()
+	h.router.SetAllowedVideoCodecs(cfg.EffectiveVideoCodecs())
 	h.router.SetLimits(media.Limits{
 		MaxAudioBitrate: cfg.MaxAudioBitrate,
 		MaxVideoBitrate: cfg.MaxVideoBitrate,
@@ -304,6 +316,8 @@ func (h *Hub) BroadcastConfig(cfg config.Config) {
 		MaxAudioBitrate: cfg.MaxAudioBitrate, MaxVideoQuality: cfg.EffectiveMaxVideoQuality(),
 		ScreenShareEnabled: &screenShareEnabled,
 		RetainChatHistory:  &retainChatHistory,
+		VideoCodecs:        cfg.EffectiveVideoCodecs(),
+		DefaultVideoCodec:  cfg.EffectiveDefaultVideoCodec(),
 	})
 	if !cfg.RetainChatHistory {
 		h.clearChatHistory()
@@ -766,6 +780,10 @@ func (h *Hub) forgetMediaState(participantID string) {
 	h.mu.Lock()
 	delete(h.mediaStates, participantID)
 	delete(h.sourceQuality, participantID)
+	if _, claimed := h.videoCodecClaims[participantID]; claimed {
+		delete(h.videoCodecClaims, participantID)
+		h.refreshRoomVideoCodecsLocked(h.allowedVideoCodecs(), nil)
+	}
 	h.mu.Unlock()
 }
 
@@ -1165,6 +1183,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.cancelChatHistoryExpiry(chatRoomID)
 		c.opusDTX = cfg.OpusDTXEnabled
+		c.videoCodecs = normalizeVideoCodecClaim(msg.VideoCodecs)
+		h.router.SetAllowedVideoCodecs(cfg.EffectiveVideoCodecs())
 		turnUsername := cfg.TURNUsername
 		turnPassword := cfg.TURNPassword
 		if username, password, ok := cfg.TURNCredentials(participant.ID, time.Now()); ok {
@@ -1249,6 +1269,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// state handler that rewrites it.
 			h.router.Publish(participant.ID, role, c.peer, track, layer)
 		})
+		// The receiver's codecs must be known before it is registered, so its
+		// first subscriptions already skip video it cannot decode.
+		h.router.SetReceiverVideoCodecs(participant.ID, c.videoCodecs)
 		h.router.Register(participant.ID, c.peer, func() error {
 			return h.sendOffer(c, false)
 		})

@@ -113,6 +113,8 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"max_participants":          cfg.MaxParticipants,
 			"default_video_quality":     cfg.DefaultVideoQuality,
+			"video_codecs":              cfg.EffectiveVideoCodecs(),
+			"default_video_codec":       cfg.EffectiveDefaultVideoCodec(),
 			"max_video_quality":         cfg.EffectiveMaxVideoQuality(),
 			"default_video_fps":         cfg.DefaultVideoFPS,
 			"default_audio_bitrate":     cfg.DefaultAudioBitrate,
@@ -529,6 +531,8 @@ func writePublicConfig(w http.ResponseWriter, cfg config.Config) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"max_participants": cfg.MaxParticipants, "max_video_bitrate": cfg.MaxVideoBitrate,
 		"default_video_quality": cfg.DefaultVideoQuality,
+		"video_codecs":          cfg.EffectiveVideoCodecs(),
+		"default_video_codec":   cfg.EffectiveDefaultVideoCodec(),
 		"max_video_quality":     cfg.EffectiveMaxVideoQuality(),
 		"default_video_fps":     cfg.DefaultVideoFPS, "default_audio_bitrate": cfg.DefaultAudioBitrate,
 		"max_video_fps": cfg.MaxVideoFPS, "max_audio_bitrate": cfg.MaxAudioBitrate,

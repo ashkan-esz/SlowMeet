@@ -51,6 +51,11 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 	// broadcast path. Snapshotting before this point used to lose the messages
 	// recorded in between. No other goroutine can enqueue a room broadcast to
 	// c in this window because fan-out collects members under h.mu.
+	// The joiner's codec support can narrow what the whole room may use: the
+	// others hear the new list now, the joiner in its admission response.
+	h.setVideoCodecClaimLocked(participant.ID, c.videoCodecs)
+	response.RoomVideoCodecs = h.refreshRoomVideoCodecsLocked(h.allowedVideoCodecs(), c)
+	response.DefaultVideoCodec = h.defaultVideoCodec()
 	response.ChatHistory = h.chatHistorySnapshotLocked(chatRoomID)
 	if err := c.write(response); err != nil {
 		return err

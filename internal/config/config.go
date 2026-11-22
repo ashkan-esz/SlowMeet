@@ -71,6 +71,12 @@ type Config struct {
 	MaxParticipants     int
 	DefaultVideoQuality string
 	MaxVideoQuality     string
+	// VideoCodecs lists the video codecs publishers may use (see
+	// video_codecs.go); nil allows all of them. DefaultVideoCodec is the one
+	// browsers use unless the participant picks another; empty selects the
+	// newest allowed codec.
+	VideoCodecs         []string
+	DefaultVideoCodec   string
 	DefaultVideoFPS     int
 	MaxVideoFPS         int
 	DefaultAudioBitrate int
@@ -86,6 +92,7 @@ func cloneConfig(cfg Config) Config {
 	cfg.STUNServers = cloneStrings(cfg.STUNServers)
 	cfg.TURNURLs = cloneStrings(cfg.TURNURLs)
 	cfg.EnabledConnectionMethods = cloneStrings(cfg.EnabledConnectionMethods)
+	cfg.VideoCodecs = cloneStrings(cfg.VideoCodecs)
 	cfg.TrustedProxyCIDRs = cloneStrings(cfg.TrustedProxyCIDRs)
 	return cfg
 }
@@ -253,6 +260,8 @@ func LoadFromEnv() (Config, error) {
 		MaxParticipants:     maxParticipants,
 		DefaultVideoQuality: envString("DEFAULT_VIDEO_QUALITY", "low"),
 		MaxVideoQuality:     envString("MAX_VIDEO_QUALITY", "ultra"),
+		VideoCodecs:         parseVideoCodecs(os.Getenv("VIDEO_CODECS")),
+		DefaultVideoCodec:   strings.ToLower(strings.TrimSpace(os.Getenv("DEFAULT_VIDEO_CODEC"))),
 		DefaultVideoFPS:     defaultVideoFPS,
 		MaxVideoFPS:         maxVideoFPS,
 		DefaultAudioBitrate: defaultAudioBitrate,
@@ -341,6 +350,9 @@ func (c Config) Validate() error {
 	if c.TURNTCPRotateInterval != 0 &&
 		(c.TURNTCPRotateInterval < 10*time.Second || c.TURNTCPRotateInterval > 10*time.Minute) {
 		return fmt.Errorf("TURN_TCP_ROTATE_SECONDS must be 0 or between 10 and 600")
+	}
+	if err := c.validateVideoCodecs(); err != nil {
+		return err
 	}
 	if err := c.validateTURNServer(); err != nil {
 		return err
