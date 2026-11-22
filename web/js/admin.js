@@ -131,7 +131,12 @@ function renderPolicySummary(values) {
   const videoBitrate = formatBitrate(values.max_video_bitrate);
   const audioBitrate = formatBitrate(values.max_audio_bitrate);
   const qualityLabel = (value) => value.charAt(0).toUpperCase() + value.slice(1);
-  summaryValues[0].textContent = `${qualityLabel(videoQuality)} default · ${qualityLabel(maxVideoQuality)} max · ${videoBitrate}`;
+  const codecLabels = { av1: "AV1", vp9: "VP9", vp8: "VP8", h264: "H.264" };
+  const codecLabel = (codec) => codecLabels[codec] || codec;
+  const codecSummary = values.default_video_codec && Array.isArray(values.video_codecs)
+    ? ` · ${codecLabel(values.default_video_codec)} default (${values.video_codecs.map(codecLabel).join(", ")})`
+    : "";
+  summaryValues[0].textContent = `${qualityLabel(videoQuality)} default · ${qualityLabel(maxVideoQuality)} max · ${videoBitrate}${codecSummary}`;
   summaryValues[1].textContent = `${audioBitrate} max${Number.isFinite(values.max_video_fps) ? ` · ${values.max_video_fps} fps video` : ""}`;
   const screenShareLabel = values.screen_share_enabled == null
     ? "Screen sharing unknown"

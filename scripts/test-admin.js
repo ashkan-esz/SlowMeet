@@ -123,6 +123,14 @@ assert.match(adminMarkup, /<select id="default-video-codec">/);
 assert.match(adminSource, /video_codecs: Object\.entries\(videoCodecFields\)/);
 assert.match(adminSource, /default_video_codec: fields\.default_video_codec\.value/);
 assert.match(adminSource, /field\.checked = codec === "vp8" \|\| values\.video_codecs\.includes\(codec\)/);
+const codecDiagnostics = JSON.parse(buildDiagnostics({capturedAt: "2026-11-23T00:00:00Z", settings: codecSettings}));
+assert.deepEqual(codecDiagnostics.policy.video_codecs, codecSettings.video_codecs);
+assert.equal(codecDiagnostics.policy.default_video_codec, "av1");
+assert.equal(JSON.parse(buildDiagnostics({capturedAt: "2026-11-23T00:00:00Z"})).policy.video_codecs, null);
+assert.match(adminSource,
+  /codecLabel\(values\.default_video_codec\)\} default \(\$\{values\.video_codecs\.map\(codecLabel\)\.join\(", "\)\}\)/,
+  "the policy summary names the default codec and the allowed list");
+assert.match(adminSource, /\$\{videoBitrate\}\$\{codecSummary\}`/);
 assert.match(adminSource, /"turn-tls-rotate": document\.querySelector\("#connection-turn-tls-rotate"\)/);
 assert.match(appSource, /option\.disabled = !method\?\.enabled/);
 assert.match(appSource, /connectionMethodSwitchRequested = true/);

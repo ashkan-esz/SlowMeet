@@ -140,7 +140,9 @@
         max_video_bitrate: settings.max_video_bitrate ?? metrics.max_video_bitrate ?? null,
         max_video_fps: settings.max_video_fps ?? null,
         max_audio_bitrate: settings.max_audio_bitrate ?? metrics.max_audio_bitrate ?? null,
-        screen_share_enabled: settings.screen_share_enabled ?? null
+        screen_share_enabled: settings.screen_share_enabled ?? null,
+        video_codecs: settings.video_codecs ?? null,
+        default_video_codec: settings.default_video_codec ?? null
       }
     }, null, 2);
   }
