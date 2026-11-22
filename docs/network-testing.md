@@ -120,25 +120,6 @@ namespace:
 These tests pin today's behaviour and say in a `KNOWN ISSUE (Bn)` comment
 what should change. Fixing an issue means flipping that assertion.
 
-- **B1 — good participant blames its own link.** The own-link loss estimate
-  is the minimum loss across inbound streams. When every remote sender has a
-  lossy uplink, that minimum is high even though the receiver's link is
-  clean, so a fast participant steps its own camera down and, above 10%,
-  pauses it. In `one-fast-three-bad-uplinks` the fast participant fell from
-  level 3 to 0 within about 5 s and paused its camera for most of the
-  window in every run so far (33–34 of 40 samples, up to 70 % loss, in the
-  three runs after the change below).
-  Partly addressed: each sender now reports its own uplink loss and jitter
-  in `network_state`, the server relays them as `source_quality`, and
-  `selectOwnLinkMeasurements` discounts each stream by its sender's report.
-  That fixes the room model (`scripts/test-room-network-scenarios.js`, whose
-  B1 rows now hold) but not the browser scenario: there the senders report
-  0 % uplink loss, because the SFU's NACKs recover their packets, while the
-  fast participant still sees ~70 % loss. The loss is created at the SFU, which
-  forwards a frame once complete or skips it, so retransmissions that
-  arrive late over a slow lossy uplink never reach receivers. The remaining
-  fix is for the SFU to measure each publication's forwarded-versus-expected
-  packets and relay that instead of, or with, the sender's own report.
 - **B10 — a ghost tile after a signaling stall.** In
   `signaling-stall-during-churn` one participant's signaling is held while
   another leaves and rejoins; when the held `participant_left`,
@@ -151,7 +132,26 @@ what should change. Fixing an issue means flipping that assertion.
   that was the cause is unproven, so the scenario keeps logging
   `KNOWN ISSUE B10` if it ever reproduces.
 
-- **Fixed: B2–B9 and B11.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11.** Their tests now enforce the fix without a gate.
+  - B1, a participant on a good link blaming its own link: its own-link
+    estimate is the minimum loss across inbound streams, and with every
+    remote sender on a bad uplink there is no clean stream. In
+    `one-fast-three-bad-uplinks` the fast participant read up to 70 % loss,
+    stepped 3 -> 0 and paused its camera in 33–34 of 40 samples. Most of that
+    loss is created at the SFU: over a slow lossy uplink the SFU's NACKs do
+    recover the packets (so the sender's own receiver reports read 0 %), but
+    too late, after their frame was forwarded or skipped. The SFU now
+    measures, per publication, the share of the publisher's sequence numbers
+    it did not forward (`forward_loss.go`, the worst of the last three
+    one-second windows) and relays it per sender and kind in
+    `source_quality`, with the sender's own uplink jitter; receivers discount
+    each stream by its sender's share before taking the minimum
+    (`selectOwnLinkMeasurements`). The fast participant now never pauses
+    (asserted in the scenario), reads 0 % in nearly every sample, and at
+    most steps down once in the first second or two, before the first
+    measurement reaches it. `TestForwardLossMeasuresUnforwardedSequences`,
+    `TestHubRelaysReportedUplinkQuality`,
+    `scripts/test-room-network-scenarios.js`, `one-fast-three-bad-uplinks`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

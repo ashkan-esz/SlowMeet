@@ -3410,7 +3410,7 @@ async function scenarioOneFastThreeBadUplinks() {
       };
       b1Evidence = evidence;
       recordEvidence("b1-own-link-evidence", evidence);
-      console.log(`[${tag}] B1 evidence (sampled, not asserted) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
+      console.log(`[${tag}] B1 evidence (pause asserted, level logged) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
       console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
     }
   }
