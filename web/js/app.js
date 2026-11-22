@@ -2119,6 +2119,192 @@ function refreshOpusDTXSwitch() {
   if (opusDTXSwitch) opusDTXSwitch.checked = opusDTXEffective() === true;
 }
 refreshOpusDTXSwitch();
+
+// Video codec for this participant's outgoing camera and screen video (see
+// video-codec.js). The server allows a list and names a default, the room can
+// only use what every participant's device supports, and the participant may
+// pick one in Settings.
+const videoCodecSelect = document.querySelector("#video-codec");
+const videoCodecNote = document.querySelector("#video-codec-note");
+const videoCodecMetric = document.querySelector("#metric-video-codec");
+const videoCodecUpgradeDelayMs = 15000;
+let videoCodecStored = readStoredValue("meeting.videoCodec") || "auto";
+let videoCodecsAllowed = null;
+let videoCodecServerDefault = null;
+let videoCodecsRoom = null;
+// The codec the encoder is asked for through the remote description, or null
+// to leave the browser's own order alone.
+let videoCodecApplied = null;
+let videoCodecUpgradeTimer;
+let videoCodecCpuSamples = [];
+let videoCodecCpuSampledAt = 0;
+// Codecs Automatic skips on this device: not smooth to encode, or caught
+// CPU-limited during this session.
+const videoCodecsAvoided = new Set();
+const videoCodecsDevice = (() => {
+  try {
+    return window.SlowMeetVideoCodec.deviceCodecs(
+      RTCRtpSender.getCapabilities("video"), RTCRtpReceiver.getCapabilities("video"));
+  } catch (_) {
+    return null;
+  }
+})();
+
+function videoCodecRoomList() {
+  return videoCodecsRoom || videoCodecsAllowed;
+}
+
+function videoCodecTarget() {
+  return window.SlowMeetVideoCodec.chooseSendCodec({
+    stored: videoCodecStored, serverDefault: videoCodecServerDefault,
+    roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
+    avoid: videoCodecsAvoided, simulcast: simulcastEnabled
+  });
+}
+
+function applyVideoCodecChoice(sdp) {
+  return window.SlowMeetVideoCodec.preferVideoCodec(sdp, videoCodecApplied);
+}
+
+function applyRemoteSDPChoices(sdp) {
+  return applyVideoCodecChoice(applyOpusDTXChoice(sdp));
+}
+
+function videoCodecNoteText() {
+  const { codecLabel, isCodec } = window.SlowMeetVideoCodec;
+  if (!videoCodecApplied) return "Uses the newest codec everyone in the room can play.";
+  const wanted = isCodec(videoCodecStored) ? videoCodecStored : videoCodecServerDefault;
+  let reason = "";
+  if (wanted && wanted !== videoCodecApplied) {
+    const room = videoCodecRoomList() || [];
+    if (videoCodecsDevice && !videoCodecsDevice.includes(wanted)) {
+      reason = ` This device cannot send ${codecLabel(wanted)}.`;
+    } else if (!room.includes(wanted)) {
+      reason = ` Not everyone here can play ${codecLabel(wanted)}.`;
+    } else if (simulcastEnabled) {
+      reason = ` ${codecLabel(wanted)} is not used while simulcast is on.`;
+    } else if (videoCodecsAvoided.has(wanted)) {
+      reason = ` ${codecLabel(wanted)} is too heavy for this device.`;
+    }
+  }
+  return `Sending ${codecLabel(videoCodecApplied)}.${reason}`;
+}
+
+function refreshVideoCodecUI() {
+  const { codecLabel } = window.SlowMeetVideoCodec;
+  if (videoCodecSelect) {
+    const allowed = videoCodecsAllowed || [];
+    const automatic = document.createElement("option");
+    automatic.value = "auto";
+    automatic.textContent = videoCodecServerDefault
+      ? `Automatic (${codecLabel(videoCodecServerDefault)})` : "Automatic";
+    videoCodecSelect.replaceChildren(automatic, ...allowed.map((codec) => {
+      const supported = !videoCodecsDevice || videoCodecsDevice.includes(codec);
+      const option = document.createElement("option");
+      option.value = codec;
+      option.textContent = supported ? codecLabel(codec) : `${codecLabel(codec)} (not supported on this device)`;
+      option.disabled = !supported;
+      return option;
+    }));
+    videoCodecSelect.value = allowed.includes(videoCodecStored) ? videoCodecStored : "auto";
+  }
+  if (videoCodecNote) videoCodecNote.textContent = videoCodecNoteText();
+}
+
+// Recomputes the codec to send with. immediate applies it now; otherwise a
+// move to a newer codec waits until the room has held still, so a participant
+// who drops and resumes does not switch everyone's encoder twice.
+function updateVideoCodecChoice(immediate) {
+  clearTimeout(videoCodecUpgradeTimer);
+  const target = videoCodecTarget();
+  if (target !== videoCodecApplied) {
+    const room = videoCodecRoomList() || [];
+    const upgrade = !immediate && room.includes(videoCodecApplied) &&
+      window.SlowMeetVideoCodec.isNewerCodec(target, videoCodecApplied);
+    if (upgrade) {
+      videoCodecUpgradeTimer = setTimeout(() => updateVideoCodecChoice(true), videoCodecUpgradeDelayMs);
+    } else {
+      videoCodecApplied = target;
+      videoCodecCpuSamples = [];
+      // The choice reaches the encoder through the next remote description
+      // (applyRemoteSDPChoices), so a live call renegotiates once to apply it.
+      if (peer && renegotiationQueue) renegotiateLocalMedia().catch(() => {});
+    }
+  }
+  refreshVideoCodecUI();
+}
+
+function noteServerVideoCodecs(allowed, serverDefault) {
+  const { isCodec } = window.SlowMeetVideoCodec;
+  if (Array.isArray(allowed)) videoCodecsAllowed = allowed.filter((codec) => isCodec(codec));
+  if (isCodec(serverDefault)) videoCodecServerDefault = serverDefault;
+  updateVideoCodecChoice(true);
+}
+
+function noteRoomVideoCodecs(room, immediate) {
+  if (!Array.isArray(room)) return;
+  videoCodecsRoom = room.filter((codec) => window.SlowMeetVideoCodec.isCodec(codec));
+  updateVideoCodecChoice(immediate);
+}
+
+// Called for every outbound video stream of each stats sample. In Automatic, a
+// newer codec the encoder cannot keep up with is given up for this session.
+function noteOutboundVideoStat(mimeType, limitationReason) {
+  const { codecNameFromMime, codecLabel, cpuFallbackDue, isCodec } = window.SlowMeetVideoCodec;
+  const sending = codecNameFromMime(mimeType);
+  if (videoCodecMetric && mimeType) videoCodecMetric.textContent = codecLabel(sending) || mimeType;
+  const guarded = (sending === "av1" || sending === "vp9") && sending === videoCodecApplied &&
+    !(isCodec(videoCodecStored) && videoCodecStored === sending);
+  if (!guarded) {
+    videoCodecCpuSamples = [];
+    return;
+  }
+  const now = Date.now();
+  const cpuLimited = limitationReason === "cpu";
+  if (now - videoCodecCpuSampledAt < 900) {
+    // Another stream of the same sample: one CPU-limited stream is enough.
+    if (cpuLimited && videoCodecCpuSamples.length) videoCodecCpuSamples[videoCodecCpuSamples.length - 1] = "cpu";
+    return;
+  }
+  videoCodecCpuSampledAt = now;
+  videoCodecCpuSamples.push(cpuLimited ? "cpu" : "none");
+  if (videoCodecCpuSamples.length > 30) videoCodecCpuSamples.shift();
+  if (!cpuFallbackDue(videoCodecCpuSamples)) return;
+  videoCodecsAvoided.add(sending);
+  showToast(`${codecLabel(sending)} is too heavy for this device. Switching to an older codec.`, "warning");
+  updateVideoCodecChoice(true);
+}
+
+videoCodecSelect?.addEventListener("change", () => {
+  videoCodecStored = videoCodecSelect.value;
+  writeStoredValue("meeting.videoCodec", videoCodecStored);
+  updateVideoCodecChoice(true);
+  showToast(videoCodecApplied
+    ? `Sending ${window.SlowMeetVideoCodec.codecLabel(videoCodecApplied)} video`
+    : "Video codec set to automatic");
+});
+
+// Some devices list a codec they cannot encode in real time. Where the browser
+// can say so, Automatic skips those codecs from the start.
+if (videoCodecsDevice && navigator.mediaCapabilities?.encodingInfo) {
+  [["av1", "video/AV1"], ["vp9", "video/VP9"]].forEach(([codec, contentType]) => {
+    if (!videoCodecsDevice.includes(codec)) return;
+    try {
+      navigator.mediaCapabilities.encodingInfo({
+        type: "webrtc",
+        video: { contentType, width: 640, height: 360, bitrate: 400000, framerate: 15 }
+      }).then((info) => {
+        if (info && (info.supported === false || info.smooth === false)) {
+          videoCodecsAvoided.add(codec);
+          updateVideoCodecChoice(true);
+        }
+      }).catch(() => {});
+    } catch (_) {
+      // Browsers without the "webrtc" configuration type reject it here.
+    }
+  });
+}
+refreshVideoCodecUI();
 const connectionMethodOptions = new Map();
 let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
 // True while the saved method is only set aside because the ICE configuration
@@ -2150,6 +2336,7 @@ async function refreshICEConfig(sessionToken) {
       simulcastEnabled = config.simulcast_enabled === true;
       opusDTXServerDefault = typeof config.opus_dtx_enabled === "boolean" ? config.opus_dtx_enabled : null;
       refreshOpusDTXSwitch();
+      updateVideoCodecChoice(true);
       relayRotation?.setIntervalSeconds(Number(config.turn_tcp_rotate_seconds));
       connectionMethodOptions.clear();
       if (Array.isArray(config.connection_methods)) {
@@ -3547,6 +3734,7 @@ enableAudio.addEventListener("click", async () => {
   if (!blocked) showStatus("Remote audio enabled.", statusConfirmationOptions);
 });
 fetch("/config").then((response) => response.json()).then((config) => {
+  noteServerVideoCodecs(config.video_codecs, config.default_video_codec);
   hostLimits.maxVideoBitrate = config.max_video_bitrate || hostLimits.maxVideoBitrate;
   hostLimits.maxVideoFPS = config.max_video_fps || hostLimits.maxVideoFPS;
   hostLimits.maxAudioBitrate = config.max_audio_bitrate || hostLimits.maxAudioBitrate;
@@ -3782,7 +3970,8 @@ function connectSocket(name, password) {
     wasReconnectResume = Boolean(reconnectToken);
     try {
       currentSocket.send(JSON.stringify({
-        version: 1, type: "join", name, password, reconnect_token: reconnectToken
+        version: 1, type: "join", name, password, reconnect_token: reconnectToken,
+        video_codecs: videoCodecsDevice || undefined
       }));
     } catch (_) {
       // The socket can close between open and the join send; the close
@@ -3875,6 +4064,7 @@ function connectSocket(name, password) {
         hostLimits.maxAudioBitrate = message.max_audio_bitrate;
       }
       if (message.max_video_quality) hostLimits.maxVideoQuality = message.max_video_quality;
+      noteServerVideoCodecs(message.video_codecs, message.default_video_codec);
       if (message.screen_share_enabled === false) {
         screenShareEnabled = false;
         if (screenStream) stopScreenShare();
@@ -3908,6 +4098,16 @@ function connectSocket(name, password) {
         : message.error;
       if (meeting.hidden) joinButton.disabled = false;
       return;
+    }
+    if (message.type === "video_codec_state") {
+      noteRoomVideoCodecs(message.room_video_codecs, false);
+      return;
+    }
+    if (message.type === "participant") {
+      if (window.SlowMeetVideoCodec.isCodec(message.default_video_codec)) {
+        videoCodecServerDefault = message.default_video_codec;
+      }
+      noteRoomVideoCodecs(message.room_video_codecs, true);
     }
     if (message.type === "participant" || message.type === "participant_joined") {
       const participant = message.participant;
@@ -5440,6 +5640,7 @@ async function runDiagnosticsUpdate() {
       }
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       values.codec = resolveCodecName(codecById, stat.codecId) || values.codec;
+      noteOutboundVideoStat(codecById.get(stat.codecId), stat.qualityLimitationReason);
     }
     if (stat.type === "outbound-rtp" && stat.kind === "audio") {
       sentAudioBytes += stat.bytesSent || 0;
@@ -6587,7 +6788,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         await currentPeer.setLocalDescription({ type: "rollback" });
         renegotiationQueue?.rollback();
       }
-      await currentPeer.setRemoteDescription({ type: "offer", sdp: applyOpusDTXChoice(message.sdp) });
+      await currentPeer.setRemoteDescription({ type: "offer", sdp: applyRemoteSDPChoices(message.sdp) });
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;
       // One unusable queued candidate must not abort the whole flush: a
@@ -6639,7 +6840,7 @@ function handleWebRTCMessage(message, generation = socketGeneration) {
         renegotiationQueue?.fail(new Error("received an answer without a local offer"));
         return;
       }
-      await currentPeer.setRemoteDescription({ type: "answer", sdp: applyOpusDTXChoice(message.sdp) });
+      await currentPeer.setRemoteDescription({ type: "answer", sdp: applyRemoteSDPChoices(message.sdp) });
       reconcileCameraSimulcast(currentPeer);
       if (!isCurrentWebRTC(generation, currentPeer, currentSocket)) throw new Error("stale WebRTC connection");
       remoteDescriptionSet = true;

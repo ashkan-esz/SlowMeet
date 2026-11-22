@@ -24,11 +24,18 @@ const fields = {
   max_participants: document.querySelector("#participants"),
   default_video_quality: document.querySelector("#video-quality"),
   max_video_quality: document.querySelector("#max-video-quality"),
+  default_video_codec: document.querySelector("#default-video-codec"),
   max_video_bitrate: document.querySelector("#video-bitrate"),
   max_video_fps: document.querySelector("#video-fps"),
   max_audio_bitrate: document.querySelector("#audio-bitrate"),
   screen_share_enabled: document.querySelector("#screen-share"),
   retain_chat_history: document.querySelector("#retain-chat-history")
+};
+const videoCodecFields = {
+  av1: document.querySelector("#codec-av1"),
+  vp9: document.querySelector("#codec-vp9"),
+  vp8: document.querySelector("#codec-vp8"),
+  h264: document.querySelector("#codec-h264")
 };
 const connectionMethodFields = {
   direct: document.querySelector("#connection-direct"),
@@ -202,6 +209,9 @@ function collectSettings() {
     max_participants: Number(fields.max_participants.value),
     default_video_quality: fields.default_video_quality.value,
     max_video_quality: fields.max_video_quality.value,
+    default_video_codec: fields.default_video_codec.value,
+    video_codecs: Object.entries(videoCodecFields)
+      .filter(([, field]) => field.checked).map(([codec]) => codec),
     max_video_bitrate: bitrateFromKbps(fields.max_video_bitrate.value),
     max_video_fps: Number(fields.max_video_fps.value),
     max_audio_bitrate: bitrateFromKbps(fields.max_audio_bitrate.value),
@@ -217,6 +227,12 @@ function applySettingsToForm(values) {
   if (values.max_participants != null) fields.max_participants.value = values.max_participants;
   if (values.default_video_quality) fields.default_video_quality.value = values.default_video_quality;
   if (values.max_video_quality) fields.max_video_quality.value = values.max_video_quality;
+  if (values.default_video_codec) fields.default_video_codec.value = values.default_video_codec;
+  if (Array.isArray(values.video_codecs)) {
+    Object.entries(videoCodecFields).forEach(([codec, field]) => {
+      field.checked = codec === "vp8" || values.video_codecs.includes(codec);
+    });
+  }
   if (values.max_video_bitrate != null) fields.max_video_bitrate.value = displayKbps(values.max_video_bitrate);
   if (values.max_video_fps != null) fields.max_video_fps.value = values.max_video_fps;
   if (values.max_audio_bitrate != null) fields.max_audio_bitrate.value = displayKbps(values.max_audio_bitrate);

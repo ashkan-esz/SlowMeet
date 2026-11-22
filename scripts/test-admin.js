@@ -106,6 +106,23 @@ assert.match(adminMarkup, /id="connection-turn-tls"/);
 assert.match(adminMarkup, /id="connection-turn-tcp-rotate"/);
 assert.match(adminMarkup, /id="connection-turn-tls-rotate"/);
 assert.match(adminSource, /"turn-tcp-rotate": document\.querySelector\("#connection-turn-tcp-rotate"\)/);
+
+// Video codecs: the allowed list and its default travel with the other settings.
+const codecSettings = {
+  max_participants: 5, default_video_quality: "low", max_video_quality: "ultra",
+  max_video_bitrate: 1000000, max_video_fps: 30, max_audio_bitrate: 64000,
+  video_codecs: ["av1", "vp9", "vp8", "h264"], default_video_codec: "av1"
+};
+assert.deepEqual(validateSettings(codecSettings), {});
+assert.deepEqual(Object.keys(validateSettings({...codecSettings, video_codecs: ["vp8", "vp9"]})), ["default_video_codec"],
+  "a default outside the enabled codecs is rejected before it is sent");
+assert.deepEqual(Object.keys(validateSettings({...codecSettings, video_codecs: ["av1"]})), ["default_video_codec"],
+  "VP8 cannot be switched off");
+assert.match(adminMarkup, /id="codec-vp8" type="checkbox" checked disabled/);
+assert.match(adminMarkup, /<select id="default-video-codec">/);
+assert.match(adminSource, /video_codecs: Object\.entries\(videoCodecFields\)/);
+assert.match(adminSource, /default_video_codec: fields\.default_video_codec\.value/);
+assert.match(adminSource, /field\.checked = codec === "vp8" \|\| values\.video_codecs\.includes\(codec\)/);
 assert.match(adminSource, /"turn-tls-rotate": document\.querySelector\("#connection-turn-tls-rotate"\)/);
 assert.match(appSource, /option\.disabled = !method\?\.enabled/);
 assert.match(appSource, /connectionMethodSwitchRequested = true/);

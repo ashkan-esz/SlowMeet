@@ -367,6 +367,20 @@ through host and provider firewalls.
 
 ## Media limits and diagnostics
 
+`VIDEO_CODECS=av1,vp9,vp8,h264` (the default) lists the video codecs
+participants may send, and `DEFAULT_VIDEO_CODEC=av1` names the one browsers use
+unless a participant picks another under Settings. `vp8` must stay in the list:
+every browser plays it, so a room always has a codec in common. An unset
+default is the newest listed codec. The server forwards video without
+transcoding, so a room only uses a codec that every participant's device both
+sends and receives. When a device without the default joins, everyone falls
+back to the newest codec they share (AV1, then VP9, then VP8, then H.264) and
+returns to the default about 15 seconds after that device leaves. A device
+that lists a codec but cannot encode it in real time steps down by itself. With
+`SIMULCAST_ENABLED=true`, cameras stay on VP8 or H.264. Administrators can
+change both settings on the admin page; running calls switch codec without
+rejoining.
+
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video
 ceilings. The quality limit caps browser profile resolution. The SFU paces
 video RTP to the bitrate ceiling and forwards complete frames only; it drops

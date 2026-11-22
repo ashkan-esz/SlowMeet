@@ -40,6 +40,9 @@ const (
 	TypeScreenShare        = "screen_share"
 	TypeScreenState        = "screen_share_state"
 	TypeConfigUpdate       = "config_update"
+	// TypeVideoCodecState tells the room which video codecs every current
+	// participant can decode (server to client only).
+	TypeVideoCodecState    = "video_codec_state"
 	TypeChat               = "chat_message"
 	TypeReaction           = "emoji_reaction"
 	TypeRoomFull           = "room_full"
@@ -99,11 +102,18 @@ type Message struct {
 	MaxVideoQuality    string               `json:"max_video_quality,omitempty"`
 	ScreenShareEnabled *bool                `json:"screen_share_enabled,omitempty"`
 	RetainChatHistory  *bool                `json:"retain_chat_history,omitempty"`
-	RTTMs              int                  `json:"rtt_ms,omitempty"`
-	PacketLoss10       int                  `json:"packet_loss10,omitempty"`
-	JitterMs           int                  `json:"jitter_ms,omitempty"`
-	VideoKbps          int                  `json:"video_kbps,omitempty"`
-	AudioKbps          int                  `json:"audio_kbps,omitempty"`
+	// VideoCodecs is the codecs the joining browser supports (in join) or the
+	// codecs the server allows (in config_update). RoomVideoCodecs is the
+	// subset every current participant can decode, which is what a publisher
+	// may use right now.
+	VideoCodecs       []string `json:"video_codecs,omitempty"`
+	RoomVideoCodecs   []string `json:"room_video_codecs,omitempty"`
+	DefaultVideoCodec string   `json:"default_video_codec,omitempty"`
+	RTTMs             int      `json:"rtt_ms,omitempty"`
+	PacketLoss10      int      `json:"packet_loss10,omitempty"`
+	JitterMs          int      `json:"jitter_ms,omitempty"`
+	VideoKbps         int      `json:"video_kbps,omitempty"`
+	AudioKbps         int      `json:"audio_kbps,omitempty"`
 	// UplinkLoss10 and UplinkJitterMs are the sender's own uplink loss (tenths
 	// of a percent) and jitter as the SFU's receiver reports describe them;
 	// -1 when unknown. Reported in network_state. In source_quality,
@@ -157,6 +167,14 @@ func (m Message) Validate() error {
 		}
 		if len(m.ReconnectToken) > 128 {
 			return fmt.Errorf("reconnect_token is too long")
+		}
+		if len(m.VideoCodecs) > maxVideoCodecClaims {
+			return fmt.Errorf("video_codecs has too many entries")
+		}
+		for _, codec := range m.VideoCodecs {
+			if len(codec) > maxVideoCodecNameLength {
+				return fmt.Errorf("video_codecs entry is too long")
+			}
 		}
 	case TypeLeave:
 		if m.ParticipantID == "" {
