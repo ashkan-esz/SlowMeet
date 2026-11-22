@@ -140,20 +140,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **B13 — leftover jitter slows a fast participant's climb back.** In
-  `one-fast-three-bad-uplinks`, after the fixes for B1 (per-sender forward
-  loss, per-kind uplink jitter, send-path climb backoff), the fast
-  participant's own-link jitter still reads 18–46 ms now and then on a
-  clean 20 ms link. Each such sample falls outside the healthy band (under
-  30 ms) and restarts the climb streak. Over five runs it held the top level
-  for 39/39, 29/39, 40/40, 39/39 and 9/40 samples; in the last it needed
-  about 30 s to climb back after one early step. The cause is not pinned
-  down: the senders' audio uplink jitter reports should cancel their queueing,
-  so either the reports lag the streams or the SFU adds jitter of its own on
-  the way out. The scenario logs the share at the top as `B13`; next step is
-  to record per-stream jitter beside each sender's report in its evidence.
-
-- **Fixed: B1–B9, B11 and B12.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B13.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -165,7 +152,7 @@ what should change. Fixing an issue means flipping that assertion.
     measures, per publication, the share of the publisher's sequence numbers
     it did not forward (`forward_loss.go`, the worst of the last three
     one-second windows) and relays it per sender and kind in
-    `source_quality`, with the sender's own uplink jitter; receivers discount
+    `source_quality`, with the jitter of what it forwards (B13); receivers discount
     each stream by its sender's share before taking the minimum
     (`selectOwnLinkMeasurements`). The fast participant now never pauses,
     reads 0 % in nearly every sample, and at most steps down once in the
@@ -184,12 +171,29 @@ what should change. Fixing an issue means flipping that assertion.
     when the step-down shows on the send path: uplink loss above 5 %, a
     round trip above the poor bar, or a send estimate below 220 kbps
     (`sendPathPoor`, `noteStepDown(onSendPath)`). The scenario asserts no
-    pause, at most one step-down, and the top level at the end of the
-    window; how long it spends at the top is logged (see B13). `TestHubRelaysAudioUplinkJitter`
+    pause, at most one step-down, the top level at the end of the window,
+    and the top level for at least 60 % of it (see B13). `TestHubRelaysAudioUplinkJitter`
     and the paused-camera case in `scripts/test-room-network-scenarios.js`
     cover the relay and the discount. `TestForwardLossMeasuresUnforwardedSequences`,
     `TestHubRelaysReportedUplinkQuality`,
     `scripts/test-room-network-scenarios.js`, `one-fast-three-bad-uplinks`.
+  - B13, leftover jitter slowing the fast participant's climb back: even
+    with the per-kind discount, its own-link jitter read 18–46 ms now and
+    then on a clean 20 ms link, and each such sample restarted its climb
+    streak (9/40 samples at the top in one run, ~30 s to climb back). The
+    evidence showed every bad sender's report present but reading 0–1 ms
+    while its audio reached receivers with 30–60 ms of jitter: the jitter in
+    the SFU's receiver reports, which the sender relays, does not reflect its
+    uplink queueing. The SFU now measures the RFC 3550 jitter of what it
+    forwards, per publication, at the moment of forwarding
+    (`forward_jitter.go`, worst of the last three one-second windows, like
+    the loss), and the hub relays that in `source_quality` with the sender's
+    report as the fallback. Over five runs no sample after the first 5 s
+    read 30 ms or more; the fast participant held the top for 34, 34, 28, 34
+    and 39 of 39 samples and climbed back within 5–11 s (the 11 s one waited
+    out a single late loss reading). `TestForwardJitterMeasuresForwardedInterarrivalJitter`,
+    `TestRouterForwardJitterPicksAudioAndBusiestCameraLayer`,
+    `one-fast-three-bad-uplinks`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

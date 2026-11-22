@@ -3124,7 +3124,9 @@ function startAdaptationSampler(roleList, intervalMs = 1000) {
             rttMs: quality.rttMs ?? null, lossPct: quality.packetLossPct ?? null,
             uplinkLossPct: quality.uplinkLossPct ?? null, jitterMs: quality.jitterMs ?? null,
             estimatedOutgoingKbps: quality.estimatedOutgoingKbps ?? null,
-            outgoingVideoKbps: quality.outgoingVideoKbps ?? null
+            outgoingVideoKbps: quality.outgoingVideoKbps ?? null,
+            ownLinkStreams: quality.ownLinkStreams ?? null,
+            senderReports: quality.senderReports ?? null
           };
         }).catch(() => null);
         if (sample) sampler.timeline.get(role).push({ t: elapsed(), ...sample });
@@ -3489,7 +3491,7 @@ async function scenarioOneFastThreeBadUplinks() {
       };
       b1Evidence = evidence;
       recordEvidence("b1-own-link-evidence", evidence);
-      console.log(`[${tag}] B1 evidence (pause, step count and final level asserted) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
+      console.log(`[${tag}] B1 evidence (pause, step count, final level and time at the top asserted) — P1 on the fast tier with three bad uplinks: ${JSON.stringify(evidence.p1ThreeBadUplinks)}; P3 left at ${p3LeftAtSec}s; whole window: ${JSON.stringify(evidence.p1WholeWindow)}`);
       console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
     }
   }
@@ -3506,19 +3508,20 @@ async function scenarioOneFastThreeBadUplinks() {
   // Not pausing is not enough: P1 could sit at a low level for the whole
   // window and still never pause. In the first second or two, before the
   // first source_quality reaches it, P1 can step down once; after that it must
-  // climb back to the top level by the end of the window. With the per-kind
-  // jitter discount and the send-path climb backoff, five runs held the top
-  // for 39/39, 29/39, 40/40, 39/39 and 9/40 samples; before them, 2-21 of 40
-  // and twice stuck at level 2 to the end. The share at the top is logged,
-  // not asserted: 20-45 ms of jitter left over from the bad senders still
-  // reaches P1's estimate now and then and can delay the climb back by tens
-  // of seconds (KNOWN ISSUE B13 in docs/network-testing.md).
+  // climb back to the top level and stay there for most of the window. With
+  // the SFU measuring the jitter it forwards (B13), five runs held the top for
+  // 34, 34, 28, 34 and 39 of 39 samples and climbed back within 5-11 s; with
+  // the senders' own jitter reports instead, 9-40 of 40, once after ~30 s.
+  // The bar sits about ten points under the worst run.
   const p1Window = b1Evidence.p1ThreeBadUplinks;
   assert.ok(p1Window.stepDowns <= 1,
     `P1 on the fast tier stepped its ladder down ${p1Window.stepDowns} times with three bad uplinks (B1 allows one early step)`);
   assert.equal(p1Window.finalLevel, topAutomaticLevel,
     `P1 on the fast tier ended the three-bad-uplinks window at level ${p1Window.finalLevel}, not ${topAutomaticLevel} (B1)`);
-  console.log(`[${tag}] P1 at level ${topAutomaticLevel} in ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks (B13 when well under the whole window)`);
+  const p1TopShare = p1Window.levelSamples ? p1Window.samplesAtTop / p1Window.levelSamples : 0;
+  console.log(`[${tag}] P1 at level ${topAutomaticLevel} in ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks`);
+  assert.ok(p1TopShare >= 0.6,
+    `P1 on the fast tier was at level ${topAutomaticLevel} in only ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks (B13 needs 60 %)`);
 
   // Recovery. The cameras that were live through the window return first —
   // P1's own camera included, since B1 may have paused it — then a fresh

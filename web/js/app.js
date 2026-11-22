@@ -5976,7 +5976,12 @@ async function runDiagnosticsUpdate() {
       uplinkLossPct,
       poor,
       critical,
-      good
+      good,
+      // Evidence for the own-link estimate: this tick's inbound streams as
+      // measured, and each sender's last relayed uplink report.
+      ownLinkStreams: streamLossSamples.map(({ participantID, kind, lossPct, jitterMs, receivedDelta }) =>
+        ({ participantID, kind, lossPct, jitterMs, receivedDelta })),
+      senderReports: Object.fromEntries(remoteSourceQuality)
     };
     window.__slowMeetTest.adaptationState = {
       selectedProfile: profile.value,

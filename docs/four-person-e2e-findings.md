@@ -1661,3 +1661,12 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fixb5/one-fast-three-bad-uplinks`
+
+## 2026-11-22T21:45:28.124Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier stepped its ladder down 2 times with three bad uplinks (B1 allows one early step)
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/sfuj1/one-fast-three-bad-uplinks`
