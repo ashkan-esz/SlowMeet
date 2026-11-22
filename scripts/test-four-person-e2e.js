@@ -2694,6 +2694,12 @@ async function scenarioDelayAndJitterLinks() {
   try {
     armer = armParticipantTiers(tierByRole);
     await delay(15000);
+    // The armer classifies each participant's ports as it finds them; check
+    // that both tiers really shape their participant's link before judging
+    // it, instead of trusting the settle delay (a still-unclassified P3 once
+    // read 7 ms of jitter on its "jitter" link).
+    await waitForShapedLink("P2", 300);
+    await waitForShapedLink("P3", 60);
     // Audio flows everywhere: neither delay nor jitter may break audio.
     // Polled for flow rather than asserted on one window's delta — a peer
     // replacement mid-window restarts the cumulative counters at zero
@@ -2733,6 +2739,7 @@ async function scenarioDelayAndJitterLinks() {
     // step-down), audio keeps moving, and video must never be suspended —
     // observed over a poll window because the bursts are intermittent by
     // nature.
+    const jitterCountersBefore = netemTiers.tierClassCounters();
     const p3Observed = await pages.get("P3").evaluate(async () => {
       const deadline = Date.now() + 25000;
       const observed = { poorSeen: false, minLevel: 4, suspended: false, jitterMs: null };
@@ -2747,8 +2754,12 @@ async function scenarioDelayAndJitterLinks() {
       }
       return observed;
     });
+    // Whether P3's traffic actually crossed the jitter tier during the poll,
+    // so a failure tells a shaping miss from a client that ignored jitter.
+    const jitterClass = netemTiers.classCounterDelta(jitterCountersBefore, netemTiers.tierClassCounters(),
+      fourPersonTiers.jitter.classID);
     assert.ok(p3Observed.poorSeen || p3Observed.minLevel < 2,
-      `the jitter link never registered as degraded in the poll window (poorSeen=${p3Observed.poorSeen} minLevel=${p3Observed.minLevel} jitterMs=${p3Observed.jitterMs})`);
+      `the jitter link never registered as degraded in the poll window (poorSeen=${p3Observed.poorSeen} minLevel=${p3Observed.minLevel} jitterMs=${p3Observed.jitterMs}; jitter tier carried ${jitterClass.sentPackets} packets)`);
     if (p3Observed.suspended !== suspendedAtStart.get("P3")) {
       console.log(`[delay-jitter] P3's suspension flipped during the jitter window (was ${suspendedAtStart.get("P3")}) — cross-participant churn, recovered post-lift`);
     }
@@ -3228,6 +3239,22 @@ async function scenarioAllFastLinkTopQuality() {
     await restartAutomaticLadders();
     // From level 2 the climb needs 5 transport-healthy one-second samples.
     await Promise.all(roles.map((role) => waitForTopAutomaticLevel(role, 30000, "on the fast tier")));
+    // A tile badge needs five good samples to clear (stabilizeParticipantQuality),
+    // so one a previous scenario left degraded (delay-and-jitter-links runs
+    // just before this one in CI) can outlast the ladder's climb. The hold
+    // below checks the fast link, so it starts once those have cleared.
+    for (const role of roles) {
+      try {
+        await pages.get(role).waitForFunction(() =>
+          ![...document.querySelectorAll("li[data-participant-id]")].some((tile) => {
+            const quality = tile.dataset.quality || "";
+            return tile.dataset.camera === "paused" || tile.classList.contains("is-poor-connection") ||
+              quality === "degraded" || quality === "poor";
+          }), null, { timeout: 20000 });
+      } catch (_) {
+        assert.fail(`${role}'s degraded tiles never cleared on the fast tier: ${JSON.stringify(await degradedTileIDs(pages.get(role)))}`);
+      }
+    }
 
     const before = new Map();
     for (const role of roles) before.set(role, await pageMediaSnapshot(pages.get(role)));
