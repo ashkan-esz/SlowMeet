@@ -230,8 +230,13 @@ async function startLocalServer(maxParticipants = 2, { connectionMethodTest = fa
     detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  processHandle.stdout.on("data", (chunk) => output.push(chunk.toString()));
-  processHandle.stderr.on("data", (chunk) => output.push(chunk.toString()));
+  // MEDIA_E2E_SERVER_LOG=<file> keeps the server's log for diagnosis.
+  const keep = (chunk) => {
+    output.push(chunk.toString());
+    if (process.env.MEDIA_E2E_SERVER_LOG) fs.appendFileSync(process.env.MEDIA_E2E_SERVER_LOG, chunk);
+  };
+  processHandle.stdout.on("data", keep);
+  processHandle.stderr.on("data", keep);
   await waitForServer(`http://${address}/`, processHandle, output);
   return {
     url: `http://${address}`,

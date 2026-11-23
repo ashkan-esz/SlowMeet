@@ -312,6 +312,11 @@ assert.match(appSource, /simulcastCapableCodecs\(videoCodecsLayerable\)/);
 assert.match(appSource, /if \(optionsKey !== videoCodecOptionsKey\) \{/, "the picker is rebuilt only when its entries change");
 assert.equal((appSource.match(/device: videoCodecsUsableDevice\(\),/g) || []).length, 2,
   "the choice and the note both leave out codecs the device could not encode");
+assert.match(appSource, /if \(sending\) videoCodecsProven\.add\(sending\);/, "a codec that encoded a frame is never judged broken");
+assert.match(appSource, /const expecting = onTime && [^;]*!videoCodecsProven\.has\(videoCodecApplied\)[^;]*currentDirection/,
+  "the no-encoder verdict needs an on-time timer, an unproven codec and a negotiated sending line");
+assert.match(appSource, /new RTCPeerConnection\(\{ iceServers: selectedICEServers[^\n]*\n(\s*\/\/[^\n]*\n)*\s*videoCodecFramesEncoded\.clear\(\);/,
+  "frame counts start over with each connection");
 assert.match(appSource, /stalledFallbackDue\(now - videoCodecStalledSince, codec\)\) return;\s*videoCodecStalledSince = 0;\s*videoCodecsBroken\.add\(codec\);/);
 assert.equal((appSource.match(/simulcastCodecs: videoSimulcastCodecs\(\)/g) || []).length, 2,
   "the choice and the Settings note both know which codecs the browser can send as layers");

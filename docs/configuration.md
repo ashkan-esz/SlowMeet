@@ -447,7 +447,8 @@ room: the room rule keeps publishers on codecs everyone plays, so a value that
 stays above 0 points at a browser sending a codec it was not asked to.
 
 Codec selection and mid-call switches are tested in Chromium and Firefox,
-alone and paired with each other in both directions, for every codec.
+alone and paired with each other in both directions, for every codec, and
+with a full-size shared screen in AV1, VP9, and VP8.
 Safari and phone browsers have not been tested.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video

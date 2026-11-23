@@ -252,6 +252,54 @@ async function updateAdminConfig(fixture, body) {
   assert.equal(response.status, 200, `admin update failed: ${await response.text()}`);
 }
 
+// How many video streams the server republished because a publisher changed
+// codec, from /metrics.
+async function codecSwitches(fixture) {
+  const text = await (await fetch(`${fixture.baseURL}/metrics`)).text();
+  const match = text.match(/^slowmeet_video_codec_switches_total (\d+)$/m);
+  assert.ok(match, "the server reports no codec switch count");
+  return Number(match[1]);
+}
+
+// What the busiest outgoing video stream did over four seconds. The bytes sent
+// in the quarter second after a keyframe show how large its keyframes are.
+async function outboundVideoEvidence(page) {
+  return page.evaluate(async () => {
+    const peer = window.__slowMeetTest.peerConnections.at(-1);
+    const read = async () => {
+      let best = null;
+      (await peer.getStats()).forEach((stat) => {
+        if (stat.type === "outbound-rtp" && stat.kind === "video" && (stat.bytesSent || 0) >= (best?.bytesSent || 0)) best = stat;
+      });
+      return best;
+    };
+    const samples = [];
+    const until = Date.now() + 4000;
+    while (Date.now() < until) {
+      const sample = await read();
+      if (sample) samples.push(sample);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (samples.length < 2) return null;
+    let largestKeyFrameBytes = 0;
+    for (let index = 1; index < samples.length; index += 1) {
+      if (samples[index].keyFramesEncoded > samples[index - 1].keyFramesEncoded) {
+        const after = samples[Math.min(index + 5, samples.length - 1)];
+        largestKeyFrameBytes = Math.max(largestKeyFrameBytes, after.bytesSent - samples[index - 1].bytesSent);
+      }
+    }
+    const first = samples[0];
+    const last = samples.at(-1);
+    return {
+      width: last.frameWidth, height: last.frameHeight, fps: last.framesPerSecond,
+      kbps: Math.round((last.bytesSent - first.bytesSent) * 8 / 4000),
+      keyFrames: last.keyFramesEncoded, keyFramesInWindow: last.keyFramesEncoded - first.keyFramesEncoded,
+      largestKeyFrameBytes, pli: last.pliCount, nack: last.nackCount, hugeFrames: last.hugeFramesSent,
+      limited: last.qualityLimitationReason
+    };
+  });
+}
+
 const scenarios = [
   {
     name: "video codec follows the server default, an admin change, and the participant's choice",
@@ -274,6 +322,7 @@ const scenarios = [
       // Both browsers support AV1, the default, so the room uses it.
       await waitForSentCodec(pageA, "AV1");
       await waitForReceivedCodec(pageB, "video/AV1");
+      assert.equal(await codecSwitches(fixture), 0, "the camera must start in its final codec, with no switch");
       const senderBefore = await pageA.evaluate(() => {
         const peer = window.__slowMeetTest.peerConnections.at(-1);
         return peer.getSenders().filter((sender) => sender.track?.kind === "video").length;
@@ -428,6 +477,7 @@ const scenarios = [
           "Sending VP8. This browser cannot send AV1 as simulcast layers.");
       }
       await waitForReceivedCodec(pageB, mime);
+      assert.equal(await codecSwitches(fixture), 0, "the layers must start in their final codec, with no switch");
       await fixture.assertPeersConnected("simulcast with the default codec");
     }
   },
@@ -597,6 +647,122 @@ const scenarios = [
         await waitForNoReceivedVideo(viewer, `${role} camera off`);
       }
       await fixture.assertPeersConnected("after the codec matrix");
+    }
+  },
+  {
+    name: "a screen share uses the room's codec, follows a codec pick, and keeps arriving",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      // The screen picker cannot run headless, so the page is handed a
+      // 1920x1080 stream of changing text and colour in place of a captured
+      // screen. From there it takes the app's whole screen-share path.
+      const screenSize = (process.env.MEDIA_E2E_SCREEN_SIZE || "1920x1080").split("x").map(Number);
+      const order = (process.env.MEDIA_E2E_SCREEN_ORDER || "av1,vp9,vp8").split(",");
+      const labels = { av1: "AV1", vp9: "VP9", vp8: "VP8", h264: "H.264" };
+      await pageA.evaluate(([width, height, motion]) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        let frame = 0;
+        const draw = () => {
+          frame += 1;
+          if (!motion && frame > 1) {
+            // A document on screen: only a small counter changes.
+            context.fillStyle = "#fff";
+            context.fillRect(canvas.width - 420, canvas.height - 80, 400, 60);
+            context.fillStyle = "#111";
+            context.fillText(`frame ${frame}`, canvas.width - 410, canvas.height - 40);
+            return;
+          }
+          context.fillStyle = "#fff";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.fillStyle = "#111";
+          context.font = "20px monospace";
+          for (let row = 0; row < 40; row += 1) {
+            context.fillText(`${frame} ${"shared screen text ".repeat(7)}${row * frame}`, 10, 22 * (row + 1));
+          }
+          for (let block = 0; block < 320; block += 1) {
+            context.fillStyle = `hsl(${(block * 37 + frame * 11) % 360} 80% 50%)`;
+            context.fillRect((block % 40) * 48, 900 + Math.floor(block / 40) * 22, 48, 22);
+          }
+        };
+        draw();
+        window.__screenDrawTimer = setInterval(draw, 100);
+        const stream = canvas.captureStream(10);
+        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { configurable: true, value: async () => stream });
+      }, [...screenSize, process.env.MEDIA_E2E_SCREEN_CONTENT === "motion"]);
+      const setScreen = async (on) => {
+        await pageA.locator("#screen").click();
+        await pageA.waitForFunction((pressed) =>
+          document.querySelector("#screen")?.getAttribute("aria-pressed") === pressed,
+        String(on), { timeout: 30000 });
+      };
+      await pickCodec(pageA, order[0]);
+      await setScreen(true);
+      for (const pick of order) {
+        const label = labels[pick];
+        await pickCodec(pageA, pick);
+        await waitForSentCodec(pageA, label);
+        try {
+          await waitForReceivedCodec(pageB, codecMimes[pick]);
+        } catch (error) {
+          const viewer = await pageB.evaluate(async () => {
+            const found = [];
+            (await window.__slowMeetTest.peerConnections.at(-1).getStats()).forEach((stat) => {
+              if (stat.type !== "inbound-rtp" || stat.kind !== "video") return;
+              found.push({
+                packets: stat.packetsReceived, lost: stat.packetsLost, retransmitted: stat.retransmittedPacketsReceived,
+                nack: stat.nackCount, pli: stat.pliCount, framesReceived: stat.framesReceived,
+                framesDecoded: stat.framesDecoded, framesDropped: stat.framesDropped, keyFrames: stat.keyFramesDecoded,
+                decoder: stat.decoderImplementation, discarded: stat.packetsDiscarded
+              });
+            });
+            return found;
+          });
+          error.message = `${label} screen, sender ${JSON.stringify(await outboundVideoEvidence(pageA))}, ` +
+            `viewer ${JSON.stringify(viewer)}: ${error.message}`;
+          throw error;
+        }
+        // Large frames must keep arriving, not only the first ones.
+        const decodedFrames = () => pageB.evaluate(async () => {
+          let frames = 0;
+          (await window.__slowMeetTest.peerConnections.at(-1).getStats()).forEach((stat) => {
+            if (stat.type === "inbound-rtp" && stat.kind === "video") frames += stat.framesDecoded || 0;
+          });
+          return frames;
+        });
+        const framesBefore = await decodedFrames();
+        // The app keeps a shared screen sharp and lets its frame rate fall, so
+        // a full-size screen at the default bitrate runs at about a frame a
+        // second.
+        await pageB.waitForTimeout(12000);
+        const arrived = (await decodedFrames()) - framesBefore;
+        if (arrived < 2) {
+          assert.fail(`the shared screen stalled in ${label}: ${arrived} frames in 12 s, sender ` +
+            JSON.stringify(await outboundVideoEvidence(pageA)));
+        }
+        const size = await pageB.evaluate(async () => {
+          const stats = await window.__slowMeetTest.peerConnections.at(-1).getStats();
+          let best = null;
+          stats.forEach((report) => {
+            if (report.type === "inbound-rtp" && report.kind === "video" && (report.frameWidth || 0) > (best?.width || 0)) {
+              best = { width: report.frameWidth, height: report.frameHeight, keyFrames: report.keyFramesDecoded, frames: report.framesDecoded };
+            }
+          });
+          return best;
+        });
+        console.log(`[screen share codec evidence] ${label}: ${arrived} frames in 12 s, viewer decodes ${JSON.stringify(size)}`);
+      }
+      await pickCodec(pageA, "auto");
+      await setScreen(false);
+      await waitForNoReceivedVideo(pageB, "screen share stopped");
+      await fixture.assertPeersConnected("after the screen share");
     }
   }
 ];

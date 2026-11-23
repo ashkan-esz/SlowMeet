@@ -2170,7 +2170,10 @@ const videoCodecsNotSimulcast = new Set();
 // Codecs this device lists but turned out unable to encode at all; they are
 // treated as unsupported for the rest of the session.
 const videoCodecsBroken = new Set();
+// Codecs this device has encoded at least one frame in during this session.
+const videoCodecsProven = new Set();
 let videoCodecStalledSince = 0;
+let videoCodecStallCheckedAt = 0;
 
 function videoCodecsUsableDevice() {
   return videoCodecsDevice ? videoCodecsDevice.filter((codec) => !videoCodecsBroken.has(codec)) : videoCodecsDevice;
@@ -2343,6 +2346,7 @@ function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncod
   videoCodecFramesEncoded.set(streamID, encoded);
   if (!advanced || !mimeType) return;
   const sending = codecs.codecNameFromMime(mimeType);
+  if (sending) videoCodecsProven.add(sending);
   videoCodecSentAt = Date.now();
   if (videoCodecMetric) videoCodecMetric.textContent = codecs.codecLabel(sending) || mimeType;
   // This video started after the codec choice last changed, so its encoder
@@ -2375,10 +2379,19 @@ setInterval(() => {
   // the codec in use, the browser has no working encoder for that codec
   // (stalledFallbackDue), and the codec is dropped for this device. Only the
   // camera is judged: a shared screen that does not change sends no frames.
+  // The verdict needs certainty, so nothing else may explain the silence: the
+  // codec has never produced a frame in this session (a starved or paused
+  // encoder has), the camera's media line is negotiated for sending, and this
+  // timer is running on time (a throttled or suspended page proves nothing).
   const camera = cameraSender?.track;
-  const expecting = Boolean(peer) && peer.connectionState === "connected" && Boolean(videoCodecApplied) &&
+  const onTime = now - videoCodecStallCheckedAt < 2500;
+  videoCodecStallCheckedAt = now;
+  const expecting = onTime && Boolean(peer) && peer.connectionState === "connected" &&
+    peer.signalingState === "stable" && Boolean(videoCodecApplied) && !videoCodecsProven.has(videoCodecApplied) &&
     camera?.readyState === "live" && camera.enabled && !camera.muted &&
-    cameraSender.getParameters().encodings.some((encoding) => encoding.active !== false);
+    cameraSender.getParameters().encodings.some((encoding) => encoding.active !== false) &&
+    peer.getTransceivers().some((transceiver) => transceiver.sender === cameraSender &&
+      /send/.test(transceiver.currentDirection || ""));
   if (!expecting || encodedRecently) {
     videoCodecStalledSince = 0;
     return;
@@ -4541,6 +4554,9 @@ async function startWebRTC() {
     return;
   }
   const currentPeer = new RTCPeerConnection({ iceServers: selectedICEServers, iceTransportPolicy: selectedICEPolicy });
+  // Frame counts belong to the connection that reported them: a new
+  // connection counts from zero and must not be measured against the old one.
+  videoCodecFramesEncoded.clear();
   restartRequested = false;
   iceRestartAttempts = 0;
   directDisconnectCounted = false;
