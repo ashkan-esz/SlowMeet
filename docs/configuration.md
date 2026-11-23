@@ -413,8 +413,7 @@ The fallback is immediate when a limiting device joins. The room returns to
 the default about 15 seconds after that device leaves, and a participant
 inside the reconnect window (`RECONNECT_TIMEOUT_SECONDS`) still counts, so a
 short drop does not switch every encoder twice. A switch costs each viewer one
-renegotiation and leaves one idle video line in their session description,
-or one per layer when the camera is sent as simulcast.
+renegotiation; the media lines it frees are used again by later tracks.
 
 What the app shows:
 

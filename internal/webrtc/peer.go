@@ -274,22 +274,6 @@ func (p *Peer) AddTrack(track pion.TrackLocal) (*pion.RTPSender, error) {
 	return sender, nil
 }
 
-// AddTrackOnNewLine adds track on a media line created for it instead of the
-// first free existing one. A new line is always the last in the description.
-// When a publisher's video is replaced by the same video in another codec,
-// the receiver's offer removes the old track and adds the new one under the
-// same stream and track IDs; Firefox only binds the new stream when its line
-// comes after the old one, and stays black when a reused earlier line carries
-// it. Chromium accepts both.
-func (p *Peer) AddTrackOnNewLine(track pion.TrackLocal) (*pion.RTPSender, error) {
-	transceiver, err := p.connection.AddTransceiverFromTrack(track,
-		pion.RTPTransceiverInit{Direction: pion.RTPTransceiverDirectionSendonly})
-	if err != nil {
-		return nil, fmt.Errorf("add track on a new line: %w", err)
-	}
-	return transceiver.Sender(), nil
-}
-
 func (p *Peer) RemoveTrack(sender *pion.RTPSender) error {
 	if sender == nil || p == nil || p.connection == nil {
 		return nil

@@ -310,9 +310,6 @@ func (r *Router) republishForCodecChange(old *publication, codec pion.RTPCodecCa
 	r.warnIfVideoCodecNotAllowedLocked(next)
 	for id := range r.peers {
 		if r.shouldSubscribeLocked(next, id) && r.queueSubscriptionLocked(next, id, &ops) {
-			// The same offer removes this receiver's track of the old codec,
-			// so the new one must not land on an earlier line.
-			ops[len(ops)-1].freshLine = true
 			if offerer := r.offerers[id]; offerer != nil {
 				offers[id] = offerer
 			}

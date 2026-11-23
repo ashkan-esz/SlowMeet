@@ -177,19 +177,21 @@ func TestRouterFollowsInPlaceCodecChange(t *testing.T) {
 	fixture.receive(t, vp9, pion.MimeTypeVP9)
 	waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
 
-	// The new codec's track goes on a media line added after the existing
-	// ones. A browser gets the removal of the old track and this track, under
-	// the same IDs, in one offer; Firefox only binds it on a later line.
-	lines := fixture.targetEgress.Connection().GetTransceivers()
-	if len(lines) != linesBefore+1 {
-		t.Fatalf("receiver media lines after the switch = %d, want %d", len(lines), linesBefore+1)
+	// Switching back and forth must not keep adding media lines to the
+	// receiver's connection: a line freed by one switch carries a later track.
+	for range 2 {
+		sender := sender
+		fixture.switchCodec(t, sender, integrationVP8)
+		waitIntegrationSignal(t, fixture.targetOffer, "offer after switching to VP8")
+		negotiateIntegrationPeers(t, fixture.targetEgress.Connection(), fixture.targetClient)
+		waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
+		fixture.switchCodec(t, sender, integrationVP9)
+		waitIntegrationSignal(t, fixture.targetOffer, "offer after switching to VP9")
+		negotiateIntegrationPeers(t, fixture.targetEgress.Connection(), fixture.targetClient)
+		waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
 	}
-	lastSender := lines[len(lines)-1].Sender()
-	if lastSender == nil || lastSender.Track() == nil {
-		t.Fatal("the last media line carries no track after the switch")
-	}
-	if track, ok := lastSender.Track().(*pion.TrackLocalStaticRTP); !ok || !strings.EqualFold(track.Codec().MimeType, pion.MimeTypeVP9) {
-		t.Fatal("the last media line does not carry the VP9 track")
+	if lines := len(fixture.targetEgress.Connection().GetTransceivers()); lines > linesBefore+1 {
+		t.Fatalf("receiver media lines after five switches = %d, want at most %d", lines, linesBefore+1)
 	}
 }
 

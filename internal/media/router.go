@@ -451,9 +451,6 @@ func (r *Router) SetLimits(limits Limits) {
 // pion-internal locks, and running it under r.mu stalls every media forward
 // on the server for the duration of a join or leave.
 type pendingTrackOp struct {
-	// freshLine puts a subscription on a new media line of the receiver's
-	// connection instead of a free existing one (see Peer.AddTrackOnNewLine).
-	freshLine bool
 	subscribe bool
 	pub       *publication
 	targetID  string
@@ -1035,11 +1032,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 		if err != nil {
 			continue
 		}
-		addTrack := op.peer.AddTrack
-		if op.freshLine {
-			addTrack = op.peer.AddTrackOnNewLine
-		}
-		sender, err := addTrack(local)
+		sender, err := op.peer.AddTrack(local)
 		if err != nil {
 			continue
 		}

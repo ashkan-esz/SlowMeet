@@ -500,6 +500,47 @@ const scenarios = [
       await waitForReceivedCodec(pageB, automatic);
       await fixture.assertPeersConnected("simulcast codec picks");
     }
+  },
+  {
+    // Every switch replaces the viewer's track. The viewer must keep
+    // decoding after each one, and the tracks must go back onto media lines
+    // that became free, or the session description would grow by a line per
+    // switch for the rest of the call.
+    name: "many codec switches in a row keep the viewer's video and reuse its media lines",
+    when: "localCapacity",
+    localCapacityLimit: 2,
+    connectionMethodTest: true,
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      await setCamera(pageA, true);
+      await waitForSentCodec(pageA, "AV1");
+      await waitForReceivedCodec(pageB, codecMimes.av1);
+      const videoLines = () => pageB.evaluate(() =>
+        (window.__slowMeetTest.peerConnections.at(-1).remoteDescription.sdp.match(/^m=video /gm) || []).length);
+      const before = await videoLines();
+      const labels = { av1: "AV1", vp9: "VP9", vp8: "VP8" };
+      const switches = ["vp8", "av1", "vp9", "vp8", "av1", "vp9", "av1", "vp8"];
+      for (const [index, codec] of switches.entries()) {
+        await updateAdminConfig(fixture, { default_video_codec: codec });
+        await waitForSentCodec(pageA, labels[codec]);
+        try {
+          await waitForReceivedCodec(pageB, codecMimes[codec]);
+        } catch (error) {
+          assert.fail(`switch ${index + 1} of ${switches.length} (to ${codec}): ${error.message}`);
+        }
+      }
+      const after = await videoLines();
+      console.log(`[codec switch evidence] viewer video lines ${before} -> ${after} after ${switches.length} switches`);
+      assert.ok(after <= before + 1,
+        `the viewer's session description grew from ${before} to ${after} video lines over ${switches.length} switches`);
+      await updateAdminConfig(fixture, { default_video_codec: "av1" });
+      await fixture.assertPeersConnected("after many codec switches");
+    }
   }
 ];
 
