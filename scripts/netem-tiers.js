@@ -129,7 +129,18 @@ const optInTiers = {
   // full-size ones: three 360p cameras on the normal profile forward ~840
   // kbps at the top layer and ~360 kbps at the low one. Only receiving is
   // shaped, like the capped tier.
-  "narrow-downlink": { classID: "1:d0", handle: "d0:", rate: "700kbit", delay: "50ms", loss: "0%", downlinkOnly: true, limit: "30" }
+  "narrow-downlink": { classID: "1:d0", handle: "d0:", rate: "700kbit", delay: "50ms", loss: "0%", downlinkOnly: true, limit: "30" },
+  // A DOWNLOAD that only loses packets: 12 % loss at a 10 ms delay, no rate
+  // cap, a clean uplink. Neither the round trip nor the send path shows
+  // anything, so only inbound loss can reveal the damage, which is exactly
+  // what the sender discount (source_quality) must not cancel when every
+  // other participant's uplink is bad too.
+  "lossy-downlink": { classID: "1:e0", handle: "e0:", rate: "10gbit", delay: "10ms", loss: "12%", downlinkOnly: true },
+  // An UPLOAD that loses 10 % with no rate cap and a clean download: a
+  // clearly bad but working sender, whose surviving packets still say
+  // something about each receiver's own link (unlike the moderate tier,
+  // where the shared 200 kbit queue makes the sender's audio lose 60-85 %).
+  "lossy-uplink": { classID: "1:f0", handle: "f0:", rate: "10gbit", delay: "10ms", loss: "10%", uplinkOnly: true }
 };
 for (const [name, tier] of Object.entries(optInTiers)) {
   tiers[name] = { ...tier, optIn: true };

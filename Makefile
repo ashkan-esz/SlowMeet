@@ -178,7 +178,7 @@ test-media-e2e-four-netns: ## Run the four-person mixed-quality room scenarios i
 	./scripts/test-four-person-e2e-netns.sh
 
 # Keep in sync with the four-person list in .github/workflows/ci.yml.
-FOUR_NETNS_CI_SCENARIOS = mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired,slow-uplink-room
+FOUR_NETNS_CI_SCENARIOS = mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired,slow-uplink-room,bad-downlink-among-bad-senders
 
 test-media-e2e-four-netns-strict: ## Run the CI four-person netns scenarios with their strict checks (per-pair audio gaps, full-mesh media after recovery)
 	MEDIA_E2E_FOUR_STRICT=1 MEDIA_E2E_FOUR_SCENARIO="$(FOUR_NETNS_CI_SCENARIOS)" ./scripts/test-four-person-e2e-netns.sh

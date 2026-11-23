@@ -3557,6 +3557,80 @@ async function scenarioOneFastThreeBadUplinks() {
 // has a clean reference stream). Audio must keep flowing for everyone, the
 // impairment must degrade the room without turning into a peer-rebuild
 // storm, and every camera and ladder must recover when the tiers lift.
+// One participant's own download loses 12 % (no rate cap, ~10 ms, clean
+// uplink) while the other three send over uploads that lose 10 %. Receivers
+// discount each inbound stream by what the SFU measured its sender losing;
+// this proves that discount does not also cancel the receiver's own loss: P1
+// must still read its link as poor and step its ladder down. The senders are
+// bad but working: with uplinks near an outage (the moderate tier's shared
+// queue makes their audio lose 60-85 %) their few surviving packets cannot
+// reveal a receiver's own 12 %, and the own-link estimate skips them
+// (selectOwnLinkMeasurements, maxSenderLossPct).
+async function scenarioBadDownlinkAmongBadSenders() {
+  const tag = "bad-downlink-bad-senders";
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
+  const tierByRole = { P1: "lossy-downlink", P2: "lossy-uplink", P3: "lossy-uplink", P4: "lossy-uplink" };
+  const p1 = pages.get("P1");
+  let armer;
+  let sampler;
+  let evidence = null;
+  installRoomQdisc({ include: ["lossy-downlink", "lossy-uplink"] });
+  try {
+    // P1 starts at the top of its ladder, so a step down is observable.
+    await restartAutomaticLadders();
+    await waitForTopAutomaticLevel("P1", 45000, "on a clean link before its download turned lossy");
+    armer = armParticipantTiers(tierByRole);
+    const impairedAt = Date.now();
+    sampler = startAdaptationSampler(["P1"]);
+    for (const role of roles) {
+      await waitForAudioFlow(pages.get(role), `${role} receiving audio with every link impaired`);
+    }
+    await waitForAdvancingAudioStreams(p1, 3, "P1 receiving audio from each of the three lossy publishers", 60000);
+    const remaining = 40000 - (Date.now() - impairedAt);
+    if (remaining > 0) await delay(remaining);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+    if (sampler) {
+      const sampled = await sampler.stop();
+      const p1Samples = sampled.timeline.get("P1");
+      // The first seconds belong to the tiers arming.
+      const settled = p1Samples.filter((sample) => sample.t >= 5);
+      evidence = {
+        tiers: tierByRole,
+        summary: summarizeAdaptationTimeline(settled),
+        samples: settled.length,
+        lossyOwnSamples: settled.filter((sample) => Number.isFinite(sample.lossPct) && sample.lossPct > 5).length,
+        timeline: Object.fromEntries(sampled.timeline)
+      };
+      recordEvidence("own-downlink-evidence", evidence);
+      console.log(`[${tag}] P1 own link with a lossy download among three bad senders: ${JSON.stringify(evidence.summary)}; own loss above 5 % in ${evidence.lossyOwnSamples} of ${evidence.samples} samples`);
+      console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
+    }
+  }
+  assert.ok(evidence && evidence.samples >= 20,
+    `the sampler recorded only ${evidence?.samples ?? 0} P1 samples in the impaired window`);
+  // The discount must leave P1's own 12 % loss visible. Pooling the reported
+  // streams and narrowing the SFU's report to its last window: 27, 29 and 26
+  // of 35 samples; before, with the minimum over streams and the worst of
+  // three windows, 0-1 of 35. The bar sits about ten points under the worst.
+  const lossyShare = evidence.lossyOwnSamples / evidence.samples;
+  assert.ok(lossyShare >= 0.6,
+    `P1's own lossy download showed as own loss in only ${evidence.lossyOwnSamples} of ${evidence.samples} samples: the sender discount hid it`);
+  assert.ok(evidence.summary.minLevel < topAutomaticLevel,
+    `P1 never stepped its ladder down on a download losing 12 % (own loss above 5 % in ${evidence.lossyOwnSamples} of ${evidence.samples} samples)`);
+
+  // Recovery: every ladder back at the top and audio everywhere.
+  await Promise.all(roles.map((role) =>
+    waitForTopAutomaticLevel(role, 90000, "after the impaired links lifted")));
+  for (const role of roles) {
+    await waitForAudioFlow(pages.get(role), `${role} receiving audio after the impaired links lifted`);
+  }
+  await assertMedia();
+}
+
 async function scenarioAllFourImpaired() {
   const tag = "all-impaired";
   // A rebuild or two per participant is the recovery machinery working on a
@@ -4759,6 +4833,7 @@ const scenarios = [
   { name: "delay-and-jitter-links", description: "A pure-latency link (RTT ~350 ms, poor-not-critical) degrades interactivity while throughput survives, and a jitter-only link steps the ladder down without suspending video; the clean pair stays unaffected and everything recovers.", run: scenarioDelayAndJitterLinks, netns: true },
   { name: "all-fast-link-top-quality", description: "All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.", run: scenarioAllFastLinkTopQuality, netns: true },
   { name: "one-fast-three-bad-uplinks", description: "One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.", run: scenarioOneFastThreeBadUplinks, netns: true },
+  { name: "bad-downlink-among-bad-senders", description: "One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.", run: scenarioBadDownlinkAmongBadSenders, netns: true },
   { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true },
   // Opt-in resilience scenarios: MEDIA_E2E_FOUR_GROUP=resilience (or
   // resilience-slow), or each by its exact name. Never in CI.

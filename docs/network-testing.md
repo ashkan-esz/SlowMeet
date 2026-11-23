@@ -97,6 +97,13 @@ host interface:
     not share one 200 kbit queue), with no clean peer anywhere: audio keeps
     advancing, the room does not rebuild peers in a storm, and every camera
     recovers on lift.
+  - `bad-downlink-among-bad-senders` — the guard on the sender discount: one
+    participant's own download loses 12 % (`lossy-downlink`: no rate cap,
+    10 ms, clean upload) while the other three send over uploads losing
+    10 % (`lossy-uplink`). Only inbound loss can show that participant's
+    damage, and the discount for the senders' loss must not cancel it: its
+    own loss must read above 5 % in at least 60 % of the samples and its
+    ladder must step down (fixed issue B14 below).
 
 Deterministic coverage for the same rooms runs in `make check` without a
 namespace:
@@ -140,7 +147,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B13.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B14.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -150,11 +157,11 @@ what should change. Fixing an issue means flipping that assertion.
     recover the packets (so the sender's own receiver reports read 0 %), but
     too late, after their frame was forwarded or skipped. The SFU now
     measures, per publication, the share of the publisher's sequence numbers
-    it did not forward (`forward_loss.go`, the worst of the last three
-    one-second windows) and relays it per sender and kind in
+    it did not forward (`forward_loss.go`, the higher of its window in
+    progress and the last one-second window) and relays it per sender and kind in
     `source_quality`, with the jitter of what it forwards (B13); receivers discount
-    each stream by its sender's share before taking the minimum
-    (`selectOwnLinkMeasurements`). The fast participant now never pauses,
+    each stream by its sender's share and pool the reported streams
+    (`selectOwnLinkMeasurements`, B14). The fast participant now never pauses,
     reads 0 % in nearly every sample, and at most steps down once in the
     first second or two, before the first measurement reaches it. That early
     step once left it at level 2 for the rest of the window: the bad senders
@@ -192,8 +199,8 @@ what should change. Fixing an issue means flipping that assertion.
     the SFU's receiver reports, which the sender relays, does not reflect its
     uplink queueing. The SFU now measures the RFC 3550 jitter of what it
     forwards, per publication, at the moment of forwarding
-    (`forward_jitter.go`, worst of the last three one-second windows, like
-    the loss), and the hub relays that in `source_quality` with the sender's
+    (`forward_jitter.go`, its window in progress and the last one-second
+    window, like the loss), and the hub relays that in `source_quality` with the sender's
     report as the fallback. Over five runs no sample after the first 5 s
     read 30 ms or more; the fast participant held the top for 34, 34, 28, 34
     and 39 of 39 samples and climbed back within 5–11 s (the 11 s one waited
@@ -207,6 +214,32 @@ what should change. Fixing an issue means flipping that assertion.
     `TestForwardJitterMeasuresForwardedInterarrivalJitter`,
     `TestRouterForwardJitterPicksAudioAndBusiestCameraLayer`,
     `one-fast-three-bad-uplinks`.
+  - B14, the sender discount hiding a receiver's own bad download: in
+    `bad-downlink-among-bad-senders` the participant whose download loses
+    12 % read its own loss above 5 % in only 0-2 of 35 samples and never
+    stepped down. Three causes. The own-link estimate took the minimum over
+    discounted streams, and a video stream with five packets in a second
+    reads 0 % about a third of the time at 20 % loss; the SFU reported the
+    worst of four windows, each a noisy count of about 50 audio packets, so a
+    10 % uplink read 14-20 % and the excess cancelled the receiver's own
+    loss; and senders near an outage (the moderate tier's audio loses
+    60-85 %) leave too few packets to reveal anything, while the discount
+    divides by what is left and turns a 2-point report gap into 7-10 % own
+    loss. Now the estimate pools every reported stream (packets received
+    against packets the receiver's path was handed after each sender's
+    reported loss), keeps the minimum only for unreported streams, skips
+    streams whose sender reports 50 % loss or more, and treats a pool under
+    20 packets as unmeasurable rather than falling back to the polluted
+    pooled loss (`selectOwnLinkMeasurements`); the SFU reports the higher of
+    its window in progress and the last complete window only. Three rounds:
+    own loss visible in 27, 29 and 26 of 35 samples, ladder at the floor; the
+    fast participant in `one-fast-three-bad-uplinks` still 40/40 at the top
+    with no step-down. With only near-outage senders a receiver's own
+    download loss is unmeasurable from their streams (its round trip and send
+    path still judge the link). `scripts/test-room-network-scenarios.js`
+    (pooling, lucky small samples, near-outage and small-pool cases),
+    `TestForwardJitterReportsLastCompleteWindow`,
+    `bad-downlink-among-bad-senders`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the
@@ -310,7 +343,7 @@ what should change. Fixing an issue means flipping that assertion.
   Run the whole gated set the way CI does:
 
   ```sh
-  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired,slow-uplink-room" make test-media-e2e-four-netns
+  MEDIA_E2E_FOUR_SCENARIO="mixed-quality-room,screen-share-mixed-quality,fluctuating-link,slow-bandwidth-room,reconnect-under-impairment,ice-restart-under-impairment,reconnect-after-expiry-under-impairment,cold-join-under-impairment,blackout-and-recovery,all-distinct-qualities,impaired-sharer-screen-share,delay-and-jitter-links,all-fast-link-top-quality,one-fast-three-bad-uplinks,all-four-impaired,slow-uplink-room,bad-downlink-among-bad-senders" make test-media-e2e-four-netns
   ```
 
 - `make test-soak-netns` runs the sustained weak-network soak: the same

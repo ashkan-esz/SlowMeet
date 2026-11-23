@@ -1670,3 +1670,93 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/sfuj1/one-fast-three-bad-uplinks`
+
+## 2026-11-23T06:56:46.271Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three are on bad links: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 2 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/mask1/bad-downlink-among-bad-senders`
+
+## 2026-11-23T06:58:02.298Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier stepped its ladder down 1 times with three bad uplinks (B1)
+
+1 !== 0
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/mask2/one-fast-three-bad-uplinks`
+
+## 2026-11-23T06:58:51.936Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three are on bad links: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 0 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/mask2/bad-downlink-among-bad-senders`
+
+## 2026-11-23T07:01:11.254Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three are on bad links: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 1 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/mask3/bad-downlink-among-bad-senders`
+
+## 2026-11-23T07:06:29.509Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 0 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/skip1/bad-downlink-among-bad-senders`
+
+## 2026-11-23T07:10:17.186Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 1 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/skip2/bad-downlink-among-bad-senders`
+
+## 2026-11-23T07:14:05.025Z — bad-downlink-among-bad-senders
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=bad-downlink-among-bad-senders make test-media-e2e-four-netns`
+- Expected: One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.
+- Actual: P1's own lossy download showed as own loss in only 0 of 35 samples: the sender discount hid it
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/skip3/bad-downlink-among-bad-senders`
+
+## 2026-11-23T07:32:28.359Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier stepped its ladder down 1 times with three bad uplinks (B1)
+
+1 !== 0
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/pool1/one-fast-three-bad-uplinks`
+
+## 2026-11-23T07:44:09.325Z — one-fast-three-bad-uplinks
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=one-fast-three-bad-uplinks make test-media-e2e-four-netns`
+- Expected: One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.
+- Actual: P1 on the fast tier stepped its ladder down 1 times with three bad uplinks (B1)
+
+1 !== 0
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/pool3/one-fast-three-bad-uplinks`
