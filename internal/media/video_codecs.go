@@ -211,11 +211,16 @@ func senderNegotiatedCodec(sender *pion.RTPSender, codec pion.RTPCodecCapability
 // loop must end: the replacement has its own.
 func (r *Router) handleIngressCodecChange(pub *publication, payloadType uint8) bool {
 	codec := pub.remote.Codec()
-	if ingressCodecActionFor(pub.payloadType, payloadType, uint8(codec.PayloadType)) != ingressRepublish {
-		return false
+	switch ingressCodecActionFor(pub.payloadType, payloadType, uint8(codec.PayloadType),
+		sameCodecCapability(codec.RTPCodecCapability, pub.codec)) {
+	case ingressAdopt:
+		// Only this publication's forwarding loop reads or writes payloadType.
+		pub.payloadType = payloadType
+	case ingressRepublish:
+		r.republishForCodecChange(pub, codec.RTPCodecCapability, payloadType)
+		return true
 	}
-	r.republishForCodecChange(pub, codec.RTPCodecCapability, payloadType)
-	return true
+	return false
 }
 
 // ingressCodecAction is what the forwarding loop does with an ingress packet,
@@ -232,17 +237,27 @@ const (
 	// ingressRepublish: the track moved to the packet's payload type, so the
 	// publication is replaced by one in the new codec.
 	ingressRepublish
+	// ingressAdopt: the publication has no payload type yet and the packet is
+	// in its codec, so the packet's payload type becomes the publication's.
+	// pion reports none for a simulcast layer when the track first appears,
+	// only once a packet was read; without adopting it, a later codec change
+	// on that layer would go unnoticed and its packets would be forwarded
+	// under the old codec's payload type.
+	ingressAdopt
 )
 
-// ingressCodecActionFor compares the payload type a publication was created
-// with, the packet's, and the one pion currently reports for the track. A
-// publication without a recorded payload type (zero) is not checked.
-func ingressCodecActionFor(publicationPayloadType, packetPayloadType, trackPayloadType uint8) ingressCodecAction {
+// ingressCodecActionFor compares the payload type a publication has recorded
+// (zero when none yet), the packet's, and the one pion currently reports for
+// the track. trackCodecIsPublications says whether the track's current codec
+// is still the one the publication was created with.
+func ingressCodecActionFor(publicationPayloadType, packetPayloadType, trackPayloadType uint8, trackCodecIsPublications bool) ingressCodecAction {
 	switch {
-	case publicationPayloadType == 0 || packetPayloadType == publicationPayloadType:
+	case packetPayloadType == publicationPayloadType:
 		return ingressForward
 	case trackPayloadType != packetPayloadType:
 		return ingressDrop
+	case publicationPayloadType == 0 && trackCodecIsPublications:
+		return ingressAdopt
 	default:
 		return ingressRepublish
 	}

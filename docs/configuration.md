@@ -400,7 +400,12 @@ decided in this order:
 3. In Automatic, a device that lists a codec but cannot encode it in real time
    steps down to an older one by itself and stays there for the session. A
    codec the participant picked explicitly is not overridden this way.
-4. With `SIMULCAST_ENABLED=true`, cameras stay on VP8 or H.264.
+4. With `SIMULCAST_ENABLED=true`, a camera uses a newer codec only in a
+   browser that can send it as separate layers. Chromium-based browsers send
+   VP9 and AV1 that way; Firefox does not, so its simulcast cameras stay on
+   VP8 or H.264 and Settings says "This browser cannot send AV1 as simulcast
+   layers." A browser that claims the ability but packs all layers into one
+   stream is caught within a few seconds and returns to VP8 for the session.
 5. A codec the administrator removes is given up at once, even when a
    participant had picked it.
 
@@ -408,7 +413,8 @@ The fallback is immediate when a limiting device joins. The room returns to
 the default about 15 seconds after that device leaves, and a participant
 inside the reconnect window (`RECONNECT_TIMEOUT_SECONDS`) still counts, so a
 short drop does not switch every encoder twice. A switch costs each viewer one
-renegotiation and leaves one idle video line in their session description.
+renegotiation and leaves one idle video line in their session description,
+or one per layer when the camera is sent as simulcast.
 
 What the app shows:
 

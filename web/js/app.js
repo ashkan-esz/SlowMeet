@@ -2146,14 +2146,77 @@ const videoCodecFramesEncoded = new Map();
 // Codecs Automatic skips on this device: not smooth to encode, or caught
 // CPU-limited during this session.
 const videoCodecsAvoided = new Set();
-const videoCodecsDevice = (() => {
+const videoSenderCapabilities = (() => {
   try {
-    return window.SlowMeetVideoCodec.deviceCodecs(
-      RTCRtpSender.getCapabilities("video"), RTCRtpReceiver.getCapabilities("video"));
+    return RTCRtpSender.getCapabilities("video");
   } catch (_) {
     return null;
   }
 })();
+const videoCodecsDevice = (() => {
+  try {
+    return window.SlowMeetVideoCodec.deviceCodecs(
+      videoSenderCapabilities, RTCRtpReceiver.getCapabilities("video"));
+  } catch (_) {
+    return null;
+  }
+})();
+// With simulcast on, the camera can only use a codec this browser sends as
+// separate layers. A codec that turned out to be packed into one stream after
+// all is left out for the rest of the session (noteSimulcastLayerMode).
+// videoCodecsLayerable is filled by the capability query further down.
+const videoCodecsLayerable = new Set();
+const videoCodecsNotSimulcast = new Set();
+let videoSimulcastModeSamples = [];
+let videoSimulcastModeSample = { at: 0, modes: [] };
+
+function videoSimulcastCodecs() {
+  if (!simulcastEnabled) return null;
+  return window.SlowMeetVideoCodec.simulcastCapableCodecs(videoCodecsLayerable)
+    .filter((codec) => !videoCodecsNotSimulcast.has(codec));
+}
+
+// A simulcast camera about to send VP9 or AV1 gets a scalability mode on every
+// layer first (see video-codec.js). With the codec arriving first, Chromium
+// would pack the layers into one stream until the mode followed, and viewers
+// of the other layers would lose the picture meanwhile.
+function ensureSimulcastLayerMode(codec) {
+  const run = async () => {
+    const sender = cameraSender;
+    if (!simulcastEnabled || !sender?.track || !window.SlowMeetVideoCodec.needsLayerMode(codec)) return;
+    const parameters = sender.getParameters();
+    if (!Array.isArray(parameters.encodings) || parameters.encodings.length < 2) return;
+    const wanted = window.SlowMeetVideoCodec.simulcastEncodings(parameters.encodings, codec);
+    if (wanted.every((encoding, index) => encoding.scalabilityMode === parameters.encodings[index].scalabilityMode)) return;
+    parameters.encodings.forEach((encoding, index) => {
+      encoding.scalabilityMode = wanted[index].scalabilityMode;
+    });
+    await sender.setParameters(parameters);
+  };
+  senderParameterChain = senderParameterChain.then(run, run);
+  return senderParameterChain;
+}
+
+// Called with the scalability mode of each simulcast stream of a stats
+// sample. If the browser reports several spatial layers in one stream for a
+// few samples in a row, the codec is given up for simulcast.
+function noteSimulcastLayerMode(scalabilityMode) {
+  const now = Date.now();
+  if (now - videoSimulcastModeSample.at >= 900) {
+    if (videoSimulcastModeSample.at) {
+      videoSimulcastModeSamples = [...videoSimulcastModeSamples, videoSimulcastModeSample.modes].slice(-5);
+    }
+    videoSimulcastModeSample = { at: now, modes: [] };
+    const codec = videoCodecApplied;
+    if (window.SlowMeetVideoCodec.simulcastCollapsed(videoSimulcastModeSamples)) {
+      videoSimulcastModeSamples = [];
+      videoCodecsNotSimulcast.add(codec);
+      showToast(`This browser cannot send ${window.SlowMeetVideoCodec.codecLabel(codec)} as simulcast layers. Switching codec.`, "warning");
+      updateVideoCodecChoice(true);
+    }
+  }
+  videoSimulcastModeSample.modes.push(scalabilityMode || "");
+}
 
 function videoCodecRoomList() {
   return videoCodecsRoom || videoCodecsAllowed;
@@ -2163,7 +2226,7 @@ function videoCodecTarget() {
   return window.SlowMeetVideoCodec.chooseSendCodec({
     stored: videoCodecStored, serverDefault: videoCodecServerDefault,
     roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
-    avoid: videoCodecsAvoided, simulcast: simulcastEnabled
+    avoid: videoCodecsAvoided, simulcastCodecs: videoSimulcastCodecs()
   });
 }
 
@@ -2180,7 +2243,7 @@ function videoCodecNoteText() {
   return window.SlowMeetVideoCodec.codecNote({
     applied: videoCodecApplied, stored: videoCodecStored, serverDefault: videoCodecServerDefault,
     roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
-    avoided: videoCodecsAvoided, simulcast: simulcastEnabled
+    avoided: videoCodecsAvoided, simulcastCodecs: videoSimulcastCodecs()
   });
 }
 
@@ -2233,7 +2296,13 @@ function updateVideoCodecChoice(immediate) {
     // once to apply it. A participant who sends none has nothing to switch;
     // the description is brought up to date when their video starts
     // (noteOutboundVideoStat).
-    if (peer && renegotiationQueue && sendingVideo()) renegotiateLocalMedia().catch(() => {});
+    const renegotiate = () => {
+      if (peer && renegotiationQueue && sendingVideo()) renegotiateLocalMedia().catch(() => {});
+    };
+    // A simulcast camera gets its layers ready for the new codec before the
+    // negotiation that switches to it.
+    videoSimulcastModeSamples = [];
+    ensureSimulcastLayerMode(target).then(renegotiate, renegotiate);
   }
   refreshVideoCodecUI();
 }
@@ -2253,8 +2322,12 @@ function noteRoomVideoCodecs(room, immediate) {
 
 // Called for every outbound video stream of each stats sample. In Automatic, a
 // newer codec the encoder cannot keep up with is given up for this session.
-function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncoded) {
+function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncoded, rid, scalabilityMode) {
   const codecs = window.SlowMeetVideoCodec;
+  if (simulcastEnabled && rid && codecs.needsLayerMode(videoCodecApplied) &&
+      codecs.codecNameFromMime(mimeType) === videoCodecApplied) {
+    noteSimulcastLayerMode(scalabilityMode);
+  }
   // A camera that was turned off keeps its stream in the stats, so only a
   // stream that encoded frames since the last sample counts as sending.
   const encoded = Number(framesEncoded) || 0;
@@ -2314,6 +2387,29 @@ if (videoCodecsDevice && navigator.mediaCapabilities?.encodingInfo) {
           updateVideoCodecChoice(true);
         }
       }).catch(() => {});
+    } catch (_) {
+      // Browsers without the "webrtc" configuration type reject it here.
+    }
+  });
+}
+// Whether this browser keeps simulcast layers apart for a newer codec: it must
+// accept the single-spatial-layer scalability mode and reject one that does
+// not exist. A browser that ignores the field accepts both, and would pack the
+// layers into one stream.
+if (videoCodecsDevice && navigator.mediaCapabilities?.encodingInfo) {
+  const acceptsLayerMode = (contentType, scalabilityMode) => navigator.mediaCapabilities.encodingInfo({
+    type: "webrtc",
+    video: { contentType, width: 640, height: 360, bitrate: 400000, framerate: 15, scalabilityMode }
+  }).then((info) => info?.supported === true, () => false);
+  [["av1", "video/AV1"], ["vp9", "video/VP9"]].forEach(([codec, contentType]) => {
+    if (!videoCodecsDevice.includes(codec)) return;
+    try {
+      Promise.all([acceptsLayerMode(contentType, "L1T1"), acceptsLayerMode(contentType, "L9T9")])
+        .then(([layered, anything]) => {
+          if (!layered || anything) return;
+          videoCodecsLayerable.add(codec);
+          updateVideoCodecChoice(true);
+        });
     } catch (_) {
       // Browsers without the "webrtc" configuration type reject it here.
     }
@@ -3012,12 +3108,15 @@ async function enableCameraOnce({ negotiate = true, markRequested = true } = {})
         // profile pass refits them whenever the capture size changes.
         const settings = track.getSettings?.() || {};
         const plan = planCameraSimulcast(settings.width, settings.height);
-        transceiverOptions.sendEncodings = ["low", "medium", "high"].map((rid, index) => ({
-          rid,
-          active: plan.active[index],
-          scaleResolutionDownBy: plan.scales[index],
-          maxBitrate: Math.max(30000, Math.floor(400000 * (plan.shares[index] || 0.15)))
-        }));
+        // simulcastEncodings adds what the codec in use needs for its layers
+        // to stay separate streams.
+        transceiverOptions.sendEncodings = window.SlowMeetVideoCodec.simulcastEncodings(
+          ["low", "medium", "high"].map((rid, index) => ({
+            rid,
+            active: plan.active[index],
+            scaleResolutionDownBy: plan.scales[index],
+            maxBitrate: Math.max(30000, Math.floor(400000 * (plan.shares[index] || 0.15)))
+          })), videoCodecApplied);
       }
       try {
         cameraSender = currentPeer.addTransceiver(track, transceiverOptions).sender;
@@ -5691,7 +5790,8 @@ async function runDiagnosticsUpdate() {
       }
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       values.codec = resolveCodecName(codecById, stat.codecId) || values.codec;
-      noteOutboundVideoStat(codecById.get(stat.codecId), stat.qualityLimitationReason, stat.id, stat.framesEncoded);
+      noteOutboundVideoStat(codecById.get(stat.codecId), stat.qualityLimitationReason, stat.id, stat.framesEncoded,
+        stat.rid, stat.scalabilityMode);
     }
     if (stat.type === "outbound-rtp" && stat.kind === "audio") {
       sentAudioBytes += stat.bytesSent || 0;

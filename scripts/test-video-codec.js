@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   codecNameFromMime, deviceCodecs, fallbackOrder, chooseSendCodec, preferVideoCodec,
-  cpuFallbackDue, isNewerCodec, codecLabel, planCodecChange, codecNote, cpuFallbackWatched, addCpuSample
+  cpuFallbackDue, isNewerCodec, codecLabel, planCodecChange, codecNote, cpuFallbackWatched, addCpuSample,
+  simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed
 } = require("../web/js/video-codec.js");
 
 // --- SDP rewrite -----------------------------------------------------------
@@ -129,7 +130,16 @@ const choices = [
   [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, avoid: ["av1", "vp9"]}, "vp8", "avoid may be an array"],
   [{stored: "av1", serverDefault: "av1", roomCodecs: all, device: all, avoid: new Set(["av1"])}, "av1", "an explicit pick is not overridden"],
   [{stored: "auto", serverDefault: "av1", roomCodecs: ["av1"], device: ["av1"], avoid: new Set(["av1"])}, "av1", "the only usable codec is used even when avoided"],
-  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcast: true}, "vp8", "simulcast stays on the older codecs"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcastCodecs: ["vp8", "h264"]}, "vp8",
+    "a simulcast camera stays on the older codecs in a browser that cannot layer the newer ones"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcastCodecs: all}, "av1",
+    "a simulcast camera uses the default where the browser can send it as layers"],
+  [{stored: "av1", serverDefault: "vp8", roomCodecs: all, device: all, simulcastCodecs: ["vp9", "vp8", "h264"]}, "vp9",
+    "a pick the browser cannot send as layers falls to the next codec"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcastCodecs: null}, "av1",
+    "without simulcast nothing is restricted"],
+  [{stored: "auto", serverDefault: "av1", roomCodecs: ["av1"], device: all, simulcastCodecs: ["vp8", "h264"]}, null,
+    "no codec is both playable by the room and sendable as layers"],
   [{stored: "auto", serverDefault: "nope", roomCodecs: ["vp9", "vp8"], device: all}, "vp9", "an unknown default means the newest usable codec"],
   [{stored: "auto", serverDefault: "av1", roomCodecs: null, device: all}, null, "no room list yet"],
   [{stored: "auto", serverDefault: "av1", roomCodecs: all, device: null}, null, "browser without capabilities is left alone"],
@@ -176,8 +186,12 @@ const notes = [
     "Sending VP9. Not everyone here can play AV1."],
   [{applied: "vp8", stored: "auto", serverDefault: "av1", roomCodecs: all, device: ["vp8", "h264"]},
     "Sending VP8. This device cannot send AV1."],
-  [{applied: "vp8", stored: "av1", serverDefault: "vp8", roomCodecs: all, device: all, simulcast: true},
-    "Sending VP8. AV1 is not used while simulcast is on."],
+  [{applied: "vp8", stored: "av1", serverDefault: "vp8", roomCodecs: all, device: all, simulcastCodecs: ["vp8", "h264"]},
+    "Sending VP8. This browser cannot send AV1 as simulcast layers."],
+  [{applied: "av1", stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, simulcastCodecs: all},
+    "Sending AV1."],
+  [{applied: "vp8", stored: "auto", serverDefault: "av1", roomCodecs: ["vp8"], device: all, simulcastCodecs: ["vp8", "h264"]},
+    "Sending VP8. Not everyone here can play AV1."],
   [{applied: "vp9", stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, avoided: new Set(["av1"])},
     "Sending VP9. AV1 is too heavy for this device."],
   [{applied: "vp8", stored: "h264", serverDefault: "av1", roomCodecs: ["av1", "vp9", "vp8"], device: all},
@@ -222,6 +236,42 @@ const frozen = {samples: ["none"], lastAt: 0};
 addCpuSample(frozen, {now: 1000, cpuLimited: true});
 assert.deepEqual(frozen, {samples: ["none"], lastAt: 0}, "the given state is not modified");
 
+// --- Simulcast -------------------------------------------------------------
+
+assert.deepEqual(simulcastCapableCodecs(new Set(["vp9", "av1"])), ["av1", "vp9", "vp8", "h264"]);
+assert.deepEqual(simulcastCapableCodecs(["vp9"]), ["vp9", "vp8", "h264"]);
+assert.deepEqual(simulcastCapableCodecs(new Set()), ["vp8", "h264"],
+  "a browser that accepts no layer mode sends only the older codecs as layers");
+assert.deepEqual(simulcastCapableCodecs(new Set(["h265"])), ["vp8", "h264"]);
+assert.deepEqual(simulcastCapableCodecs(undefined), ["vp8", "h264"]);
+
+assert.equal(needsLayerMode("av1"), true);
+assert.equal(needsLayerMode("vp9"), true);
+assert.equal(needsLayerMode("vp8"), false);
+assert.equal(needsLayerMode("h264"), false);
+assert.equal(needsLayerMode(null), false);
+
+const plainLayers = [{rid: "low", active: true, maxBitrate: 60000}, {rid: "high", active: true, maxBitrate: 340000}];
+assert.deepEqual(simulcastEncodings(plainLayers, "av1"), [
+  {rid: "low", active: true, maxBitrate: 60000, scalabilityMode: "L1T1"},
+  {rid: "high", active: true, maxBitrate: 340000, scalabilityMode: "L1T1"}
+]);
+assert.deepEqual(simulcastEncodings(plainLayers, "vp8"), plainLayers, "the older codecs are sent as they always were");
+assert.deepEqual(simulcastEncodings(plainLayers, null), plainLayers);
+assert.notEqual(simulcastEncodings(plainLayers, "vp8")[0], plainLayers[0], "the given encodings are copied, not shared");
+assert.deepEqual(simulcastEncodings([{rid: "low", scalabilityMode: "L1T1"}], "vp8"), [{rid: "low", scalabilityMode: "L1T1"}],
+  "a mode that is already set stays when the camera returns to an older codec");
+assert.deepEqual(simulcastEncodings(undefined, "av1"), []);
+
+assert.equal(simulcastCollapsed([["L3T3_KEY"], ["L3T3_KEY"], ["L3T3_KEY"]]), true, "one stream carries every layer");
+assert.equal(simulcastCollapsed([["L1T1", "L1T1"], ["L1T1", "L1T1"], ["L1T1", "L1T1"]]), false, "separate layers");
+assert.equal(simulcastCollapsed([["L3T3"], ["L3T3"]]), false, "not yet long enough to be sure");
+assert.equal(simulcastCollapsed([["L3T3"], ["L1T1"], ["L3T3"], ["L3T3"]]), false, "an interrupted run starts over");
+assert.equal(simulcastCollapsed([["S2T1", "L1T1"], ["S2T1"], ["L2T1"]]), true);
+assert.equal(simulcastCollapsed([[""], [""], [""]]), false, "a browser that reports no mode is not judged");
+assert.equal(simulcastCollapsed([["L3T3"], ["L3T3"]], 2), true);
+assert.equal(simulcastCollapsed(null), false);
+
 // --- Wiring in the page ----------------------------------------------------
 
 const root = path.join(__dirname, "..");
@@ -244,8 +294,19 @@ assert.match(appSource, /if \(videoCodecDescribed !== videoCodecApplied && peer 
 assert.match(appSource, /planCodecChange\(\{\s*target, applied: videoCodecApplied, roomCodecs: videoCodecRoomList\(\), immediate\s*\}\)/);
 assert.match(appSource, /return window\.SlowMeetVideoCodec\.codecNote\(\{/);
 assert.match(appSource, /codecs\.addCpuSample\(videoCodecCpu, \{ now: Date\.now\(\), cpuLimited: limitationReason === "cpu" \}\)/);
-assert.match(appSource, /noteOutboundVideoStat\(codecById\.get\(stat\.codecId\), stat\.qualityLimitationReason, stat\.id, stat\.framesEncoded\)/);
+assert.match(appSource, /noteOutboundVideoStat\(codecById\.get\(stat\.codecId\), stat\.qualityLimitationReason, stat\.id, stat\.framesEncoded,/);
+assert.match(appSource, /acceptsLayerMode\(contentType, "L1T1"\), acceptsLayerMode\(contentType, "L9T9"\)\]\)\s*\.then\(\(\[layered, anything\]\) => \{\s*if \(!layered \|\| anything\) return;\s*videoCodecsLayerable\.add\(codec\);/,
+  "a codec counts as sendable in layers only if the browser tells real scalability modes from made-up ones");
+assert.match(appSource, /simulcastCapableCodecs\(videoCodecsLayerable\)/);
 assert.match(appSource, /if \(optionsKey !== videoCodecOptionsKey\) \{/, "the picker is rebuilt only when its entries change");
+assert.equal((appSource.match(/simulcastCodecs: videoSimulcastCodecs\(\)/g) || []).length, 2,
+  "the choice and the Settings note both know which codecs the browser can send as layers");
+assert.match(appSource, /function videoSimulcastCodecs\(\) \{\s*if \(!simulcastEnabled\) return null;/);
+assert.match(appSource, /ensureSimulcastLayerMode\(target\)\.then\(renegotiate, renegotiate\)/,
+  "a simulcast camera's layers are prepared before the negotiation that switches codec");
+assert.match(appSource, /transceiverOptions\.sendEncodings = window\.SlowMeetVideoCodec\.simulcastEncodings\(/);
+assert.match(appSource, /stat\.rid, stat\.scalabilityMode\);/);
+assert.match(appSource, /if \(window\.SlowMeetVideoCodec\.simulcastCollapsed\(videoSimulcastModeSamples\)\) \{[\s\S]{0,200}videoCodecsNotSimulcast\.add\(codec\);/);
 assert.match(appSource, /let videoCodecStored = readStoredValue\("meeting\.videoCodec"\)/);
 assert.match(appSource, /writeStoredValue\("meeting\.videoCodec", videoCodecStored\)/);
 assert.match(appSource, /type: "join", name, password, reconnect_token: reconnectToken,\s*video_codecs: videoCodecsDevice \|\| undefined/,

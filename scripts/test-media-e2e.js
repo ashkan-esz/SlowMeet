@@ -199,7 +199,7 @@ async function waitForServer(url, processHandle, output) {
   throw new Error(`SlowMeet did not become ready: ${lastError?.message || "timeout"}\n${output.join("")}`);
 }
 
-async function startLocalServer(maxParticipants = 2, { connectionMethodTest = false } = {}) {
+async function startLocalServer(maxParticipants = 2, { connectionMethodTest = false, extraEnv = {} } = {}) {
   const host = process.env.MEDIA_E2E_HOST || "127.0.0.1";
   const loopbackHost = ["localhost", "127.0.0.1", "::1"].includes(host);
   const defaultICEPublicIP = browserName === "firefox" && loopbackHost
@@ -223,6 +223,8 @@ async function startLocalServer(maxParticipants = 2, { connectionMethodTest = fa
         ADMIN_PASSWORD: "slowmeet-e2e-admin-password",
         ICE_TRANSPORT_POLICY: "all"
       } : {}),
+      // A scenario's own server settings (its serverEnv), such as simulcast.
+      ...extraEnv,
       GOCACHE: process.env.GOCACHE || "/tmp/slowmeet-media-e2e-gocache"
     },
     detached: true,
@@ -3927,7 +3929,8 @@ async function main() {
       try {
         if (scenario.localCapacityLimit && !externalBaseURL) {
           scenarioServer = await startLocalServer(scenario.localCapacityLimit, {
-            connectionMethodTest: scenario.connectionMethodTest === true
+            connectionMethodTest: scenario.connectionMethodTest === true,
+            extraEnv: scenario.serverEnv || {}
           });
           scenarioBaseURL = scenarioServer.url;
         }

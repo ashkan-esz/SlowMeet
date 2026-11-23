@@ -16,9 +16,15 @@
   // codec towards older ones, and only then towards newer ones.
   const codecs = Object.freeze(["av1", "vp9", "vp8", "h264"]);
   const labels = Object.freeze({av1: "AV1", vp9: "VP9", vp8: "VP8", h264: "H.264"});
-  // Simulcast layers are separate streams the server switches between; only
-  // the two older codecs are sent that way by every browser.
-  const simulcastCodecs = Object.freeze(["vp8", "h264"]);
+  // A simulcast camera is sent as separate streams, one per layer, and the
+  // server forwards one of them to each viewer. Every browser sends the two
+  // older codecs that way. For VP9 and AV1 a browser keeps the layers apart
+  // only when each one names a scalability mode with a single spatial layer;
+  // without it Chromium packs all layers into one stream, which the server
+  // cannot split. Whether a browser accepts such a mode is asked through the
+  // Media Capabilities API (see app.js).
+  const alwaysSimulcastCodecs = Object.freeze(["vp8", "h264"]);
+  const simulcastLayerMode = "L1T1";
 
   function isCodec(name) {
     return codecs.includes(name);
@@ -88,12 +94,14 @@
   //   device        deviceCodecs() of this browser
   //   avoid         codecs to skip on this device (too slow to encode); the
   //                 participant's explicit choice is never skipped
-  //   simulcast     true when the camera is sent as simulcast layers
+  //   simulcastCodecs  when the camera is sent as simulcast layers, the codecs
+  //                 this browser can send that way (simulcastCapableCodecs);
+  //                 anything else when it is not
   function chooseSendCodec(options) {
-    const {stored, serverDefault, roomCodecs, device, avoid, simulcast} = options || {};
+    const {stored, serverDefault, roomCodecs, device, avoid, simulcastCodecs} = options || {};
     if (!Array.isArray(roomCodecs) || !Array.isArray(device)) return null;
     const usable = codecs.filter((name) => roomCodecs.includes(name) && device.includes(name) &&
-      (!simulcast || simulcastCodecs.includes(name)));
+      (!Array.isArray(simulcastCodecs) || simulcastCodecs.includes(name)));
     if (usable.length === 0) return null;
     const explicit = isCodec(stored) ? stored : null;
     const preferred = explicit || (isCodec(serverDefault) ? serverDefault : usable[0]);
@@ -163,7 +171,7 @@
   // The line under the codec picker: what is being sent and, when that is not
   // the wanted codec, the first reason that applies.
   function codecNote(options) {
-    const {applied, stored, serverDefault, roomCodecs, device, avoided, simulcast} = options || {};
+    const {applied, stored, serverDefault, roomCodecs, device, avoided, simulcastCodecs} = options || {};
     if (!isCodec(applied)) return "Uses the newest codec everyone in the room can play.";
     const wanted = isCodec(stored) ? stored : (isCodec(serverDefault) ? serverDefault : null);
     let reason = "";
@@ -172,8 +180,8 @@
         reason = ` This device cannot send ${codecLabel(wanted)}.`;
       } else if (!Array.isArray(roomCodecs) || !roomCodecs.includes(wanted)) {
         reason = ` Not everyone here can play ${codecLabel(wanted)}.`;
-      } else if (simulcast) {
-        reason = ` ${codecLabel(wanted)} is not used while simulcast is on.`;
+      } else if (Array.isArray(simulcastCodecs) && !simulcastCodecs.includes(wanted)) {
+        reason = ` This browser cannot send ${codecLabel(wanted)} as simulcast layers.`;
       } else if (contains(avoided, wanted)) {
         reason = ` ${codecLabel(wanted)} is too heavy for this device.`;
       }
@@ -204,10 +212,47 @@
     return {samples: samples.slice(-keep), lastAt: now};
   }
 
+  // The codecs this browser can send as separate simulcast layers, newest
+  // first: the two older ones, and each newer one in `layerable`, the codecs
+  // for which the browser was found to accept the single-spatial-layer
+  // scalability mode.
+  function simulcastCapableCodecs(layerable) {
+    return codecs.filter((name) => alwaysSimulcastCodecs.includes(name) || contains(layerable, name));
+  }
+
+  // Whether a simulcast camera in this codec needs the scalability mode on
+  // its layers.
+  function needsLayerMode(codec) {
+    return isCodec(codec) && !alwaysSimulcastCodecs.includes(codec);
+  }
+
+  // The simulcast encodings to use for codec: copies of the given ones, with
+  // the scalability mode added when the codec needs it. A mode that is
+  // already there is kept, also for a codec that does not need one: taking it
+  // away again would only be a second change for the encoder.
+  function simulcastEncodings(encodings, codec) {
+    if (!Array.isArray(encodings)) return [];
+    return encodings.map((encoding) => (needsLayerMode(codec)
+      ? {...encoding, scalabilityMode: simulcastLayerMode}
+      : {...encoding}));
+  }
+
+  // samples: for each recent stats sample, the scalability modes the camera's
+  // outbound streams report. True once every one of the last `needed` samples
+  // has a stream carrying more than one spatial layer: the browser packed the
+  // simulcast layers into one stream, so viewers of the other layers get
+  // nothing and the codec cannot be used for simulcast here.
+  function simulcastCollapsed(samples, needed = 3) {
+    if (!Array.isArray(samples) || samples.length < needed) return false;
+    return samples.slice(-needed).every((modes) => Array.isArray(modes) &&
+      modes.some((mode) => /^[LS][2-9]/.test(String(mode || ""))));
+  }
+
   const utilities = Object.freeze({
     codecs, isCodec, codecLabel, isNewerCodec, codecNameFromMime, deviceCodecs,
     fallbackOrder, chooseSendCodec, preferVideoCodec, cpuFallbackDue,
-    planCodecChange, codecNote, cpuFallbackWatched, addCpuSample
+    planCodecChange, codecNote, cpuFallbackWatched, addCpuSample,
+    simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed
   });
   root.SlowMeetVideoCodec = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;

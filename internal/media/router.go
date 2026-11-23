@@ -1391,11 +1391,14 @@ func (r *Router) forwardVideo(pub *publication) {
 			r.reportPublicationReadStop(pub, err)
 			return
 		}
-		if pub.payloadType != 0 && uint8(packet.PayloadType) != pub.payloadType {
-			if r.handleIngressCodecChange(pub, uint8(packet.PayloadType)) {
+		if payloadType := uint8(packet.PayloadType); payloadType != pub.payloadType {
+			if r.handleIngressCodecChange(pub, payloadType) {
 				return
 			}
-			continue
+			if payloadType != pub.payloadType {
+				// Neither the publication's codec nor one the track moved to.
+				continue
+			}
 		}
 		pub.lastPacketAt.Store(time.Now().UnixNano())
 		if pub.paused.Load() {
