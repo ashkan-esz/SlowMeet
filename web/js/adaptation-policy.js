@@ -417,41 +417,84 @@ function shouldPauseVideo(isAutomaticProfile, adaptationLevel, criticalSamples, 
 // receiver's own path adds is 1 - (1 - observed) / (1 - senderUplinkLoss),
 // and its jitter is what remains above the sender's uplink jitter. Streams
 // without a sender report are taken as they are.
+//
+// A stream whose sender already loses maxSenderLossPct or more says almost
+// nothing about the receiver's own link: its few surviving packets are noise,
+// and the discount divides by what is left, so a 2-point gap between a
+// sender's report and its stream reads as 7-10 % own loss at 70-85 %, while a
+// receiver's real 12 % hides inside the report's own variation. Such streams
+// are skipped; when only they remain the own link is unmeasurable from the
+// streams (lossPct and jitterMs null, unmeasurable true), not the pooled
+// value they would pollute. The round trip and the send path still judge
+// the link.
 function selectOwnLinkMeasurements(streams, {
   pooledLossPct = null,
   fallbackJitterMs = null,
   minimumPackets = 5,
-  senderUplink = null
+  senderUplink = null,
+  maxSenderLossPct = 50,
+  minimumPooledPackets = 20
 } = {}) {
-  let bestLoss = null;
+  // Streams with a sender report are pooled: every packet the receiver got
+  // against every packet its own path was handed (each stream's expected
+  // packets after its sender's reported loss). The minimum over discounted
+  // streams was biased toward zero: a video stream with five packets in a
+  // second reads 0 % about a third of the time at 20 % loss, and over-stated
+  // reports cancel more on some streams than others, so a receiver's own
+  // 12 % download loss read as 0 % (bad-downlink-among-bad-senders). Streams
+  // without a report keep the minimum: a clean one proves the receiver's path.
+  // A pool of fewer than minimumPooledPackets is noise (at the onset of a
+  // sender's outage only a few late video packets remain: 6 packets read as
+  // 13-31 % own loss on a clean link), so it counts as unmeasurable.
+  let unreportedBestLoss = null;
+  let reportedReceived = 0;
+  let reportedExpectedOwnPath = 0;
   let bestJitter = null;
+  let unmeasuredStreams = false;
   for (const stream of Array.isArray(streams) ? streams : []) {
     if (!stream || !Number.isFinite(stream.receivedDelta) || stream.receivedDelta < minimumPackets) continue;
     const uplink = typeof senderUplink === "function" && stream.participantID
       ? senderUplink(stream.participantID, stream)
       : null;
-    let lossPct = stream.lossPct;
-    if (Number.isFinite(lossPct) && lossPct >= 0 && Number.isFinite(uplink?.lossPct) &&
-        uplink.lossPct > 0 && uplink.lossPct < 100) {
-      const ownDelivery = (1 - lossPct / 100) / (1 - uplink.lossPct / 100);
-      lossPct = Math.max(0, Math.round((1 - ownDelivery) * 1000) / 10);
+    const reported = Number.isFinite(uplink?.lossPct) && uplink.lossPct >= 0;
+    if (reported && uplink.lossPct >= maxSenderLossPct) {
+      unmeasuredStreams = true;
+      continue;
+    }
+    const lossPct = stream.lossPct;
+    if (Number.isFinite(lossPct) && lossPct >= 0 && lossPct < 100) {
+      if (reported) {
+        const expected = stream.receivedDelta / (1 - lossPct / 100);
+        reportedReceived += stream.receivedDelta;
+        reportedExpectedOwnPath += expected * (1 - uplink.lossPct / 100);
+      } else if (unreportedBestLoss === null || lossPct < unreportedBestLoss) {
+        unreportedBestLoss = lossPct;
+      }
     }
     let jitterMs = stream.jitterMs;
     if (Number.isFinite(jitterMs) && jitterMs >= 0 && Number.isFinite(uplink?.jitterMs) && uplink.jitterMs > 0) {
       jitterMs = Math.max(0, jitterMs - uplink.jitterMs);
-    }
-    if (Number.isFinite(lossPct) && lossPct >= 0 &&
-        (bestLoss === null || lossPct < bestLoss)) {
-      bestLoss = lossPct;
     }
     if (Number.isFinite(jitterMs) && jitterMs >= 0 &&
         (bestJitter === null || jitterMs < bestJitter)) {
       bestJitter = jitterMs;
     }
   }
+  const pooledEnough = reportedReceived >= minimumPooledPackets;
+  if (reportedExpectedOwnPath > 0 && !pooledEnough) unmeasuredStreams = true;
+  const reportedLoss = reportedExpectedOwnPath > 0 && pooledEnough
+    ? Math.max(0, Math.round((1 - reportedReceived / reportedExpectedOwnPath) * 1000) / 10)
+    : null;
+  const bestLoss = reportedLoss === null ? unreportedBestLoss
+    : (unreportedBestLoss === null ? reportedLoss : Math.min(reportedLoss, unreportedBestLoss));
+  if (bestLoss === null && bestJitter === null && unmeasuredStreams) {
+    return { lossPct: null, jitterMs: null, unmeasurable: true };
+  }
+  // Streams that could not be measured (near-outage senders, a pool too
+  // small) must not fall back to the pooled loss they would pollute.
   return {
     lossPct: bestLoss !== null ? bestLoss
-      : (Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null),
+      : (!unmeasuredStreams && Number.isFinite(pooledLossPct) && pooledLossPct >= 0 ? pooledLossPct : null),
     jitterMs: bestJitter !== null ? bestJitter
       : (Number.isFinite(fallbackJitterMs) && fallbackJitterMs >= 0 ? fallbackJitterMs : null)
   };

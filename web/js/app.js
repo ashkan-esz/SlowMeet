@@ -5796,6 +5796,8 @@ async function runDiagnosticsUpdate() {
   // the own-link minimum (a clean sender's stream proves my path is calm)
   // overrides them so a remote sender's queueing cannot read as my jitter.
   if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
+  // Only near-outage senders: the streams cannot judge this link at all.
+  if (ownLink.unmeasurable) values.jitterMs = null;
   connectionHistoryModel?.addSample({
     at: values.timestamp,
     rttMs: values.rttMs,

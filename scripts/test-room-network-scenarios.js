@@ -49,6 +49,7 @@ const localBadge = "local";
     "const ownLink = selectOwnLinkMeasurements(streamLossSamples, {",
     "values.packetLoss = ownLink.lossPct;",
     "if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;",
+    "if (ownLink.unmeasurable) values.jitterMs = null;",
     "if (stat.jitter != null && !videoSuspended) values.jitterMs = Math.round(stat.jitter * 1000);",
     "if (stat.jitter != null && values.jitterMs == null) values.jitterMs = Math.round(stat.jitter * 1000);",
     "const lossKnown = values.packetLoss != null;",
@@ -192,6 +193,8 @@ function runLadder(ticks, sampleAt, {
     });
     values.packetLoss = ownLink.lossPct;
     if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
+    // Only near-outage senders: the streams cannot judge this link at all.
+    if (ownLink.unmeasurable) values.jitterMs = null;
     values.cameraPacketLossPct = sample.cameraPacketLossPct !== undefined
       ? sample.cameraPacketLossPct
       : packetLossPercentFromDeltas(cameraLostSincePreviousSample, cameraReceivedSincePreviousSample);
@@ -894,6 +897,121 @@ for (const [name, uplinkLossPcts] of [
     "a send estimate below the poor bar is send-path damage");
   assert.equal(classifyNetworkSample({ rttMs: 20, packetLoss: 0, jitterMs: 3, availableOutgoingKbps: 0 }).sendPathPoor, false,
     "a warming-up (zero) send estimate is not send-path damage");
+}
+
+// The sender discount must not hide the receiver's own bad downlink. The
+// observer's downlink loses 12 % at a 20 ms round trip, so only loss can show
+// it, and all three senders have lossy uplinks (8/12/9 %). With reports that
+// match what each sender's packets lost, the discount leaves the observer's
+// own 12 %, and it steps down. The discount is only as good as the reports:
+// a report that over-states its sender's loss cancels the receiver's own
+// loss too (5 points over still leaves it poor; 10 points over hides it),
+// which is why the SFU reports its recent windows tightly (see
+// bad-downlink-among-bad-senders in test-four-person-e2e.js).
+{
+  const badUplinks = [8, 12, 9];
+  const overstated = (points) => new Map([...senderReports(badUplinks)].map(([id, report]) =>
+    [id, { ...report, videoLossPct: report.videoLossPct + points, audioLossPct: report.audioLossPct + points }]));
+  const badDownlinkRoom = (points) => () => ({
+    ...goodParticipantLink,
+    streams: roomStreams(badUplinks, { ownDownlinkLossPct: 12 }),
+    senderUplinks: overstated(points)
+  });
+
+  const accurate = runLadder(30, badDownlinkRoom(0), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(accurate.samples.every((sample) => sample.packetLoss >= 10 && sample.packetLoss <= 13 && sample.poor),
+    "with accurate sender reports the observer's own 12 % downlink loss shows through the discount");
+  assert.ok(accurate.stepDowns.length > 0, "an own downlink losing 12 % must step the ladder down");
+
+  const slightlyHigh = runLadder(30, badDownlinkRoom(5), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(slightlyHigh.samples.every((sample) => sample.packetLoss > 5 && sample.poor),
+    "sender reports 5 points high still leave the observer's own downlink loss poor");
+
+  const farTooHigh = runLadder(30, badDownlinkRoom(10), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(farTooHigh.samples.every((sample) => sample.packetLoss < 2),
+    "sender reports 10 points high cancel the observer's own downlink loss (the limit of the discount)");
+
+  // Small samples must not hide it either. Each sender's video delivered only
+  // five packets this second, all of them by chance, while its audio lost the
+  // expected ~21 % (10 % on its uplink, 12 % on the observer's downlink).
+  // Taking the minimum over discounted streams read a lucky five-packet
+  // stream as a clean own path (0 %); pooling every reported stream weighs
+  // it by its five packets.
+  const luckyVideo = ["remote-1", "remote-2", "remote-3"].flatMap((participantID) => [
+    { participantID, kind: "audio", lossPct: 21, receivedDelta: 79, jitterMs: 3 },
+    { participantID, kind: "camera", lossPct: 0, receivedDelta: 5, jitterMs: 3 }
+  ]);
+  const tenPercentReports = new Map(["remote-1", "remote-2", "remote-3"].map((id) =>
+    [id, { videoLossPct: 10, audioLossPct: 10, jitterMs: 0, audioJitterMs: 0 }]));
+  const pooled = selectOwnLinkMeasurements(luckyVideo, {
+    senderUplink: (id, stream) => senderUplinkForStream(tenPercentReports.get(id), stream)
+  });
+  assert.ok(pooled.lossPct >= 10 && pooled.lossPct <= 12,
+    `a lucky five-packet stream must not hide the observer's own ~12 % loss (read ${pooled.lossPct} %)`);
+}
+
+// Senders near an outage (their uplinks lose 50 % or more) cannot speak for
+// the receiver's own link: their few surviving packets are noise, and the
+// discount amplifies any gap between a report and its stream. Their streams
+// are skipped; with only such streams the own link is unmeasurable from the
+// streams, so a fast participant is neither blamed for a 2-point report gap
+// nor told its link is clean.
+{
+  const nearOutage = [72, 80, 85];
+  // Reports two points under what the streams really lost, as at onset.
+  const lagging = (uplinks, points) => new Map([...senderReports(uplinks)].map(([id, report]) =>
+    [id, { ...report, videoLossPct: report.videoLossPct - points, audioLossPct: report.audioLossPct - points }]));
+
+  const direct = selectOwnLinkMeasurements(
+    roomStreams(nearOutage).map(({ participantID, kind, lost, received, jitterMs }) =>
+      ({ participantID, kind, lossPct: packetLossPercentFromDeltas(lost, received), receivedDelta: received, jitterMs })),
+    {
+      pooledLossPct: 79, fallbackJitterMs: 60,
+      senderUplink: (id, stream) => senderUplinkForStream(lagging(nearOutage, 2).get(id), stream)
+    });
+  assert.deepEqual(direct, { lossPct: null, jitterMs: null, unmeasurable: true },
+    "only near-outage senders: the own link is unmeasurable, not the polluted pooled value");
+
+  const fastAmongOutages = runLadder(60, () => ({
+    ...goodParticipantLink, streams: roomStreams(nearOutage), senderUplinks: lagging(nearOutage, 2)
+  }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.deepEqual(fastAmongOutages.stepDowns, [], "a 2-point report gap on near-outage senders must not step a fast participant down");
+  assert.ok(fastAmongOutages.samples.every((sample) => !sample.poor), "near-outage senders must not make a clean own link read poor");
+
+  // One sender still working (10 %) is enough to see the receiver's own 12 %.
+  const mixed = [72, 10, 85];
+  const ownLossVisible = runLadder(30, () => ({
+    ...goodParticipantLink, streams: roomStreams(mixed, { ownDownlinkLossPct: 12 }), senderUplinks: senderReports(mixed)
+  }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(ownLossVisible.samples.every((sample) => sample.packetLoss >= 10 && sample.poor),
+    "one sender with a working uplink still shows the receiver's own 12 % downlink loss");
+  assert.ok(ownLossVisible.stepDowns.length > 0, "and the ladder steps down on it");
+}
+
+// A pool of a few late video packets is noise. At the onset of the senders'
+// outages their audio is skipped (near outage) and only a handful of video
+// packets with lagging reports remain; read as own loss they stepped a fast
+// participant down. Under 20 pooled packets the loss is unknown (null), not
+// the pooled raw value, even when a jitter reading exists.
+{
+  const fewLatePackets = [
+    { participantID: "remote-1", kind: "audio", lossPct: 58, receivedDelta: 15, jitterMs: 3 },
+    { participantID: "remote-2", kind: "audio", lossPct: 78, receivedDelta: 11, jitterMs: 3 },
+    { participantID: "remote-3", kind: "camera", lossPct: 54, receivedDelta: 6, jitterMs: 3 }
+  ];
+  const reports = new Map([
+    ["remote-1", { videoLossPct: 59, audioLossPct: 59, jitterMs: 0, audioJitterMs: 0 }],
+    ["remote-2", { videoLossPct: 68, audioLossPct: 68, jitterMs: 0, audioJitterMs: 0 }],
+    ["remote-3", { videoLossPct: 46.6, audioLossPct: 46.6, jitterMs: 0, audioJitterMs: 0 }]
+  ]);
+  const estimate = selectOwnLinkMeasurements(fewLatePackets, {
+    pooledLossPct: 63, fallbackJitterMs: 40,
+    senderUplink: (id, stream) => senderUplinkForStream(reports.get(id), stream)
+  });
+  assert.equal(estimate.lossPct, null, "six pooled packets must not be read as own loss");
+  assert.equal(estimate.jitterMs, 3, "the jitter of a measured stream still counts");
+  const verdict = classifyNetworkSample({ rttMs: 20, packetLoss: undefined, jitterMs: estimate.jitterMs, availableOutgoingKbps: 5000 });
+  assert.equal(verdict.poor, false, "with own loss unknown a clean link does not read poor");
 }
 
 console.log("Room network scenario tests passed");
