@@ -216,3 +216,63 @@ func TestHubPushesForwardMeasurementWithoutSenderReport(t *testing.T) {
 		t.Fatalf("a closed hub relayed again: %d source_quality messages, want 3", got)
 	}
 }
+
+// A change measured while a sender is in its reconnect grace window cannot
+// reach the room (its connection is gone), and must not be recorded as sent:
+// the refresher used to mark it sent without broadcasting it, so after the
+// resume the room kept the stale value until the next real change.
+func TestHubRelaysChangeMeasuredDuringReconnectAfterResume(t *testing.T) {
+	var measured struct {
+		sync.Mutex
+		videoLoss10 int
+	}
+	set := func(videoLoss10 int) {
+		measured.Lock()
+		measured.videoLoss10 = videoLoss10
+		measured.Unlock()
+	}
+	set(0)
+	_, socketURL := newFourSeatHub(t, 5*time.Second, func(h *Hub) {
+		h.forwardQualityForTest = func(string) (int, int, int, int) {
+			measured.Lock()
+			defer measured.Unlock()
+			return 0, measured.videoLoss10, 2, 2
+		}
+	})
+	sender := joinTestParticipant(t, socketURL, "Avery", "")
+	receiver := joinTestParticipant(t, socketURL, "Blake", "")
+	waitForRoster(t, []*testParticipant{sender, receiver})
+	report := func(p *testParticipant) {
+		t.Helper()
+		if err := p.conn.WriteJSON(Message{Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: p.id,
+			RTTMs: 40, VideoKbps: 300, AudioKbps: 30, UplinkLoss10: 0, UplinkJitterMs: 0, AudioUplinkJitterMs: 0}); err != nil {
+			t.Fatalf("send network state: %v", err)
+		}
+	}
+	report(sender)
+	waitWithin(t, 3*time.Second, "the first value is relayed", func() bool {
+		return len(receiver.sourceQualityFor(sender.id)) == 1
+	})
+
+	// The sender drops; while it is in its grace window the SFU's measurement
+	// of its uplink gets worse. Nothing can be relayed for it now.
+	senderID, token := sender.id, sender.token
+	sender.reset()
+	time.Sleep(300 * time.Millisecond)
+	set(400)
+	time.Sleep(4 * sourceQualityRefreshInterval)
+	if got := len(receiver.sourceQualityFor(senderID)); got != 1 {
+		t.Fatalf("receiver got %d source_quality messages while the sender was gone, want 1", got)
+	}
+
+	// The sender resumes and reports; the room must now hear the worse value.
+	back := joinTestParticipant(t, socketURL, "Avery", token)
+	if back.id != senderID {
+		t.Fatalf("resume changed the participant id from %s to %s", senderID, back.id)
+	}
+	report(back)
+	waitWithin(t, 3*time.Second, "the change measured during the grace window is relayed after the resume", func() bool {
+		messages := receiver.sourceQualityFor(senderID)
+		return len(messages) >= 2 && messages[len(messages)-1].UplinkLoss10 == 400
+	})
+}

@@ -85,6 +85,10 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 		if _, ok := h.announced[participantID]; !ok {
 			continue
 		}
+		if quality.sentAt.IsZero() {
+			// Never relayed yet: there is no value the room was told.
+			continue
+		}
 		_ = c.write(sourceQualityMessage(participantID, quality))
 	}
 	screenOwner := ""

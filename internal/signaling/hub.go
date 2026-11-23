@@ -917,11 +917,17 @@ func (h *Hub) relaySourceQuality(participantID string, now time.Time) {
 	if !changed || (!first && !worse && now.Sub(state.sentAt) < sourceQualityMinInterval) {
 		return
 	}
+	// Only what the room was actually told counts as sent. Between a resume
+	// (or during a reconnect grace window) and the new client's first report,
+	// state.client is the old, no longer admitted connection; recording a
+	// change there without broadcasting it left the room on a stale value
+	// until the next change.
+	if _, admitted := h.roomMembers[state.client]; !admitted {
+		return
+	}
 	state.sentLoss10, state.sentAudioLoss10, state.sentJitterMs, state.sentAudioJitterMs, state.sentAt =
 		videoLoss10, audioLoss10, videoJitterMs, audioJitterMs, now
-	if _, admitted := h.roomMembers[state.client]; admitted {
-		h.broadcastExceptLocked(state.client, sourceQualityMessage(participantID, state))
-	}
+	h.broadcastExceptLocked(state.client, sourceQualityMessage(participantID, state))
 }
 
 // armSourceQualityRefreshLocked schedules the next refreshSourceQuality. The
