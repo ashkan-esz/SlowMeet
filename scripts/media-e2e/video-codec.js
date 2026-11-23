@@ -53,7 +53,56 @@ async function waitForReceivedCodec(page, mime, timeout = 45000) {
     seen = await advancingInboundVideoMime(page);
     if (seen === mime) return;
   }
-  assert.fail(`receiver is decoding ${seen}, expected ${mime}`);
+  assert.fail(`receiver is decoding ${seen}, expected ${mime}; receiver state: ${JSON.stringify(await receiverVideoState(page))}`);
+}
+
+// What the receiving browser negotiated and is getting for video, for a
+// failure message that says where the stream stopped.
+async function receiverVideoState(page) {
+  return page.evaluate(async () => {
+    const peer = window.__slowMeetTest.peerConnections.at(-1);
+    const sections = (description) => (description?.sdp || "").split(/\r\nm=/).slice(1)
+      .map((section) => `m=${section}`.split("\r\n"))
+      .filter((lines) => lines[0].startsWith("m=video"))
+      .map((lines) => ({
+        mid: (lines.find((line) => line.startsWith("a=mid:")) || "").slice(6),
+        direction: (lines.find((line) => /^a=(sendrecv|sendonly|recvonly|inactive)$/.test(line)) || "").slice(2),
+        payloadTypes: lines[0].split(" ").slice(3, 8).join(" "),
+        msid: lines.filter((line) => line.startsWith("a=msid:")).map((line) => line.slice(7, 40)),
+        ssrc: [...new Set(lines.filter((line) => line.startsWith("a=ssrc:")).map((line) => line.slice(7).split(" ")[0]))]
+      }));
+    const sample = async () => {
+      const report = await peer.getStats();
+      const codecs = new Map();
+      const result = { inbound: [], transportBytesReceived: 0 };
+      report.forEach((stat) => {
+        if (stat.type === "codec") codecs.set(stat.id, `${stat.mimeType}/${stat.payloadType}`);
+      });
+      report.forEach((stat) => {
+        if (stat.type === "inbound-rtp" && stat.kind === "video") {
+          result.inbound.push({ mid: stat.mid, ssrc: stat.ssrc, packets: stat.packetsReceived,
+            frames: stat.framesDecoded, codec: codecs.get(stat.codecId) || null });
+        }
+        if (stat.type === "candidate-pair" && (stat.nominated || stat.selected)) {
+          result.transportBytesReceived = Math.max(result.transportBytesReceived, stat.bytesReceived || 0);
+        }
+      });
+      return result;
+    };
+    const first = await sample();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const second = await sample();
+    return {
+      remote: sections(peer.remoteDescription),
+      local: sections(peer.localDescription),
+      transceivers: peer.getTransceivers().filter((transceiver) => transceiver.receiver.track.kind === "video")
+        .map((transceiver) => ({ mid: transceiver.mid, direction: transceiver.direction,
+          currentDirection: transceiver.currentDirection, receiverTrack: transceiver.receiver.track.id.slice(0, 9),
+          muted: transceiver.receiver.track.muted, readyState: transceiver.receiver.track.readyState })),
+      inbound: second.inbound,
+      receivedKbps: Math.round((second.transportBytesReceived - first.transportBytesReceived) * 8 / 2000)
+    };
+  });
 }
 
 async function updateAdminConfig(fixture, body) {
