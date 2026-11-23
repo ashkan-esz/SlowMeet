@@ -201,7 +201,12 @@ type Hub struct {
 	roomVideoCodecs  []string
 	// sourceQuality is each participant's last reported uplink loss and
 	// jitter, relayed to the room as source_quality (see noteSourceQuality).
-	sourceQuality         map[string]*sourceQualityState
+	sourceQuality map[string]*sourceQualityState
+	// sourceQualityRefresh re-relays the SFU's own measurements on the hub's
+	// clock (refreshSourceQuality); nil while disarmed.
+	sourceQualityRefresh *time.Timer
+	// forwardQualityForTest replaces the router's measurements in tests.
+	forwardQualityForTest func(participantID string) (audioLoss10, videoLoss10, audioJitterMs, videoJitterMs int)
 	metrics               *metrics.Metrics
 	screenSharer          *client
 	chatHistory           map[string]*roomChatHistory
@@ -248,6 +253,10 @@ func (h *Hub) RTCPRelay() metrics.RTCPRelaySnapshot {
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true
+	if h.sourceQualityRefresh != nil {
+		h.sourceQualityRefresh.Stop()
+		h.sourceQualityRefresh = nil
+	}
 	for _, history := range h.chatHistory {
 		if history.expiry != nil {
 			history.expiry.Stop()
@@ -790,6 +799,11 @@ func (h *Hub) forgetMediaState(participantID string) {
 // sourceQualityState is one participant's reported uplink, and what the room
 // was last told about it.
 type sourceQualityState struct {
+	// client is the participant's current connection (it changes on resume).
+	client *client
+	// The participant's own last report, the fallback for any value the SFU
+	// has not measured.
+	reportedLoss10, reportedJitterMs, reportedAudioJitterMs      int
 	sentLoss10, sentAudioLoss10, sentJitterMs, sentAudioJitterMs int
 	sentAt                                                       time.Time
 }
@@ -801,6 +815,9 @@ const (
 	sourceQualityMinInterval  = time.Second
 	sourceQualityLossStep     = 10
 	sourceQualityJitterStepMs = 10
+	// sourceQualityRefreshInterval is how often the hub re-reads the SFU's
+	// own measurements between the senders' reports.
+	sourceQualityRefreshInterval = 250 * time.Millisecond
 )
 
 func absInt(value int) int {
@@ -837,42 +854,109 @@ func (h *Hub) noteSourceQuality(c *client, reportedLoss10, jitterMs, audioJitter
 	if participantID == "" {
 		return
 	}
-	audioLoss10, videoLoss10 := h.router.ForwardLoss(participantID)
-	if videoLoss10 < 0 {
-		videoLoss10 = reportedLoss10
-	}
-	// The jitter is the SFU's own measurement too (media.Router.ForwardJitter):
-	// the sender's report, from the SFU's receiver reports, read 0-1 ms while
-	// its audio reached receivers with 30-60 ms of uplink queueing (B13). The
-	// report stays the fallback for a kind the SFU has not measured yet.
-	audioForwardJitterMs, videoForwardJitterMs := h.router.ForwardJitter(participantID)
-	if videoForwardJitterMs >= 0 {
-		jitterMs = videoForwardJitterMs
-	}
-	if audioForwardJitterMs >= 0 {
-		audioJitterMs = audioForwardJitterMs
-	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	state := h.sourceQuality[participantID]
-	first := state == nil
-	if first {
+	if state == nil {
 		state = &sourceQualityState{}
 		h.sourceQuality[participantID] = state
 	}
-	changed := first || absInt(videoLoss10-state.sentLoss10) >= sourceQualityLossStep ||
+	state.client = c
+	state.reportedLoss10, state.reportedJitterMs, state.reportedAudioJitterMs = reportedLoss10, jitterMs, audioJitterMs
+	h.armSourceQualityRefreshLocked()
+	h.mu.Unlock()
+	h.relaySourceQuality(participantID, now)
+}
+
+// measuredSourceQuality is the SFU's own measurement of what participantID's
+// audio and camera lose and queue before they are forwarded, or -1 per value
+// it has not measured.
+func (h *Hub) measuredSourceQuality(participantID string) (audioLoss10, videoLoss10, audioJitterMs, videoJitterMs int) {
+	if h.forwardQualityForTest != nil {
+		return h.forwardQualityForTest(participantID)
+	}
+	audioLoss10, videoLoss10 = h.router.ForwardLoss(participantID)
+	audioJitterMs, videoJitterMs = h.router.ForwardJitter(participantID)
+	return audioLoss10, videoLoss10, audioJitterMs, videoJitterMs
+}
+
+// relaySourceQuality tells the room what participantID's streams lose and
+// queue before the SFU forwards them, when it changed enough. The loss and
+// jitter are the SFU's own measurements: a sender's own report reads 0 %
+// loss when the SFU's NACKs recover its packets too late to forward them
+// (B1), and 0-1 ms jitter while its audio reaches receivers with 30-60 ms of
+// uplink queueing (B13); the report is the fallback for a value the SFU has
+// not measured. A worsening is relayed at once: until it arrives a receiver
+// charges it to its own link. Other changes wait sourceQualityMinInterval.
+func (h *Hub) relaySourceQuality(participantID string, now time.Time) {
+	audioLoss10, videoLoss10, audioJitterMs, videoJitterMs := h.measuredSourceQuality(participantID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.sourceQuality[participantID]
+	if state == nil || h.closed {
+		return
+	}
+	if videoLoss10 < 0 {
+		videoLoss10 = state.reportedLoss10
+	}
+	if videoJitterMs < 0 {
+		videoJitterMs = state.reportedJitterMs
+	}
+	if audioJitterMs < 0 {
+		audioJitterMs = state.reportedAudioJitterMs
+	}
+	first := state.sentAt.IsZero()
+	worse := videoLoss10-state.sentLoss10 >= sourceQualityLossStep ||
+		audioLoss10-state.sentAudioLoss10 >= sourceQualityLossStep ||
+		videoJitterMs-state.sentJitterMs >= sourceQualityJitterStepMs ||
+		audioJitterMs-state.sentAudioJitterMs >= sourceQualityJitterStepMs
+	changed := first || worse || absInt(videoLoss10-state.sentLoss10) >= sourceQualityLossStep ||
 		absInt(audioLoss10-state.sentAudioLoss10) >= sourceQualityLossStep ||
-		absInt(jitterMs-state.sentJitterMs) >= sourceQualityJitterStepMs ||
+		absInt(videoJitterMs-state.sentJitterMs) >= sourceQualityJitterStepMs ||
 		absInt(audioJitterMs-state.sentAudioJitterMs) >= sourceQualityJitterStepMs ||
 		(videoLoss10 < 0) != (state.sentLoss10 < 0) || (audioLoss10 < 0) != (state.sentAudioLoss10 < 0)
-	if !changed || (!first && now.Sub(state.sentAt) < sourceQualityMinInterval) {
+	if !changed || (!first && !worse && now.Sub(state.sentAt) < sourceQualityMinInterval) {
 		return
 	}
 	state.sentLoss10, state.sentAudioLoss10, state.sentJitterMs, state.sentAudioJitterMs, state.sentAt =
-		videoLoss10, audioLoss10, jitterMs, audioJitterMs, now
-	if _, admitted := h.roomMembers[c]; admitted {
-		h.broadcastExceptLocked(c, sourceQualityMessage(participantID, state))
+		videoLoss10, audioLoss10, videoJitterMs, audioJitterMs, now
+	if _, admitted := h.roomMembers[state.client]; admitted {
+		h.broadcastExceptLocked(state.client, sourceQualityMessage(participantID, state))
 	}
+}
+
+// armSourceQualityRefreshLocked schedules the next refreshSourceQuality. The
+// senders report about once a second, and each report used to be the only
+// moment the SFU's measurements were read, so a sender's new loss or jitter
+// reached receivers a second or two after it reached their own samples: long
+// enough for a participant on a fast link to step down on it.
+func (h *Hub) armSourceQualityRefreshLocked() {
+	if h.closed || h.sourceQualityRefresh != nil || len(h.sourceQuality) == 0 {
+		return
+	}
+	h.sourceQualityRefresh = time.AfterFunc(sourceQualityRefreshInterval, h.refreshSourceQuality)
+}
+
+// refreshSourceQuality re-reads the SFU's measurements for every participant
+// with a source quality state and relays what changed, then re-arms.
+func (h *Hub) refreshSourceQuality() {
+	h.mu.Lock()
+	h.sourceQualityRefresh = nil
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	participantIDs := make([]string, 0, len(h.sourceQuality))
+	for participantID := range h.sourceQuality {
+		participantIDs = append(participantIDs, participantID)
+	}
+	h.mu.Unlock()
+	now := time.Now()
+	for _, participantID := range participantIDs {
+		h.relaySourceQuality(participantID, now)
+	}
+	h.mu.Lock()
+	h.armSourceQualityRefreshLocked()
+	h.mu.Unlock()
 }
 
 func sameOrigin(r *http.Request) bool {

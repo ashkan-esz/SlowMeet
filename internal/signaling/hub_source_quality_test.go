@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,8 +20,9 @@ func (p *testParticipant) sourceQualityFor(participantID string) []Message {
 
 // A participant's reported uplink reaches the rest of the room as
 // source_quality, so receivers can tell a sender's bad uplink from their own
-// bad downlink (B1); small or rapid changes are not relayed, and a joiner is
-// told the current value.
+// bad downlink (B1); a worsening is relayed at once, an easing after the
+// minimum interval, a change below the step never, and a joiner is told the
+// current value.
 func TestHubRelaysReportedUplinkQuality(t *testing.T) {
 	_, socketURL := newFourSeatHub(t, 5*time.Second)
 	sender := joinTestParticipant(t, socketURL, "Avery", "")
@@ -44,31 +46,41 @@ func TestHubRelaysReportedUplinkQuality(t *testing.T) {
 		t.Fatalf("relayed uplink = loss10 %d jitter %d, want 120 and 30", got.UplinkLoss10, got.UplinkJitterMs)
 	}
 
-	// Below the step, and a real change inside the minimum interval: neither
-	// is relayed.
+	// A change below the step is never relayed.
 	report(125, 32)
-	report(300, 30)
 	time.Sleep(300 * time.Millisecond)
 	if got := len(receiver.sourceQualityFor(sender.id)); got != 1 {
-		t.Fatalf("receiver got %d source_quality messages, want 1 (no relay for a small or rapid change)", got)
+		t.Fatalf("receiver got %d source_quality messages, want 1 (no relay for a change below the step)", got)
 	}
+
+	// A worsening is relayed at once, even inside the minimum interval: until
+	// it arrives the receiver charges it to its own link.
+	report(300, 30)
+	waitWithin(t, 500*time.Millisecond, "a worsening is relayed at once", func() bool {
+		messages := receiver.sourceQualityFor(sender.id)
+		return len(messages) == 2 && messages[1].UplinkLoss10 == 300
+	})
 	if got := len(sender.sourceQualityFor(sender.id)); got != 0 {
 		t.Fatalf("the sender was told its own uplink %d times", got)
 	}
 
-	// After the interval a real change is relayed.
-	time.Sleep(sourceQualityMinInterval)
-	report(300, 30)
-	waitWithin(t, 3*time.Second, "a later change is relayed", func() bool {
+	// An easing inside the interval waits, then the hub's own refresh relays
+	// it without another report.
+	report(100, 30)
+	time.Sleep(300 * time.Millisecond)
+	if got := len(receiver.sourceQualityFor(sender.id)); got != 2 {
+		t.Fatalf("receiver got %d source_quality messages, want 2 (an easing waits for the interval)", got)
+	}
+	waitWithin(t, 3*time.Second, "the easing is relayed after the interval", func() bool {
 		messages := receiver.sourceQualityFor(sender.id)
-		return len(messages) == 2 && messages[1].UplinkLoss10 == 300
+		return len(messages) == 3 && messages[2].UplinkLoss10 == 100
 	})
 
 	// A participant joining later learns the current value in its replay.
 	joiner := joinTestParticipant(t, socketURL, "Casey", "")
 	waitWithin(t, 3*time.Second, "the joiner is told the sender's uplink", func() bool {
 		messages := joiner.sourceQualityFor(sender.id)
-		return len(messages) == 1 && messages[0].UplinkLoss10 == 300
+		return len(messages) == 1 && messages[0].UplinkLoss10 == 100
 	})
 
 	// Out-of-range reports are rejected by validation.
@@ -132,5 +144,75 @@ func TestHubRelaysAudioUplinkJitter(t *testing.T) {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("an audio uplink jitter of %d passed validation", value)
 		}
+	}
+}
+
+// The SFU's own measurement of a sender's loss and jitter reaches the room
+// on the hub's clock, not only when that sender's next report arrives: the
+// report came about once a second and the relay waited for it, so a sender's
+// new loss reached receivers a second or two after their own samples showed
+// it, long enough for a participant on a fast link to step down on it.
+func TestHubPushesForwardMeasurementWithoutSenderReport(t *testing.T) {
+	var measured struct {
+		sync.Mutex
+		audioLoss10, videoLoss10, audioJitterMs, videoJitterMs int
+	}
+	set := func(audioLoss10, videoLoss10, audioJitterMs, videoJitterMs int) {
+		measured.Lock()
+		measured.audioLoss10, measured.videoLoss10 = audioLoss10, videoLoss10
+		measured.audioJitterMs, measured.videoJitterMs = audioJitterMs, videoJitterMs
+		measured.Unlock()
+	}
+	set(0, 0, 2, 2)
+	hub, socketURL := newFourSeatHub(t, 5*time.Second, func(h *Hub) {
+		h.forwardQualityForTest = func(string) (int, int, int, int) {
+			measured.Lock()
+			defer measured.Unlock()
+			return measured.audioLoss10, measured.videoLoss10, measured.audioJitterMs, measured.videoJitterMs
+		}
+	})
+	sender := joinTestParticipant(t, socketURL, "Avery", "")
+	receiver := joinTestParticipant(t, socketURL, "Blake", "")
+	waitForRoster(t, []*testParticipant{sender, receiver})
+
+	// One report creates the sender's state; the measurement, not the
+	// report, is what is relayed.
+	if err := sender.conn.WriteJSON(Message{Version: ProtocolVersion, Type: TypeNetworkState, ParticipantID: sender.id,
+		RTTMs: 40, VideoKbps: 300, AudioKbps: 30, UplinkLoss10: 0, UplinkJitterMs: 0, AudioUplinkJitterMs: 0}); err != nil {
+		t.Fatalf("send network state: %v", err)
+	}
+	waitWithin(t, 3*time.Second, "the first measurement is relayed", func() bool {
+		return len(receiver.sourceQualityFor(sender.id)) == 1
+	})
+
+	// The SFU measures the sender's uplink getting worse; no further report
+	// arrives. The hub relays it within a refresh or two.
+	set(150, 300, 45, 60)
+	waitWithin(t, 4*sourceQualityRefreshInterval, "a worse measurement is pushed without a report", func() bool {
+		messages := receiver.sourceQualityFor(sender.id)
+		if len(messages) != 2 {
+			return false
+		}
+		got := messages[1]
+		return got.UplinkLoss10 == 300 && got.AudioLoss10 == 150 && got.UplinkJitterMs == 60 && got.AudioUplinkJitterMs == 45
+	})
+
+	// An easing waits for the minimum interval, then is pushed too.
+	set(0, 0, 3, 3)
+	time.Sleep(2 * sourceQualityRefreshInterval)
+	if got := len(receiver.sourceQualityFor(sender.id)); got != 2 {
+		t.Fatalf("receiver got %d source_quality messages, want 2 (an easing waits for the interval)", got)
+	}
+	waitWithin(t, sourceQualityMinInterval+4*sourceQualityRefreshInterval, "the easing is pushed after the interval", func() bool {
+		messages := receiver.sourceQualityFor(sender.id)
+		return len(messages) == 3 && messages[2].UplinkLoss10 == 0 && messages[2].AudioUplinkJitterMs == 3
+	})
+
+	// A closed hub stops refreshing.
+	hub.Close()
+	set(500, 500, 90, 90)
+	time.Sleep(4 * sourceQualityRefreshInterval)
+	if got := len(receiver.sourceQualityFor(sender.id)); got != 3 {
+		t.Fatalf("a closed hub relayed again: %d source_quality messages, want 3", got)
 	}
 }
