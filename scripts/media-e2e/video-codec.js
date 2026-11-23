@@ -132,6 +132,117 @@ async function waitForNoReceivedVideo(page, step, timeout = 15000) {
   assert.fail(`receiver still gets video after ${step}`);
 }
 
+// --- Simulcast ---------------------------------------------------------------
+
+// A server of its own with simulcast on and an admin password. Medium default
+// quality gives a capture large enough for at least two layers.
+const simulcastServer = {
+  when: "localCapacity",
+  localCapacityLimit: 2,
+  connectionMethodTest: true,
+  serverEnv: { SIMULCAST_ENABLED: "true", DEFAULT_VIDEO_QUALITY: "medium" }
+};
+
+const codecMimes = { av1: "video/AV1", vp9: "video/VP9", vp8: "video/VP8", h264: "video/H264" };
+const browserName = process.env.MEDIA_E2E_BROWSER || "chromium";
+
+// The codec a simulcast camera in this browser ends up with when `codec` is
+// wanted: the codec itself where the page found that the browser can send it
+// as separate layers, VP8 otherwise.
+async function simulcastMime(page, codec) {
+  if (codec === "vp8" || codec === "h264") return codecMimes[codec];
+  const layered = await page.evaluate((name) => videoCodecsLayerable.has(name), codec);
+  // Chromium is known to send both newer codecs as layers; if the page stops
+  // finding that out, the scenarios must fail rather than quietly test VP8.
+  if (browserName === "chromium") {
+    assert.equal(layered, true, `Chromium did not report ${codec} as sendable in simulcast layers`);
+  }
+  return layered ? codecMimes[codec] : codecMimes.vp8;
+}
+
+// The camera's simulcast layers that are encoding frames right now, and how
+// many the sender plans to send.
+async function cameraLayers(page) {
+  return page.evaluate(async () => {
+    const peer = window.__slowMeetTest.peerConnections.at(-1);
+    const sender = peer.getSenders().find((candidate) => candidate.track?.kind === "video");
+    const planned = sender
+      ? sender.getParameters().encodings.filter((encoding) => encoding.active !== false).length : 0;
+    const sample = async () => {
+      const report = await peer.getStats();
+      const codecs = new Map();
+      const layers = new Map();
+      report.forEach((stat) => {
+        if (stat.type === "codec") codecs.set(stat.id, stat.mimeType);
+      });
+      report.forEach((stat) => {
+        if (stat.type === "outbound-rtp" && stat.kind === "video" && stat.rid) {
+          layers.set(stat.rid, { frames: stat.framesEncoded || 0, mime: codecs.get(stat.codecId) || null,
+            mode: stat.scalabilityMode || null });
+        }
+      });
+      return layers;
+    };
+    const before = await sample();
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const after = await sample();
+    const encoding = [];
+    for (const [rid, layer] of after) {
+      if (layer.frames > (before.get(rid)?.frames ?? 0)) encoding.push({ rid, mime: layer.mime, mode: layer.mode });
+    }
+    return { planned, encoding };
+  });
+}
+
+// Every planned layer is encoding, and all of them in the wanted codec.
+async function waitForCameraLayers(page, mime, timeout = 45000) {
+  const deadline = Date.now() + timeout;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await cameraLayers(page);
+    if (state.planned >= 2 && state.encoding.length === state.planned &&
+        state.encoding.every((layer) => layer.mime === mime)) {
+      return state;
+    }
+  }
+  assert.fail(`camera layers are ${JSON.stringify(state)}, expected every planned layer (at least two) in ${mime}`);
+}
+
+async function joinSimulcastPair(fixture) {
+  const pageA = pageFor(fixture, "A");
+  const pageB = pageFor(fixture, "B");
+  await fixture.join("A", "Alice");
+  await fixture.waitForConnected("A");
+  await fixture.join("B", "Bob");
+  await fixture.waitForConnected();
+  assert.equal(await pageA.evaluate(() => simulcastEnabled), true, "the server did not turn simulcast on");
+  await setCamera(pageA, true);
+  return { pageA, pageB };
+}
+
+async function pickCodec(page, codec) {
+  await page.evaluate((value) => {
+    const select = document.querySelector("#video-codec");
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }, codec);
+}
+
+// Makes the page report no AV1 support, as a device without an AV1 codec
+// does. Takes effect on the next page load.
+async function reportNoAV1(page) {
+  await page.addInitScript(() => {
+    for (const endpoint of [RTCRtpSender, RTCRtpReceiver]) {
+      const original = endpoint.getCapabilities.bind(endpoint);
+      endpoint.getCapabilities = (kind) => {
+        const capabilities = original(kind);
+        if (!capabilities || kind !== "video") return capabilities;
+        return { ...capabilities, codecs: capabilities.codecs.filter((codec) => !/av1/i.test(codec.mimeType)) };
+      };
+    }
+  });
+}
+
 async function updateAdminConfig(fixture, body) {
   const response = await fetch(`${fixture.baseURL}/admin/config`, {
     method: "POST",
@@ -291,6 +402,103 @@ const scenarios = [
       assert.equal(await pageA.locator("#metric-video-codec").textContent(), "VP9",
         "the sender moved back to AV1 before the hold time passed");
       await waitForSentCodec(pageA, "AV1", 30000);
+    }
+  },
+  {
+    name: "simulcast camera layers use the default codec where the browser can send it as layers",
+    ...simulcastServer,
+    async run(fixture) {
+      const { pageA, pageB } = await joinSimulcastPair(fixture);
+      const mime = await simulcastMime(pageA, "av1");
+      let state = await waitForCameraLayers(pageA, mime);
+      assert.equal(new Set(state.encoding.map((layer) => layer.rid)).size, state.planned, "every layer has its own rid");
+      if (mime === codecMimes.av1) {
+        // A layer's scalability mode can lag its first frames in the stats.
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline && !state.encoding.every((layer) => /^L1T/.test(String(layer.mode)))) {
+          state = await waitForCameraLayers(pageA, mime);
+        }
+        console.log(`[simulcast codec evidence] ${JSON.stringify(state)}`);
+        for (const layer of state.encoding) {
+          assert.match(String(layer.mode), /^L1T/, `layer ${layer.rid} must be a stream of its own, not carry other layers`);
+        }
+        assert.equal(await pageA.locator("#video-codec-note").textContent(), "Sending AV1.");
+      } else {
+        assert.equal(await pageA.locator("#video-codec-note").textContent(),
+          "Sending VP8. This browser cannot send AV1 as simulcast layers.");
+      }
+      await waitForReceivedCodec(pageB, mime);
+      await fixture.assertPeersConnected("simulcast with the default codec");
+    }
+  },
+  {
+    name: "simulcast camera layers follow codec changes and layer requests without going dark",
+    ...simulcastServer,
+    async run(fixture) {
+      const { pageA, pageB } = await joinSimulcastPair(fixture);
+      await waitForCameraLayers(pageA, await simulcastMime(pageA, "av1"));
+      await waitForReceivedVideo(pageB, "simulcast start");
+      for (const codec of ["vp9", "vp8", "av1"]) {
+        await updateAdminConfig(fixture, { default_video_codec: codec });
+        const mime = await simulcastMime(pageA, codec);
+        await waitForCameraLayers(pageA, mime);
+        await waitForReceivedCodec(pageB, mime);
+        // The viewer asks for the small layer and then the large one; each
+        // is a different stream of the new codec on the server.
+        for (const layer of ["low", "high"]) {
+          await pageB.evaluate((wanted) => setCameraLayer(wanted), layer);
+          await waitForReceivedCodec(pageB, mime);
+        }
+      }
+      await fixture.assertPeersConnected("simulcast codec changes");
+    }
+  },
+  {
+    name: "a device without AV1 brings a simulcast room down and the room recovers",
+    ...simulcastServer,
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await reportNoAV1(pageB);
+      await pageB.goto(fixture.baseURL);
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await setCamera(pageA, true);
+      const withEveryone = await simulcastMime(pageA, "av1");
+      await waitForCameraLayers(pageA, withEveryone);
+
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      const withoutAV1 = await simulcastMime(pageA, "vp9");
+      await waitForCameraLayers(pageA, withoutAV1);
+      await waitForReceivedCodec(pageB, withoutAV1);
+
+      await pageB.locator("#leave").click();
+      await waitForCameraLayers(pageA, withEveryone, 60000);
+    }
+  },
+  {
+    name: "a participant's codec pick applies to every simulcast layer",
+    ...simulcastServer,
+    async run(fixture) {
+      const { pageA, pageB } = await joinSimulcastPair(fixture);
+      await waitForCameraLayers(pageA, await simulcastMime(pageA, "av1"));
+      await pickCodec(pageA, "vp9");
+      const picked = await simulcastMime(pageA, "vp9");
+      await waitForCameraLayers(pageA, picked);
+      await waitForReceivedCodec(pageB, picked);
+      if (picked !== codecMimes.vp9) {
+        assert.equal(await pageA.locator("#video-codec-note").textContent(),
+          "Sending VP8. This browser cannot send VP9 as simulcast layers.");
+      }
+      await pickCodec(pageA, "vp8");
+      await waitForCameraLayers(pageA, codecMimes.vp8);
+      await waitForReceivedCodec(pageB, codecMimes.vp8);
+      await pickCodec(pageA, "auto");
+      const automatic = await simulcastMime(pageA, "av1");
+      await waitForCameraLayers(pageA, automatic);
+      await waitForReceivedCodec(pageB, automatic);
+      await fixture.assertPeersConnected("simulcast codec picks");
     }
   }
 ];
