@@ -248,11 +248,19 @@
       modes.some((mode) => /^[LS][2-9]/.test(String(mode || ""))));
   }
 
+  // A browser can list a codec it has no working encoder for (Firefox lists
+  // H.264 without its H.264 component installed). The camera then encodes no
+  // frame at all. True once a live camera has produced nothing for limitMs in
+  // `codec`; VP8 is never given up, it is what the camera falls back to.
+  function stalledFallbackDue(stalledMs, codec, limitMs = 8000) {
+    return isCodec(codec) && codec !== "vp8" && Number(stalledMs) >= limitMs;
+  }
+
   const utilities = Object.freeze({
     codecs, isCodec, codecLabel, isNewerCodec, codecNameFromMime, deviceCodecs,
     fallbackOrder, chooseSendCodec, preferVideoCodec, cpuFallbackDue,
     planCodecChange, codecNote, cpuFallbackWatched, addCpuSample,
-    simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed
+    simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed, stalledFallbackDue
   });
   root.SlowMeetVideoCodec = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;

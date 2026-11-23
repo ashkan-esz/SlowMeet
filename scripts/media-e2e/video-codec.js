@@ -541,6 +541,63 @@ const scenarios = [
       await updateAdminConfig(fixture, { default_video_codec: "av1" });
       await fixture.assertPeersConnected("after many codec switches");
     }
+  },
+  {
+    // With MEDIA_E2E_BROWSER_B set to the other engine this is the interop
+    // check: the engines number payload types differently and offer different
+    // H.264 profiles. With one engine it covers H.264 where that engine has it.
+    name: "two browsers exchange every codec they share in both directions",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      const labels = { av1: "AV1", vp9: "VP9", vp8: "VP8", h264: "H.264" };
+      const engines = { A: browserName, B: process.env.MEDIA_E2E_BROWSER_B || browserName };
+      for (const [role, sender, viewer] of [["A", pageA, pageB], ["B", pageB, pageA]]) {
+        await setCamera(sender, true);
+        const shared = await sender.evaluate(() =>
+          (videoCodecsRoom || []).filter((codec) => (videoCodecsDevice || []).includes(codec)));
+        assert.ok(shared.includes("vp8"), `the room of ${role} has no VP8: ${shared}`);
+        const done = [];
+        for (const codec of shared) {
+          await pickCodec(sender, codec);
+          try {
+            // Either the codec is sent, or the browser turns out to have no
+            // encoder for it and the camera falls back with a note.
+            const outcome = await sender.waitForFunction(({ label }) => {
+              const sending = document.querySelector("#metric-video-codec")?.textContent;
+              const note = document.querySelector("#video-codec-note")?.textContent || "";
+              if (sending === label) return "sent";
+              if (note.includes(`This device cannot send ${label}.`) && sending && sending !== "Not active") return "fell back";
+              return false;
+            }, { label: labels[codec] }, { timeout: 40000 }).then((handle) => handle.jsonValue());
+            if (outcome === "fell back") {
+              assert.notEqual(engines[role], "chromium", `Chromium could not encode ${codec}`);
+              await waitForReceivedVideo(viewer, `${engines[role]} falling back from ${codec}`);
+              done.push(`${codec} (no encoder, fell back)`);
+              continue;
+            }
+            await waitForReceivedCodec(viewer, codecMimes[codec]);
+          } catch (error) {
+            const state = await sender.evaluate(() => ({
+              sending: document.querySelector("#metric-video-codec")?.textContent,
+              note: document.querySelector("#video-codec-note")?.textContent
+            }));
+            assert.fail(`${engines[role]} sending ${codec} (done so far: ${done.join(", ") || "none"}; ` +
+              `sender shows ${JSON.stringify(state)}): ${String(error.message).slice(0, 300)}`);
+          }
+          done.push(codec);
+        }
+        console.log(`[codec matrix evidence] ${engines[role]} (${role}) sent and the other side decoded: ${done.join(", ")}`);
+        await pickCodec(sender, "auto");
+        await setCamera(sender, false);
+        await waitForNoReceivedVideo(viewer, `${role} camera off`);
+      }
+      await fixture.assertPeersConnected("after the codec matrix");
+    }
   }
 ];
 

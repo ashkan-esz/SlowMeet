@@ -272,6 +272,17 @@ assert.equal(simulcastCollapsed([[""], [""], [""]]), false, "a browser that repo
 assert.equal(simulcastCollapsed([["L3T3"], ["L3T3"]], 2), true);
 assert.equal(simulcastCollapsed(null), false);
 
+// --- A codec the browser lists but cannot encode ----------------------------
+
+const { stalledFallbackDue } = require("../web/js/video-codec.js");
+assert.equal(stalledFallbackDue(8000, "h264"), true, "eight seconds without a frame gives the codec up");
+assert.equal(stalledFallbackDue(7999, "h264"), false);
+assert.equal(stalledFallbackDue(60000, "vp8"), false, "VP8 is the floor and is never given up");
+assert.equal(stalledFallbackDue(60000, null), false);
+assert.equal(stalledFallbackDue(3000, "av1", 2000), true);
+assert.equal(chooseSendCodec({stored: "h264", serverDefault: "av1", roomCodecs: all, device: ["av1", "vp9", "vp8"]}), "vp8",
+  "a pick the device turned out unable to send falls back like an unsupported one");
+
 // --- Wiring in the page ----------------------------------------------------
 
 const root = path.join(__dirname, "..");
@@ -299,6 +310,9 @@ assert.match(appSource, /acceptsLayerMode\(contentType, "L1T1"\), acceptsLayerMo
   "a codec counts as sendable in layers only if the browser tells real scalability modes from made-up ones");
 assert.match(appSource, /simulcastCapableCodecs\(videoCodecsLayerable\)/);
 assert.match(appSource, /if \(optionsKey !== videoCodecOptionsKey\) \{/, "the picker is rebuilt only when its entries change");
+assert.equal((appSource.match(/device: videoCodecsUsableDevice\(\),/g) || []).length, 2,
+  "the choice and the note both leave out codecs the device could not encode");
+assert.match(appSource, /stalledFallbackDue\(now - videoCodecStalledSince, codec\)\) return;\s*videoCodecStalledSince = 0;\s*videoCodecsBroken\.add\(codec\);/);
 assert.equal((appSource.match(/simulcastCodecs: videoSimulcastCodecs\(\)/g) || []).length, 2,
   "the choice and the Settings note both know which codecs the browser can send as layers");
 assert.match(appSource, /function videoSimulcastCodecs\(\) \{\s*if \(!simulcastEnabled\) return null;/);

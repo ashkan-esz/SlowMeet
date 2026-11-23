@@ -406,7 +406,12 @@ decided in this order:
    VP8 or H.264 and Settings says "This browser cannot send AV1 as simulcast
    layers." A browser that claims the ability but packs all layers into one
    stream is caught within a few seconds and returns to VP8 for the session.
-5. A codec the administrator removes is given up at once, even when a
+5. A browser can list a codec it has no working encoder for (Firefox lists
+   H.264 where its H.264 component is not installed). A live camera that
+   produces no frame for eight seconds in such a codec gives the codec up for
+   the session, also when the participant picked it, and Settings says "This
+   device cannot send H.264."
+6. A codec the administrator removes is given up at once, even when a
    participant had picked it.
 
 The fallback is immediate when a limiting device joins. The room returns to
@@ -431,8 +436,9 @@ browser is usually still running a page cached from before codec selection:
 it reports no codecs, so the server assumes only VP8 and H.264 for it.
 Reloading that page fixes it.
 
-Codec selection and mid-call switches are tested in Chromium and Firefox.
-Safari has not been tested.
+Codec selection and mid-call switches are tested in Chromium and Firefox,
+alone and paired with each other in both directions, for every codec.
+Safari and phone browsers have not been tested.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video
 ceilings. The quality limit caps browser profile resolution. The SFU paces

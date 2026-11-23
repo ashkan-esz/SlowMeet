@@ -202,7 +202,7 @@ async function waitForServer(url, processHandle, output) {
 async function startLocalServer(maxParticipants = 2, { connectionMethodTest = false, extraEnv = {} } = {}) {
   const host = process.env.MEDIA_E2E_HOST || "127.0.0.1";
   const loopbackHost = ["localhost", "127.0.0.1", "::1"].includes(host);
-  const defaultICEPublicIP = browserName === "firefox" && loopbackHost
+  const defaultICEPublicIP = [browserName, process.env.MEDIA_E2E_BROWSER_B].includes("firefox") && loopbackHost
     ? findLocalIPv4Address() || host
     : host;
   const port = await reserveLocalPort(host);
@@ -1196,7 +1196,8 @@ async function createScenarioFixture({
   await Promise.all([...new Set([contextA, contextB])].map(async (context) => {
     await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
     traceContexts.add(context);
-    if (browserName === "chromium") {
+    // Decided per context: participant B may run another engine than A.
+    if (context.browser()?.browserType().name() === "chromium") {
       await context.grantPermissions(["camera", "microphone"], { origin: new URL(baseURL).origin });
     }
   }));
@@ -3061,35 +3062,45 @@ async function main() {
 
   const browserType = browserName === "firefox" ? firefox : chromium;
   console.log(`[media] profile=${suiteProfile}; ${realDevices ? "real capture devices" : `${browserName}-generated camera/microphone`}; ${headed ? "headed" : "headless"} ${browserName}`);
-  const launchArgs = [];
-  const launchOptions = { headless: !headed };
-  if (browserName === "chromium") {
-    launchArgs.push(
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--force-webrtc-ip-handling-policy=default_public_interface_only",
-      `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
-      "--autoplay-policy=no-user-gesture-required",
-      "--disable-features=WebRtcHideLocalIpsWithMdns"
-    );
-    if (localTarget) launchArgs.push("--allow-loopback-in-peer-connection");
-    if (!realDevices) launchArgs.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
-    if (testScreenShare) launchArgs.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
-    launchOptions.args = launchArgs;
-    const chromePath = findChrome();
-    if (chromePath) launchOptions.executablePath = chromePath;
-  } else {
-    launchOptions.firefoxUserPrefs = {
-      "media.navigator.permission.disabled": true,
-      "media.peerconnection.ice.loopback": true,
-      "media.autoplay.default": 0
-    };
-    if (!realDevices) launchOptions.firefoxUserPrefs["media.navigator.streams.fake"] = true;
-    const firefoxPath = findFirefox();
-    if (firefoxPath) launchOptions.executablePath = firefoxPath;
+  // Launch settings for one engine. Participant B can run another engine than
+  // A (MEDIA_E2E_BROWSER_B) for scenarios that pair two different browsers.
+  const launchSetup = (engine) => {
+    const launchArgs = [];
+    const launchOptions = { headless: !headed };
+    if (engine === "chromium") {
+      launchArgs.push(
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--force-webrtc-ip-handling-policy=default_public_interface_only",
+        `--unsafely-treat-insecure-origin-as-secure=${baseURL}`,
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-features=WebRtcHideLocalIpsWithMdns"
+      );
+      if (localTarget) launchArgs.push("--allow-loopback-in-peer-connection");
+      if (!realDevices) launchArgs.push("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream");
+      if (testScreenShare) launchArgs.push(`--auto-select-desktop-capture-source=${screenSourceTitle}`);
+      launchOptions.args = launchArgs;
+      const chromePath = findChrome();
+      if (chromePath) launchOptions.executablePath = chromePath;
+    } else {
+      launchOptions.firefoxUserPrefs = {
+        "media.navigator.permission.disabled": true,
+        "media.peerconnection.ice.loopback": true,
+        "media.autoplay.default": 0
+      };
+      if (!realDevices) launchOptions.firefoxUserPrefs["media.navigator.streams.fake"] = true;
+      const firefoxPath = findFirefox();
+      if (firefoxPath) launchOptions.executablePath = firefoxPath;
+    }
+    return { type: engine === "firefox" ? firefox : chromium, launchArgs, launchOptions };
+  };
+  const { launchArgs, launchOptions } = launchSetup(browserName);
+  const browserNameB = process.env.MEDIA_E2E_BROWSER_B || browserName;
+  if (!["chromium", "firefox"].includes(browserNameB)) {
+    throw new Error("MEDIA_E2E_BROWSER_B must be chromium or firefox");
   }
 
   const runRealCameraToggleScenario = async (fixture, toggledRole, { sourceLabels = { A: "real", B: "real" } } = {}) => {
@@ -3887,7 +3898,11 @@ async function main() {
 
   try {
     browserA = await browserType.launch({ ...launchOptions, ...(launchArgs.length ? { args: [...launchArgs] } : {}) });
-    browserB = await browserType.launch({ ...launchOptions, ...(launchArgs.length ? { args: [...launchArgs] } : {}) });
+    const setupB = browserNameB === browserName
+      ? { type: browserType, launchArgs, launchOptions } : launchSetup(browserNameB);
+    browserB = await setupB.type.launch({
+      ...setupB.launchOptions, ...(setupB.launchArgs.length ? { args: [...setupB.launchArgs] } : {})
+    });
 
     for (const scenario of scenarios) {
       const scenarioSelected = !requestedScenario || scenario.name === requestedScenario;
