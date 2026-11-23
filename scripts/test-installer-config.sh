@@ -458,11 +458,15 @@ declare -F load_legacy_install_settings caddy_https_port caddy_https_port_confli
 
 # Listeners per port, as `ss -H -ltnp "sport = :PORT"` prints them.
 declare -A LISTENERS=()
+# ss and systemctl stand in for the real commands; the installer functions
+# under test call them, nothing in this file does.
+# shellcheck disable=SC2317
 ss() {
     local port=${*: -1}
     port=${port##*:}
     [[ -z "${LISTENERS[$port]:-}" ]] || printf '%s\n' "${LISTENERS[$port]}"
 }
+# shellcheck disable=SC2317
 systemctl() {
     if [[ "$*" == 'show -p MainPID --value caddy' ]]; then
         printf '4242\n'
