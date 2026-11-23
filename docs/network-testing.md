@@ -147,7 +147,24 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B15.** Their tests now enforce the fix without a gate.
+- **B17 — forwarded packets keep the publisher's header extensions.** The
+  SFU forwards each publisher's RTP header extensions as they arrive, under
+  the IDs the publisher's connection negotiated, while a receiver reads
+  them with the IDs of its own connection to the SFU. Where the maps differ,
+  a receiver can read one extension as another (pion numbers its own offer's
+  extensions mid 1, rid 2, repaired-rid 3, transport-cc 4; Chrome and
+  Firefox publishers use other IDs). Stripping them on egress, leaving only
+  the SFU's own transport-cc, broke `simulcast-mixed-room` in 3 of 3 runs:
+  after a downlink cap lifted, the receiver decoded the sender's top layer
+  at 0 px (that layer's receive track got ~50 KB against ~940 KB for the
+  others). Some forwarded extension is load-bearing for receivers, most
+  likely `mid` for routing the simulcast layers' transceivers that were
+  added by renegotiation, so the extensions stay forwarded. Next step:
+  log the SFU's negotiated extension IDs on both sides and the extensions
+  on the failing layer's packets, then rewrite each extension to the
+  receiver's ID instead of dropping it.
+
+- **Fixed: B1–B9 and B11–B16.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -239,7 +256,11 @@ what should change. Fixing an issue means flipping that assertion.
     path still judge the link). `scripts/test-room-network-scenarios.js`
     (pooling, lucky small samples, near-outage and small-pool cases),
     `TestForwardJitterReportsLastCompleteWindow`,
-    `bad-downlink-among-bad-senders`.
+    `bad-downlink-among-bad-senders`. The jitter discount has the same
+    shape and limit: a receiver's own 60 ms of download jitter shows through
+    accurate sender reports and reads poor, reports 20 ms too high leave it
+    neither poor nor healthy, 40 ms too high hide it (unit cases in the same
+    script).
   - B15, a transport-cc feedback flood: `all-fast-link-top-quality` failed
     in every full CI-list run (also on code from before B14) yet passed on
     its own. Late in a long session the browsers sent 1,600-12,600 non-RTP
@@ -264,6 +285,14 @@ what should change. Fixing an issue means flipping that assertion.
     `TestRouterStampsItsOwnTransportSequenceOnForwardedPackets`,
     `TestWithOwnHeaderExtensionsIsolatesConcurrentWriters`,
     `all-fast-link-top-quality`.
+  - B16, a source-quality change marked as sent without being sent: the
+    hub's 250 ms refresher recorded each relayed value before checking that
+    the sender's connection was still a room member. Between a resume (or
+    during a reconnect grace window) and the new connection's first report,
+    it recorded changes for the old, gone connection and broadcast nothing,
+    so the room kept the stale value until the next real change. The hub now
+    records only what it broadcasts, and a joiner is not replayed a value
+    never sent. `TestHubRelaysChangeMeasuredDuringReconnectAfterResume`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

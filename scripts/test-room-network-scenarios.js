@@ -1014,4 +1014,38 @@ for (const [name, uplinkLossPcts] of [
   assert.equal(verdict.poor, false, "with own loss unknown a clean link does not read poor");
 }
 
+// The jitter discount must not hide the receiver's own jitter either. The
+// observer's own download adds 60 ms of jitter (poor: above 50 ms) and its
+// three senders' uplinks add 40-50 ms of their own; streams arrive with both.
+// With reports that match each sender's queueing the discount leaves the
+// observer's own 60 ms and the sample reads poor. Reports that over-state
+// the senders' jitter cancel the observer's own: 20 ms too high leaves 40 ms
+// (no longer poor, not healthy either), 40 ms too high leaves 20 ms (healthy),
+// the same limit the loss discount has (B14).
+{
+  const senderJitter = [40, 50, 45];
+  const ownJitterMs = 60;
+  const jitteryRoom = (overstatedMs) => () => ({
+    ...goodParticipantLink,
+    streams: senderJitter.flatMap((jitterMs, index) =>
+      remoteSender(`remote-${index + 1}`, 0, { jitterMs: jitterMs + ownJitterMs })),
+    senderUplinks: new Map(senderJitter.map((jitterMs, index) => [`remote-${index + 1}`, {
+      videoLossPct: 0, audioLossPct: 0, jitterMs: jitterMs + overstatedMs, audioJitterMs: jitterMs + overstatedMs
+    }]))
+  });
+
+  const accurate = runLadder(30, jitteryRoom(0), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(accurate.samples.every((sample) => sample.jitterMs === ownJitterMs && sample.poor),
+    "with accurate sender reports the observer's own 60 ms of jitter shows through the discount and reads poor");
+  assert.ok(accurate.stepDowns.length > 0, "own jitter above the poor bar steps the ladder down");
+
+  const twentyHigh = runLadder(30, jitteryRoom(20), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(twentyHigh.samples.every((sample) => sample.jitterMs === 40 && !sample.poor && !sample.good),
+    "sender jitter reports 20 ms high leave 40 ms: no longer poor, not healthy either");
+
+  const fortyHigh = runLadder(30, jitteryRoom(40), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(fortyHigh.samples.every((sample) => sample.jitterMs === 20 && sample.good),
+    "sender jitter reports 40 ms high cancel the observer's own jitter (the limit of the discount)");
+}
+
 console.log("Room network scenario tests passed");
