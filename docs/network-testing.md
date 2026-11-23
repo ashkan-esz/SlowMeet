@@ -170,9 +170,15 @@ what should change. Fixing an issue means flipping that assertion.
     raises what a participant sends, so the climb backoff now doubles only
     when the step-down shows on the send path: uplink loss above 5 %, a
     round trip above the poor bar, or a send estimate below 220 kbps
-    (`sendPathPoor`, `noteStepDown(onSendPath)`). The scenario asserts no
-    pause, at most one step-down, the top level at the end of the window,
-    and the top level for at least 60 % of it (see B13). `TestHubRelaysAudioUplinkJitter`
+    (`sendPathPoor`, `noteStepDown(onSendPath)`). The early step itself is
+    gone too (see B13): the hub re-reads the SFU's measurements every 250 ms
+    and relays a worsening at once, instead of waiting for the sender's next
+    report and a 1 s minimum interval (`refreshSourceQuality`), and the SFU
+    includes its measurement window in progress, so the onset is no longer
+    under-reported for a second. The scenario asserts no pause, no step-down,
+    the top level at the end of the window, and the top level for at least
+    90 % of it. `TestHubPushesForwardMeasurementWithoutSenderReport`,
+    `TestForwardLossReportsWindowInProgress`, `TestHubRelaysAudioUplinkJitter`
     and the paused-camera case in `scripts/test-room-network-scenarios.js`
     cover the relay and the discount. `TestForwardLossMeasuresUnforwardedSequences`,
     `TestHubRelaysReportedUplinkQuality`,
@@ -191,7 +197,14 @@ what should change. Fixing an issue means flipping that assertion.
     report as the fallback. Over five runs no sample after the first 5 s
     read 30 ms or more; the fast participant held the top for 34, 34, 28, 34
     and 39 of 39 samples and climbed back within 5–11 s (the 11 s one waited
-    out a single late loss reading). `TestForwardJitterMeasuresForwardedInterarrivalJitter`,
+    out a single late loss reading). That early step and late reading came
+    from lag: the hub read the SFU's measurements only when a sender's own
+    report arrived, at most once a second, and the SFU reported only
+    completed one-second windows, so at onset it said ~55 % loss while the
+    streams already lost 78–92 %. With the 250 ms push (worsenings at once)
+    and the window in progress, five more rounds never stepped down and held
+    the top for every sample (39/39, 39/39, 40/40, 40/40, 40/40).
+    `TestForwardJitterMeasuresForwardedInterarrivalJitter`,
     `TestRouterForwardJitterPicksAudioAndBusiestCameraLayer`,
     `one-fast-three-bad-uplinks`.
   - B2, keyframe requests not coalesced: one retry series per publication

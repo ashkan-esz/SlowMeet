@@ -3506,22 +3506,23 @@ async function scenarioOneFastThreeBadUplinks() {
   assert.equal(b1Evidence.p1ThreeBadUplinks.suspendedSamples, 0,
     `P1 on the fast tier paused its camera in ${b1Evidence.p1ThreeBadUplinks.suspendedSamples} samples with three bad uplinks (B1)`);
   // Not pausing is not enough: P1 could sit at a low level for the whole
-  // window and still never pause. In the first second or two, before the
-  // first source_quality reaches it, P1 can step down once; after that it must
-  // climb back to the top level and stay there for most of the window. With
-  // the SFU measuring the jitter it forwards (B13), five runs held the top for
-  // 34, 34, 28, 34 and 39 of 39 samples and climbed back within 5-11 s; with
-  // the senders' own jitter reports instead, 9-40 of 40, once after ~30 s.
+  // window and still never pause. The SFU measures what each bad sender's
+  // streams lose and queue before it forwards them, including its window in
+  // progress, and the hub pushes that every 250 ms (worsenings at once), so
+  // P1's samples are discounted from the first impaired second: five runs
+  // never stepped down and held the top for every sample (39/39, 39/39,
+  // 40/40, 40/40, 40/40). Before the window in progress and the push, one
+  // early step and 28-39 of 39; with the senders' own reports, 9-40 of 40.
   // The bar sits about ten points under the worst run.
   const p1Window = b1Evidence.p1ThreeBadUplinks;
-  assert.ok(p1Window.stepDowns <= 1,
-    `P1 on the fast tier stepped its ladder down ${p1Window.stepDowns} times with three bad uplinks (B1 allows one early step)`);
+  assert.equal(p1Window.stepDowns, 0,
+    `P1 on the fast tier stepped its ladder down ${p1Window.stepDowns} times with three bad uplinks (B1)`);
   assert.equal(p1Window.finalLevel, topAutomaticLevel,
     `P1 on the fast tier ended the three-bad-uplinks window at level ${p1Window.finalLevel}, not ${topAutomaticLevel} (B1)`);
   const p1TopShare = p1Window.levelSamples ? p1Window.samplesAtTop / p1Window.levelSamples : 0;
   console.log(`[${tag}] P1 at level ${topAutomaticLevel} in ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks`);
-  assert.ok(p1TopShare >= 0.6,
-    `P1 on the fast tier was at level ${topAutomaticLevel} in only ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks (B13 needs 60 %)`);
+  assert.ok(p1TopShare >= 0.9,
+    `P1 on the fast tier was at level ${topAutomaticLevel} in only ${p1Window.samplesAtTop} of ${p1Window.levelSamples} samples with three bad uplinks (B13 needs 90 %)`);
 
   // Recovery. The cameras that were live through the window return first —
   // P1's own camera included, since B1 may have paused it — then a fresh
