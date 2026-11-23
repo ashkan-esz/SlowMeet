@@ -35,19 +35,26 @@ func TestIngressCodecActionFor(t *testing.T) {
 	tests := []struct {
 		name                       string
 		publication, packet, track uint8
+		sameCodec                  bool
 		want                       ingressCodecAction
 	}{
-		{name: "packet in the publication's codec", publication: 96, packet: 96, track: 96, want: ingressForward},
-		{name: "publication without a recorded payload type", publication: 0, packet: 98, track: 98, want: ingressForward},
+		{name: "packet in the publication's codec", publication: 96, packet: 96, track: 96, sameCodec: true, want: ingressForward},
 		{name: "track moved to the packet's payload type", publication: 96, packet: 98, track: 98, want: ingressRepublish},
-		{name: "stray packet while the track stays put", publication: 96, packet: 98, track: 96, want: ingressDrop},
+		{name: "stray packet while the track stays put", publication: 96, packet: 98, track: 96, sameCodec: true, want: ingressDrop},
 		{name: "late packet of a third payload type", publication: 96, packet: 45, track: 98, want: ingressDrop},
+		// A simulcast layer starts without a payload type and learns it from
+		// its first packet, so that a later change is seen.
+		{name: "first packet of a layer without a payload type", publication: 0, packet: 45, track: 45, sameCodec: true, want: ingressAdopt},
+		{name: "layer changed codec before its first packet was read", publication: 0, packet: 98, track: 98, want: ingressRepublish},
+		{name: "stray packet on a layer without a payload type", publication: 0, packet: 98, track: 45, sameCodec: true, want: ingressDrop},
+		{name: "change after the payload type was adopted", publication: 45, packet: 98, track: 98, want: ingressRepublish},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := ingressCodecActionFor(test.publication, test.packet, test.track); got != test.want {
-				t.Fatalf("ingressCodecActionFor(%d, %d, %d) = %d, want %d",
-					test.publication, test.packet, test.track, got, test.want)
+			got := ingressCodecActionFor(test.publication, test.packet, test.track, test.sameCodec)
+			if got != test.want {
+				t.Fatalf("ingressCodecActionFor(%d, %d, %d, %v) = %d, want %d",
+					test.publication, test.packet, test.track, test.sameCodec, got, test.want)
 			}
 		})
 	}
