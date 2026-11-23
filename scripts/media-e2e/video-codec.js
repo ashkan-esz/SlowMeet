@@ -105,6 +105,33 @@ async function receiverVideoState(page) {
   });
 }
 
+async function setCamera(page, on) {
+  const camera = page.locator("#camera");
+  await camera.waitFor({ state: "visible" });
+  if ((await camera.getAttribute("aria-pressed")) !== String(on)) await camera.click();
+  await page.waitForFunction((pressed) =>
+    document.querySelector("#camera")?.getAttribute("aria-pressed") === pressed,
+  String(on), { timeout: 15000 });
+}
+
+// Any inbound video stream that is decoding frames right now, whatever its
+// codec.
+async function waitForReceivedVideo(page, step, timeout = 30000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await advancingInboundVideoMime(page)) return;
+  }
+  assert.fail(`receiver got no video after ${step}; receiver state: ${JSON.stringify(await receiverVideoState(page))}`);
+}
+
+async function waitForNoReceivedVideo(page, step, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (!(await advancingInboundVideoMime(page))) return;
+  }
+  assert.fail(`receiver still gets video after ${step}`);
+}
+
 async function updateAdminConfig(fixture, body) {
   const response = await fetch(`${fixture.baseURL}/admin/config`, {
     method: "POST",
@@ -172,6 +199,42 @@ const scenarios = [
       assert.equal(senderAfter, senderBefore, "codec switches reuse the camera sender");
       await fixture.assertPeersConnected("after codec switches");
       await updateAdminConfig(fixture, { video_codecs: ["av1", "vp9", "vp8", "h264"], default_video_codec: "av1" });
+    }
+  },
+  {
+    // The server puts a new outgoing track on the first free media line of
+    // the viewer's connection, so every round here lands on a line that
+    // carried another stream before. Firefox has failed to bind such streams.
+    name: "a viewer keeps getting video after the sender leaves and rejoins, and after a camera restart",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      await setCamera(pageA, true);
+      await waitForReceivedVideo(pageB, "first join");
+
+      for (const round of ["first", "second"]) {
+        await pageA.locator("#leave").click();
+        await waitForNoReceivedVideo(pageB, `${round} leave`);
+        // Leaving ends on the "meeting ended" screen; a fresh page load
+        // brings the join form back for a new participant.
+        await pageA.goto(fixture.baseURL);
+        await fixture.join("A", `Alice ${round} rejoin`);
+        await fixture.waitForConnected("A");
+        await setCamera(pageA, true);
+        await waitForReceivedVideo(pageB, `${round} rejoin`);
+      }
+
+      for (const round of ["first", "second"]) {
+        await setCamera(pageA, false);
+        await waitForNoReceivedVideo(pageB, `${round} camera stop`);
+        await setCamera(pageA, true);
+        await waitForReceivedVideo(pageB, `${round} camera restart`);
+      }
+      await fixture.assertPeersConnected("after rejoins and camera restarts");
     }
   }
 ];
