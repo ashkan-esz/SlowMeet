@@ -4554,12 +4554,12 @@ async function startWebRTC() {
     return;
   }
   const currentPeer = new RTCPeerConnection({ iceServers: selectedICEServers, iceTransportPolicy: selectedICEPolicy });
-  // Frame counts belong to the connection that reported them: a new
-  // connection counts from zero and must not be measured against the old one.
-  videoCodecFramesEncoded.clear();
   restartRequested = false;
   iceRestartAttempts = 0;
   directDisconnectCounted = false;
+  // Frame counts belong to the connection that reported them: a new
+  // connection counts from zero and must not be measured against the old one.
+  videoCodecFramesEncoded.clear();
   relayRotation?.reset();
   appliedConnectionMethod = effectiveMethod;
   peerFirstConnectedAtMs = null;
