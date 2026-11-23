@@ -30,10 +30,8 @@ type forwardJitter struct {
 	partialAt     time.Time
 
 	// result is the last complete window's highest estimate in microseconds
-	// plus one (0 before the first window completes); recent holds the
-	// windows before it, like forwardLoss.
+	// plus one (0 before the first window completes).
 	result atomic.Int64
-	recent [forwardLossRecentWindows - 1]atomic.Int64
 	// partial is the window in progress, like forwardLoss.partial: a sender's
 	// new queueing reaches receivers' samples before its window completes.
 	partial atomic.Int64
@@ -76,20 +74,13 @@ func (j *forwardJitter) observe(timestamp uint32, clockRate uint32, now time.Tim
 }
 
 func (j *forwardJitter) closeWindow() {
-	for index := len(j.recent) - 1; index > 0; index-- {
-		j.recent[index].Store(j.recent[index-1].Load())
-	}
-	if len(j.recent) > 0 {
-		j.recent[0].Store(j.result.Load())
-	}
 	j.result.Store(int64(math.Round(j.windowMax*1e6)) + 1)
 }
 
-// jitterMs reports the highest jitter, in milliseconds, of the window in
-// progress and the last forwardLossRecentWindows complete windows; ok is
-// false with neither. Like the loss, the worst recent window keeps a burst
-// that a receiver's one-second sample caught but the SFU's matching window
-// split from reading as the receiver's own jitter.
+// jitterMs reports the higher jitter, in milliseconds, of the window in
+// progress and the last complete window; ok is false with neither. Like the
+// loss, the window in progress covers a burst that a receiver's one-second
+// sample caught before the SFU's matching window completed.
 func (j *forwardJitter) jitterMs() (int, bool) {
 	value := j.result.Load()
 	if partial := j.partial.Load(); partial > value {
@@ -97,11 +88,6 @@ func (j *forwardJitter) jitterMs() (int, bool) {
 	}
 	if value == 0 {
 		return 0, false
-	}
-	for index := range j.recent {
-		if earlier := j.recent[index].Load(); earlier > value {
-			value = earlier
-		}
 	}
 	return int(math.Round(float64(value-1) / 1000)), true
 }

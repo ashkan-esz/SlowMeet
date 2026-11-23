@@ -58,10 +58,11 @@ func TestForwardJitterMeasuresForwardedInterarrivalJitter(t *testing.T) {
 	}
 }
 
-// The reported jitter is the worst of the recent windows, so one jittery
-// second is still discounted while a receiver's sample overlaps it, and it
-// ages out after forwardLossRecentWindows clean windows.
-func TestForwardJitterReportsWorstRecentWindow(t *testing.T) {
+// The reported jitter is the higher of the window in progress and the last
+// complete window, so one jittery second is still discounted while a
+// receiver's sample overlaps it, and it ages out once a clean window
+// completes after it.
+func TestForwardJitterReportsLastCompleteWindow(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	var jitter forwardJitter
 	timestamp := uint32(0)
@@ -82,9 +83,9 @@ func TestForwardJitterReportsWorstRecentWindow(t *testing.T) {
 	if got, _ := jitter.jitterMs(); got < 30 {
 		t.Fatalf("one clean second later the reported jitter is %d ms; the jittery window must still count", got)
 	}
-	send(forwardLossRecentWindows+2, 0)
+	send(3, 0)
 	if got, _ := jitter.jitterMs(); got > 2 {
-		t.Fatalf("after %d clean windows the reported jitter is %d ms, want about 0", forwardLossRecentWindows+2, got)
+		t.Fatalf("after %d clean windows the reported jitter is %d ms, want about 0", 3, got)
 	}
 }
 
