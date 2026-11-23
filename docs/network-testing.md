@@ -147,7 +147,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B17.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B18.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -294,6 +294,22 @@ what should change. Fixing an issue means flipping that assertion.
     Chromium/Firefox room 4 of 4, and the core netns scenarios pass.
     `TestRouterGivesEachReceiverItsOwnMid` (fails with the publisher's
     mid forwarded), `TestEgressHeaderExtensionsRewriteForEachReceiver`.
+  - B18, a receiver's video mailbox smaller than the pacer's burst: a
+    shared screen at 720p or 1080p never appeared for the viewer, in any
+    codec, on a loss-free local link. The pacer hands a frame's packets to
+    each receiver's mailbox back to back while the token bucket allows (31
+    full packets at the 3 Mbps default), in microseconds, and the mailbox
+    held 24: every frame above about 28 KB lost its tail for every receiver.
+    Repair by retransmission could not keep up, the viewer asked for a
+    keyframe, and the keyframe lost its tail too. Measured with a 1280x720
+    VP8 screen: the viewer received 5341 packets, counted 444 lost, sent
+    1670 NACKs and 108 PLIs and assembled 0 frames; the sender encoded 85
+    keyframes. At 640x360 the same scenario passed. The mailbox now holds a
+    whole frame (`maxFramePackets`); the same run shows 0 NACKs and a
+    keyframe only on request. `TestVideoTargetMailboxHoldsAWholeFrame`, and
+    the browser scenario "a screen share uses the room's codec, follows a
+    codec pick, and keeps arriving" at 1920x1080
+    (`MEDIA_E2E_SCREEN_SIZE` changes the size).
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

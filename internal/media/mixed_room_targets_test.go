@@ -109,7 +109,7 @@ func TestThreeSaturatedTargetsDoNotDelayHealthyTarget(t *testing.T) {
 			frames := make(chan videoFrame, maxQueuedVideoFrames)
 			mixedRoomStartPacer(t, router, video, frames)
 
-			packets := fastLinkFramePackets(9_000, 4_000, targetVideoQueueDepth)
+			packets := fastLinkFramePackets(9_000, 4_000, 24)
 			frames <- videoFrame{packets: packets}
 
 			audioPacket := &rtp.Packet{Header: rtp.Header{SequenceNumber: 77}}
@@ -141,7 +141,7 @@ func TestThreeSaturatedTargetsDoNotDelayHealthyTarget(t *testing.T) {
 			}
 			// A barrier frame reaching every healthy target proves the pacer has
 			// offered the whole previous frame to every target.
-			barrier := fastLinkFramePackets(12_000, 4_000+targetVideoQueueDepth, 1)[0]
+			barrier := fastLinkFramePackets(12_000, 4_000+24, 1)[0]
 			frames <- videoFrame{packets: []*rtp.Packet{barrier}}
 			for index, target := range healthy {
 				if got := mixedRoomReceive(t, target, fmt.Sprintf("healthy target %d", index)); got != barrier {

@@ -181,8 +181,15 @@ func (t *publicationTarget) continueAudioFrom(predecessor *publicationTarget) {
 }
 
 const (
-	targetAudioQueueDepth = 4  // ~80ms of 20ms Opus frames
-	targetVideoQueueDepth = 24 // absorbs multi-packet frame bursts
+	targetAudioQueueDepth = 4 // ~80ms of 20ms Opus frames
+	// targetVideoQueueDepth is a receiver's video mailbox. The pacer hands a
+	// frame's packets over back to back while its token bucket allows (31
+	// full packets at the 3 Mbps default), far faster than the receiver's
+	// writer can encrypt and send them, so the mailbox must hold a whole
+	// frame. At 24 packets every frame above about 28 KB lost its tail for
+	// every receiver: a 720p or 1080p keyframe never arrived complete, the
+	// receiver asked for another, and the stream stayed dark.
+	targetVideoQueueDepth = maxFramePackets
 	// receiveMTU matches pion's default receive MTU; every ingress packet is
 	// read into a per-publication buffer of this size.
 	receiveMTU = 1500
