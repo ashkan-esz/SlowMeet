@@ -446,6 +446,16 @@ the browser cannot decode their codec. The last one should be 0 in a healthy
 room: the room rule keeps publishers on codecs everyone plays, so a value that
 stays above 0 points at a browser sending a codec it was not asked to.
 
+`/metrics` also says what the server's video path did not pass on, so a dark
+or stuttering picture can be told apart from a bad link:
+`slowmeet_video_frames_dropped_total{reason=...}` counts whole frames dropped
+before sending (`queue_full`: the pacing queue was full, the stream sends more
+than `MAX_VIDEO_BITRATE` lets through; `fps_limit`: faster than
+`MAX_VIDEO_FPS`; `too_large`: one frame larger than the server buffers),
+`slowmeet_video_mailbox_drops_total` counts packets a receiver's send queue
+had no room for, and `slowmeet_video_mailbox_peak_packets` is the fullest such
+a queue has been (it holds 512).
+
 Codec selection and mid-call switches are tested in Chromium and Firefox,
 alone and paired with each other in both directions, for every codec, and
 with a full-size shared screen in AV1, VP9, and VP8.

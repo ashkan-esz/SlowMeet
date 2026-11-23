@@ -3982,6 +3982,17 @@ async function main() {
             .catch((artifactError) => console.error(`[artifacts] ${scenario.name}: ${artifactError.message}`));
         }
       } finally {
+        if (fixture?.baseURL) {
+          // What the server's video path dropped so far, to tell a transport
+          // loss from an SFU one.
+          try {
+            const dropLines = (await (await fetch(`${fixture.baseURL}/metrics`)).text()).split("\n")
+              .filter((line) => /^slowmeet_video_(frames_dropped|mailbox)/.test(line) && !/ 0$/.test(line));
+            if (dropLines.length) console.log(`[video drops] after ${scenario.name}: ${dropLines.join("; ")}`);
+          } catch (_) {
+            // The server may already be gone.
+          }
+        }
         if (fixture) {
           await closeScenarioFixture(fixture, contexts, traceContexts);
         }

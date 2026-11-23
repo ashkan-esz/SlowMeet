@@ -255,6 +255,11 @@ func (h *Hub) VideoCodecs() media.VideoCodecStats {
 	return h.router.VideoCodecs()
 }
 
+// VideoDrops reports the video the media router did not pass on, by cause.
+func (h *Hub) VideoDrops() metrics.VideoDropSnapshot {
+	return h.router.VideoDrops()
+}
+
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true

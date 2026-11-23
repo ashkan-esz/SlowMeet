@@ -322,6 +322,7 @@ func (r *Router) republishForCodecChange(old *publication, codec pion.RTPCodecCa
 		tracks:      make(map[string]*publicationTarget),
 		senders:     make(map[string]*pion.RTPSender),
 		limiter:     old.limiter,
+		videoDrops:  old.videoDrops,
 		layerKeys:   old.layerKeys,
 		readBuf:     make([]byte, receiveMTU),
 		stopped:     make(chan struct{}),

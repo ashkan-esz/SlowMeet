@@ -147,7 +147,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B18.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B19.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -310,6 +310,18 @@ what should change. Fixing an issue means flipping that assertion.
     the browser scenario "a screen share uses the room's codec, follows a
     codec pick, and keeps arriving" at 1920x1080
     (`MEDIA_E2E_SCREEN_SIZE` changes the size).
+  - B19, the frames right behind a large keyframe dropped: with B18 fixed,
+    a 1080p AV1 screen from Chromium still showed the viewer 10 of 77 encoded
+    frames in 12 s on a loss-free link. The pacer is busy with a keyframe
+    larger than its burst for 170 to 300 ms; the frames the publisher sends
+    right behind it arrive meanwhile, and the queue of complete frames held
+    4. The fifth was dropped whole (14 drops in one run, all of 1 to 5
+    packets, in clusters right after a keyframe), so the picture could not
+    continue from its own keyframe; the viewer froze about 3 s, asked for a
+    keyframe, and the same happened again. The queue now holds 64 frames.
+    `TestFramesBehindALargeKeyframeAreNotDropped`;
+    `slowmeet_video_frames_dropped_total{reason="queue_full"}` counts what
+    it still drops.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

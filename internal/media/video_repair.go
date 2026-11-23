@@ -98,9 +98,18 @@ func queueVideoPacket(pub *publication, frame *videoFrameBuffer, history *videoF
 		return false
 	}
 
+	oversized := frame.oversized
 	packets, _, complete := frame.add(packet)
-	if complete && pub.limiter.allowFrame(packets[0].Timestamp) &&
-		enqueueVideoFrame(frames, videoFrame{packets: packets}) {
+	if frame.oversized != oversized {
+		pub.videoDrops.FrameTooLarge()
+	}
+	switch {
+	case !complete:
+	case !pub.limiter.allowFrame(packets[0].Timestamp):
+		pub.videoDrops.FrameFPSLimit()
+	case !enqueueVideoFrame(frames, videoFrame{packets: packets}):
+		pub.videoDrops.FrameQueueFull()
+	default:
 		history.remember(packets, time.Now())
 	}
 	return false

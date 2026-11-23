@@ -295,7 +295,10 @@ async function outboundVideoEvidence(page) {
       kbps: Math.round((last.bytesSent - first.bytesSent) * 8 / 4000),
       keyFrames: last.keyFramesEncoded, keyFramesInWindow: last.keyFramesEncoded - first.keyFramesEncoded,
       largestKeyFrameBytes, pli: last.pliCount, nack: last.nackCount, hugeFrames: last.hugeFramesSent,
-      limited: last.qualityLimitationReason
+      limited: last.qualityLimitationReason,
+      caps: peer.getSenders().filter((sender) => sender.track?.kind === "video")
+        .map((sender) => sender.getParameters().encodings.map((encoding) =>
+          `${encoding.active === false ? "off" : "on"}/${encoding.maxBitrate ?? "-"}bps/${encoding.maxFramerate ?? "-"}fps`).join(","))
     };
   });
 }
@@ -741,8 +744,17 @@ const scenarios = [
         // The app keeps a shared screen sharp and lets its frame rate fall, so
         // a full-size screen at the default bitrate runs at about a frame a
         // second.
+        const encodedFrames = () => pageA.evaluate(async () => {
+          let frames = 0;
+          (await window.__slowMeetTest.peerConnections.at(-1).getStats()).forEach((stat) => {
+            if (stat.type === "outbound-rtp" && stat.kind === "video") frames += stat.framesEncoded || 0;
+          });
+          return frames;
+        });
+        const encodedBefore = await encodedFrames();
         await pageB.waitForTimeout(12000);
         const arrived = (await decodedFrames()) - framesBefore;
+        const encoded = (await encodedFrames()) - encodedBefore;
         if (arrived < 2) {
           assert.fail(`the shared screen stalled in ${label}: ${arrived} frames in 12 s, sender ` +
             JSON.stringify(await outboundVideoEvidence(pageA)));
@@ -757,7 +769,8 @@ const scenarios = [
           });
           return best;
         });
-        console.log(`[screen share codec evidence] ${label}: ${arrived} frames in 12 s, viewer decodes ${JSON.stringify(size)}`);
+        console.log(`[screen share codec evidence] ${label}: ${arrived} of ${encoded} encoded frames in 12 s, viewer decodes ${JSON.stringify(size)}, ` +
+          `sender ${JSON.stringify(await outboundVideoEvidence(pageA))}`);
       }
       await pickCodec(pageA, "auto");
       await setScreen(false);

@@ -36,6 +36,10 @@ type Limits struct {
 }
 
 type publication struct {
+	// videoDrops counts video this publication could not pass on. Nil in
+	// tests that build a publication by hand.
+	videoDrops *metrics.VideoDrops
+
 	key      string
 	sourceID string
 	role     SourceRole
@@ -319,7 +323,14 @@ const (
 	videoKeyFrameRetryDelay   = 250 * time.Millisecond
 	videoKeyFrameRequestCount = 3
 	maxVideoFrameBufferBytes  = 16 << 20
-	maxQueuedVideoFrames      = 4
+	// maxQueuedVideoFrames is how many complete frames wait for the pacer.
+	// The queue fills only while the pacer is busy with a frame larger than
+	// its burst: a 150 KB keyframe at the 3 Mbps default takes about 300 ms,
+	// and the frames the publisher sends right behind it arrive meanwhile.
+	// With room for 4, those were dropped, the picture could not continue
+	// from its own keyframe, and the receiver froze until it asked for the
+	// next one (B19 in docs/network-testing.md). 64 is one second at 60 fps.
+	maxQueuedVideoFrames      = 64
 	cameraLayerActivityWindow = 3 * time.Second
 	// maxFramePackets bounds a buffered frame; a frame with more packets is
 	// dropped whole. It must hold a keyframe at the highest bitrate cap: a
@@ -361,6 +372,7 @@ type Router struct {
 	// videoCodecSwitches counts publications replaced because their publisher
 	// changed codec (VideoCodecs).
 	videoCodecSwitches atomic.Uint64
+	videoDrops         metrics.VideoDrops
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -420,6 +432,11 @@ func (r *Router) AudioDrops() metrics.AudioDropSnapshot {
 // RTCPRelay reports the subscriber RTCP forwarded to publishers by type.
 func (r *Router) RTCPRelay() metrics.RTCPRelaySnapshot {
 	return r.rtcpRelay.Snapshot()
+}
+
+// VideoDrops reports the video the router did not pass on, by cause.
+func (r *Router) VideoDrops() metrics.VideoDropSnapshot {
+	return r.videoDrops.Snapshot()
 }
 
 func (r *Router) newTarget(track *pion.TrackLocalStaticRTP, pub *publication) *publicationTarget {
@@ -594,6 +611,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		senders:     make(map[string]*pion.RTPSender),
 		readBuf:     make([]byte, receiveMTU),
 		limiter:     newPublicationBitrateLimiter(remote.Kind(), rateForKind(remote.Kind(), r.currentLimits())),
+		videoDrops:  &r.videoDrops,
 		stopped:     make(chan struct{}),
 		forwardDone: make(chan struct{}),
 	}
@@ -1527,7 +1545,10 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 				}
 				for _, target := range targets {
 					if frame.repairTargets == nil || target.hasVideoLoss(packet) {
-						target.enqueueVideo(packet)
+						if !target.enqueueVideo(packet) {
+							pub.videoDrops.MailboxDrop()
+						}
+						pub.videoDrops.ObserveMailbox(len(target.pending))
 					}
 				}
 			}
@@ -1676,6 +1697,9 @@ type videoFrameBuffer struct {
 	active           bool
 	dropping         bool
 	hasLastTimestamp bool
+	// oversized counts frames given up for exceeding the buffer limits; it
+	// survives the resets between frames.
+	oversized uint32
 }
 
 type videoFrame struct {
@@ -1714,6 +1738,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 			f.packets = nil
 			f.bytes = 0
 			f.dropping = true
+			f.oversized++
 		} else {
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
@@ -1727,7 +1752,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	packets, frameBytes, complete := f.packets, f.bytes, !f.dropping
 	frameTimestamp := f.timestamp
 	lastTimestamp, hasLastTimestamp := frameTimestamp, true
-	*f = videoFrameBuffer{lastTimestamp: lastTimestamp, hasLastTimestamp: hasLastTimestamp}
+	*f = videoFrameBuffer{lastTimestamp: lastTimestamp, hasLastTimestamp: hasLastTimestamp, oversized: f.oversized}
 	if !complete {
 		return nil, 0, false
 	}
@@ -1766,6 +1791,7 @@ func sortFramePackets(packets []*rtp.Packet) {
 func (f *videoFrameBuffer) start(timestamp uint32) {
 	lastTimestamp, hasLastTimestamp := f.lastTimestamp, f.hasLastTimestamp
 	*f = videoFrameBuffer{
+		oversized:        f.oversized,
 		timestamp:        timestamp,
 		lastTimestamp:    lastTimestamp,
 		consecutive:      true,
