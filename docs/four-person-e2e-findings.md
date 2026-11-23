@@ -2070,3 +2070,12 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/f1sim1/simulcast-mixed-room`
+
+## 2026-11-23T13:42:54.521Z — simulcast-mixed-room
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=simulcast-mixed-room make test-media-e2e-four-netns`
+- Expected: With simulcast on, every 360p camera sends a 180 px and a 360 px layer (B12); a receiver whose downlink fits only the low layers falls to them below a fast receiver's, keeps decoding every camera, and climbs back once the cap lifts.
+- Actual: P3 decodes P1's camera at 0 px, not the 180 px low layer: {"preferred":"medium","low":"live muted ","medium":"live muted bound ","receivers":["1 recvonly 0cb4b57f-315a-4541-9db7-78318141d435 live muted owner=a5a6c8 ","5 recvonly e6c92068-6f56-4eaa-88a4-8db5736c6455|camera|low live owner=e6c920 180p 225671B","6 recvonly 2ebe589d-8ea2-47b1-9f18-334caa9e53f2|camera|low live owner=2ebe58 180p 232210B","7 recvonly e6c92068-6f56-4eaa-88a4-8db5736c6455|camera|medium live owner=e6c920 360p 487242B","8 recvonly a5a6c892-45c7-4589-8903-87c18650d06b|camera|medium live muted owner=a5a6c8 ","9 recvonly 2ebe589d-8ea2-47b1-9f18-334caa9e53f2|camera|medium live owner=2ebe58 360p 496290B"]}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/diag17/simulcast-mixed-room`

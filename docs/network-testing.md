@@ -147,24 +147,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **B17 — forwarded packets keep the publisher's header extensions.** The
-  SFU forwards each publisher's RTP header extensions as they arrive, under
-  the IDs the publisher's connection negotiated, while a receiver reads
-  them with the IDs of its own connection to the SFU. Where the maps differ,
-  a receiver can read one extension as another (pion numbers its own offer's
-  extensions mid 1, rid 2, repaired-rid 3, transport-cc 4; Chrome and
-  Firefox publishers use other IDs). Stripping them on egress, leaving only
-  the SFU's own transport-cc, broke `simulcast-mixed-room` in 3 of 3 runs:
-  after a downlink cap lifted, the receiver decoded the sender's top layer
-  at 0 px (that layer's receive track got ~50 KB against ~940 KB for the
-  others). Some forwarded extension is load-bearing for receivers, most
-  likely `mid` for routing the simulcast layers' transceivers that were
-  added by renegotiation, so the extensions stay forwarded. Next step:
-  log the SFU's negotiated extension IDs on both sides and the extensions
-  on the failing layer's packets, then rewrite each extension to the
-  receiver's ID instead of dropping it.
-
-- **Fixed: B1–B9 and B11–B16.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B17.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -275,9 +258,9 @@ what should change. Fixing an issue means flipping that assertion.
     transport, and as they drifted apart (an impaired publisher sends less)
     every packet read as a huge jump or reorder. The SFU now registers pion's
     transport-cc header extension interceptor, so each of its transports
-    numbers its own packets; each receiver's write gets its own header
-    extension array, since the interceptor rewrites the publisher's
-    extension in place (`withOwnHeaderExtensions`). Three runs of the CI list
+    numbers its own packets; each receiver's write gets its own copy of the
+    packet's header extensions (now `egressHeaderExtensions`, see B17),
+    since the interceptor writes into them in place. Three runs of the CI list
     up to the fast scenario: 24-51 non-RTP packets a second per browser and
     every scenario passing. The scenario asserts under 200 a second per
     browser and logs the rate; on failure it records the tiers' tc counters,
@@ -293,6 +276,24 @@ what should change. Fixing an issue means flipping that assertion.
     so the room kept the stale value until the next real change. The hub now
     records only what it broadcasts, and a joiner is not replayed a value
     never sent. `TestHubRelaysChangeMeasuredDuringReconnectAfterResume`.
+  - B17, forwarded packets naming the publisher's transceiver:
+    `simulcast-mixed-room` passed about half its runs. The SFU forwarded
+    each publisher's RTP header extensions unchanged, and every forwarded
+    camera packet carried the publisher's mid ("4", "5") while the
+    receiver's transceiver for that track had another (1, 6, 7, 8, 9).
+    Chrome routes an incoming packet by its mid before its SSRC, so a
+    forwarded layer was delivered to whichever of the receiver's
+    transceivers happened to have that mid; whether the sender's top layer
+    decoded depended on how the mids lined up (Chrome's SFU-side IDs match
+    the publisher's, so the IDs were fine; the values were not). Stripping
+    the extensions made it worse (0 of 3). Each receiver's forwarded packets
+    now drop all of the publisher's extensions (which a Firefox publisher
+    also numbers differently) and carry the receiver's own transceiver mid;
+    the transport-cc interceptor adds the SFU's transport sequence
+    (`egressHeaderExtensions`). `simulcast-mixed-room` 4 of 4, a mixed
+    Chromium/Firefox room 4 of 4, and the core netns scenarios pass.
+    `TestRouterGivesEachReceiverItsOwnMid` (fails with the publisher's
+    mid forwarded), `TestEgressHeaderExtensionsRewriteForEachReceiver`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the
