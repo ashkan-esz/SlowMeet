@@ -147,7 +147,7 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B14.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B15.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -240,6 +240,30 @@ what should change. Fixing an issue means flipping that assertion.
     (pooling, lucky small samples, near-outage and small-pool cases),
     `TestForwardJitterReportsLastCompleteWindow`,
     `bad-downlink-among-bad-senders`.
+  - B15, a transport-cc feedback flood: `all-fast-link-top-quality` failed
+    in every full CI-list run (also on code from before B14) yet passed on
+    its own. Late in a long session the browsers sent 1,600-12,600 non-RTP
+    packets a second each (normal is 25-50) and the SFU relayed up to 20,000
+    transport-cc feedback packets a second, saturating the shared 20 mbit
+    fast tier (13 % dropped) so every participant read loss on a clean link.
+    The SFU negotiated the transport-cc header extension with every browser
+    but only generated feedback for what it received
+    (`ConfigureTWCCSenderWithOptions`); nothing stamped its own transport
+    sequence on what it sent, so each forwarded packet kept its publisher's
+    number. A receiver saw its senders' unrelated counters interleaved as one
+    transport, and as they drifted apart (an impaired publisher sends less)
+    every packet read as a huge jump or reorder. The SFU now registers pion's
+    transport-cc header extension interceptor, so each of its transports
+    numbers its own packets; each receiver's write gets its own header
+    extension array, since the interceptor rewrites the publisher's
+    extension in place (`withOwnHeaderExtensions`). Three runs of the CI list
+    up to the fast scenario: 24-51 non-RTP packets a second per browser and
+    every scenario passing. The scenario asserts under 200 a second per
+    browser and logs the rate; on failure it records the tiers' tc counters,
+    host load and every browser's packet counters.
+    `TestRouterStampsItsOwnTransportSequenceOnForwardedPackets`,
+    `TestWithOwnHeaderExtensionsIsolatesConcurrentWriters`,
+    `all-fast-link-top-quality`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

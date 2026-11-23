@@ -3260,6 +3260,95 @@ async function connectionIdentity(page) {
 // — with the camera sender carrying the top profile's bitrate. One
 // participant's link then turns moderate for a window and returns: the whole
 // room must be back at the top level afterwards.
+// What the machine and the shaped tiers looked like at one moment: load,
+// memory, the busiest processes, and the tc class/qdisc counters (sent,
+// dropped, backlog per tier). all-fast-link-top-quality failed only late in
+// full runs, with every stream on the "clean" fast tier losing 15-46 %; these
+// tell a saturated tier queue apart from a starved machine.
+function hostAndTierSnapshot(label) {
+  let processes = "";
+  try {
+    processes = execFileSync("ps", ["-eo", "pid,pcpu,pmem,rss,comm", "--sort=-pcpu"], { encoding: "utf8" })
+      .split("\n").slice(0, 16).join("\n");
+  } catch (error) {
+    processes = `ps failed: ${error.message}`;
+  }
+  return {
+    label,
+    at: new Date().toISOString(),
+    loadavg: os.loadavg(),
+    cpus: os.cpus().length,
+    freeMemMB: Math.round(os.freemem() / 1048576),
+    totalMemMB: Math.round(os.totalmem() / 1048576),
+    processes,
+    tierStats: netemTiers.snapshotTierStats()
+  };
+}
+
+// Each browser's packet counters per connection (transport totals against
+// RTP audio/video and retransmissions; the difference is RTCP and STUN) and
+// the SFU's /metrics, at one moment. Two of these bracket a window.
+async function roomPacketCounters() {
+  const browsers = {};
+  for (const role of roles) {
+    browsers[role] = await pages.get(role).evaluate(async () => {
+      const peers = [...(window.__slowMeetTest?.peerConnections || [])]
+        .filter((peer) => peer.connectionState !== "closed");
+      const out = [];
+      for (const peer of peers) {
+        const entry = { state: peer.connectionState, transport: null, outbound: [], inbound: [] };
+        try {
+          (await peer.getStats()).forEach((stat) => {
+            if (stat.type === "transport") {
+              entry.transport = { packetsSent: stat.packetsSent, packetsReceived: stat.packetsReceived,
+                bytesSent: stat.bytesSent, bytesReceived: stat.bytesReceived };
+            } else if (stat.type === "outbound-rtp") {
+              entry.outbound.push({ kind: stat.kind, packetsSent: stat.packetsSent, bytesSent: stat.bytesSent,
+                retransmittedPacketsSent: stat.retransmittedPacketsSent, nackCount: stat.nackCount,
+                pliCount: stat.pliCount, firCount: stat.firCount, frameHeight: stat.frameHeight,
+                framesPerSecond: stat.framesPerSecond, targetBitrate: stat.targetBitrate, rid: stat.rid });
+            } else if (stat.type === "inbound-rtp") {
+              entry.inbound.push({ kind: stat.kind, packetsReceived: stat.packetsReceived,
+                packetsLost: stat.packetsLost, nackCount: stat.nackCount, pliCount: stat.pliCount,
+                retransmittedPacketsReceived: stat.retransmittedPacketsReceived });
+            }
+          });
+        } catch (_) {}
+        out.push(entry);
+      }
+      return out;
+    }).catch((pageError) => `getStats failed: ${pageError.message}`);
+  }
+  let serverMetrics = null;
+  try {
+    serverMetrics = await (await fetch(`${server.url}/metrics`)).text();
+  } catch (metricsError) {
+    serverMetrics = `metrics failed: ${metricsError.message}`;
+  }
+  return { at: Date.now(), browsers, serverMetrics };
+}
+
+// Non-RTP packets each browser sent per second between two counter
+// snapshots, and the SFU's transport-wide feedback relayed per second.
+function packetCounterRates(before, after) {
+  const seconds = Math.max(0.001, (after.at - before.at) / 1000);
+  const nonRTPSent = (entry) => {
+    if (!Array.isArray(entry)) return null;
+    return entry.reduce((total, peer) => total + (peer.transport?.packetsSent || 0) -
+      peer.outbound.reduce((sum, stream) => sum + (stream.packetsSent || 0), 0), 0);
+  };
+  const metric = (text, name) => Number((String(text).match(new RegExp(`^${name.replace(/[{}"=]/g, "\\$&")} (\\d+)`, "m")) || [])[1] ?? NaN);
+  const rates = {};
+  for (const role of Object.keys(after.browsers)) {
+    const a = nonRTPSent(before.browsers[role]);
+    const b = nonRTPSent(after.browsers[role]);
+    rates[role] = a === null || b === null ? null : Math.round((b - a) / seconds);
+  }
+  const twcc = 'slowmeet_rtcp_relayed_total{type="transport_cc"}';
+  rates.sfuTransportCCPerSecond = Math.round((metric(after.serverMetrics, twcc) - metric(before.serverMetrics, twcc)) / seconds);
+  return rates;
+}
+
 async function scenarioAllFastLinkTopQuality() {
   await setupRoom();
   await unmuteAllForAudioGuarantee();
@@ -3279,11 +3368,16 @@ async function scenarioAllFastLinkTopQuality() {
     installRoomQdisc();
     armer = armParticipantTiers(tierByRole);
   };
+  const snapshots = [];
+  let packetCountersAtArm = null;
   try {
     arm(allFast);
     // 10 ms each way ⇒ ~20 ms RTT; 15 ms leaves margin below that while
     // staying clear of what a loaded unshaped loopback can show.
     for (const role of roles) await waitForShapedLink(role, 15);
+    snapshots.push(hostAndTierSnapshot("fast tier armed"));
+    packetCountersAtArm = await roomPacketCounters();
+    console.log(`[fast] load ${snapshots[0].loadavg.map((value) => value.toFixed(1)).join("/")} on ${snapshots[0].cpus} CPUs, ${snapshots[0].freeMemMB} of ${snapshots[0].totalMemMB} MB free`);
     await restartAutomaticLadders();
     // From level 2 the climb needs 5 transport-healthy one-second samples.
     await Promise.all(roles.map((role) => waitForTopAutomaticLevel(role, 30000, "on the fast tier")));
@@ -3371,6 +3465,29 @@ async function scenarioAllFastLinkTopQuality() {
         `${role}'s camera sender did not return to the top Auto profile's bitrate after the lift`);
     }
     console.log("[fast] all four ladders returned to the top Auto level after the moderate window lifted");
+    // Each browser's RTCP (mostly transport-cc feedback) and STUN. ~25-50 a
+    // second is normal; when the SFU forwarded its publishers' transport-cc
+    // numbers instead of stamping its own, a receiver saw unrelated counters
+    // interleaved and sent thousands a second, saturating this tier late in
+    // full runs (B15 in docs/network-testing.md).
+    const feedbackRates = packetCounterRates(packetCountersAtArm, await roomPacketCounters());
+    console.log(`[fast] non-RTP packets per second per browser over the scenario ${JSON.stringify(feedbackRates)}`);
+    for (const role of roles) {
+      assert.ok(feedbackRates[role] !== null && feedbackRates[role] < 200,
+        `${role} sent ${feedbackRates[role]} non-RTP packets a second on the fast tier: a transport-cc feedback flood (B15)`);
+    }
+  } catch (error) {
+    snapshots.push(hostAndTierSnapshot("failure"));
+    // What fills the tier: each browser's packet counters per connection
+    // (transport totals against RTP audio/video and retransmissions; the
+    // difference is RTCP and STUN), and the SFU's own counters.
+    const counters = await roomPacketCounters();
+    const rates = packetCountersAtArm ? packetCounterRates(packetCountersAtArm, counters) : null;
+    console.log(`[fast] at failure: non-RTP packets per second per browser since the tier was armed ${JSON.stringify(rates)}`);
+    recordEvidence("fast-tier-diagnostics", { snapshots, packetCountersAtArm, counters, rates });
+    const failure = snapshots.at(-1);
+    console.log(`[fast] at failure: load ${failure.loadavg.map((value) => value.toFixed(1)).join("/")}, ${failure.freeMemMB} MB free; tiers:\n${failure.tierStats}\n${failure.processes}`);
+    throw error;
   } finally {
     if (armer) armer.stopped = true;
     clearRoomProfiles();

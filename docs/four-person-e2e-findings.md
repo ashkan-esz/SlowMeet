@@ -1760,3 +1760,277 @@ true !== false
 - Failure type: application-or-assertion
 - Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
 - Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/pool3/one-fast-three-bad-uplinks`
+
+## 2026-11-23T08:30:18.888Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 did not reach the top Auto level within 30s on the fast tier: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"very-slow","profileLevel":0,"poorSamples":5,"goodSamples":0,"criticalSamples":2,"lastPauseCriticalSamples":3,"recoverySamples":0,"videoSuspended":true,"videoSuspendedAutomatically":true},"quality":{"rttMs":77,"packetLossPct":13.2,"jitterMs":0,"estimatedOutgoingKbps":618,"outgoingVideoKbps":572,"uplinkLossPct":0,"poor":true,"critical":true,"good":false,"ownLinkStreams":[{"participantID":"e9309e7a-4420-432d-bcad-8f8349fcdc61","kind":"audio","lossPct":29.2,"jitterMs":10,"receivedDelta":34},{"participantID":"1b351bfd-e064-4299-99a5-1ed1721162d9","kind":"audio","lossPct":14.6,"jitterMs":12,"receivedDelta":41},{"participantID":"b547360f-dcb7-46bc-9041-242cd26a230e","kind":"audio","lossPct":37.5,"jitterMs":9,"receivedDelta":30},{"participantID":"b547360f-dcb7-46bc-9041-242cd26a230e","kind":"video","lossPct":20,"jitterMs":22,"receivedDelta":8},{"participantID":"1b351bfd-e064-4299-99a5-1ed1721162d9","kind":"video","lossPct":0,"jitterMs":45,"receivedDelta":7},{"participantID":"e9309e7a-4420-432d-bcad-8f8349fcdc61","kind":"video","lossPct":21.1,"jitterMs":184,"receivedDelta":15},{"participantID":"b547360f-dcb7-46bc-9041-242cd26a230e","kind":"video","lossPct":null,"jitterMs":0,"receivedDelta":0}],"senderReports":{"b547360f-dcb7-46bc-9041-242cd26a230e":{"videoLossPct":16.6,"audioLossPct":20,"jitterMs":58,"audioJitterMs":14},"e9309e7a-4420-432d-bcad-8f8349fcdc61":{"videoLossPct":0,"audioLossPct":21.4,"jitterMs":190,"audioJitterMs":14},"1b351bfd-e064-4299-99a5-1ed1721162d9":{"videoLossPct":14.2,"audioLossPct":4,"jitterMs":95,"audioJitterMs":21}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/ci1/all-fast-link-top-quality`
+
+## 2026-11-23T08:43:01.286Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P4 did not reach the top Auto level within 30s on the fast tier: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"normal","profileLevel":2,"poorSamples":0,"goodSamples":3,"criticalSamples":0,"lastPauseCriticalSamples":3,"recoverySamples":8,"videoSuspended":false,"videoSuspendedAutomatically":false},"quality":{"rttMs":20,"packetLossPct":0,"jitterMs":0,"estimatedOutgoingKbps":642,"outgoingVideoKbps":311,"uplinkLossPct":0,"poor":false,"critical":false,"good":true,"ownLinkStreams":[{"participantID":"b2474f9f-3286-442e-a84f-fe2918e851fa","kind":"audio","lossPct":0,"jitterMs":12,"receivedDelta":50},{"participantID":"a1b3dd3e-be97-4cbe-adf4-efb5e469fefc","kind":"audio","lossPct":0,"jitterMs":11,"receivedDelta":50},{"participantID":"9f760220-8be4-47d5-a964-0efc31658bc3","kind":"audio","lossPct":0,"jitterMs":10,"receivedDelta":50},{"participantID":"9f760220-8be4-47d5-a964-0efc31658bc3","kind":"video","lossPct":0,"jitterMs":9,"receivedDelta":18},{"participantID":"b2474f9f-3286-442e-a84f-fe2918e851fa","kind":"video","lossPct":0,"jitterMs":9,"receivedDelta":17},{"participantID":"a1b3dd3e-be97-4cbe-adf4-efb5e469fefc","kind":"video","lossPct":0,"jitterMs":12,"receivedDelta":16},{"participantID":"a1b3dd3e-be97-4cbe-adf4-efb5e469fefc","kind":"video","lossPct":null,"jitterMs":15,"receivedDelta":0}],"senderReports":{"9f760220-8be4-47d5-a964-0efc31658bc3":{"videoLossPct":0,"audioLossPct":0,"jitterMs":4,"audioJitterMs":8},"a1b3dd3e-be97-4cbe-adf4-efb5e469fefc":{"videoLossPct":0,"audioLossPct":0,"jitterMs":6,"audioJitterMs":8},"b2474f9f-3286-442e-a84f-fe2918e851fa":{"videoLossPct":0,"audioLossPct":0,"jitterMs":7,"audioJitterMs":12}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/ci2/all-fast-link-top-quality`
+
+## 2026-11-23T08:55:41.286Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 saw degraded tiles on the fast tier at 4.1s: ["4ae74c59-e3ff-4373-8d5f-a5af5cf4e703"]
++ actual - expected
+
++ {
++   critical: false,
++   degradedTiles: [
++     '4ae74c59-e3ff-4373-8d5f-a5af5cf4e703'
++   ],
++   estimatedOutgoingKbps: 948,
++   good: false,
++   jitterMs: 0,
++   level: 3,
++   lossPct: 1.2,
++   outgoingVideoKbps: 102,
++   ownLinkStreams: [
++     {
++       jitterMs: 10,
++       kind: 'audio',
++       lossPct: 5.8,
++       participantID: 'f09d9024-88db-401a-b9a5-859ec354b97d',
++       receivedDelta: 49
++     },
++     {
++       jitterMs: 9,
++       kind: 'audio',
++       lossPct: 0,
++       participantID: 'a5755f67-2494-40d0-a347-7e0c3f98b2f7',
++       receivedDelta: 52
++     },
++     {
++       jitterMs: 9,
++       kind: 'audio',
++       lossPct: 3.8,
++       participantID: '4ae74c59-e3ff-4373-8d5f-a5af5cf4e703',
++       receivedDelta: 50
++     },
++     {
++       jitterMs: 0,
++       kind: 'video',
++       lossPct: null,
++       participantID: 'a5755f67-2494-40d0-a347-7e0c3f98b2f7',
++       receivedDelta: 0
++     },
++     {
++       jitterMs: 11,
++       kind: 'video',
++       lossPct: 0,
++       participantID: 'f09d9024-88db-401a-b9a5-859ec354b97d',
++       receivedDelta: 16
++     },
++     {
++       jitterMs: 24,
++       kind: 'video',
++       lossPct: 0,
++       participantID: 'a5755f67-2494-40d0-a347-7e0c3f98b2f7',
++       receivedDelta: 18
++     },
++     {
++       jitterMs: 8,
++       kind: 'video',
++       lossPct: 10.5,
++       participantID: '4ae74c59-e3ff-4373-8d5f-a5af5cf4e703',
++       receivedDelta: 17
++     }
++   ],
++   poor: false,
++   profile: 'high',
++   rttMs: 46,
++   selected: 'auto',
++   senderReports: {
++     '4ae74c59-e3ff-4373-8d5f-a5af5cf4e703': {
++       audioJitterMs: 14,
++       audioLossPct: 3.5,
++       jitterMs: 8,
++       videoLossPct: 0
++     },
++     'a5755f67-2494-40d0-a347-7e0c3f98b2f7': {
++       audioJitterMs: 9,
++       audioLossPct: 0,
++       jitterMs: 24,
++       videoLossPct: 0
++     },
++     'f09d9024-88db-401a-b9a5-859ec354b97d': {
++       audioJitterMs: 12,
++       audioLossPct: 5.1,
++       jitterMs: 11,
++       videoLossPct: 0
++     }
++   },
++   suspended: false,
++   suspendedAutomatically: false,
++   t: 4.1,
++   uplinkLossPct: 0
++ }
+- undefined
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/strict/all-fast-link-top-quality`
+
+## 2026-11-23T10:04:47.126Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 did not reach the top Auto level within 30s on the fast tier: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"normal","profileLevel":2,"poorSamples":0,"goodSamples":1,"criticalSamples":0,"lastPauseCriticalSamples":0,"recoverySamples":18,"videoSuspended":false,"videoSuspendedAutomatically":false},"quality":{"rttMs":35,"packetLossPct":0,"jitterMs":0,"estimatedOutgoingKbps":495,"outgoingVideoKbps":191,"uplinkLossPct":0,"poor":false,"critical":false,"good":true,"ownLinkStreams":[{"participantID":"084e552d-f551-415e-ac23-92bba3571f76","kind":"audio","lossPct":0,"jitterMs":8,"receivedDelta":49},{"participantID":"bc9ab8cf-2be6-4b1d-a149-bf1accd770b6","kind":"audio","lossPct":0,"jitterMs":7,"receivedDelta":49},{"participantID":"62771960-2edf-41fa-9c7f-804d94fb8a7e","kind":"audio","lossPct":0,"jitterMs":9,"receivedDelta":50},{"participantID":"bc9ab8cf-2be6-4b1d-a149-bf1accd770b6","kind":"video","lossPct":0,"jitterMs":6,"receivedDelta":16},{"participantID":"084e552d-f551-415e-ac23-92bba3571f76","kind":"video","lossPct":0,"jitterMs":12,"receivedDelta":15},{"participantID":"62771960-2edf-41fa-9c7f-804d94fb8a7e","kind":"video","lossPct":0,"jitterMs":17,"receivedDelta":17},{"participantID":"62771960-2edf-41fa-9c7f-804d94fb8a7e","kind":"video","lossPct":null,"jitterMs":0,"receivedDelta":0}],"senderReports":{"62771960-2edf-41fa-9c7f-804d94fb8a7e":{"videoLossPct":0,"audioLossPct":0,"jitterMs":13,"audioJitterMs":6},"084e552d-f551-415e-ac23-92bba3571f76":{"videoLossPct":0,"audioLossPct":0,"jitterMs":13,"audioJitterMs":3},"bc9ab8cf-2be6-4b1d-a149-bf1accd770b6":{"videoLossPct":0,"audioLossPct":0,"jitterMs":6,"audioJitterMs":5}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/diagfast2/all-fast-link-top-quality`
+
+## 2026-11-23T10:39:11.111Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 did not reach the top Auto level within 30s on the fast tier: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"very-slow","profileLevel":0,"poorSamples":0,"goodSamples":1,"criticalSamples":0,"lastPauseCriticalSamples":3,"recoverySamples":2,"videoSuspended":true,"videoSuspendedAutomatically":true},"quality":{"rttMs":39,"packetLossPct":0,"jitterMs":0,"estimatedOutgoingKbps":692,"outgoingVideoKbps":299,"uplinkLossPct":0,"poor":false,"critical":false,"good":true,"ownLinkStreams":[{"participantID":"7659badd-cd63-4a95-a031-2205aeee0e8e","kind":"audio","lossPct":0,"jitterMs":15,"receivedDelta":51},{"participantID":"8b95326c-8a4c-46a2-aa74-60b5491774c9","kind":"audio","lossPct":2,"jitterMs":12,"receivedDelta":50},{"participantID":"0998132d-895e-4eca-b9fb-097f3cf65430","kind":"audio","lossPct":5.9,"jitterMs":15,"receivedDelta":48},{"participantID":"7659badd-cd63-4a95-a031-2205aeee0e8e","kind":"video","lossPct":null,"jitterMs":10,"receivedDelta":0},{"participantID":"0998132d-895e-4eca-b9fb-097f3cf65430","kind":"video","lossPct":null,"jitterMs":9,"receivedDelta":0},{"participantID":"0998132d-895e-4eca-b9fb-097f3cf65430","kind":"video","lossPct":null,"jitterMs":0,"receivedDelta":0},{"participantID":"8b95326c-8a4c-46a2-aa74-60b5491774c9","kind":"video","lossPct":null,"jitterMs":12,"receivedDelta":0}],"senderReports":{"0998132d-895e-4eca-b9fb-097f3cf65430":{"videoLossPct":0,"audioLossPct":6,"jitterMs":5,"audioJitterMs":11},"8b95326c-8a4c-46a2-aa74-60b5491774c9":{"videoLossPct":0,"audioLossPct":1.9,"jitterMs":10,"audioJitterMs":12},"7659badd-cd63-4a95-a031-2205aeee0e8e":{"videoLossPct":0,"audioLossPct":7.8,"jitterMs":7,"audioJitterMs":15}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/diagfast6/all-fast-link-top-quality`
+
+## 2026-11-23T10:49:03.316Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 saw degraded tiles on the fast tier at 4.1s: ["caca36a3-fbd5-4267-8b1d-b103216b6ba6"]
++ actual - expected
+
++ {
++   critical: false,
++   degradedTiles: [
++     'caca36a3-fbd5-4267-8b1d-b103216b6ba6'
++   ],
++   estimatedOutgoingKbps: 1163,
++   good: true,
++   jitterMs: 0,
++   level: 3,
++   lossPct: 0,
++   outgoingVideoKbps: 100,
++   ownLinkStreams: [
++     {
++       jitterMs: 11,
++       kind: 'audio',
++       lossPct: 4,
++       participantID: 'ca973df4-6954-4282-8c50-629e27711608',
++       receivedDelta: 48
++     },
++     {
++       jitterMs: 10,
++       kind: 'audio',
++       lossPct: 6,
++       participantID: 'caca36a3-fbd5-4267-8b1d-b103216b6ba6',
++       receivedDelta: 47
++     },
++     {
++       jitterMs: 9,
++       kind: 'audio',
++       lossPct: 2,
++       participantID: '566a3bb6-6de9-4ae0-af0e-39ee6ef3fd4a',
++       receivedDelta: 49
++     },
++     {
++       jitterMs: 10,
++       kind: 'video',
++       lossPct: 5,
++       participantID: '566a3bb6-6de9-4ae0-af0e-39ee6ef3fd4a',
++       receivedDelta: 19
++     },
++     {
++       jitterMs: 9,
++       kind: 'video',
++       lossPct: 0,
++       participantID: 'caca36a3-fbd5-4267-8b1d-b103216b6ba6',
++       receivedDelta: 20
++     },
++     {
++       jitterMs: 11,
++       kind: 'video',
++       lossPct: 0,
++       participantID: 'ca973df4-6954-4282-8c50-629e27711608',
++       receivedDelta: 19
++     },
++     {
++       jitterMs: 24,
++       kind: 'video',
++       lossPct: null,
++       participantID: '566a3bb6-6de9-4ae0-af0e-39ee6ef3fd4a',
++       receivedDelta: 0
++     }
++   ],
++   poor: false,
++   profile: 'high',
++   rttMs: 44,
++   selected: 'auto',
++   senderReports: {
++     '566a3bb6-6de9-4ae0-af0e-39ee6ef3fd4a': {
++       audioJitterMs: 13,
++       audioLossPct: 2.5,
++       jitterMs: 6,
++       videoLossPct: 0
++     },
++     'ca973df4-6954-4282-8c50-629e27711608': {
++       audioJitterMs: 12,
++       audioLossPct: 6,
++       jitterMs: 9,
++       videoLossPct: 0
++     },
++     'caca36a3-fbd5-4267-8b1d-b103216b6ba6': {
++       audioJitterMs: 13,
++       audioLossPct: 7.1,
++       jitterMs: 8,
++       videoLossPct: 0
++     }
++   },
++   suspended: false,
++   suspendedAutomatically: false,
++   t: 4.1,
++   uplinkLossPct: 0
++ }
+- undefined
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/diagfast7/all-fast-link-top-quality`
+
+## 2026-11-23T11:00:33.034Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 stepped down from the top Auto level on the fast tier: 0s:L3+0.0 1s:L3+0.0 2s:L3+0.0 3s:L3+0.0 4s:L3+0.0 5s:L3+0.0 6s:L3+0.0 7s:L3+0.0 8s:L3+0.0 9s:L3+0.0 10s:L3+0.1 11s:L3+0.0 12s:L3.2.4 13s:L3!15.7 14s:L2~8.2
+
+2 !== 3
+
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/bisB/all-fast-link-top-quality`
+
+## 2026-11-23T11:11:45.793Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P1 did not reach the top Auto level within 30s on the fast tier: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"very-slow","profileLevel":0,"poorSamples":0,"goodSamples":0,"criticalSamples":0,"lastPauseCriticalSamples":0,"recoverySamples":1,"videoSuspended":false,"videoSuspendedAutomatically":false},"quality":{"rttMs":51,"packetLossPct":1.2,"jitterMs":0,"estimatedOutgoingKbps":444,"outgoingVideoKbps":334,"uplinkLossPct":0,"poor":false,"critical":false,"good":false,"ownLinkStreams":[{"participantID":"f10c8dfe-2a98-4fee-8ab1-3054a1eefb9c","kind":"audio","lossPct":10,"jitterMs":11,"receivedDelta":45},{"participantID":"7e299c8a-3661-47df-9609-d0153855b0b2","kind":"audio","lossPct":10,"jitterMs":11,"receivedDelta":45},{"participantID":"e7775858-c90b-44fe-b8f4-bf979d5719f4","kind":"audio","lossPct":14,"jitterMs":10,"receivedDelta":43},{"participantID":"7e299c8a-3661-47df-9609-d0153855b0b2","kind":"video","lossPct":null,"jitterMs":15,"receivedDelta":0},{"participantID":"e7775858-c90b-44fe-b8f4-bf979d5719f4","kind":"video","lossPct":null,"jitterMs":121,"receivedDelta":0},{"participantID":"7e299c8a-3661-47df-9609-d0153855b0b2","kind":"video","lossPct":0,"jitterMs":374,"receivedDelta":4},{"participantID":"f10c8dfe-2a98-4fee-8ab1-3054a1eefb9c","kind":"video","lossPct":25,"jitterMs":27,"receivedDelta":15}],"senderReports":{"7e299c8a-3661-47df-9609-d0153855b0b2":{"videoLossPct":0,"audioLossPct":14.2,"jitterMs":307,"audioJitterMs":9},"e7775858-c90b-44fe-b8f4-bf979d5719f4":{"videoLossPct":0,"audioLossPct":15.3,"jitterMs":115,"audioJitterMs":16},"f10c8dfe-2a98-4fee-8ab1-3054a1eefb9c":{"videoLossPct":17.6,"audioLossPct":4,"jitterMs":61,"audioJitterMs":8}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fixtwcc1/all-fast-link-top-quality`
+
+## 2026-11-23T11:30:51.071Z — all-fast-link-top-quality
+
+- Reproduction: `MEDIA_E2E_FOUR_SCENARIO=all-fast-link-top-quality make test-media-e2e-four-netns`
+- Expected: All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.
+- Actual: P2 did not reach the top Auto level within 90s after P2's moderate window lifted: {"adaptation":{"selectedProfile":"auto","effectiveProfile":"very-slow","profileLevel":0,"poorSamples":49,"goodSamples":0,"criticalSamples":1,"lastPauseCriticalSamples":3,"recoverySamples":0,"videoSuspended":true,"videoSuspendedAutomatically":true},"quality":{"rttMs":null,"packetLossPct":12.1,"jitterMs":0,"estimatedOutgoingKbps":null,"outgoingVideoKbps":126,"uplinkLossPct":0,"poor":true,"critical":true,"good":false,"ownLinkStreams":[{"participantID":"d9f7581c-334a-4346-83ea-85a621cc9c53","kind":"audio","lossPct":34,"jitterMs":13,"receivedDelta":33},{"participantID":"4173cd35-cdb5-460c-a42b-344a4ea047fa","kind":"audio","lossPct":26,"jitterMs":12,"receivedDelta":37},{"participantID":"79474dfc-0c7d-4ef5-9d2f-f0d4d638f09f","kind":"audio","lossPct":30,"jitterMs":12,"receivedDelta":35},{"participantID":"79474dfc-0c7d-4ef5-9d2f-f0d4d638f09f","kind":"video","lossPct":null,"jitterMs":14,"receivedDelta":0},{"participantID":"d9f7581c-334a-4346-83ea-85a621cc9c53","kind":"video","lossPct":null,"jitterMs":182,"receivedDelta":0},{"participantID":"4173cd35-cdb5-460c-a42b-344a4ea047fa","kind":"video","lossPct":null,"jitterMs":57,"receivedDelta":0}],"senderReports":{"79474dfc-0c7d-4ef5-9d2f-f0d4d638f09f":{"videoLossPct":0,"audioLossPct":24,"jitterMs":16,"audioJitterMs":15},"4173cd35-cdb5-460c-a42b-344a4ea047fa":{"videoLossPct":0,"audioLossPct":23.5,"jitterMs":43,"audioJitterMs":17},"d9f7581c-334a-4346-83ea-85a621cc9c53":{"videoLossPct":0,"audioLossPct":13.7,"jitterMs":64,"audioJitterMs":18}}}}
+- Failure type: application-or-assertion
+- Participant roles: P1=Avery, P2=Blake, P3=Casey, P4=Drew
+- Artifacts: `/tmp/claude-1000/-home-ashkan-Codes-golang-SlowMeet/c724f3ad-4e01-4874-83e1-f3ae011bf9b6/scratchpad/fixtwcc3/all-fast-link-top-quality`
