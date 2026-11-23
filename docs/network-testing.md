@@ -147,6 +147,20 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
+- **Open: `simulcast-mixed-room` still fails now and then.** After B17 it
+  was recorded as 4 of 4. Measured again: 1 failure in 6 runs on the B17
+  commit and 4 in 10 with B18 and B19 fixed, too few runs to call the two
+  rates different. Three of the four fail as "P3 decodes P1's camera at 0 px,
+  not the 360 px top layer after the cap lifted": P3's receiver for P1's
+  medium layer is bound and live but stopped receiving at about 150 to
+  230 KB while the other cameras' medium layers passed 950 KB. One fails the
+  sender-side B12 check (P1's medium layer capped at 60 kbps). In every
+  failing run the server's video path dropped nothing
+  (`slowmeet_video_frames_dropped_total` and
+  `slowmeet_video_mailbox_drops_total` all 0), no publisher changed codec,
+  and the server log has no warning, so neither B18 nor B19 is the cause.
+  Not investigated further.
+
 - **Fixed: B1–B9 and B11–B19.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
