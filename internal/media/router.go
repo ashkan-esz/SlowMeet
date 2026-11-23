@@ -93,7 +93,10 @@ type publication struct {
 // block the publisher's read loop or delay the other receivers; overflowing
 // drops the packet and the receiver recovers via RTCP feedback.
 type publicationTarget struct {
-	track       *pion.TrackLocalStaticRTP
+	track *pion.TrackLocalStaticRTP
+	// egress rewrites the publisher's header extensions for this receiver
+	// (egress_extensions.go); nil for targets built without a peer (tests).
+	egress      *egressHeaderExtensions
 	pending     chan *rtp.Packet
 	audio       *audioMailbox
 	done        chan struct{}
@@ -153,36 +156,13 @@ func (rebase *audioRebase) apply(packet *rtp.Packet) *rtp.Packet {
 	return &rewritten
 }
 
-// withOwnHeaderExtensions returns packet, or a copy of it whose header
-// extensions are its own when it has any. Every receiver's writer is handed
-// the same *rtp.Packet, and pion's TrackLocalStaticRTP.WriteRTP copies only
-// the packet struct, so all of them share one extension array. The
-// transport-wide congestion control interceptor then writes each receiver's
-// own transport sequence number into that array (rtp.Header.SetExtension
-// replaces the publisher's transport-cc extension in place), so a receiver
-// could be sent another receiver's number. Its feedback then tracked several
-// unrelated sequence spaces at once and flooded the SFU with transport-cc
-// feedback: thousands of packets a second per browser, enough to saturate a
-// 20 mbit link (all-fast-link-top-quality in a full netns run).
-func withOwnHeaderExtensions(packet *rtp.Packet) *rtp.Packet {
-	if len(packet.Header.Extensions) == 0 {
-		return packet
-	}
-	own := *packet
-	// One spare slot: the interceptor appends its extension when the
-	// publisher's packet does not carry one.
-	own.Header.Extensions = append(make([]rtp.Extension, 0, len(packet.Header.Extensions)+1),
-		packet.Header.Extensions...)
-	return &own
-}
-
 // writeAudio writes one audio packet to the receiver, continuing its stream
 // across a publication swap, and records what was sent for the next swap.
 func (t *publicationTarget) writeAudio(packet *rtp.Packet) error {
 	if t.audioRebase != nil {
 		packet = t.audioRebase.apply(packet)
 	}
-	packet = withOwnHeaderExtensions(packet)
+	packet = t.egress.packet(packet)
 	if err := t.track.WriteRTP(packet); err != nil {
 		return err
 	}
@@ -269,7 +249,7 @@ func (t *publicationTarget) writePackets(stopped <-chan struct{}) {
 		case <-stopped:
 			return
 		case packet := <-t.pending:
-			_ = t.track.WriteRTP(withOwnHeaderExtensions(packet))
+			_ = t.track.WriteRTP(t.egress.packet(packet))
 		}
 	}
 }
@@ -1001,6 +981,7 @@ func (r *Router) migrateTargetsLocked(existing, replacement *publication) {
 			continue
 		}
 		target := r.newTarget(local, replacement)
+		target.egress = newEgressHeaderExtensions(r.peers[targetID], sender)
 		target.continueAudioFrom(oldTarget)
 		replacement.tracks[targetID] = target
 		replacement.senders[targetID] = sender
@@ -1078,6 +1059,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 			r.shouldSubscribeLocked(op.pub, op.targetID)
 		if valid {
 			target := r.newTarget(local, op.pub)
+			target.egress = newEgressHeaderExtensions(op.peer, sender)
 			op.pub.tracks[op.targetID] = target
 			op.pub.senders[op.targetID] = sender
 			if op.pub.source != nil && op.pub.remote != nil {

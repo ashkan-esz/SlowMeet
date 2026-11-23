@@ -131,8 +131,8 @@ func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEn
 	// read as a huge jump or reorder and the browsers' transport-cc feedback
 	// grew to thousands of packets a second, enough to saturate a 20 mbit
 	// link. The header extension interceptor gives each of this peer's
-	// transports its own sequence (media.withOwnHeaderExtensions keeps the
-	// in-place rewrite from reaching other receivers' copies).
+	// transports its own sequence (media.egressHeaderExtensions drops the
+	// publisher's extensions first, on a copy of each packet per receiver).
 	stamper, err := twcc.NewHeaderExtensionInterceptor()
 	if err != nil {
 		return nil, nil, err

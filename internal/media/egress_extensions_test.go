@@ -8,48 +8,63 @@ import (
 	"github.com/pion/rtp"
 )
 
-// Every receiver's writer gets the same *rtp.Packet, and pion's
-// TrackLocalStaticRTP.WriteRTP copies only the packet struct; the
-// transport-cc interceptor then sets each receiver's own transport sequence
-// number with Header.SetExtension, in place when the publisher's packet
-// already carries that extension. Each write must therefore get its own
-// extension array, or one receiver is sent another's number and floods the
-// SFU with transport-cc feedback.
-func TestWithOwnHeaderExtensionsIsolatesConcurrentWriters(t *testing.T) {
-	const transportCCID = 3
+// A receiver's forwarded packet carries none of the publisher's header
+// extensions (its mid, rid and transport-wide sequence, under its own
+// connection's IDs) and does carry the receiver's own transceiver mid. Each
+// receiver's write is its own copy: every writer is handed the same
+// *rtp.Packet, and the transport-cc interceptor then stamps each receiver's
+// sequence into that copy in place.
+func TestEgressHeaderExtensionsRewriteForEachReceiver(t *testing.T) {
+	const publisherTransportCC, publisherMid, publisherRID, midID, transportCCID = 3, 4, 10, 4, 3
 	shared := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: 100, Timestamp: 9000, SSRC: 1}, Payload: []byte{1, 2, 3}}
-	if err := shared.Header.SetExtension(transportCCID, []byte{0, 0}); err != nil {
-		t.Fatalf("set publisher extension: %v", err)
-	}
-	if err := shared.Header.SetExtension(1, []byte{0xaa}); err != nil {
-		t.Fatalf("set second extension: %v", err)
+	for id, payload := range map[uint8][]byte{publisherTransportCC: {0x27, 0x10}, publisherMid: []byte("4"), publisherRID: []byte("medium")} {
+		if err := shared.Header.SetExtension(id, payload); err != nil {
+			t.Fatalf("set publisher extension %d: %v", id, err)
+		}
 	}
 
-	// Several receivers' writers stamp their own sequence numbers at once,
-	// as the interceptor does; each must read back exactly its own. Run with
-	// -race: any sharing of the extension array is a data race.
+	// Several receivers, each with its own transceiver mid, write the same
+	// packet at once and stamp their own transport sequence, as the
+	// interceptor does. Run with -race: any sharing between copies races.
 	const writers = 8
 	var wait sync.WaitGroup
-	results := make([]uint16, writers)
 	for writer := 0; writer < writers; writer++ {
 		wait.Add(1)
 		go func(writer int) {
 			defer wait.Done()
+			egress := &egressHeaderExtensions{resolved: true, midID: midID, mid: []byte{byte('1' + writer)}}
 			for round := 0; round < 200; round++ {
-				own := withOwnHeaderExtensions(shared)
+				out := egress.packet(shared)
 				number := make([]byte, 2)
 				binary.BigEndian.PutUint16(number, uint16(writer*1000+round))
-				if err := own.Header.SetExtension(transportCCID, number); err != nil {
-					t.Errorf("writer %d: set extension: %v", writer, err)
+				if err := out.Header.SetExtension(transportCCID, number); err != nil {
+					t.Errorf("writer %d: stamp: %v", writer, err)
 					return
 				}
-				if _, err := own.Marshal(); err != nil {
+				raw, err := out.Marshal()
+				if err != nil {
 					t.Errorf("writer %d: marshal: %v", writer, err)
 					return
 				}
-				results[writer] = binary.BigEndian.Uint16(own.Header.GetExtension(transportCCID))
-				if want := uint16(writer*1000 + round); results[writer] != want {
-					t.Errorf("writer %d read transport sequence %d, want its own %d", writer, results[writer], want)
+				var sent rtp.Packet
+				if err := sent.Unmarshal(raw); err != nil {
+					t.Errorf("writer %d: unmarshal: %v", writer, err)
+					return
+				}
+				if got := string(sent.Header.GetExtension(midID)); got != string(rune('1'+writer)) {
+					t.Errorf("writer %d sent mid %q, want its own transceiver's %q", writer, got, string(rune('1'+writer)))
+					return
+				}
+				if got, want := binary.BigEndian.Uint16(sent.Header.GetExtension(transportCCID)), uint16(writer*1000+round); got != want {
+					t.Errorf("writer %d sent transport sequence %d, want its own %d", writer, got, want)
+					return
+				}
+				if sent.Header.GetExtension(publisherRID) != nil {
+					t.Errorf("writer %d forwarded the publisher's rid", writer)
+					return
+				}
+				if ids := sent.Header.GetExtensionIDs(); len(ids) != 2 {
+					t.Errorf("writer %d sent extensions %v, want only mid and transport-cc", writer, ids)
 					return
 				}
 			}
@@ -57,22 +72,22 @@ func TestWithOwnHeaderExtensionsIsolatesConcurrentWriters(t *testing.T) {
 	}
 	wait.Wait()
 
-	// The shared packet is untouched, and an appended extension (a publisher
-	// packet without transport-cc) lands in the copy only.
-	if got := shared.Header.GetExtension(transportCCID); len(got) != 2 || got[0] != 0 || got[1] != 0 {
-		t.Fatalf("the shared packet's transport-cc extension changed to %v", got)
+	// The shared packet still carries the publisher's extensions untouched.
+	if got := string(shared.Header.GetExtension(publisherMid)); got != "4" {
+		t.Fatalf("the shared packet's mid changed to %q", got)
 	}
-	own := withOwnHeaderExtensions(shared)
-	if err := own.Header.SetExtension(5, []byte{0x55}); err != nil {
-		t.Fatalf("append extension: %v", err)
-	}
-	if shared.Header.GetExtension(5) != nil {
-		t.Fatal("an extension appended to the copy appeared on the shared packet")
+	if got := shared.Header.GetExtension(publisherTransportCC); len(got) != 2 || got[0] != 0x27 || got[1] != 0x10 {
+		t.Fatalf("the shared packet's transport-cc changed to %v", got)
 	}
 
-	// Without extensions there is nothing to share: the packet itself is used.
+	// Before the receiver's mid is known (or on a connection without the mid
+	// extension, like audio) the publisher's extensions are still dropped.
+	unresolved := (*egressHeaderExtensions)(nil).packet(shared)
+	if unresolved == shared || unresolved.Header.Extension || len(unresolved.Header.Extensions) != 0 {
+		t.Fatalf("without a resolved mid the publisher's extensions were forwarded: %+v", unresolved.Header.Extensions)
+	}
 	plain := &rtp.Packet{Header: rtp.Header{Version: 2}}
-	if withOwnHeaderExtensions(plain) != plain {
-		t.Fatal("a packet without extensions was copied")
+	if (*egressHeaderExtensions)(nil).packet(plain) != plain {
+		t.Fatal("a packet with nothing to rewrite was copied")
 	}
 }
