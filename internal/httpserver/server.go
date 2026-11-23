@@ -236,6 +236,12 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_overflow_drops_total %d\n", audioDrops.QueueOverflow)
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_queue_expired_drops_total %d\n", audioDrops.QueueExpired)
 		_, _ = fmt.Fprintf(w, "slowmeet_audio_write_failures_total %d\n", audioDrops.WriteFailures)
+		videoCodecs := hub.VideoCodecs()
+		_, _ = fmt.Fprintf(w, "slowmeet_video_codec_switches_total %d\n", videoCodecs.Switches)
+		_, _ = fmt.Fprintf(w, "slowmeet_video_subscriptions_withheld %d\n", videoCodecs.Withheld)
+		for _, codec := range config.SupportedVideoCodecs() {
+			_, _ = fmt.Fprintf(w, "slowmeet_video_publications{codec=%q} %d\n", codec, videoCodecs.Publications[codec])
+		}
 		relayed := hub.RTCPRelay()
 		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_relayed_batches_total %d\n", relayed.Batches)
 		_, _ = fmt.Fprintf(w, "slowmeet_rtcp_forwarded_batches_total %d\n", relayed.ForwardedBatches)

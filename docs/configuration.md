@@ -436,6 +436,16 @@ browser is usually still running a page cached from before codec selection:
 it reports no codecs, so the server assumes only VP8 and H.264 for it.
 Reloading that page fixes it.
 
+`/metrics` reports codec behaviour without participant labels:
+`slowmeet_video_publications{codec=...}` is the video streams being published
+in each codec (each simulcast layer is a stream),
+`slowmeet_video_codec_switches_total` counts streams republished because their
+publisher changed codec, and `slowmeet_video_subscriptions_withheld` is how
+many camera or screen streams are kept from a participant right now because
+the browser cannot decode their codec. The last one should be 0 in a healthy
+room: the room rule keeps publishers on codecs everyone plays, so a value that
+stays above 0 points at a browser sending a codec it was not asked to.
+
 Codec selection and mid-call switches are tested in Chromium and Firefox,
 alone and paired with each other in both directions, for every codec.
 Safari and phone browsers have not been tested.

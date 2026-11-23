@@ -351,6 +351,9 @@ type Router struct {
 	limits              Limits
 	audioDrops          metrics.AudioDrops
 	rtcpRelay           metrics.RTCPRelay
+	// videoCodecSwitches counts publications replaced because their publisher
+	// changed codec (VideoCodecs).
+	videoCodecSwitches atomic.Uint64
 }
 
 func NewRouter(config ...Limits) *Router {

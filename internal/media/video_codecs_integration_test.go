@@ -255,8 +255,15 @@ func TestRouterSkipsReceiverUntilItCanDecode(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	waitIntegrationPublicationTargets(t, fixture.router, 1, 0)
+	if stats := fixture.router.VideoCodecs(); stats.Withheld != 1 || stats.Publications["vp9"] != 1 || stats.Switches != 0 {
+		t.Fatalf("codec stats before the switch = %+v, want one withheld VP9 stream and no switch", stats)
+	}
 
 	vp8 := fixture.switchCodec(t, sender, integrationVP8)
 	fixture.receive(t, vp8, pion.MimeTypeVP8)
 	waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
+	if stats := fixture.router.VideoCodecs(); stats.Withheld != 0 || stats.Publications["vp8"] != 1 ||
+		stats.Publications["vp9"] != 0 || stats.Switches != 1 {
+		t.Fatalf("codec stats after the switch = %+v, want one VP8 stream, nothing withheld, one switch", stats)
+	}
 }

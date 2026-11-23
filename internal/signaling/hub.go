@@ -250,6 +250,11 @@ func (h *Hub) RTCPRelay() metrics.RTCPRelaySnapshot {
 	return h.router.RTCPRelay()
 }
 
+// VideoCodecs reports the media router's video codec state for /metrics.
+func (h *Hub) VideoCodecs() media.VideoCodecStats {
+	return h.router.VideoCodecs()
+}
+
 func (h *Hub) Close() {
 	h.mu.Lock()
 	h.closed = true
