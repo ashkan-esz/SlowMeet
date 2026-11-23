@@ -236,6 +236,55 @@ const scenarios = [
       }
       await fixture.assertPeersConnected("after rejoins and camera restarts");
     }
+  },
+  {
+    // The server does not transcode, so one device without a codec takes it
+    // away from the whole room while it is there.
+    name: "a device without AV1 brings the room down to VP9 and the room recovers",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      // B reports no AV1 support, as a phone without an AV1 codec does. The
+      // script must be in place before the page's own scripts read the
+      // capabilities, so the page is loaded again after installing it.
+      await pageB.addInitScript(() => {
+        for (const endpoint of [RTCRtpSender, RTCRtpReceiver]) {
+          const original = endpoint.getCapabilities.bind(endpoint);
+          endpoint.getCapabilities = (kind) => {
+            const capabilities = original(kind);
+            if (!capabilities || kind !== "video") return capabilities;
+            return { ...capabilities, codecs: capabilities.codecs.filter((codec) => !/av1/i.test(codec.mimeType)) };
+          };
+        }
+      });
+      await pageB.goto(fixture.baseURL);
+
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await setCamera(pageA, true);
+      await waitForSentCodec(pageA, "AV1");
+
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      await waitForSentCodec(pageA, "VP9");
+      await waitForReceivedCodec(pageB, "video/VP9");
+      const note = await pageA.locator("#video-codec-note").textContent();
+      assert.match(note, /Sending VP9\. Not everyone here can play AV1\./, "the sender is told why it is not on the default codec");
+      const av1Option = await pageB.evaluate(() => {
+        const option = document.querySelector('#video-codec option[value="av1"]');
+        return option ? { disabled: option.disabled, text: option.textContent } : null;
+      });
+      assert.deepEqual(av1Option, { disabled: true, text: "AV1 (not supported on this device)" });
+
+      // After the limiting device leaves, the room returns to the default,
+      // but only once it has held still: a device that drops and comes back
+      // must not switch every encoder twice.
+      await pageB.locator("#leave").click();
+      await pageA.waitForTimeout(8000);
+      assert.equal(await pageA.locator("#metric-video-codec").textContent(), "VP9",
+        "the sender moved back to AV1 before the hold time passed");
+      await waitForSentCodec(pageA, "AV1", 30000);
+    }
   }
 ];
 

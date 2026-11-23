@@ -40,14 +40,17 @@ func (fixture *codecSwitchFixture) send(t *testing.T, track *pion.TrackLocalStat
 
 // newCodecSwitchFixture registers both peers. targetCodecs, when not nil, is
 // the receiver's supported video codecs as its browser would report them.
-func newCodecSwitchFixture(t *testing.T, targetCodecs []string) *codecSwitchFixture {
+func newCodecSwitchFixture(t *testing.T, targetCodecs []string, targetClient *pion.PeerConnection) *codecSwitchFixture {
 	t.Helper()
+	if targetClient == nil {
+		targetClient = newIntegrationPeer(t)
+	}
 	fixture := &codecSwitchFixture{
 		router:        NewRouter(),
 		sourceClient:  newIntegrationPeer(t),
 		sourceIngress: newIntegrationWrapperPeer(t),
 		targetEgress:  newIntegrationWrapperPeer(t),
-		targetClient:  newIntegrationPeer(t),
+		targetClient:  targetClient,
 		targetTracks:  make(chan *pion.TrackRemote, 4),
 		targetOffer:   make(chan struct{}, 4),
 		nextSequence:  1,
@@ -159,12 +162,13 @@ func (fixture *codecSwitchFixture) publicationCodec(t *testing.T) string {
 // new track event reaches the router: it has to notice the new payload type
 // on the live publication and give receivers a track in the new codec.
 func TestRouterFollowsInPlaceCodecChange(t *testing.T) {
-	fixture := newCodecSwitchFixture(t, nil)
+	fixture := newCodecSwitchFixture(t, nil, nil)
 	vp8, sender := fixture.publish(t, integrationVP8)
 	if got := fixture.publicationCodec(t); got != "vp8" {
 		t.Fatalf("publication codec = %q, want vp8", got)
 	}
 	fixture.receive(t, vp8, pion.MimeTypeVP8)
+	linesBefore := len(fixture.targetEgress.Connection().GetTransceivers())
 
 	vp9 := fixture.switchCodec(t, sender, integrationVP9)
 	if got := fixture.publicationCodec(t); got != "vp9" {
@@ -172,13 +176,73 @@ func TestRouterFollowsInPlaceCodecChange(t *testing.T) {
 	}
 	fixture.receive(t, vp9, pion.MimeTypeVP9)
 	waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
+
+	// The new codec's track goes on a media line added after the existing
+	// ones. A browser gets the removal of the old track and this track, under
+	// the same IDs, in one offer; Firefox only binds it on a later line.
+	lines := fixture.targetEgress.Connection().GetTransceivers()
+	if len(lines) != linesBefore+1 {
+		t.Fatalf("receiver media lines after the switch = %d, want %d", len(lines), linesBefore+1)
+	}
+	lastSender := lines[len(lines)-1].Sender()
+	if lastSender == nil || lastSender.Track() == nil {
+		t.Fatal("the last media line carries no track after the switch")
+	}
+	if track, ok := lastSender.Track().(*pion.TrackLocalStaticRTP); !ok || !strings.EqualFold(track.Codec().MimeType, pion.MimeTypeVP9) {
+		t.Fatal("the last media line does not carry the VP9 track")
+	}
+}
+
+// A codec the administrator removes stops being forwarded at once, and comes
+// back when it is allowed again, without the publisher doing anything.
+func TestRouterStopsForwardingACodecTheServerNoLongerAllows(t *testing.T) {
+	fixture := newCodecSwitchFixture(t, nil, nil)
+	vp9, _ := fixture.publish(t, integrationVP9)
+	fixture.receive(t, vp9, pion.MimeTypeVP9)
+	waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
+
+	fixture.router.SetAllowedVideoCodecs([]string{"vp8", "h264"})
+	waitIntegrationPublicationTargets(t, fixture.router, 1, 0)
+	waitIntegrationSignal(t, fixture.targetOffer, "offer removing the disallowed camera")
+	negotiateIntegrationPeers(t, fixture.targetEgress.Connection(), fixture.targetClient)
+
+	fixture.router.SetAllowedVideoCodecs([]string{"av1", "vp9", "vp8", "h264"})
+	waitIntegrationPublicationTargets(t, fixture.router, 1, 1)
+	waitIntegrationSignal(t, fixture.targetOffer, "offer restoring the camera")
+	negotiateIntegrationPeers(t, fixture.targetEgress.Connection(), fixture.targetClient)
+}
+
+// The receiver's codec list comes from its browser and can be wrong. Starting
+// a sender for a codec the connection never negotiated fails that receiver's
+// whole next description, so the router checks what was really negotiated
+// before it keeps the track.
+func TestRouterDoesNotBindACodecTheReceiverNeverNegotiated(t *testing.T) {
+	engine := &pion.MediaEngine{}
+	if err := engine.RegisterCodec(pion.RTPCodecParameters{
+		RTPCodecCapability: integrationVP8, PayloadType: 96,
+	}, pion.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	vp8Only, err := pion.NewAPI(pion.WithMediaEngine(engine)).NewPeerConnection(pion.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No codec list is given for the receiver, so only the negotiated codecs
+	// can keep the VP9 camera away from it.
+	fixture := newCodecSwitchFixture(t, nil, vp8Only)
+	negotiateIntegrationPeers(t, fixture.targetClient, fixture.targetEgress.Connection())
+
+	fixture.publish(t, integrationVP9)
+	waitIntegrationSignal(t, fixture.targetOffer, "offer after the camera was published")
+	negotiateIntegrationPeers(t, fixture.targetEgress.Connection(), fixture.targetClient)
+	waitIntegrationPublicationTargets(t, fixture.router, 1, 0)
 }
 
 // A receiver whose browser cannot decode the publisher's codec is left out,
 // which keeps its own negotiation working, and is subscribed as soon as the
 // publisher switches to a codec it has.
 func TestRouterSkipsReceiverUntilItCanDecode(t *testing.T) {
-	fixture := newCodecSwitchFixture(t, []string{"vp8", "h264"})
+	fixture := newCodecSwitchFixture(t, []string{"vp8", "h264"}, nil)
 	_, sender := fixture.publish(t, integrationVP9)
 	if got := fixture.publicationCodec(t); got != "vp9" {
 		t.Fatalf("publication codec = %q, want vp9", got)
