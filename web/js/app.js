@@ -2379,19 +2379,23 @@ setInterval(() => {
   // the codec in use, the browser has no working encoder for that codec
   // (stalledFallbackDue), and the codec is dropped for this device. Only the
   // camera is judged: a shared screen that does not change sends no frames.
-  // The verdict needs certainty, so nothing else may explain the silence: the
-  // codec has never produced a frame in this session (a starved or paused
-  // encoder has), the camera's media line is negotiated for sending, and this
-  // timer is running on time (a throttled or suspended page proves nothing).
+  // The verdict needs certainty; encoderSilenceCounts decides from these
+  // facts whether anything else could explain the silence.
   const camera = cameraSender?.track;
   const onTime = now - videoCodecStallCheckedAt < 2500;
   videoCodecStallCheckedAt = now;
-  const expecting = onTime && Boolean(peer) && peer.connectionState === "connected" &&
-    peer.signalingState === "stable" && Boolean(videoCodecApplied) && !videoCodecsProven.has(videoCodecApplied) &&
-    camera?.readyState === "live" && camera.enabled && !camera.muted &&
-    cameraSender.getParameters().encodings.some((encoding) => encoding.active !== false) &&
-    peer.getTransceivers().some((transceiver) => transceiver.sender === cameraSender &&
-      /send/.test(transceiver.currentDirection || ""));
+  const expecting = window.SlowMeetVideoCodec.encoderSilenceCounts({
+    onTime,
+    connected: peer?.connectionState === "connected",
+    signalingStable: peer?.signalingState === "stable",
+    codec: videoCodecApplied,
+    proven: videoCodecsProven.has(videoCodecApplied),
+    cameraLive: camera?.readyState === "live" && camera.enabled && !camera.muted,
+    encodingActive: Boolean(camera) &&
+      cameraSender.getParameters().encodings.some((encoding) => encoding.active !== false),
+    lineNegotiated: Boolean(peer) && peer.getTransceivers().some((transceiver) =>
+      transceiver.sender === cameraSender && /send/.test(transceiver.currentDirection || ""))
+  });
   if (!expecting || encodedRecently) {
     videoCodecStalledSince = 0;
     return;

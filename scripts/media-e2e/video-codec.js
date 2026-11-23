@@ -777,6 +777,55 @@ const scenarios = [
       await waitForNoReceivedVideo(pageB, "screen share stopped");
       await fixture.assertPeersConnected("after the screen share");
     }
+  },
+  {
+    name: "a working encoder is never judged unable to send",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      const labels = { av1: "AV1", vp9: "VP9", vp8: "VP8" };
+      // Every moment in which a camera sends nothing for a reason other than
+      // a missing encoder: codec switches, a camera turned off and on, a new
+      // connection after the signaling socket dropped, and a long quiet call.
+      const assertNoVerdict = async (step) => {
+        const state = await pageA.evaluate(() => ({
+          broken: [...videoCodecsBroken],
+          note: document.querySelector("#video-codec-note")?.textContent || ""
+        }));
+        assert.deepEqual(state.broken, [], `${step}: a codec was judged unable to send (${state.note})`);
+        assert.ok(!state.note.includes("cannot send"), `${step}: the note says "${state.note}"`);
+      };
+      await setCamera(pageA, true);
+      for (const codec of ["av1", "vp9", "vp8", "av1", "vp9"]) {
+        await pickCodec(pageA, codec);
+        await waitForSentCodec(pageA, labels[codec]);
+        await waitForReceivedCodec(pageB, codecMimes[codec]);
+        await assertNoVerdict(`after switching to ${codec}`);
+      }
+      await setCamera(pageA, false);
+      await pageA.waitForTimeout(10000);
+      await assertNoVerdict("with the camera off for ten seconds");
+      await setCamera(pageA, true);
+      await waitForSentCodec(pageA, "VP9");
+      await assertNoVerdict("after the camera came back");
+
+      await pageA.evaluate(() => socket.close());
+      await pageA.waitForFunction(() => {
+        const peers = window.__slowMeetTest.peerConnections;
+        return peers.length > 1 && peers.at(-1).connectionState === "connected";
+      }, null, { timeout: 45000 });
+      await waitForSentCodec(pageA, "VP9");
+      await waitForReceivedCodec(pageB, codecMimes.vp9);
+      await assertNoVerdict("after a reconnect");
+
+      await pageA.waitForTimeout(20000);
+      await assertNoVerdict("after twenty quiet seconds");
+      await waitForReceivedCodec(pageB, codecMimes.vp9);
+    }
   }
 ];
 
