@@ -122,6 +122,22 @@ func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEn
 		twcc.WithLoggerFactory(loggerFactory)); err != nil {
 		return nil, nil, err
 	}
+	// ConfigureTWCCSenderWithOptions only generates feedback for what this
+	// peer receives; it negotiates the transport-cc header extension but
+	// stamps nothing on what it sends. A forwarded packet then kept its
+	// publisher's transport-wide sequence number, so every receiver saw its
+	// senders' unrelated counters interleaved as one transport. As those
+	// counters drifted apart (an impaired publisher sends less), each packet
+	// read as a huge jump or reorder and the browsers' transport-cc feedback
+	// grew to thousands of packets a second, enough to saturate a 20 mbit
+	// link. The header extension interceptor gives each of this peer's
+	// transports its own sequence (media.withOwnHeaderExtensions keeps the
+	// in-place rewrite from reaching other receivers' copies).
+	stamper, err := twcc.NewHeaderExtensionInterceptor()
+	if err != nil {
+		return nil, nil, err
+	}
+	registry.Add(stamper)
 	return mediaEngine, registry, nil
 }
 
