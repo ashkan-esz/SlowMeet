@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# load_legacy_install_settings and detect_caddy_tls_mode take the Caddyfile
+# path as an optional argument so the installer's tests can point them at a
+# fixture; the installer itself always calls them without it.
+# shellcheck disable=SC2119,SC2120
 set -Eeuo pipefail
 
 readonly INSTALL_DIR=/opt/slowmeet
