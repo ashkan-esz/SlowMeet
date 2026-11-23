@@ -2136,8 +2136,13 @@ let videoCodecsRoom = null;
 // to leave the browser's own order alone.
 let videoCodecApplied = null;
 let videoCodecUpgradeTimer;
-let videoCodecCpuSamples = [];
-let videoCodecCpuSampledAt = 0;
+// The codec the last applied remote description asked for; it differs from
+// videoCodecApplied while a change waits for this participant to send video.
+let videoCodecDescribed = null;
+let videoCodecOptionsKey = "";
+let videoCodecCpu = { samples: [], lastAt: 0 };
+let videoCodecSentAt = 0;
+const videoCodecFramesEncoded = new Map();
 // Codecs Automatic skips on this device: not smooth to encode, or caught
 // CPU-limited during this session.
 const videoCodecsAvoided = new Set();
@@ -2163,6 +2168,7 @@ function videoCodecTarget() {
 }
 
 function applyVideoCodecChoice(sdp) {
+  videoCodecDescribed = videoCodecApplied;
   return window.SlowMeetVideoCodec.preferVideoCodec(sdp, videoCodecApplied);
 }
 
@@ -2171,65 +2177,63 @@ function applyRemoteSDPChoices(sdp) {
 }
 
 function videoCodecNoteText() {
-  const { codecLabel, isCodec } = window.SlowMeetVideoCodec;
-  if (!videoCodecApplied) return "Uses the newest codec everyone in the room can play.";
-  const wanted = isCodec(videoCodecStored) ? videoCodecStored : videoCodecServerDefault;
-  let reason = "";
-  if (wanted && wanted !== videoCodecApplied) {
-    const room = videoCodecRoomList() || [];
-    if (videoCodecsDevice && !videoCodecsDevice.includes(wanted)) {
-      reason = ` This device cannot send ${codecLabel(wanted)}.`;
-    } else if (!room.includes(wanted)) {
-      reason = ` Not everyone here can play ${codecLabel(wanted)}.`;
-    } else if (simulcastEnabled) {
-      reason = ` ${codecLabel(wanted)} is not used while simulcast is on.`;
-    } else if (videoCodecsAvoided.has(wanted)) {
-      reason = ` ${codecLabel(wanted)} is too heavy for this device.`;
-    }
-  }
-  return `Sending ${codecLabel(videoCodecApplied)}.${reason}`;
+  return window.SlowMeetVideoCodec.codecNote({
+    applied: videoCodecApplied, stored: videoCodecStored, serverDefault: videoCodecServerDefault,
+    roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
+    avoided: videoCodecsAvoided, simulcast: simulcastEnabled
+  });
 }
 
 function refreshVideoCodecUI() {
   const { codecLabel } = window.SlowMeetVideoCodec;
   if (videoCodecSelect) {
     const allowed = videoCodecsAllowed || [];
-    const automatic = document.createElement("option");
-    automatic.value = "auto";
-    automatic.textContent = videoCodecServerDefault
-      ? `Automatic (${codecLabel(videoCodecServerDefault)})` : "Automatic";
-    videoCodecSelect.replaceChildren(automatic, ...allowed.map((codec) => {
-      const supported = !videoCodecsDevice || videoCodecsDevice.includes(codec);
-      const option = document.createElement("option");
-      option.value = codec;
-      option.textContent = supported ? codecLabel(codec) : `${codecLabel(codec)} (not supported on this device)`;
-      option.disabled = !supported;
-      return option;
-    }));
+    // The entries are rebuilt only when they would differ: replacing them
+    // closes the picker if the participant has it open.
+    const optionsKey = JSON.stringify([videoCodecServerDefault, allowed, videoCodecsDevice]);
+    if (optionsKey !== videoCodecOptionsKey) {
+      videoCodecOptionsKey = optionsKey;
+      const automatic = document.createElement("option");
+      automatic.value = "auto";
+      automatic.textContent = videoCodecServerDefault
+        ? `Automatic (${codecLabel(videoCodecServerDefault)})` : "Automatic";
+      videoCodecSelect.replaceChildren(automatic, ...allowed.map((codec) => {
+        const supported = !videoCodecsDevice || videoCodecsDevice.includes(codec);
+        const option = document.createElement("option");
+        option.value = codec;
+        option.textContent = supported ? codecLabel(codec) : `${codecLabel(codec)} (not supported on this device)`;
+        option.disabled = !supported;
+        return option;
+      }));
+    }
     videoCodecSelect.value = allowed.includes(videoCodecStored) ? videoCodecStored : "auto";
   }
   if (videoCodecNote) videoCodecNote.textContent = videoCodecNoteText();
 }
 
+function sendingVideo() {
+  return [cameraSender, screenSender].some((sender) => sender?.track?.readyState === "live");
+}
+
 // Recomputes the codec to send with. immediate applies it now; otherwise a
-// move to a newer codec waits until the room has held still, so a participant
-// who drops and resumes does not switch everyone's encoder twice.
+// move to a newer codec waits until the room has held still (planCodecChange).
 function updateVideoCodecChoice(immediate) {
   clearTimeout(videoCodecUpgradeTimer);
   const target = videoCodecTarget();
-  if (target !== videoCodecApplied) {
-    const room = videoCodecRoomList() || [];
-    const upgrade = !immediate && room.includes(videoCodecApplied) &&
-      window.SlowMeetVideoCodec.isNewerCodec(target, videoCodecApplied);
-    if (upgrade) {
-      videoCodecUpgradeTimer = setTimeout(() => updateVideoCodecChoice(true), videoCodecUpgradeDelayMs);
-    } else {
-      videoCodecApplied = target;
-      videoCodecCpuSamples = [];
-      // The choice reaches the encoder through the next remote description
-      // (applyRemoteSDPChoices), so a live call renegotiates once to apply it.
-      if (peer && renegotiationQueue) renegotiateLocalMedia().catch(() => {});
-    }
+  const plan = window.SlowMeetVideoCodec.planCodecChange({
+    target, applied: videoCodecApplied, roomCodecs: videoCodecRoomList(), immediate
+  });
+  if (plan === "hold") {
+    videoCodecUpgradeTimer = setTimeout(() => updateVideoCodecChoice(true), videoCodecUpgradeDelayMs);
+  } else if (plan === "apply") {
+    videoCodecApplied = target;
+    videoCodecCpu = { samples: [], lastAt: 0 };
+    // The choice reaches the encoder through the next remote description
+    // (applyRemoteSDPChoices), so a call that is sending video renegotiates
+    // once to apply it. A participant who sends none has nothing to switch;
+    // the description is brought up to date when their video starts
+    // (noteOutboundVideoStat).
+    if (peer && renegotiationQueue && sendingVideo()) renegotiateLocalMedia().catch(() => {});
   }
   refreshVideoCodecUI();
 }
@@ -2249,31 +2253,42 @@ function noteRoomVideoCodecs(room, immediate) {
 
 // Called for every outbound video stream of each stats sample. In Automatic, a
 // newer codec the encoder cannot keep up with is given up for this session.
-function noteOutboundVideoStat(mimeType, limitationReason) {
-  const { codecNameFromMime, codecLabel, cpuFallbackDue, isCodec } = window.SlowMeetVideoCodec;
-  const sending = codecNameFromMime(mimeType);
-  if (videoCodecMetric && mimeType) videoCodecMetric.textContent = codecLabel(sending) || mimeType;
-  const guarded = (sending === "av1" || sending === "vp9") && sending === videoCodecApplied &&
-    !(isCodec(videoCodecStored) && videoCodecStored === sending);
-  if (!guarded) {
-    videoCodecCpuSamples = [];
+function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncoded) {
+  const codecs = window.SlowMeetVideoCodec;
+  // A camera that was turned off keeps its stream in the stats, so only a
+  // stream that encoded frames since the last sample counts as sending.
+  const encoded = Number(framesEncoded) || 0;
+  const advanced = encoded > (videoCodecFramesEncoded.get(streamID) ?? 0);
+  videoCodecFramesEncoded.set(streamID, encoded);
+  if (!advanced || !mimeType) return;
+  const sending = codecs.codecNameFromMime(mimeType);
+  videoCodecSentAt = Date.now();
+  if (videoCodecMetric) videoCodecMetric.textContent = codecs.codecLabel(sending) || mimeType;
+  // This video started after the codec choice last changed, so its encoder
+  // still follows a description written for the earlier choice.
+  if (videoCodecDescribed !== videoCodecApplied && peer && renegotiationQueue) {
+    videoCodecDescribed = videoCodecApplied;
+    renegotiateLocalMedia().catch(() => {});
+  }
+  if (!codecs.cpuFallbackWatched({ sending, applied: videoCodecApplied, stored: videoCodecStored })) {
+    videoCodecCpu = { samples: [], lastAt: 0 };
     return;
   }
-  const now = Date.now();
-  const cpuLimited = limitationReason === "cpu";
-  if (now - videoCodecCpuSampledAt < 900) {
-    // Another stream of the same sample: one CPU-limited stream is enough.
-    if (cpuLimited && videoCodecCpuSamples.length) videoCodecCpuSamples[videoCodecCpuSamples.length - 1] = "cpu";
-    return;
-  }
-  videoCodecCpuSampledAt = now;
-  videoCodecCpuSamples.push(cpuLimited ? "cpu" : "none");
-  if (videoCodecCpuSamples.length > 30) videoCodecCpuSamples.shift();
-  if (!cpuFallbackDue(videoCodecCpuSamples)) return;
+  videoCodecCpu = codecs.addCpuSample(videoCodecCpu, { now: Date.now(), cpuLimited: limitationReason === "cpu" });
+  if (!codecs.cpuFallbackDue(videoCodecCpu.samples)) return;
   videoCodecsAvoided.add(sending);
-  showToast(`${codecLabel(sending)} is too heavy for this device. Switching to an older codec.`, "warning");
+  showToast(`${codecs.codecLabel(sending)} is too heavy for this device. Switching to an older codec.`, "warning");
   updateVideoCodecChoice(true);
 }
+
+// The codec row in the connection details goes back to "Not active" once no
+// stream has encoded a frame for a few stats samples.
+setInterval(() => {
+  if (videoCodecMetric && videoCodecSentAt && Date.now() - videoCodecSentAt > 3500) {
+    videoCodecSentAt = 0;
+    videoCodecMetric.textContent = "Not active";
+  }
+}, 1000);
 
 videoCodecSelect?.addEventListener("change", () => {
   videoCodecStored = videoCodecSelect.value;
@@ -5676,7 +5691,7 @@ async function runDiagnosticsUpdate() {
       }
       if (stat.frameWidth && stat.frameHeight) values.resolution = `${stat.frameWidth}x${stat.frameHeight}`;
       values.codec = resolveCodecName(codecById, stat.codecId) || values.codec;
-      noteOutboundVideoStat(codecById.get(stat.codecId), stat.qualityLimitationReason);
+      noteOutboundVideoStat(codecById.get(stat.codecId), stat.qualityLimitationReason, stat.id, stat.framesEncoded);
     }
     if (stat.type === "outbound-rtp" && stat.kind === "audio") {
       sentAudioBytes += stat.bytesSent || 0;

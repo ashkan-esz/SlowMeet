@@ -31,6 +31,28 @@ func TestVideoCodecName(t *testing.T) {
 	}
 }
 
+func TestIngressCodecActionFor(t *testing.T) {
+	tests := []struct {
+		name                       string
+		publication, packet, track uint8
+		want                       ingressCodecAction
+	}{
+		{name: "packet in the publication's codec", publication: 96, packet: 96, track: 96, want: ingressForward},
+		{name: "publication without a recorded payload type", publication: 0, packet: 98, track: 98, want: ingressForward},
+		{name: "track moved to the packet's payload type", publication: 96, packet: 98, track: 98, want: ingressRepublish},
+		{name: "stray packet while the track stays put", publication: 96, packet: 98, track: 96, want: ingressDrop},
+		{name: "late packet of a third payload type", publication: 96, packet: 45, track: 98, want: ingressDrop},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ingressCodecActionFor(test.publication, test.packet, test.track); got != test.want {
+				t.Fatalf("ingressCodecActionFor(%d, %d, %d) = %d, want %d",
+					test.publication, test.packet, test.track, got, test.want)
+			}
+		})
+	}
+}
+
 func testCodecPublication(sourceID string, role SourceRole, codecName string) *publication {
 	return &publication{
 		key:       publicationKey(sourceID, role, ""),

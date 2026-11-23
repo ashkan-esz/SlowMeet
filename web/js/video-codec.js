@@ -148,9 +148,66 @@
     return reasons.slice(-needed).every((reason) => reason === "cpu");
   }
 
+  // What to do when the codec to send with (target) differs from the one in
+  // use (applied): "none", "apply" now, or "hold" it back for a while. Only a
+  // move to a newer codec while the current one still works is held, so that a
+  // participant who drops and comes back does not switch every encoder twice.
+  // immediate (the participant or the administrator chose) never holds.
+  function planCodecChange(options) {
+    const {target, applied, roomCodecs, immediate} = options || {};
+    if (target === applied) return "none";
+    const appliedStillUsable = Array.isArray(roomCodecs) && roomCodecs.includes(applied);
+    return !immediate && appliedStillUsable && isNewerCodec(target, applied) ? "hold" : "apply";
+  }
+
+  // The line under the codec picker: what is being sent and, when that is not
+  // the wanted codec, the first reason that applies.
+  function codecNote(options) {
+    const {applied, stored, serverDefault, roomCodecs, device, avoided, simulcast} = options || {};
+    if (!isCodec(applied)) return "Uses the newest codec everyone in the room can play.";
+    const wanted = isCodec(stored) ? stored : (isCodec(serverDefault) ? serverDefault : null);
+    let reason = "";
+    if (wanted && wanted !== applied) {
+      if (Array.isArray(device) && !device.includes(wanted)) {
+        reason = ` This device cannot send ${codecLabel(wanted)}.`;
+      } else if (!Array.isArray(roomCodecs) || !roomCodecs.includes(wanted)) {
+        reason = ` Not everyone here can play ${codecLabel(wanted)}.`;
+      } else if (simulcast) {
+        reason = ` ${codecLabel(wanted)} is not used while simulcast is on.`;
+      } else if (contains(avoided, wanted)) {
+        reason = ` ${codecLabel(wanted)} is too heavy for this device.`;
+      }
+    }
+    return `Sending ${codecLabel(applied)}.${reason}`;
+  }
+
+  // Whether the encoder is watched for CPU overload: only a newer codec that
+  // Automatic chose. A codec the participant picked is theirs to keep.
+  function cpuFallbackWatched(options) {
+    const {sending, applied, stored} = options || {};
+    return (sending === "av1" || sending === "vp9") && sending === applied && stored !== sending;
+  }
+
+  // Adds one stats sample to state ({samples, lastAt}) and returns the new
+  // state. Several outbound streams report in the same stats sample; they
+  // count once, as CPU-limited if any of them is.
+  function addCpuSample(state, sample, limits) {
+    const {now, cpuLimited} = sample || {};
+    const {minGapMs = 900, keep = 30} = limits || {};
+    const samples = state && Array.isArray(state.samples) ? state.samples.slice() : [];
+    const lastAt = state && Number.isFinite(state.lastAt) ? state.lastAt : -Infinity;
+    if (now - lastAt < minGapMs) {
+      if (cpuLimited && samples.length) samples[samples.length - 1] = "cpu";
+      return {samples, lastAt};
+    }
+    samples.push(cpuLimited ? "cpu" : "none");
+    return {samples: samples.slice(-keep), lastAt: now};
+  }
+
   const utilities = Object.freeze({
     codecs, isCodec, codecLabel, isNewerCodec, codecNameFromMime, deviceCodecs,
-    fallbackOrder, chooseSendCodec, preferVideoCodec, cpuFallbackDue
+    fallbackOrder, chooseSendCodec, preferVideoCodec, cpuFallbackDue,
+    planCodecChange, codecNote, cpuFallbackWatched, addCpuSample
   });
   root.SlowMeetVideoCodec = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;

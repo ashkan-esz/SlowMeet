@@ -211,12 +211,41 @@ func senderNegotiatedCodec(sender *pion.RTPSender, codec pion.RTPCodecCapability
 // loop must end: the replacement has its own.
 func (r *Router) handleIngressCodecChange(pub *publication, payloadType uint8) bool {
 	codec := pub.remote.Codec()
-	if uint8(codec.PayloadType) != payloadType {
-		// The track did not move to this payload type; drop the stray packet.
+	if ingressCodecActionFor(pub.payloadType, payloadType, uint8(codec.PayloadType)) != ingressRepublish {
 		return false
 	}
 	r.republishForCodecChange(pub, codec.RTPCodecCapability, payloadType)
 	return true
+}
+
+// ingressCodecAction is what the forwarding loop does with an ingress packet,
+// judged by payload type alone.
+type ingressCodecAction int
+
+const (
+	// ingressForward: the packet is in the publication's codec.
+	ingressForward ingressCodecAction = iota
+	// ingressDrop: another payload type that the track itself has not moved
+	// to, such as a retransmission queued before a codec switch. Forwarding it
+	// would hand receivers a payload under the wrong codec's payload type.
+	ingressDrop
+	// ingressRepublish: the track moved to the packet's payload type, so the
+	// publication is replaced by one in the new codec.
+	ingressRepublish
+)
+
+// ingressCodecActionFor compares the payload type a publication was created
+// with, the packet's, and the one pion currently reports for the track. A
+// publication without a recorded payload type (zero) is not checked.
+func ingressCodecActionFor(publicationPayloadType, packetPayloadType, trackPayloadType uint8) ingressCodecAction {
+	switch {
+	case publicationPayloadType == 0 || packetPayloadType == publicationPayloadType:
+		return ingressForward
+	case trackPayloadType != packetPayloadType:
+		return ingressDrop
+	default:
+		return ingressRepublish
+	}
 }
 
 // republishForCodecChange replaces old with a publication of the same track in

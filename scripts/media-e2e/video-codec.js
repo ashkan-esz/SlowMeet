@@ -170,9 +170,15 @@ const scenarios = [
 
       // The administrator changes the default mid-call: the sender switches
       // encoder on the same connection and the receiver keeps getting video.
+      const viewerOffers = () => pageB.evaluate(() => window.__slowMeetTest.signalingMessages
+        .filter((message) => message.direction === "out" && message.type === "offer").length);
+      const offersBefore = await viewerOffers();
       await updateAdminConfig(fixture, { default_video_codec: "vp8" });
       await waitForSentCodec(pageA, "VP8");
       await waitForReceivedCodec(pageB, "video/VP8");
+      // The viewer sends no video, so the change is nothing it has to
+      // negotiate; an offer of its own would only cost a round trip.
+      assert.equal(await viewerOffers(), offersBefore, "a viewer without video renegotiated for a codec change");
 
       // The participant picks another allowed codec in Settings.
       await pageA.evaluate(() => {
@@ -231,6 +237,7 @@ const scenarios = [
       for (const round of ["first", "second"]) {
         await setCamera(pageA, false);
         await waitForNoReceivedVideo(pageB, `${round} camera stop`);
+        await waitForSentCodec(pageA, "Not active");
         await setCamera(pageA, true);
         await waitForReceivedVideo(pageB, `${round} camera restart`);
       }

@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   codecNameFromMime, deviceCodecs, fallbackOrder, chooseSendCodec, preferVideoCodec,
-  cpuFallbackDue, isNewerCodec, codecLabel
+  cpuFallbackDue, isNewerCodec, codecLabel, planCodecChange, codecNote, cpuFallbackWatched, addCpuSample
 } = require("../web/js/video-codec.js");
 
 // --- SDP rewrite -----------------------------------------------------------
@@ -149,6 +149,79 @@ assert.equal(cpuFallbackDue(["none", ...Array(10).fill("cpu")]), true);
 assert.equal(cpuFallbackDue(["cpu", "cpu"], 2), true);
 assert.equal(cpuFallbackDue(null), false);
 
+// --- Applying a change now or holding it -----------------------------------
+
+const plans = [
+  [{target: "av1", applied: "av1", roomCodecs: all}, "none", "nothing changed"],
+  [{target: null, applied: null, roomCodecs: null}, "none", "still nothing to apply"],
+  [{target: "av1", applied: null, roomCodecs: all}, "apply", "the first choice is applied at once"],
+  [{target: "vp9", applied: "av1", roomCodecs: ["vp9", "vp8"]}, "apply", "the codec in use stopped being usable"],
+  [{target: "vp8", applied: "vp9", roomCodecs: all}, "apply", "a move to an older codec is not held"],
+  [{target: "av1", applied: "vp9", roomCodecs: all}, "hold", "a move to a newer codec waits for the room to hold still"],
+  [{target: "av1", applied: "vp9", roomCodecs: all, immediate: true}, "apply", "a choice by the participant or administrator is not held"],
+  [{target: "av1", applied: "vp9", roomCodecs: ["av1"]}, "apply", "an upgrade is not held when the current codec is gone"],
+  [{target: null, applied: "vp9", roomCodecs: []}, "apply", "losing every usable codec clears the choice"]
+];
+for (const [options, expected, label] of plans) {
+  assert.equal(planCodecChange(options), expected, label);
+}
+assert.equal(planCodecChange(), "none");
+
+// --- Settings note ---------------------------------------------------------
+
+const notes = [
+  [{applied: null}, "Uses the newest codec everyone in the room can play."],
+  [{applied: "av1", stored: "auto", serverDefault: "av1", roomCodecs: all, device: all}, "Sending AV1."],
+  [{applied: "vp9", stored: "auto", serverDefault: "av1", roomCodecs: ["vp9", "vp8"], device: all},
+    "Sending VP9. Not everyone here can play AV1."],
+  [{applied: "vp8", stored: "auto", serverDefault: "av1", roomCodecs: all, device: ["vp8", "h264"]},
+    "Sending VP8. This device cannot send AV1."],
+  [{applied: "vp8", stored: "av1", serverDefault: "vp8", roomCodecs: all, device: all, simulcast: true},
+    "Sending VP8. AV1 is not used while simulcast is on."],
+  [{applied: "vp9", stored: "auto", serverDefault: "av1", roomCodecs: all, device: all, avoided: new Set(["av1"])},
+    "Sending VP9. AV1 is too heavy for this device."],
+  [{applied: "vp8", stored: "h264", serverDefault: "av1", roomCodecs: ["av1", "vp9", "vp8"], device: all},
+    "Sending VP8. Not everyone here can play H.264."],
+  [{applied: "vp8", stored: "vp8", serverDefault: "av1", roomCodecs: all, device: all}, "Sending VP8."],
+  [{applied: "vp9", stored: "auto", serverDefault: null, roomCodecs: all, device: all}, "Sending VP9."],
+  // The device reason comes first: it is the one the participant can do nothing about.
+  [{applied: "vp8", stored: "auto", serverDefault: "av1", roomCodecs: ["vp8"], device: ["vp8"]},
+    "Sending VP8. This device cannot send AV1."]
+];
+for (const [options, expected] of notes) {
+  assert.equal(codecNote(options), expected);
+}
+assert.equal(codecNote(), "Uses the newest codec everyone in the room can play.");
+
+// --- CPU fallback bookkeeping ----------------------------------------------
+
+assert.equal(cpuFallbackWatched({sending: "av1", applied: "av1", stored: "auto"}), true);
+assert.equal(cpuFallbackWatched({sending: "vp9", applied: "vp9", stored: "auto"}), true);
+assert.equal(cpuFallbackWatched({sending: "av1", applied: "av1", stored: "av1"}), false, "an explicit pick is not watched");
+assert.equal(cpuFallbackWatched({sending: "vp8", applied: "vp8", stored: "auto"}), false, "the older codecs are not watched");
+assert.equal(cpuFallbackWatched({sending: "av1", applied: "vp9", stored: "auto"}), false, "a codec on its way out is not watched");
+assert.equal(cpuFallbackWatched(), false);
+
+let cpuState = {samples: [], lastAt: 0};
+cpuState = addCpuSample(cpuState, {now: 1000, cpuLimited: false});
+assert.deepEqual(cpuState, {samples: ["none"], lastAt: 1000});
+cpuState = addCpuSample(cpuState, {now: 1010, cpuLimited: true});
+assert.deepEqual(cpuState, {samples: ["cpu"], lastAt: 1000}, "a second stream of the same sample upgrades it");
+cpuState = addCpuSample(cpuState, {now: 1020, cpuLimited: false});
+assert.deepEqual(cpuState, {samples: ["cpu"], lastAt: 1000}, "and a later unlimited stream does not downgrade it");
+cpuState = addCpuSample(cpuState, {now: 2000, cpuLimited: true});
+assert.deepEqual(cpuState, {samples: ["cpu", "cpu"], lastAt: 2000});
+assert.deepEqual(addCpuSample(undefined, {now: 5, cpuLimited: true}), {samples: ["cpu"], lastAt: 5});
+let longState = {samples: [], lastAt: 0};
+for (let second = 1; second <= 40; second += 1) {
+  longState = addCpuSample(longState, {now: second * 1000, cpuLimited: second > 30});
+}
+assert.equal(longState.samples.length, 30, "only recent samples are kept");
+assert.equal(cpuFallbackDue(longState.samples), true, "ten limited seconds in a row trigger the fallback");
+const frozen = {samples: ["none"], lastAt: 0};
+addCpuSample(frozen, {now: 1000, cpuLimited: true});
+assert.deepEqual(frozen, {samples: ["none"], lastAt: 0}, "the given state is not modified");
+
 // --- Wiring in the page ----------------------------------------------------
 
 const root = path.join(__dirname, "..");
@@ -162,7 +235,17 @@ for (const call of remoteDescriptions) {
     "every remote description goes through the codec and DTX choices");
 }
 assert.match(appSource, /function applyRemoteSDPChoices\(sdp\) \{\s*return applyVideoCodecChoice\(applyOpusDTXChoice\(sdp\)\);/);
-assert.match(appSource, /function applyVideoCodecChoice\(sdp\) \{\s*return window\.SlowMeetVideoCodec\.preferVideoCodec\(sdp, videoCodecApplied\);/);
+assert.match(appSource, /function applyVideoCodecChoice\(sdp\) \{\s*videoCodecDescribed = videoCodecApplied;\s*return window\.SlowMeetVideoCodec\.preferVideoCodec\(sdp, videoCodecApplied\);/);
+assert.match(appSource, /if \(peer && renegotiationQueue && sendingVideo\(\)\) renegotiateLocalMedia\(\)/,
+  "a codec change renegotiates only for a participant who is sending video");
+assert.match(appSource, /function sendingVideo\(\) \{\s*return \[cameraSender, screenSender\]\.some\(\(sender\) => sender\?\.track\?\.readyState === "live"\);/);
+assert.match(appSource, /if \(videoCodecDescribed !== videoCodecApplied && peer && renegotiationQueue\) \{\s*videoCodecDescribed = videoCodecApplied;\s*renegotiateLocalMedia\(\)/,
+  "video that starts after a codec change brings the description up to date");
+assert.match(appSource, /planCodecChange\(\{\s*target, applied: videoCodecApplied, roomCodecs: videoCodecRoomList\(\), immediate\s*\}\)/);
+assert.match(appSource, /return window\.SlowMeetVideoCodec\.codecNote\(\{/);
+assert.match(appSource, /codecs\.addCpuSample\(videoCodecCpu, \{ now: Date\.now\(\), cpuLimited: limitationReason === "cpu" \}\)/);
+assert.match(appSource, /noteOutboundVideoStat\(codecById\.get\(stat\.codecId\), stat\.qualityLimitationReason, stat\.id, stat\.framesEncoded\)/);
+assert.match(appSource, /if \(optionsKey !== videoCodecOptionsKey\) \{/, "the picker is rebuilt only when its entries change");
 assert.match(appSource, /let videoCodecStored = readStoredValue\("meeting\.videoCodec"\)/);
 assert.match(appSource, /writeStoredValue\("meeting\.videoCodec", videoCodecStored\)/);
 assert.match(appSource, /type: "join", name, password, reconnect_token: reconnectToken,\s*video_codecs: videoCodecsDevice \|\| undefined/,
