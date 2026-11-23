@@ -26,12 +26,17 @@ type forwardJitter struct {
 	jitter        float64 // seconds, RFC 3550 estimate
 	windowStart   time.Time
 	windowMax     float64 // seconds, highest estimate seen in the window
+	windowPackets int
+	partialAt     time.Time
 
 	// result is the last complete window's highest estimate in microseconds
 	// plus one (0 before the first window completes); recent holds the
 	// windows before it, like forwardLoss.
 	result atomic.Int64
 	recent [forwardLossRecentWindows - 1]atomic.Int64
+	// partial is the window in progress, like forwardLoss.partial: a sender's
+	// new queueing reaches receivers' samples before its window completes.
+	partial atomic.Int64
 }
 
 // observe records one packet forwarded to the publication's receivers, with
@@ -43,7 +48,7 @@ func (j *forwardJitter) observe(timestamp uint32, clockRate uint32, now time.Tim
 	if !j.started {
 		j.started = true
 		j.lastTimestamp, j.lastArrival = timestamp, now
-		j.windowStart = now
+		j.windowStart, j.partialAt = now, now
 		return
 	}
 	// D(i-1, i) = (arrival difference) - (RTP timestamp difference); the
@@ -54,12 +59,19 @@ func (j *forwardJitter) observe(timestamp uint32, clockRate uint32, now time.Tim
 	j.jitter += (math.Abs(difference) - j.jitter) / 16
 	if now.Sub(j.windowStart) >= forwardLossWindow {
 		j.closeWindow()
-		j.windowStart = now
+		j.windowStart, j.partialAt = now, now
 		j.windowMax = j.jitter
+		j.windowPackets = 1
+		j.partial.Store(0)
 		return
 	}
 	if j.jitter > j.windowMax {
 		j.windowMax = j.jitter
+	}
+	j.windowPackets++
+	if now.Sub(j.partialAt) >= forwardPartialInterval && j.windowPackets >= forwardPartialMinPackets {
+		j.partialAt = now
+		j.partial.Store(int64(math.Round(j.windowMax*1e6)) + 1)
 	}
 }
 
@@ -73,13 +85,16 @@ func (j *forwardJitter) closeWindow() {
 	j.result.Store(int64(math.Round(j.windowMax*1e6)) + 1)
 }
 
-// jitterMs reports the highest jitter, in milliseconds, of the last
-// forwardLossRecentWindows complete windows; ok is false before the first
-// window completes. Like the loss, the worst recent window keeps a burst
+// jitterMs reports the highest jitter, in milliseconds, of the window in
+// progress and the last forwardLossRecentWindows complete windows; ok is
+// false with neither. Like the loss, the worst recent window keeps a burst
 // that a receiver's one-second sample caught but the SFU's matching window
 // split from reading as the receiver's own jitter.
 func (j *forwardJitter) jitterMs() (int, bool) {
 	value := j.result.Load()
+	if partial := j.partial.Load(); partial > value {
+		value = partial
+	}
 	if value == 0 {
 		return 0, false
 	}

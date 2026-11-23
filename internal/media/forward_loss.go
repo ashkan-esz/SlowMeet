@@ -29,13 +29,29 @@ type forwardLoss struct {
 	firstExt    int64
 	maxExt      int64
 	count       int64
+	partialAt   time.Time
 
 	// result is the last complete window: loss in tenths of a percent in the
 	// low 32 bits and the window's forwarded packet count above, or 0 before
 	// the first window completes. recent holds the windows before it.
 	result atomic.Int64
 	recent [forwardLossRecentWindows - 1]atomic.Int64
+	// partial is the window in progress, in result's encoding, refreshed at
+	// most every forwardPartialInterval once it spans forwardPartialMinPackets
+	// sequence numbers; 0 when it does not yet. An impairment reaches a
+	// receiver's one-second sample before the window that holds it completes;
+	// with completed windows only, the first second of a sender's new loss
+	// was under-reported and the receiver charged the rest to its own link.
+	partial atomic.Int64
 }
+
+const (
+	// forwardPartialInterval is how often the window in progress is
+	// published; forwardPartialMinPackets is the fewest sequence numbers it
+	// must span to be worth reporting.
+	forwardPartialInterval   = 250 * time.Millisecond
+	forwardPartialMinPackets = 10
+)
 
 // forwardLossRecentWindows is how many complete windows lossTenths takes the
 // highest loss of. A receiver samples its own streams on its own one-second
@@ -75,49 +91,75 @@ func (f *forwardLoss) observe(sequence uint16, now time.Time) {
 		f.maxExt = ext
 	}
 	f.count++
+	if now.Sub(f.partialAt) >= forwardPartialInterval && f.maxExt-f.firstExt+1 >= forwardPartialMinPackets {
+		f.partialAt = now
+		if value, ok := f.windowValue(); ok {
+			f.partial.Store(value)
+		}
+	}
 }
 
 func (f *forwardLoss) startWindow(ext int64, now time.Time) {
 	f.windowStart = now
+	f.partialAt = now
+	f.partial.Store(0)
 	f.firstExt = ext
 	f.maxExt = ext
 	f.count = 0
 }
 
-func (f *forwardLoss) closeWindow() {
+// windowValue is the current window's loss in result's encoding.
+func (f *forwardLoss) windowValue() (int64, bool) {
 	expected := f.maxExt - f.firstExt + 1
 	if expected <= 0 || f.count <= 0 {
-		return
+		return 0, false
 	}
 	forwarded := f.count
 	if forwarded > expected {
 		forwarded = expected
 	}
-	lossTenths := (expected - forwarded) * 1000 / expected
+	return f.count<<32 | (expected-forwarded)*1000/expected, true
+}
+
+func (f *forwardLoss) closeWindow() {
+	value, ok := f.windowValue()
+	if !ok {
+		return
+	}
 	for index := len(f.recent) - 1; index > 0; index-- {
 		f.recent[index].Store(f.recent[index-1].Load())
 	}
 	if len(f.recent) > 0 {
 		f.recent[0].Store(f.result.Load())
 	}
-	f.result.Store(f.count<<32 | lossTenths)
+	f.result.Store(value)
 }
 
 // lossTenths reports the highest forwarded loss, in tenths of a percent, of the
-// last forwardLossRecentWindows complete windows, and how many packets the
-// latest one forwarded; ok is false before the first window completes.
+// window in progress and the last forwardLossRecentWindows complete windows,
+// and how many packets the latest complete one forwarded (the window in
+// progress's before the first completes); ok is false with neither.
 func (f *forwardLoss) lossTenths() (loss10 int, packets int64, ok bool) {
-	value := f.result.Load()
-	if value == 0 {
+	value, partial := f.result.Load(), f.partial.Load()
+	if value == 0 && partial == 0 {
 		return 0, 0, false
 	}
-	loss10 = int(value & 0xffffffff)
-	for index := range f.recent {
-		if earlier := f.recent[index].Load(); earlier != 0 && int(earlier&0xffffffff) > loss10 {
-			loss10 = int(earlier & 0xffffffff)
+	packets = value >> 32
+	if value == 0 {
+		packets = partial >> 32
+	}
+	loss10 = -1
+	consider := func(candidate int64) {
+		if candidate != 0 && int(candidate&0xffffffff) > loss10 {
+			loss10 = int(candidate & 0xffffffff)
 		}
 	}
-	return loss10, value >> 32, true
+	consider(value)
+	consider(partial)
+	for index := range f.recent {
+		consider(f.recent[index].Load())
+	}
+	return loss10, packets, true
 }
 
 // ForwardLoss reports the share of sourceID's audio and camera packets the SFU

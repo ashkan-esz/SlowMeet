@@ -68,3 +68,56 @@ func TestRouterForwardLossPicksAudioAndBusiestCameraLayer(t *testing.T) {
 		t.Fatalf("forward loss = audio %d video %d, want 80 and the busiest layer's 120", audio, video)
 	}
 }
+
+// The window in progress is reported before it closes, so a sender's new
+// loss reaches receivers while their own samples already show it: with
+// completed windows only, the newest one held just the start of an
+// impairment and the receiver charged the rest to its own link.
+func TestForwardLossReportsWindowInProgress(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	var loss forwardLoss
+	// A clean completed window first.
+	at := start
+	sequence := uint16(0)
+	for ; sequence < 50; sequence++ {
+		loss.observe(sequence, at)
+		at = at.Add(20 * time.Millisecond)
+	}
+	at = start.Add(forwardLossWindow)
+	loss.observe(sequence, at) // closes the clean window, opens the next
+	sequence++
+	if loss10, _, _ := loss.lossTenths(); loss10 != 0 {
+		t.Fatalf("clean window loss = %d, want 0", loss10)
+	}
+
+	// The next window loses every other sequence. Before forwardPartialInterval
+	// has passed nothing of it is reported.
+	windowStart := at
+	observeHalf := func(until time.Duration) {
+		for at.Sub(windowStart) < until {
+			at = at.Add(20 * time.Millisecond)
+			loss.observe(sequence+1, at) // sequence itself is never forwarded
+			sequence += 2
+		}
+	}
+	observeHalf(forwardPartialInterval - 30*time.Millisecond)
+	if loss10, _, _ := loss.lossTenths(); loss10 != 0 {
+		t.Fatalf("loss reported %d before the window in progress was published", loss10)
+	}
+	observeHalf(forwardPartialInterval + 30*time.Millisecond)
+	loss10, packets, ok := loss.lossTenths()
+	if !ok || loss10 < 400 {
+		t.Fatalf("window in progress = loss10 %d (ok %t), want about 500 before the window closes", loss10, ok)
+	}
+	if packets != 50 {
+		t.Fatalf("packet count = %d, want the last complete window's 50", packets)
+	}
+
+	// Too few sequences in a new window are not reported on their own.
+	var short forwardLoss
+	short.observe(0, start)
+	short.observe(5, start.Add(forwardPartialInterval+time.Millisecond))
+	if _, _, ok := short.lossTenths(); ok {
+		t.Fatal("a window in progress spanning fewer than forwardPartialMinPackets sequences was reported")
+	}
+}

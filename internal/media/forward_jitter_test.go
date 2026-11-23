@@ -121,3 +121,28 @@ func TestRouterForwardJitterPicksAudioAndBusiestCameraLayer(t *testing.T) {
 		t.Fatalf("another source = audio %d video %d, want -1 and -1", audio, video)
 	}
 }
+
+// The jitter of the window in progress is reported before it closes, like the
+// loss: a sender's new queueing reaches receivers' samples first.
+func TestForwardJitterReportsWindowInProgress(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	var jitter forwardJitter
+	timestamp := uint32(0)
+	at := start
+	send := func(packets int, lateEveryOther time.Duration) {
+		for index := 0; index < packets; index++ {
+			jitter.observe(timestamp, 48000, at.Add(time.Duration(index%2)*lateEveryOther))
+			timestamp += 960
+			at = at.Add(20 * time.Millisecond)
+		}
+	}
+	send(60, 0) // one clean completed window (and a little of the next)
+	if got, ok := jitter.jitterMs(); !ok || got > 1 {
+		t.Fatalf("clean window jitter = %d ms (ok %t), want about 0", got, ok)
+	}
+	// Half a second of 40 ms queueing, inside the window that is still open.
+	send(25, 40*time.Millisecond)
+	if got, _ := jitter.jitterMs(); got < 20 {
+		t.Fatalf("window in progress jitter = %d ms, want the queueing reported before the window closes", got)
+	}
+}
