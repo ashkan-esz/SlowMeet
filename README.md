@@ -118,5 +118,5 @@ The server reads configuration from environment variables. `.env` files are
 read by Compose, but are not loaded automatically by `go run .`. Keep passwords
 and TURN credentials private. Set `MEETING_PASSWORD` to protect meeting entry
 and `ADMIN_PASSWORD` to protect `/admin`. See the
-[configuration guide](docs/configuration.md) for TURN, ICE, media limits, and
+[configuration guide](docs/configuration.md) for TURN, ICE, media limits, video codecs, and
 metrics details.

@@ -367,19 +367,67 @@ through host and provider firewalls.
 
 ## Media limits and diagnostics
 
+### Video codecs
+
 `VIDEO_CODECS=av1,vp9,vp8,h264` (the default) lists the video codecs
 participants may send, and `DEFAULT_VIDEO_CODEC=av1` names the one browsers use
 unless a participant picks another under Settings. `vp8` must stay in the list:
 every browser plays it, so a room always has a codec in common. An unset
-default is the newest listed codec. The server forwards video without
-transcoding, so a room only uses a codec that every participant's device both
-sends and receives. When a device without the default joins, everyone falls
-back to the newest codec they share (AV1, then VP9, then VP8, then H.264) and
-returns to the default about 15 seconds after that device leaves. A device
-that lists a codec but cannot encode it in real time steps down by itself. With
-`SIMULCAST_ENABLED=true`, cameras stay on VP8 or H.264. Administrators can
-change both settings on the admin page; running calls switch codec without
-rejoining.
+default is the newest listed codec. Administrators can change both under
+"Video codecs" on the admin page; running calls switch codec without rejoining.
+
+Choosing the default:
+
+| Codec | Picture at low bitrate | Cost for the sending device | Missing on |
+|---|---|---|---|
+| AV1 | Best | Highest; encoded in software on most devices | Many phones, older Firefox, Safari without AV1 hardware |
+| VP9 | Clearly better than VP8 | Moderate | Very few current browsers |
+| VP8 | Baseline | Low | Nothing |
+| H.264 | About VP8 | Lowest on phones, which encode it in hardware | Browsers on systems without an H.264 codec, which is rare |
+
+AV1 suits slow links when most participants use capable devices. If phones get
+hot or drop frames, make VP9 the default. VP8 is the floor every room can fall
+to.
+
+The server forwards video without transcoding, so the codec a sender uses is
+decided in this order:
+
+1. The participant's own choice under Settings, otherwise the default.
+2. Only codecs that every device in the room both sends and receives. One
+   device without the default takes it away from the whole room while it is
+   there; everyone falls back to the newest codec they share (AV1, then VP9,
+   then VP8, then H.264).
+3. In Automatic, a device that lists a codec but cannot encode it in real time
+   steps down to an older one by itself and stays there for the session. A
+   codec the participant picked explicitly is not overridden this way.
+4. With `SIMULCAST_ENABLED=true`, cameras stay on VP8 or H.264.
+5. A codec the administrator removes is given up at once, even when a
+   participant had picked it.
+
+The fallback is immediate when a limiting device joins. The room returns to
+the default about 15 seconds after that device leaves, and a participant
+inside the reconnect window (`RECONNECT_TIMEOUT_SECONDS`) still counts, so a
+short drop does not switch every encoder twice. A switch costs each viewer one
+renegotiation and leaves one idle video line in their session description.
+
+What the app shows:
+
+- Settings, "Video codec": the note under the picker says what is being sent
+  and why it is not the wanted codec, for example "Sending VP9. Not everyone
+  here can play AV1." Entries the device cannot use are disabled and marked
+  "not supported on this device".
+- Connection details: the "Video codec" row is the codec the browser reports
+  for its outgoing video.
+- Admin page: the policy summary names the default and the allowed list, and
+  the diagnostics export carries both.
+
+If a whole room sits on VP8 or H.264 although its devices are capable, one
+browser is usually still running a page cached from before codec selection:
+it reports no codecs, so the server assumes only VP8 and H.264 for it.
+Reloading that page fixes it.
+
+Codec selection and mid-call switches are tested in Chromium and Firefox.
+Safari has not been tested.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video
 ceilings. The quality limit caps browser profile resolution. The SFU paces
