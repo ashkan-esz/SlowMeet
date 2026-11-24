@@ -35,7 +35,13 @@ const (
 	// TypeSourceQuality is sent by the server only: another participant's
 	// reported uplink loss and jitter, so receivers do not charge a sender's
 	// bad uplink to their own link.
-	TypeSourceQuality      = "source_quality"
+	TypeSourceQuality = "source_quality"
+	// TypeDownlinkQuality is sent by the server only, to one participant:
+	// what that participant's own download loses (packet_loss10) and queues
+	// (jitter_ms) of the packets the SFU sends it, from its transport-cc
+	// feedback. It replaces the participant's estimate from its inbound
+	// streams, which every sender's uplink trouble leaks into.
+	TypeDownlinkQuality    = "downlink_quality"
 	TypeVideoSubscriptions = "set_video_subscriptions"
 	TypeScreenShare        = "screen_share"
 	TypeScreenState        = "screen_share_state"

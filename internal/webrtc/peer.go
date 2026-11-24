@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	ice "github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
@@ -19,6 +20,9 @@ type Peer struct {
 	connection *pion.PeerConnection
 	closeOnce  sync.Once
 	ciphers    *cipherReport
+	// downlink measures what reaches the participant of what this peer
+	// sends (downlink_meter.go).
+	downlink *downlinkMeter
 }
 
 func NewPeer(iceServers []string) (*Peer, error) {
@@ -95,32 +99,32 @@ func NewPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 // negotiation are unchanged; TestCustomRegistrySDPMatchesDefault pins the
 // negotiated SDP against a default-construction peer. Re-verify this recipe
 // against interceptor.go if the pion version is ever bumped.
-func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEngine, *interceptor.Registry, error) {
+func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEngine, *interceptor.Registry, *downlinkMeter, error) {
 	loggerFactory := settingEngine.LoggerFactory
 	if loggerFactory == nil {
 		loggerFactory = logging.NewDefaultLoggerFactory()
 	}
 	mediaEngine := &pion.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	registry := &interceptor.Registry{}
 	if err := pion.ConfigureNackWithOptions(mediaEngine, registry,
 		[]nack.GeneratorOption{nack.WithGeneratorLoggerFactory(loggerFactory)},
 		nack.WithResponderLoggerFactory(loggerFactory)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := pion.ConfigureRTCPReportsWithOptions(registry,
 		[]report.ReceiverOption{report.WithReceiverLoggerFactory(loggerFactory)},
 		report.WithSenderLoggerFactory(loggerFactory)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := pion.ConfigureSimulcastExtensionHeaders(mediaEngine); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := pion.ConfigureTWCCSenderWithOptions(mediaEngine, registry,
 		twcc.WithLoggerFactory(loggerFactory)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// ConfigureTWCCSenderWithOptions only generates feedback for what this
 	// peer receives; it negotiates the transport-cc header extension but
@@ -133,12 +137,17 @@ func newMediaEngineAndRegistry(settingEngine *pion.SettingEngine) (*pion.MediaEn
 	// link. The header extension interceptor gives each of this peer's
 	// transports its own sequence (media.egressHeaderExtensions drops the
 	// publisher's extensions first, on a copy of each packet per receiver).
+	// The downlink meter reads the sequence numbers the stamper writes, so it
+	// is added first: the last interceptor added wraps the others and sees
+	// each outgoing packet before them.
+	downlink := newDownlinkMeter()
+	registry.Add(downlink)
 	stamper, err := twcc.NewHeaderExtensionInterceptor()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	registry.Add(stamper)
-	return mediaEngine, registry, nil
+	return mediaEngine, registry, downlink, nil
 }
 
 func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int, ipv4Only bool, publicIP string) (*Peer, error) {
@@ -199,7 +208,7 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 			})
 		}
 	}
-	mediaEngine, registry, err := newMediaEngineAndRegistry(&settingEngine)
+	mediaEngine, registry, downlink, err := newMediaEngineAndRegistry(&settingEngine)
 	if err != nil {
 		return nil, fmt.Errorf("configure media engine and interceptors: %w", err)
 	}
@@ -209,7 +218,7 @@ func newPeerWithPortRange(configuration pion.Configuration, portMin, portMax int
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
-	return &Peer{connection: connection, ciphers: ciphers}, nil
+	return &Peer{connection: connection, ciphers: ciphers, downlink: downlink}, nil
 }
 
 // localInterfaceHasIP reports whether ip is assigned to a local interface.
@@ -224,6 +233,18 @@ func localInterfaceHasIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// DownlinkQuality reports what the participant's download loses and queues
+// of what this peer sends it, from the participant's transport-cc feedback:
+// loss in tenths of a percent, RFC 3550 jitter in milliseconds, and the
+// packets measured. ok is false without a recent measurement (no feedback,
+// too few packets, or a peer built without the meter).
+func (p *Peer) DownlinkQuality() (loss10, jitterMs, packets int, ok bool) {
+	if p == nil || p.downlink == nil {
+		return 0, 0, 0, false
+	}
+	return p.downlink.quality(time.Now())
 }
 
 func (p *Peer) Connection() *pion.PeerConnection {

@@ -36,6 +36,8 @@ func (h *Hub) admit(c *client, participant meeting.Participant, response Message
 		return errors.New("admission expired")
 	}
 	h.roomMembers[c] = struct{}{}
+	// The refresher also tells each member its own downlink.
+	h.armSourceQualityRefreshLocked()
 	if !activeTakeover {
 		// A takeover's peers never saw this participant leave, so they get no
 		// second announcement.

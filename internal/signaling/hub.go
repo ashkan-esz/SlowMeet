@@ -130,6 +130,12 @@ type client struct {
 	// so forcing keyframes for it would only cost bitrate. Guarded by
 	// negotiationMu.
 	restartKeyFrameWanted bool
+	// downlinkSentAt, downlinkSentLoss10 and downlinkSentJitterMs are the
+	// last downlink_quality sent to this connection (guarded by Hub.mu). They
+	// live on the connection, so a resumed participant starts fresh.
+	downlinkSentAt       time.Time
+	downlinkSentLoss10   int
+	downlinkSentJitterMs int
 	// opusDTX marks the SDP sent to this client so its browser sends
 	// discontinuous Opus; set once at join, before any description is sent.
 	opusDTX bool
@@ -207,13 +213,16 @@ type Hub struct {
 	sourceQualityRefresh *time.Timer
 	// forwardQualityForTest replaces the router's measurements in tests.
 	forwardQualityForTest func(participantID string) (audioLoss10, videoLoss10, audioJitterMs, videoJitterMs int)
-	metrics               *metrics.Metrics
-	screenSharer          *client
-	chatHistory           map[string]*roomChatHistory
-	closed                bool
-	pendingConnections    int
-	maxPendingConnections int
-	joinTimeout           time.Duration
+	// downlinkQualityForTest replaces the router's downlink measurement in
+	// tests.
+	downlinkQualityForTest func(participantID string) (loss10, jitterMs int)
+	metrics                *metrics.Metrics
+	screenSharer           *client
+	chatHistory            map[string]*roomChatHistory
+	closed                 bool
+	pendingConnections     int
+	maxPendingConnections  int
+	joinTimeout            time.Duration
 	// Liveness and resume timings. NewHub sets them from the package
 	// constants; tests shorten them on a hub before serving it.
 	pongWait             time.Duration
@@ -936,14 +945,15 @@ func (h *Hub) relaySourceQuality(participantID string, now time.Time) {
 // reached receivers a second or two after it reached their own samples: long
 // enough for a participant on a fast link to step down on it.
 func (h *Hub) armSourceQualityRefreshLocked() {
-	if h.closed || h.sourceQualityRefresh != nil || len(h.sourceQuality) == 0 {
+	if h.closed || h.sourceQualityRefresh != nil || (len(h.sourceQuality) == 0 && len(h.roomMembers) == 0) {
 		return
 	}
 	h.sourceQualityRefresh = time.AfterFunc(sourceQualityRefreshInterval, h.refreshSourceQuality)
 }
 
 // refreshSourceQuality re-reads the SFU's measurements for every participant
-// with a source quality state and relays what changed, then re-arms.
+// with a source quality state and relays what changed, tells every room
+// member its own downlink, then re-arms.
 func (h *Hub) refreshSourceQuality() {
 	h.mu.Lock()
 	h.sourceQualityRefresh = nil
@@ -960,9 +970,74 @@ func (h *Hub) refreshSourceQuality() {
 	for _, participantID := range participantIDs {
 		h.relaySourceQuality(participantID, now)
 	}
+	h.relayDownlinkQuality(now)
 	h.mu.Lock()
 	h.armSourceQualityRefreshLocked()
 	h.mu.Unlock()
+}
+
+// measuredDownlink is the SFU's measurement of participantID's download
+// (media.Router.DownlinkQuality), or -1 for both without one.
+func (h *Hub) measuredDownlink(participantID string) (loss10, jitterMs int) {
+	if h.downlinkQualityForTest != nil {
+		return h.downlinkQualityForTest(participantID)
+	}
+	if h.router == nil {
+		return -1, -1
+	}
+	return h.router.DownlinkQuality(participantID)
+}
+
+// relayDownlinkQuality tells each room member what its own download loses
+// and queues, as the SFU measures it from the member's transport-cc feedback.
+// A receiver used to estimate that from its inbound streams, discounting what
+// each sender's uplink lost (source_quality); with every sender on a bad
+// uplink, or reports that over-state a sender's loss, its own download loss
+// was hidden or unmeasurable (B1, B14 in docs/network-testing.md). A
+// worsening goes out at once; otherwise the current value is re-sent every
+// sourceQualityMinInterval, which also tells the browser it is fresh.
+// Nothing is sent without a measurement: the browser falls back to its own
+// estimate once the last value is old.
+func (h *Hub) relayDownlinkQuality(now time.Time) {
+	h.mu.RLock()
+	members := make([]*client, 0, len(h.roomMembers))
+	for c := range h.roomMembers {
+		if c.participant.ID != "" {
+			members = append(members, c)
+		}
+	}
+	h.mu.RUnlock()
+	type reading struct {
+		c                *client
+		loss10, jitterMs int
+	}
+	readings := make([]reading, 0, len(members))
+	for _, c := range members {
+		if loss10, jitterMs := h.measuredDownlink(c.participant.ID); loss10 >= 0 && jitterMs >= 0 {
+			readings = append(readings, reading{c, loss10, jitterMs})
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	for _, read := range readings {
+		c := read.c
+		if _, admitted := h.roomMembers[c]; !admitted {
+			continue
+		}
+		worse := read.loss10-c.downlinkSentLoss10 >= sourceQualityLossStep ||
+			read.jitterMs-c.downlinkSentJitterMs >= sourceQualityJitterStepMs
+		if !c.downlinkSentAt.IsZero() && !worse && now.Sub(c.downlinkSentAt) < sourceQualityMinInterval {
+			continue
+		}
+		c.downlinkSentAt, c.downlinkSentLoss10, c.downlinkSentJitterMs = now, read.loss10, read.jitterMs
+		msg := Message{Version: ProtocolVersion, Type: TypeDownlinkQuality, ParticipantID: c.participant.ID,
+			PacketLoss10: read.loss10, JitterMs: read.jitterMs}
+		msg.prepare()
+		_ = c.writePrepared(&msg)
+	}
 }
 
 func sameOrigin(r *http.Request) bool {
