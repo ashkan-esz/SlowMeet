@@ -6094,7 +6094,7 @@ async function runDiagnosticsUpdate() {
     // packet loss is zero, drop the drop count from the layer decision so a
     // slow decoder on a perfect link does not downgrade (and never recover)
     // the SFU layer.
-    const decodeDropsNotNetwork = lossKnown && packetLoss === 0;
+    const decodeDropsNotNetwork = ownLinkEstimate.lossPct === 0;
     const layerDecision = chooseCameraLayer(
       cameraLayer, cameraLayerPoorSamples, cameraLayerGoodSamples,
       values.cameraPacketLossPct,

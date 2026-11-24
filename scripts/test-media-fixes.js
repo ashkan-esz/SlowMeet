@@ -282,7 +282,7 @@ assert.match(appSource,
 
 // Decode-side frame drops must not downgrade the SFU layer when the measured
 // packet loss is zero.
-const layerDecisionSource = slice(appSource, "const decodeDropsNotNetwork = lossKnown && packetLoss === 0;",
+const layerDecisionSource = slice(appSource, "const decodeDropsNotNetwork = ownLinkEstimate.lossPct === 0;",
   "setCameraLayer(layerDecision.layer);");
 assert.match(layerDecisionSource,
   /decodeDropsNotNetwork \? 0 : values\.cameraDroppedFramesPct/,

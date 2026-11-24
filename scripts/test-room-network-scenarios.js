@@ -77,7 +77,7 @@ const localBadge = "local";
     "const suspendedHealthy = videoSuspended && pauseCondition.transportHealthy && !critical;",
     "const recoverable = pauseCondition.good || (atFloorProfile && !pauseCondition.poor && !critical) || suspendedHealthy;",
     "recoverySamples = recoverable ? recoverySamples + 1 : 0;",
-    "const decodeDropsNotNetwork = lossKnown && packetLoss === 0;",
+    "const decodeDropsNotNetwork = ownLinkEstimate.lossPct === 0;",
     "decodeDropsNotNetwork ? 0 : values.cameraDroppedFramesPct",
     'if (shouldPauseVideo(profile.value === "auto", adaptationLevel, criticalSamples)) {',
     "} else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, recoverable)) {",
@@ -281,7 +281,7 @@ function runLadder(ticks, sampleAt, {
     const recoverable = pauseCondition.good || (atFloorProfile && !pauseCondition.poor && !critical) || suspendedHealthy;
     recoverySamples = recoverable ? recoverySamples + 1 : 0;
     if (simulcastEnabled) {
-      const decodeDropsNotNetwork = lossKnown && packetLoss === 0;
+      const decodeDropsNotNetwork = ownLinkEstimate.lossPct === 0;
       const layerDecision = chooseCameraLayer(
         cameraLayer, cameraLayerPoorSamples, cameraLayerGoodSamples,
         values.cameraPacketLossPct,
@@ -1114,6 +1114,19 @@ for (const [name, uplinkLossPcts] of [
   assert.equal(resumes.pauses.length, 1, "the estimate pauses the camera once");
   assert.equal(resumes.resumes.length, 1,
     "and a healed estimate resumes it although the server still measures 12 % before repair");
+  // The camera layer is not the ladder either: a server loss of exactly zero
+  // must not excuse frame drops that the streams' own loss charges to the
+  // network.
+  const lossyStreamsCleanServer = runLadder(20, () => ({
+    ...goodParticipantLink,
+    streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: 3 }),
+    senderUplinks: senderReports([0, 0, 0]),
+    serverDownlink: { lossPct: 0, jitterMs: 1 },
+    cameraPacketLossPct: 0.5,
+    cameraDroppedFramesPct: 30
+  }), { uplinkLossPct: 0, simulcastEnabled: true, startLayer: "high" });
+  assert.equal(lossyStreamsCleanServer.cameraLayer, "low",
+    "frame drops alongside measured stream loss lower the camera layer whatever the server measured");
   // A queue only the streams see must reach the pause decision too.
   const jitterPause = runLadder(10, () => ({
     ...goodParticipantLink,
