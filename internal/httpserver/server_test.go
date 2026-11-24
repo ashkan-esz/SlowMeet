@@ -86,6 +86,15 @@ func TestHealthAndPublicConfig(t *testing.T) {
 		"slowmeet_audio_queue_overflow_drops_total 0",
 		"slowmeet_audio_queue_expired_drops_total 0",
 		"slowmeet_audio_write_failures_total 0",
+		"slowmeet_video_codec_switches_total 0",
+		`slowmeet_video_frames_dropped_total{reason="queue_full"} 0`,
+		`slowmeet_video_frames_dropped_total{reason="fps_limit"} 0`,
+		`slowmeet_video_frames_dropped_total{reason="too_large"} 0`,
+		"slowmeet_video_mailbox_drops_total 0",
+		"slowmeet_video_mailbox_peak_packets 0",
+		"slowmeet_video_subscriptions_withheld 0",
+		`slowmeet_video_publications{codec="av1"} 0`,
+		`slowmeet_video_publications{codec="h264"} 0`,
 	} {
 		if !strings.Contains(metrics.Body.String(), metric) {
 			t.Fatalf("metrics response omitted %q", metric)

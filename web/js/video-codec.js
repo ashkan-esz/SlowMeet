@@ -248,11 +248,34 @@
       modes.some((mode) => /^[LS][2-9]/.test(String(mode || ""))));
   }
 
+  // A browser can list a codec it has no working encoder for (Firefox lists
+  // H.264 without its H.264 component installed). The camera then encodes no
+  // frame at all. True once a live camera has produced nothing for limitMs in
+  // `codec`; VP8 is never given up, it is what the camera falls back to.
+  function stalledFallbackDue(stalledMs, codec, limitMs = 8000) {
+    return isCodec(codec) && codec !== "vp8" && Number(stalledMs) >= limitMs;
+  }
+
+  // Whether silence from the camera's encoder may be held against the codec.
+  // It may only when nothing else explains it: the page's timer ran on time
+  // (a throttled or sleeping page proves nothing), the connection is up and
+  // not negotiating, the camera is live with an active encoding on a media
+  // line negotiated for sending, and the codec has never encoded a frame in
+  // this session (an encoder that worked once is starved or paused, not
+  // missing). VP8 is never judged; it is what the camera falls back to.
+  function encoderSilenceCounts(state) {
+    const facts = state || {};
+    return Boolean(facts.onTime && facts.connected && facts.signalingStable &&
+      isCodec(facts.codec) && facts.codec !== "vp8" && !facts.proven &&
+      facts.cameraLive && facts.encodingActive && facts.lineNegotiated);
+  }
+
   const utilities = Object.freeze({
     codecs, isCodec, codecLabel, isNewerCodec, codecNameFromMime, deviceCodecs,
     fallbackOrder, chooseSendCodec, preferVideoCodec, cpuFallbackDue,
     planCodecChange, codecNote, cpuFallbackWatched, addCpuSample,
-    simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed
+    simulcastCapableCodecs, needsLayerMode, simulcastEncodings, simulcastCollapsed, stalledFallbackDue,
+    encoderSilenceCounts
   });
   root.SlowMeetVideoCodec = utilities;
   if (typeof module !== "undefined" && module.exports) module.exports = utilities;

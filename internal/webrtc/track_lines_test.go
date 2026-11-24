@@ -30,10 +30,11 @@ func negotiateTestLines(t *testing.T, offerer, answerer *pion.PeerConnection) {
 	}
 }
 
-// AddTrack reuses a media line whose track was removed; AddTrackOnNewLine does
-// not, and its line is the last one, which is what a receiver's browser needs
-// when the same offer removes a track with the same IDs from an earlier line.
-func TestAddTrackOnNewLineAppendsALine(t *testing.T) {
+// A media line whose track was removed carries the next track, so a viewer's
+// session description does not grow with every publisher that comes and goes
+// or changes codec. (Browsers find the stream on the reused line through the
+// mid the router writes on forwarded packets.)
+func TestAddTrackReusesAFreedMediaLine(t *testing.T) {
 	server, err := NewPeer(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,19 +89,13 @@ func TestAddTrackOnNewLineAppendsALine(t *testing.T) {
 	}
 	remove(second)
 
-	third, err := server.AddTrackOnNewLine(newTrack("third"))
+	third, err := server.AddTrack(newTrack("third"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := lines()
-	if len(current) != 2 {
-		t.Fatalf("media lines after AddTrackOnNewLine = %d, want 2", len(current))
-	}
-	if current[len(current)-1].Sender() != third {
-		t.Fatal("the new track is not on the last media line")
-	}
-	if got := current[len(current)-1].Direction(); got != pion.RTPTransceiverDirectionSendonly {
-		t.Fatalf("new line direction = %s, want sendonly", got)
-	}
 	negotiateTestLines(t, server.Connection(), browser)
+	if got := len(lines()); got != 1 {
+		t.Fatalf("media lines after a third track = %d, want still 1", got)
+	}
+	remove(third)
 }

@@ -36,6 +36,10 @@ type Limits struct {
 }
 
 type publication struct {
+	// videoDrops counts video this publication could not pass on. Nil in
+	// tests that build a publication by hand.
+	videoDrops *metrics.VideoDrops
+
 	key      string
 	sourceID string
 	role     SourceRole
@@ -59,6 +63,12 @@ type publication struct {
 	// lastKeyFrameRequest is when (Unix nanoseconds) a keyframe request last
 	// reached this publication's publisher; see allowKeyFrameRequest.
 	lastKeyFrameRequest atomic.Int64
+	// keyFrameAfterDrop is set when the SFU dropped one of this publication's
+	// frames whole: no receiver can continue the picture until a keyframe.
+	// lastDropKeyFrameRequest is when the SFU last asked for one for that
+	// reason; see keyFrameAfterDropDue.
+	keyFrameAfterDrop       atomic.Bool
+	lastDropKeyFrameRequest atomic.Int64
 	// forwardLoss measures the publisher's packets the SFU did not forward
 	// (forward_loss.go).
 	forwardLoss forwardLoss
@@ -181,8 +191,15 @@ func (t *publicationTarget) continueAudioFrom(predecessor *publicationTarget) {
 }
 
 const (
-	targetAudioQueueDepth = 4  // ~80ms of 20ms Opus frames
-	targetVideoQueueDepth = 24 // absorbs multi-packet frame bursts
+	targetAudioQueueDepth = 4 // ~80ms of 20ms Opus frames
+	// targetVideoQueueDepth is a receiver's video mailbox. The pacer hands a
+	// frame's packets over back to back while its token bucket allows (31
+	// full packets at the 3 Mbps default), far faster than the receiver's
+	// writer can encrypt and send them, so the mailbox must hold a whole
+	// frame. At 24 packets every frame above about 28 KB lost its tail for
+	// every receiver: a 720p or 1080p keyframe never arrived complete, the
+	// receiver asked for another, and the stream stayed dark.
+	targetVideoQueueDepth = maxFramePackets
 	// receiveMTU matches pion's default receive MTU; every ingress packet is
 	// read into a per-publication buffer of this size.
 	receiveMTU = 1500
@@ -312,7 +329,14 @@ const (
 	videoKeyFrameRetryDelay   = 250 * time.Millisecond
 	videoKeyFrameRequestCount = 3
 	maxVideoFrameBufferBytes  = 16 << 20
-	maxQueuedVideoFrames      = 4
+	// maxQueuedVideoFrames is how many complete frames wait for the pacer.
+	// The queue fills only while the pacer is busy with a frame larger than
+	// its burst: a 150 KB keyframe at the 3 Mbps default takes about 300 ms,
+	// and the frames the publisher sends right behind it arrive meanwhile.
+	// With room for 4, those were dropped, the picture could not continue
+	// from its own keyframe, and the receiver froze until it asked for the
+	// next one (B19 in docs/network-testing.md). 64 is one second at 60 fps.
+	maxQueuedVideoFrames      = 64
 	cameraLayerActivityWindow = 3 * time.Second
 	// maxFramePackets bounds a buffered frame; a frame with more packets is
 	// dropped whole. It must hold a keyframe at the highest bitrate cap: a
@@ -351,6 +375,10 @@ type Router struct {
 	limits              Limits
 	audioDrops          metrics.AudioDrops
 	rtcpRelay           metrics.RTCPRelay
+	// videoCodecSwitches counts publications replaced because their publisher
+	// changed codec (VideoCodecs).
+	videoCodecSwitches atomic.Uint64
+	videoDrops         metrics.VideoDrops
 }
 
 func NewRouter(config ...Limits) *Router {
@@ -412,6 +440,11 @@ func (r *Router) RTCPRelay() metrics.RTCPRelaySnapshot {
 	return r.rtcpRelay.Snapshot()
 }
 
+// VideoDrops reports the video the router did not pass on, by cause.
+func (r *Router) VideoDrops() metrics.VideoDropSnapshot {
+	return r.videoDrops.Snapshot()
+}
+
 func (r *Router) newTarget(track *pion.TrackLocalStaticRTP, pub *publication) *publicationTarget {
 	target := newPublicationTarget(track, targetQueueDepth(pub.remote))
 	if pub.remote != nil && pub.remote.Kind() == pion.RTPCodecTypeAudio {
@@ -451,9 +484,6 @@ func (r *Router) SetLimits(limits Limits) {
 // pion-internal locks, and running it under r.mu stalls every media forward
 // on the server for the duration of a join or leave.
 type pendingTrackOp struct {
-	// freshLine puts a subscription on a new media line of the receiver's
-	// connection instead of a free existing one (see Peer.AddTrackOnNewLine).
-	freshLine bool
 	subscribe bool
 	pub       *publication
 	targetID  string
@@ -587,6 +617,7 @@ func (r *Router) Publish(sourceID string, roleOrSource interface{}, args ...inte
 		senders:     make(map[string]*pion.RTPSender),
 		readBuf:     make([]byte, receiveMTU),
 		limiter:     newPublicationBitrateLimiter(remote.Kind(), rateForKind(remote.Kind(), r.currentLimits())),
+		videoDrops:  &r.videoDrops,
 		stopped:     make(chan struct{}),
 		forwardDone: make(chan struct{}),
 	}
@@ -1035,11 +1066,7 @@ func (r *Router) applyTrackOps(ops []pendingTrackOp) {
 		if err != nil {
 			continue
 		}
-		addTrack := op.peer.AddTrack
-		if op.freshLine {
-			addTrack = op.peer.AddTrackOnNewLine
-		}
-		sender, err := addTrack(local)
+		sender, err := op.peer.AddTrack(local)
 		if err != nil {
 			continue
 		}
@@ -1396,6 +1423,9 @@ func (r *Router) forwardVideo(pub *publication) {
 				enqueueVideoFrame(frames, videoFrame{packets: []*rtp.Packet{packet}, repairTargets: targets})
 			}
 		}
+		if pub.keyFrameAfterDrop.Load() && pub.keyFrameAfterDropDue(time.Now()) {
+			r.writeVideoKeyFrame(pub, nil)
+		}
 	}
 }
 
@@ -1524,7 +1554,10 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 				}
 				for _, target := range targets {
 					if frame.repairTargets == nil || target.hasVideoLoss(packet) {
-						target.enqueueVideo(packet)
+						if !target.enqueueVideo(packet) {
+							pub.videoDrops.MailboxDrop()
+						}
+						pub.videoDrops.ObserveMailbox(len(target.pending))
 					}
 				}
 			}
@@ -1673,6 +1706,9 @@ type videoFrameBuffer struct {
 	active           bool
 	dropping         bool
 	hasLastTimestamp bool
+	// oversized counts frames given up for exceeding the buffer limits; it
+	// survives the resets between frames.
+	oversized uint32
 }
 
 type videoFrame struct {
@@ -1711,6 +1747,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 			f.packets = nil
 			f.bytes = 0
 			f.dropping = true
+			f.oversized++
 		} else {
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
@@ -1724,7 +1761,7 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 	packets, frameBytes, complete := f.packets, f.bytes, !f.dropping
 	frameTimestamp := f.timestamp
 	lastTimestamp, hasLastTimestamp := frameTimestamp, true
-	*f = videoFrameBuffer{lastTimestamp: lastTimestamp, hasLastTimestamp: hasLastTimestamp}
+	*f = videoFrameBuffer{lastTimestamp: lastTimestamp, hasLastTimestamp: hasLastTimestamp, oversized: f.oversized}
 	if !complete {
 		return nil, 0, false
 	}
@@ -1763,6 +1800,7 @@ func sortFramePackets(packets []*rtp.Packet) {
 func (f *videoFrameBuffer) start(timestamp uint32) {
 	lastTimestamp, hasLastTimestamp := f.lastTimestamp, f.hasLastTimestamp
 	*f = videoFrameBuffer{
+		oversized:        f.oversized,
 		timestamp:        timestamp,
 		lastTimestamp:    lastTimestamp,
 		consecutive:      true,

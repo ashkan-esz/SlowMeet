@@ -2167,6 +2167,17 @@ const videoCodecsDevice = (() => {
 // videoCodecsLayerable is filled by the capability query further down.
 const videoCodecsLayerable = new Set();
 const videoCodecsNotSimulcast = new Set();
+// Codecs this device lists but turned out unable to encode at all; they are
+// treated as unsupported for the rest of the session.
+const videoCodecsBroken = new Set();
+// Codecs this device has encoded at least one frame in during this session.
+const videoCodecsProven = new Set();
+let videoCodecStalledSince = 0;
+let videoCodecStallCheckedAt = 0;
+
+function videoCodecsUsableDevice() {
+  return videoCodecsDevice ? videoCodecsDevice.filter((codec) => !videoCodecsBroken.has(codec)) : videoCodecsDevice;
+}
 let videoSimulcastModeSamples = [];
 let videoSimulcastModeSample = { at: 0, modes: [] };
 
@@ -2225,7 +2236,7 @@ function videoCodecRoomList() {
 function videoCodecTarget() {
   return window.SlowMeetVideoCodec.chooseSendCodec({
     stored: videoCodecStored, serverDefault: videoCodecServerDefault,
-    roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
+    roomCodecs: videoCodecRoomList(), device: videoCodecsUsableDevice(),
     avoid: videoCodecsAvoided, simulcastCodecs: videoSimulcastCodecs()
   });
 }
@@ -2242,7 +2253,7 @@ function applyRemoteSDPChoices(sdp) {
 function videoCodecNoteText() {
   return window.SlowMeetVideoCodec.codecNote({
     applied: videoCodecApplied, stored: videoCodecStored, serverDefault: videoCodecServerDefault,
-    roomCodecs: videoCodecRoomList(), device: videoCodecsDevice,
+    roomCodecs: videoCodecRoomList(), device: videoCodecsUsableDevice(),
     avoided: videoCodecsAvoided, simulcastCodecs: videoSimulcastCodecs()
   });
 }
@@ -2335,6 +2346,7 @@ function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncod
   videoCodecFramesEncoded.set(streamID, encoded);
   if (!advanced || !mimeType) return;
   const sending = codecs.codecNameFromMime(mimeType);
+  if (sending) videoCodecsProven.add(sending);
   videoCodecSentAt = Date.now();
   if (videoCodecMetric) videoCodecMetric.textContent = codecs.codecLabel(sending) || mimeType;
   // This video started after the codec choice last changed, so its encoder
@@ -2357,10 +2369,44 @@ function noteOutboundVideoStat(mimeType, limitationReason, streamID, framesEncod
 // The codec row in the connection details goes back to "Not active" once no
 // stream has encoded a frame for a few stats samples.
 setInterval(() => {
-  if (videoCodecMetric && videoCodecSentAt && Date.now() - videoCodecSentAt > 3500) {
+  const now = Date.now();
+  const encodedRecently = videoCodecSentAt && now - videoCodecSentAt <= 3500;
+  if (videoCodecMetric && videoCodecSentAt && !encodedRecently) {
     videoCodecSentAt = 0;
     videoCodecMetric.textContent = "Not active";
   }
+  // A live, enabled camera always produces frames. If it produces none in
+  // the codec in use, the browser has no working encoder for that codec
+  // (stalledFallbackDue), and the codec is dropped for this device. Only the
+  // camera is judged: a shared screen that does not change sends no frames.
+  // The verdict needs certainty; encoderSilenceCounts decides from these
+  // facts whether anything else could explain the silence.
+  const camera = cameraSender?.track;
+  const onTime = now - videoCodecStallCheckedAt < 2500;
+  videoCodecStallCheckedAt = now;
+  const expecting = window.SlowMeetVideoCodec.encoderSilenceCounts({
+    onTime,
+    connected: peer?.connectionState === "connected",
+    signalingStable: peer?.signalingState === "stable",
+    codec: videoCodecApplied,
+    proven: videoCodecsProven.has(videoCodecApplied),
+    cameraLive: camera?.readyState === "live" && camera.enabled && !camera.muted,
+    encodingActive: Boolean(camera) &&
+      cameraSender.getParameters().encodings.some((encoding) => encoding.active !== false),
+    lineNegotiated: Boolean(peer) && peer.getTransceivers().some((transceiver) =>
+      transceiver.sender === cameraSender && /send/.test(transceiver.currentDirection || ""))
+  });
+  if (!expecting || encodedRecently) {
+    videoCodecStalledSince = 0;
+    return;
+  }
+  if (!videoCodecStalledSince) videoCodecStalledSince = now;
+  const codec = videoCodecApplied;
+  if (!window.SlowMeetVideoCodec.stalledFallbackDue(now - videoCodecStalledSince, codec)) return;
+  videoCodecStalledSince = 0;
+  videoCodecsBroken.add(codec);
+  showToast(`This device cannot send ${window.SlowMeetVideoCodec.codecLabel(codec)}. Switching codec.`, "warning");
+  updateVideoCodecChoice(true);
 }, 1000);
 
 videoCodecSelect?.addEventListener("change", () => {
@@ -4529,6 +4575,9 @@ async function startWebRTC() {
   restartRequested = false;
   iceRestartAttempts = 0;
   directDisconnectCounted = false;
+  // Frame counts belong to the connection that reported them: a new
+  // connection counts from zero and must not be measured against the old one.
+  videoCodecFramesEncoded.clear();
   relayRotation?.reset();
   appliedConnectionMethod = effectiveMethod;
   peerFirstConnectedAtMs = null;

@@ -406,15 +406,19 @@ decided in this order:
    VP8 or H.264 and Settings says "This browser cannot send AV1 as simulcast
    layers." A browser that claims the ability but packs all layers into one
    stream is caught within a few seconds and returns to VP8 for the session.
-5. A codec the administrator removes is given up at once, even when a
+5. A browser can list a codec it has no working encoder for (Firefox lists
+   H.264 where its H.264 component is not installed). A live camera that
+   produces no frame for eight seconds in such a codec gives the codec up for
+   the session, also when the participant picked it, and Settings says "This
+   device cannot send H.264."
+6. A codec the administrator removes is given up at once, even when a
    participant had picked it.
 
 The fallback is immediate when a limiting device joins. The room returns to
 the default about 15 seconds after that device leaves, and a participant
 inside the reconnect window (`RECONNECT_TIMEOUT_SECONDS`) still counts, so a
 short drop does not switch every encoder twice. A switch costs each viewer one
-renegotiation and leaves one idle video line in their session description,
-or one per layer when the camera is sent as simulcast.
+renegotiation; the media lines it frees are used again by later tracks.
 
 What the app shows:
 
@@ -432,8 +436,30 @@ browser is usually still running a page cached from before codec selection:
 it reports no codecs, so the server assumes only VP8 and H.264 for it.
 Reloading that page fixes it.
 
-Codec selection and mid-call switches are tested in Chromium and Firefox.
-Safari has not been tested.
+`/metrics` reports codec behaviour without participant labels:
+`slowmeet_video_publications{codec=...}` is the video streams being published
+in each codec (each simulcast layer is a stream),
+`slowmeet_video_codec_switches_total` counts streams republished because their
+publisher changed codec, and `slowmeet_video_subscriptions_withheld` is how
+many camera or screen streams are kept from a participant right now because
+the browser cannot decode their codec. The last one should be 0 in a healthy
+room: the room rule keeps publishers on codecs everyone plays, so a value that
+stays above 0 points at a browser sending a codec it was not asked to.
+
+`/metrics` also says what the server's video path did not pass on, so a dark
+or stuttering picture can be told apart from a bad link:
+`slowmeet_video_frames_dropped_total{reason=...}` counts whole frames dropped
+before sending (`queue_full`: the pacing queue was full, the stream sends more
+than `MAX_VIDEO_BITRATE` lets through; `fps_limit`: faster than
+`MAX_VIDEO_FPS`; `too_large`: one frame larger than the server buffers),
+`slowmeet_video_mailbox_drops_total` counts packets a receiver's send queue
+had no room for, and `slowmeet_video_mailbox_peak_packets` is the fullest such
+a queue has been (it holds 512).
+
+Codec selection and mid-call switches are tested in Chromium and Firefox,
+alone and paired with each other in both directions, for every codec, and
+with a full-size shared screen in AV1, VP9, and VP8.
+Safari and phone browsers have not been tested.
 
 `MAX_VIDEO_QUALITY`, `MAX_VIDEO_BITRATE`, and `MAX_VIDEO_FPS` set hard video
 ceilings. The quality limit caps browser profile resolution. The SFU paces

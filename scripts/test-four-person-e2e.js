@@ -5153,6 +5153,15 @@ async function saveFailure(error) {
           console.error("[recover] shared room could not be restored; later scenarios may cascade");
         }
       }
+      // What the server's video path dropped so far (counted since this
+      // server started), to tell a transport loss from an SFU one.
+      try {
+        const dropLines = (await (await fetch(`${server.url}/metrics`)).text()).split("\n")
+          .filter((line) => /^slowmeet_video_(frames_dropped|mailbox)/.test(line));
+        console.log(`[video drops] after ${scenario.name}: ${dropLines.join("; ")}`);
+      } catch (_) {
+        // The server may be gone after a failed scenario.
+      }
     }
     if (skipped && !ran && !failed) {
       console.log(`SKIP | ${skipped} netns scenario(s) need MEDIA_E2E_FOUR_NETNS=1; nothing else was selected`);

@@ -153,7 +153,42 @@ what should change. Fixing an issue means flipping that assertion.
   `MutationObserver` on `li[data-participant-id]` in the
   `createParticipant` init script) to see what kept the tile.
 
-- **Fixed: B1–B9 and B11–B17.** Their tests now enforce the fix without a gate.
+- **Open: `simulcast-mixed-room` still fails now and then.** After B17 it
+  was recorded as 4 of 4. Measured again: 1 failure in 6 runs on the B17
+  commit and 4 in 10 with B18 and B19 fixed, too few runs to call the two
+  rates different. Three of the four fail as "P3 decodes P1's camera at 0 px,
+  not the 360 px top layer after the cap lifted": P3's receiver for P1's
+  medium layer is bound and live but stopped receiving at about 150 to
+  230 KB while the other cameras' medium layers passed 950 KB. One fails the
+  sender-side B12 check (P1's medium layer capped at 60 kbps). In every
+  failing run the server's video path dropped nothing
+  (`slowmeet_video_frames_dropped_total` and
+  `slowmeet_video_mailbox_drops_total` all 0), no publisher changed codec,
+  and the server log has no warning, so neither B18 nor B19 is the cause.
+  Followed up: with `DEFAULT_VIDEO_CODEC=vp8` it passed 8 of 8, with the AV1
+  default it failed 6 of 22 in all, so it goes with AV1 simulcast layers
+  (too few runs to be sure). Chromium accepts every layer change the refit
+  makes with the AV1 layer mode set (`setParameters` with one, two and three
+  layers), so the refit is not being refused. In a failing run P1, the
+  participant on the fast tier, is on the `slow` profile at the end while
+  the other three are still on `normal`, without having rejoined or
+  reloaded: its own adaptation stepped it down during the run. `slow`
+  captures 360x240, which `planCameraSimulcast` gives one layer, so P1 no
+  longer sends the 360 px layer the check waits for, and P3 keeps a bound
+  receiver that gets nothing. What makes P1 step down on a clean link, and
+  only with AV1, was not found; its link figures at the end are clean (0 %
+  loss, estimated 558 kbps out against 948 and 1023 for P2 and P4).
+
+- **Open: "signaling reconnects under network impairment" fails every
+  second run** of `make test-media-e2e-netns`: a participant's join does not
+  reach the meeting view within 20 s. It is not new: 3 failures in 6 runs on
+  `c506d5a`, 2 in 5 on `d42c094`, 3 in 5 after B20 and B21. In all three
+  series passes and failures alternate strictly (pass, fail, pass, fail), the
+  run after a pass fails and the run after a failure passes, which points at
+  something a passing run leaves behind for the next one rather than at the
+  network. Not investigated further.
+
+- **Fixed: B1–B9 and B11–B21.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -343,6 +378,66 @@ what should change. Fixing an issue means flipping that assertion.
     Chromium/Firefox room 4 of 4, and the core netns scenarios pass.
     `TestRouterGivesEachReceiverItsOwnMid` (fails with the publisher's
     mid forwarded), `TestEgressHeaderExtensionsRewriteForEachReceiver`.
+  - B18, a receiver's video mailbox smaller than the pacer's burst: a
+    shared screen at 720p or 1080p never appeared for the viewer, in any
+    codec, on a loss-free local link. The pacer hands a frame's packets to
+    each receiver's mailbox back to back while the token bucket allows (31
+    full packets at the 3 Mbps default), in microseconds, and the mailbox
+    held 24: every frame above about 28 KB lost its tail for every receiver.
+    Repair by retransmission could not keep up, the viewer asked for a
+    keyframe, and the keyframe lost its tail too. Measured with a 1280x720
+    VP8 screen: the viewer received 5341 packets, counted 444 lost, sent
+    1670 NACKs and 108 PLIs and assembled 0 frames; the sender encoded 85
+    keyframes. At 640x360 the same scenario passed. The mailbox now holds a
+    whole frame (`maxFramePackets`); the same run shows 0 NACKs and a
+    keyframe only on request. `TestVideoTargetMailboxHoldsAWholeFrame`, and
+    the browser scenario "a screen share uses the room's codec, follows a
+    codec pick, and keeps arriving" at 1920x1080
+    (`MEDIA_E2E_SCREEN_SIZE` changes the size).
+  - B19, the frames right behind a large keyframe dropped: with B18 fixed,
+    a 1080p AV1 screen from Chromium still showed the viewer 10 of 77 encoded
+    frames in 12 s on a loss-free link. The pacer is busy with a keyframe
+    larger than its burst for 170 to 300 ms; the frames the publisher sends
+    right behind it arrive meanwhile, and the queue of complete frames held
+    4. The fifth was dropped whole (14 drops in one run, all of 1 to 5
+    packets, in clusters right after a keyframe), so the picture could not
+    continue from its own keyframe; the viewer froze about 3 s, asked for a
+    keyframe, and the same happened again. The queue now holds 64 frames.
+    `TestFramesBehindALargeKeyframeAreNotDropped`;
+    `slowmeet_video_frames_dropped_total{reason="queue_full"}` counts what
+    it still drops.
+  - B20, a frame the SFU drops froze the picture for about three seconds:
+    the frame-rate gate dropped one frame of a 720p VP8 screen (two captured
+    frames 12 ms apart) and the viewer showed 19 of the 49 frames encoded in
+    the next 12 s. Every later frame builds on the dropped one, and nothing
+    asked for a keyframe until the viewer's own timeout did. The SFU now asks
+    the publisher itself as soon as it drops a frame at the gate or at a full
+    pacing queue, through the shared request budget and at most once a second
+    per stream; not for a frame larger than it buffers, whose replacement
+    would be too large again.
+    `TestDroppedFrameAsksForAKeyframeButAnOversizedOneDoesNot`,
+    `TestKeyframeAfterDropIsBoundedAndWaitsForTheSharedBudget`.
+  - B21, a shared screen stuck at a frame every few seconds: on the default
+    slow profile (180 kbps) a full-size screen in VP9 or VP8 fell into a
+    keyframe loop after a codec change in the middle of the share. One
+    1920x1080 keyframe costs seconds of that bitrate; the change asks for
+    several, the viewer sees nothing for longer than the three seconds it
+    waits before asking again, and every frame becomes a keyframe. Measured
+    per 12 s, loss-free: VP9 2 to 4 frames at 1920x1080 and at 1280x720, 87 at
+    960x540; VP8 12, 61 and 90; AV1 119 at full size (its keyframes are small).
+    The same on the production server: VP9 2 frames in 12 s. VP9 from the
+    start of a share did not loop in Chromium (10 fps at 34 kbps). The
+    sender's screen adaptation only watched the bitrate, which stays inside
+    the cap. It now also compares the frames the screen offers with the
+    frames the encoder makes (`screenShareStarving`); below 2 a second for two
+    samples it sends the next smaller size (1.5, 2, 3) and keeps the starved
+    size ruled out for three minutes or until the budget grows. Browser
+    scenario "a shared screen too large for its bitrate shrinks until it
+    moves again": 4 frames in the first 12 s, then 76 (Chromium) and 46
+    (Firefox). Where the browser does not report its video source, only an
+    encoder using half its budget for less than a frame a second counts, so
+    a slow VP8 encoder in Firefox (6 to 8 frames in 12 s at 55 kbps) is not
+    caught.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

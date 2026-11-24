@@ -161,13 +161,27 @@ func TestBitrateLimiterFPSGateAtSourceRate(t *testing.T) {
 	}
 }
 
+func TestVideoTargetMailboxHoldsAWholeFrame(t *testing.T) {
+	// The pacer can hand over a frame before the receiver's writer runs at all.
+	target := newPublicationTarget(nil, targetQueueDepth(nil))
+	for index, packet := range fastLinkFramePackets(9_000, 4_000, maxFramePackets) {
+		if !target.enqueueVideo(packet) {
+			t.Fatalf("packet %d of a %d-packet frame was dropped before the writer ran", index, maxFramePackets)
+		}
+	}
+	if target.videoLosses.Load() != nil {
+		t.Fatal("a frame within the frame limit recorded a mailbox loss")
+	}
+}
+
 func TestVideoPacerBurstVersusTargetMailbox(t *testing.T) {
 	// The pacer admits packets back to back while the token bucket holds them,
 	// and each target's mailbox (targetVideoQueueDepth) must absorb that burst
 	// while its writer catches up. At the floor the burst is one packet; at the
-	// 3 Mbps default cap it is larger than the mailbox, so a target whose
-	// writer is momentarily stalled drops the tail of a burst even on a fast
-	// link. This test records those numbers so a change to either side is seen.
+	// 3 Mbps default cap it is 31. A 24-packet mailbox dropped the tail of
+	// every such burst, because the pacer fills it far faster than the writer
+	// empties it: no 720p or 1080p keyframe arrived complete. This test
+	// records those numbers so a change to either side is seen.
 	packetBytes := fastLinkFramePackets(0, 0, 1)[0].MarshalSize()
 	if packetBytes != 1_200 {
 		t.Fatalf("test packet size = %d, want 1200", packetBytes)
@@ -180,7 +194,7 @@ func TestVideoPacerBurstVersusTargetMailbox(t *testing.T) {
 		burstFitsTarget bool
 	}{
 		{name: "100 kbps floor", bitsPerSecond: 100_000, wantBurst: 1, wantPerFrame: 0, burstFitsTarget: true},
-		{name: "3 Mbps default cap", bitsPerSecond: 3_000_000, wantBurst: 31, wantPerFrame: 10, burstFitsTarget: false},
+		{name: "3 Mbps default cap", bitsPerSecond: 3_000_000, wantBurst: 31, wantPerFrame: 10, burstFitsTarget: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

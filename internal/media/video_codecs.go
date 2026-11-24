@@ -93,6 +93,44 @@ func (r *Router) videoCodecUsableLocked(pub *publication, receiverID string) boo
 	return true
 }
 
+// VideoCodecStats is the codec state exported on /metrics.
+type VideoCodecStats struct {
+	// Switches counts video streams republished because their publisher
+	// changed codec. Each simulcast layer is a stream of its own.
+	Switches uint64
+	// Withheld is how many camera or screen streams are kept from a
+	// participant right now because the browser cannot decode their codec or
+	// the server no longer allows it. A simulcast camera counts once.
+	Withheld int
+	// Publications is the video streams being published, by codec name.
+	Publications map[string]int
+}
+
+// VideoCodecs reports the router's current video codec state.
+func (r *Router) VideoCodecs() VideoCodecStats {
+	type withheldKey struct {
+		sourceID, receiverID string
+		role                 SourceRole
+	}
+	stats := VideoCodecStats{Switches: r.videoCodecSwitches.Load(), Publications: make(map[string]int)}
+	withheld := make(map[withheldKey]struct{})
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, pub := range r.pubs {
+		if pub.codecName == "" || pub.role == SourceRoleAudio {
+			continue
+		}
+		stats.Publications[pub.codecName]++
+		for id := range r.peers {
+			if id != pub.sourceID && !r.videoCodecUsableLocked(pub, id) {
+				withheld[withheldKey{sourceID: pub.sourceID, receiverID: id, role: pub.role}] = struct{}{}
+			}
+		}
+	}
+	stats.Withheld = len(withheld)
+	return stats
+}
+
 func (r *Router) warnIfVideoCodecNotAllowedLocked(pub *publication) {
 	if pub.codecName == "" || r.allowedVideoCodecs == nil {
 		return
@@ -284,6 +322,7 @@ func (r *Router) republishForCodecChange(old *publication, codec pion.RTPCodecCa
 		tracks:      make(map[string]*publicationTarget),
 		senders:     make(map[string]*pion.RTPSender),
 		limiter:     old.limiter,
+		videoDrops:  old.videoDrops,
 		layerKeys:   old.layerKeys,
 		readBuf:     make([]byte, receiveMTU),
 		stopped:     make(chan struct{}),
@@ -300,6 +339,7 @@ func (r *Router) republishForCodecChange(old *publication, codec pion.RTPCodecCa
 		r.mu.Unlock()
 		return
 	}
+	r.videoCodecSwitches.Add(1)
 	slog.Default().Info("media_publication_codec_changed",
 		"source_id", old.sourceID, "role", old.role, "layer", old.layer,
 		"from", old.codecName, "to", next.codecName)
@@ -310,9 +350,6 @@ func (r *Router) republishForCodecChange(old *publication, codec pion.RTPCodecCa
 	r.warnIfVideoCodecNotAllowedLocked(next)
 	for id := range r.peers {
 		if r.shouldSubscribeLocked(next, id) && r.queueSubscriptionLocked(next, id, &ops) {
-			// The same offer removes this receiver's track of the old codec,
-			// so the new one must not land on an earlier line.
-			ops[len(ops)-1].freshLine = true
 			if offerer := r.offerers[id]; offerer != nil {
 				offers[id] = offerer
 			}
