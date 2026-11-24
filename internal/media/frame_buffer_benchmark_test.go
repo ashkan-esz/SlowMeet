@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkVideoFrameBuffer(b *testing.B) {
-	for _, count := range []int{4, 32, 128} {
+	for _, count := range []int{1, 2, 3, 4, 5, 32, 128} {
 		b.Run(fmt.Sprintf("%d_packets", count), func(b *testing.B) {
 			packets := make([]rtp.Packet, count)
 			for i := range packets {

@@ -346,7 +346,8 @@ const (
 	// docs/network-testing.md). 512 packets (~600 KB) leaves room for larger
 	// keyframes while keeping the per-frame dedupe scan, insertion sort and
 	// repair bitmaps (videoRepairFrame.seen) small.
-	maxFramePackets = 512
+	maxFramePackets            = 512
+	initialFramePacketCapacity = 2
 )
 
 type Router struct {
@@ -1749,6 +1750,9 @@ func (f *videoFrameBuffer) add(packet *rtp.Packet) ([]*rtp.Packet, int, bool) {
 			f.dropping = true
 			f.oversized++
 		} else {
+			if f.packets == nil {
+				f.packets = make([]*rtp.Packet, 0, initialFramePacketCapacity)
+			}
 			f.packets = append(f.packets, packet)
 			f.bytes += packetBytes
 			f.lastSequence = packet.SequenceNumber
