@@ -192,7 +192,7 @@ what should change. Fixing an issue means flipping that assertion.
   something a passing run leaves behind for the next one rather than at the
   network. Not investigated further.
 
-- **Fixed: B1–B9 and B11–B21.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B23.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -466,7 +466,59 @@ what should change. Fixing an issue means flipping that assertion.
     (Firefox). Where the browser does not report its video source, only an
     encoder using half its budget for less than a frame a second counts, so
     a slow VP8 encoder in Firefox (6 to 8 frames in 12 s at 55 kbps) is not
-    caught.
+    caught. A smaller picture helps Firefox as much: per 12 s at 180 kbps,
+    VP9 made 5, 24, 58 and 73 frames at 1920x1080, 1280x720, 960x540 and
+    640x360, and VP8 12, 14, 48 and 70; in those runs the rule did shrink
+    Firefox's share (to 1280x720, then 853x480), because its encoder was
+    using the budget. What starvation teaches is kept per codec: a share that shrank
+    in VP9 is full size again within one sample of being sent in AV1, and
+    shrinks at once when the room returns to VP9.
+  - B22, video many seconds late with nothing lost: a sender whose profile
+    reaches `MAX_VIDEO_BITRATE` encodes at exactly the rate the SFU's pacer
+    lets through, and is 1 to 3% over it once packet headers and the
+    encoder's own overshoot are counted. The pacing queue then only grows.
+    With room for 4 frames (before B19) that was a steady trickle of dropped
+    frames; with room for 64 it was delay: a browser sharing a moving screen
+    through a 300 kbps limit had every frame reach the viewers 12 s late (63
+    frames queued, 0 dropped, so no counter showed it). The same follows a
+    keyframe at any limit it is large against. The pacer now sends a frame
+    that has waited 250 ms at one and a half times the rate and one that has
+    waited a second at twice the rate, until the backlog is gone. Same
+    browser run after: at most 5 frames queued, and steady state no longer
+    grows. Synthetic, 20% over the rate for 20 s: longest wait 3.2 s before,
+    0.2 s after. `slowmeet_video_frame_wait_max_ms` and
+    `slowmeet_video_frame_queue_peak_frames` now show this delay.
+    `TestASenderALittleOverTheRateDoesNotFallBehind`,
+    `TestPacedVideoBytesSpeedUpALateFrame`.
+  - B23, keyframes asked for while one was already on its way: a new viewer
+    of a stream, a layer switch, and a publisher's renegotiation each sent
+    three requests 250 ms apart, whether or not a keyframe was arriving. A
+    sender on a small bitrate needs seconds to deliver one, so the request
+    and both repeats went out while the first keyframe of a new screen share
+    was still arriving (it would have reached the new viewer whole), and
+    the encoder answered them one after another: 4 keyframes of about
+    250 KB in the first 20 s of a 720p VP8 screen at 300 kbps, the viewer
+    showed 5 of 23 frames and the pacer was 12 s behind. The SFU now reads
+    the few header bits that mark a keyframe's first packet in VP8, VP9, AV1
+    and H.264 (`startsVideoKeyFrame`; counts checked against the browser's
+    own in all four), and neither asks nor repeats while a keyframe has
+    started to arrive and not yet gone out, or once one has gone out since
+    the request. Same run after: 2 keyframes (the second from a resolution
+    step), no request, 16 of 19 frames shown, at most 1.2 s behind; AV1 at
+    1920x1080: 3 keyframes before, 1 after. A viewer's own request (it asks
+    every few seconds while it shows nothing) is likewise not passed on while
+    a keyframe is arriving, queued, being sent, or was sent in the last
+    250 ms: after a codec change in the middle of a 1080p share at 180 kbps
+    the sender received 9 requests and made 7 keyframes in the first seconds
+    before, 4 and 4 after. That change still costs 12 to 24 s of a crawling
+    picture in VP9 until the sender shrinks it (B21); one full-size VP9
+    keyframe is simply seconds of that bitrate.
+    `slowmeet_video_keyframes_total` counts keyframes.
+    `TestVideoKeyFrameStartIsRecognisedPerCodec`, `TestKeyFrameComing`,
+    `TestKeyFrameInTransit`, `TestKeyFramesAreCountedOnceAndMarkedOnTheirWayOut`,
+    `TestKeyFrameRequestIsNotRepeatedOnceAKeyFrameIsComing`; browser scenario
+    "a sender at the server's bitrate limit does not fall seconds behind"
+    covers B22 and B23 together.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

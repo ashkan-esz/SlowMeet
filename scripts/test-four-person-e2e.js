@@ -5275,7 +5275,7 @@ async function saveFailure(error) {
       // server started), to tell a transport loss from an SFU one.
       try {
         const dropLines = (await (await fetch(`${server.url}/metrics`)).text()).split("\n")
-          .filter((line) => /^slowmeet_video_(frames_dropped|mailbox)/.test(line));
+          .filter((line) => /^slowmeet_video_(frames_dropped|mailbox|frame_|keyframes)/.test(line));
         console.log(`[video drops] after ${scenario.name}: ${dropLines.join("; ")}`);
       } catch (_) {
         // The server may be gone after a failed scenario.

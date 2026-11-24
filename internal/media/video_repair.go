@@ -84,6 +84,14 @@ func (f *videoRepairFrame) markSeen(sequence uint16) {
 func queueVideoPacket(pub *publication, frame *videoFrameBuffer, history *videoFrameHistory,
 	frames chan<- videoFrame, packet *rtp.Packet,
 ) bool {
+	if startsVideoKeyFrame(pub.codec.MimeType, packet.Payload) {
+		// Once per picture: H.264 sends its parameter set and the picture as
+		// separate packets, and a retransmission repeats the first packet.
+		if stamp := keyFrameStamp(packet.Timestamp); pub.keyFrameTimestamp.Swap(stamp) != stamp {
+			pub.lastKeyFrameStart.Store(time.Now().UnixNano())
+			pub.videoDrops.KeyFrame()
+		}
+	}
 	// Do not wait for missing packets before forwarding a frame: retransmissions
 	// and reordered packets can follow it through the same bounded pacer queue.
 	if frame.hasLastTimestamp && !rtpTimestampAfter(packet.Timestamp, frame.lastTimestamp) {
@@ -108,13 +116,67 @@ func queueVideoPacket(pub *publication, frame *videoFrameBuffer, history *videoF
 	case !pub.limiter.allowFrame(packets[0].Timestamp):
 		pub.videoDrops.FrameFPSLimit()
 		pub.keyFrameAfterDrop.Store(true)
-	case !enqueueVideoFrame(frames, videoFrame{packets: packets}):
+	case !enqueueVideoFrame(frames, videoFrame{
+		packets:  packets,
+		keyFrame: pub.keyFrameTimestamp.Load() == keyFrameStamp(packets[0].Timestamp),
+	}):
 		pub.videoDrops.FrameQueueFull()
 		pub.keyFrameAfterDrop.Store(true)
 	default:
 		history.remember(packets, time.Now())
 	}
 	return false
+}
+
+// keyFrameStamp is an RTP timestamp as stored in publication.keyFrameTimestamp;
+// the extra bit keeps timestamp 0 apart from "no keyframe yet".
+func keyFrameStamp(timestamp uint32) uint64 {
+	return uint64(timestamp) | 1<<32
+}
+
+// keyFrameArrivalLimit is how long a keyframe that has started to arrive is
+// trusted to still be on its way. A screen keyframe of 250 KB takes about
+// three seconds to arrive from a sender limited to 300 kbps.
+const keyFrameArrivalLimit = 5 * time.Second
+
+// keyFrameComing reports whether receivers of pub need no new keyframe
+// request: one has gone out to them since the given moment, or one has started
+// to arrive and not yet gone out. Frames are passed on whole and their
+// receivers are chosen when the pacer takes the frame, so a receiver that
+// subscribed while the keyframe was still arriving gets all of it.
+//
+// A keyframe is by far the most expensive thing a sender on a small bitrate
+// can be asked for; asking for a second while the first is on its way doubles
+// the wait for everyone (B23 in docs/network-testing.md). Should the awaited
+// keyframe be lost, a dropped frame is answered by keyFrameAfterDropDue and
+// anything else by the receiver's own request a few seconds later.
+func (pub *publication) keyFrameComing(now time.Time, since int64) bool {
+	started := pub.lastKeyFrameStart.Load()
+	forwarded := pub.lastKeyFrameForward.Load()
+	if forwarded > since {
+		return true
+	}
+	return started > forwarded && now.UnixNano()-started < int64(keyFrameArrivalLimit)
+}
+
+// keyFrameSettle is how long after a keyframe went out a receiver's request
+// is still taken to be about the picture before it.
+const keyFrameSettle = 250 * time.Millisecond
+
+// keyFrameInTransit reports whether a receiver's own keyframe request should
+// not be passed to the publisher: a keyframe is arriving, waiting for the
+// pacer, being sent, or was sent a moment ago. A receiver that shows nothing
+// asks again every few seconds; on a small bitrate a keyframe takes longer
+// than that to arrive and be sent, so each such request started the next
+// keyframe before the last was through, and no frame but keyframes was ever
+// sent (the loop behind B21, B23 in docs/network-testing.md).
+func (pub *publication) keyFrameInTransit(now time.Time) bool {
+	started := pub.lastKeyFrameStart.Load()
+	sent := pub.lastKeyFrameSent.Load()
+	if started > sent {
+		return now.UnixNano()-started < int64(keyFrameArrivalLimit)
+	}
+	return sent != 0 && now.UnixNano()-sent < int64(keyFrameSettle)
 }
 
 // keyFrameAfterDropInterval bounds the keyframes a publisher is asked for

@@ -456,6 +456,23 @@ than `MAX_VIDEO_BITRATE` lets through; `fps_limit`: faster than
 had no room for, and `slowmeet_video_mailbox_peak_packets` is the fullest such
 a queue has been (it holds 512).
 
+Video that arrives late without anything being dropped shows in two more
+lines: `slowmeet_video_frame_wait_max_ms` is the longest a frame has waited
+for the server's pacer since the server started, and
+`slowmeet_video_frame_queue_peak_frames` the most frames that have waited at
+once (the queue holds 64). A wait of a second or two right after a shared
+screen starts on a small bitrate is a large keyframe; a queue peak near 64
+means a sender stayed above `MAX_VIDEO_BITRATE`.
+`slowmeet_video_keyframes_total` counts the keyframes publishers have sent;
+each costs many ordinary frames, so a count that climbs by several a minute
+explains a picture that crawls.
+
+`MAX_VIDEO_BITRATE` holds for a sender's average. A frame that has waited
+250 ms for the pacer is sent at up to one and a half times that rate, and
+one that has waited a second at up to twice, until the backlog is gone:
+otherwise a sender encoding at exactly the limit, or the backlog behind a
+large keyframe, leaves every viewer seconds behind.
+
 Codec selection and mid-call switches are tested in Chromium and Firefox,
 alone and paired with each other in both directions, for every codec, and
 with a full-size shared screen in AV1, VP9, and VP8.
