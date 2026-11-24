@@ -159,7 +159,19 @@ what should change. Fixing an issue means flipping that assertion.
   (`slowmeet_video_frames_dropped_total` and
   `slowmeet_video_mailbox_drops_total` all 0), no publisher changed codec,
   and the server log has no warning, so neither B18 nor B19 is the cause.
-  Not investigated further.
+  Followed up: with `DEFAULT_VIDEO_CODEC=vp8` it passed 8 of 8, with the AV1
+  default it failed 6 of 22 in all, so it goes with AV1 simulcast layers
+  (too few runs to be sure). Chromium accepts every layer change the refit
+  makes with the AV1 layer mode set (`setParameters` with one, two and three
+  layers), so the refit is not being refused. In a failing run P1, the
+  participant on the fast tier, is on the `slow` profile at the end while
+  the other three are still on `normal`, without having rejoined or
+  reloaded: its own adaptation stepped it down during the run. `slow`
+  captures 360x240, which `planCameraSimulcast` gives one layer, so P1 no
+  longer sends the 360 px layer the check waits for, and P3 keeps a bound
+  receiver that gets nothing. What makes P1 step down on a clean link, and
+  only with AV1, was not found; its link figures at the end are clean (0 %
+  loss, estimated 558 kbps out against 948 and 1023 for P2 and P4).
 
 - **Fixed: B1–B9 and B11–B21.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
