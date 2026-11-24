@@ -110,6 +110,10 @@ host interface:
     of each download (F4 below) must read 8-16 % for that participant and
     under 3 % for the three clean downloads, and that participant's
     adaptation must use it in at least 80 % of the samples.
+  - `lossy-downlink-clean-senders` — the guard on that measurement under
+    NACK repair: the same 12 % download carrying only video (the three
+    senders' microphones are taken off the wire), so every lost packet is
+    resent. The SFU must still read 8-19 % and no jitter. Not in the CI list.
 
 Deterministic coverage for the same rooms runs in `make check` without a
 namespace:
@@ -304,10 +308,11 @@ what should change. Fixing an issue means flipping that assertion.
     `selectOwnLinkMeasurements` otherwise (old servers, a peer without
     transport-cc, the first seconds of a call; `chooseOwnLinkQuality`).
     It drives the quality ladder only. The loss is counted before NACK
-    repair, so a 12 % download reads about 12 % steadily and crosses the 10 %
-    critical bar in most samples, and pausing the own camera cannot help a
-    download: when it drove the pause too, the camera was paused in 34 of 35
-    samples in each of three runs of `bad-downlink-among-bad-senders`.
+    repair (since the fix below), so a 12 % download reads about 12 % steadily
+    and crosses the 10 % critical bar in most samples, and pausing the own
+    camera cannot help a download: when it drove the pause too, the camera was
+    paused in 34 of 35 samples in each of three runs of
+    `bad-downlink-among-bad-senders`.
     Pausing and resuming therefore stay on the estimate (`pauseCondition` in
     `app.js`): of seven runs each, the camera paused in two (21 and 16
     samples), and before this change in three (9, 25 and 6).
@@ -328,6 +333,30 @@ what should change. Fixing an issue means flipping that assertion.
     (fails when the value is broadcast), `bad-downlink-among-bad-senders`
     (asserts the SFU-measured loss per participant and that the receiver's
     adaptation used it).
+    As first pushed, the measurement missed most video loss: pion's NACK
+    responder was registered before the stamper, so a resend repeated the
+    lost packet's transport number, the browser reported that number as
+    arrived, and the meter took the loss back. On a 12 % download with a
+    10 ms round trip, two instrumented runs left 11.5 and 12.2 % of the
+    audio (never resent) lost but 0.5 and 1.6 % of the video. The room
+    above hid it: a receiver this lossy takes the low camera layers, so three
+    quarters of its packets are audio. A repair that beat the first feedback
+    also read as jitter. The meter, the stamper and a header copy for resends
+    (`resendHeaderCloner`) are now registered before the responder, so a
+    resend is numbered and recorded as a packet of its own; the sender reports
+    stay after it. With a video-only download, three runs before read medians
+    of 4.8, 4.8 and 10.3 % and 7, 7 and 14 ms; ten runs after, 10.9-15.6 % and
+    0 ms (the browser's own estimate: 9.7-11.7 %). In
+    `bad-downlink-among-bad-senders` the lossy download now reads 13.6-14.2 %
+    (three runs). The ladder reached its floor in 8, 20 and 23 s before, in
+    6-8 s after, and in 6-10 s in five runs of the code from before F4, when
+    the estimate drove it; the camera then paused in 18-32 of 35 samples, and
+    in 5-34 after the fix.
+    `TestResentPacketsGetTheirOwnTransportNumber`,
+    `TestDownlinkMeterSeesLossThatResendsRepair`,
+    `TestConcurrentResendsOfOnePacketDoNotShareItsHeader`,
+    `TestResendsStayOutOfSenderReports`, `lossy-downlink-clean-senders`
+    (not in the CI list).
   - B15, a transport-cc feedback flood: `all-fast-link-top-quality` failed
     in every full CI-list run (also on code from before B14) yet passed on
     its own. Late in a long session the browsers sent 1,600-12,600 non-RTP
