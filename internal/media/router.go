@@ -63,6 +63,12 @@ type publication struct {
 	// lastKeyFrameRequest is when (Unix nanoseconds) a keyframe request last
 	// reached this publication's publisher; see allowKeyFrameRequest.
 	lastKeyFrameRequest atomic.Int64
+	// keyFrameAfterDrop is set when the SFU dropped one of this publication's
+	// frames whole: no receiver can continue the picture until a keyframe.
+	// lastDropKeyFrameRequest is when the SFU last asked for one for that
+	// reason; see keyFrameAfterDropDue.
+	keyFrameAfterDrop       atomic.Bool
+	lastDropKeyFrameRequest atomic.Int64
 	// forwardLoss measures the publisher's packets the SFU did not forward
 	// (forward_loss.go).
 	forwardLoss forwardLoss
@@ -1416,6 +1422,9 @@ func (r *Router) forwardVideo(pub *publication) {
 			if targets := r.videoLossTargets(pub, packet); len(targets) > 0 {
 				enqueueVideoFrame(frames, videoFrame{packets: []*rtp.Packet{packet}, repairTargets: targets})
 			}
+		}
+		if pub.keyFrameAfterDrop.Load() && pub.keyFrameAfterDropDue(time.Now()) {
+			r.writeVideoKeyFrame(pub, nil)
 		}
 	}
 }

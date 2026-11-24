@@ -161,7 +161,7 @@ what should change. Fixing an issue means flipping that assertion.
   and the server log has no warning, so neither B18 nor B19 is the cause.
   Not investigated further.
 
-- **Fixed: B1–B9 and B11–B19.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B20.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -336,6 +336,17 @@ what should change. Fixing an issue means flipping that assertion.
     `TestFramesBehindALargeKeyframeAreNotDropped`;
     `slowmeet_video_frames_dropped_total{reason="queue_full"}` counts what
     it still drops.
+  - B20, a frame the SFU drops froze the picture for about three seconds:
+    the frame-rate gate dropped one frame of a 720p VP8 screen (two captured
+    frames 12 ms apart) and the viewer showed 19 of the 49 frames encoded in
+    the next 12 s. Every later frame builds on the dropped one, and nothing
+    asked for a keyframe until the viewer's own timeout did. The SFU now asks
+    the publisher itself as soon as it drops a frame at the gate or at a full
+    pacing queue, through the shared request budget and at most once a second
+    per stream; not for a frame larger than it buffers, whose replacement
+    would be too large again.
+    `TestDroppedFrameAsksForAKeyframeButAnOversizedOneDoesNot`,
+    `TestKeyframeAfterDropIsBoundedAndWaitsForTheSharedBudget`.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

@@ -706,6 +706,15 @@ const scenarios = [
           document.querySelector("#screen")?.getAttribute("aria-pressed") === pressed,
         String(on), { timeout: 30000 });
       };
+      // MEDIA_E2E_SCREEN_PROFILE picks the sender's network profile, which
+      // sets the bitrate a shared screen may use (the default profile is slow).
+      if (process.env.MEDIA_E2E_SCREEN_PROFILE) {
+        await pageA.evaluate((profileName) => {
+          const select = document.querySelector("#profile");
+          select.value = profileName;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }, process.env.MEDIA_E2E_SCREEN_PROFILE);
+      }
       await pickCodec(pageA, order[0]);
       await setScreen(true);
       for (const pick of order) {
@@ -755,8 +764,10 @@ const scenarios = [
         await pageB.waitForTimeout(12000);
         const arrived = (await decodedFrames()) - framesBefore;
         const encoded = (await encodedFrames()) - encodedBefore;
-        if (arrived < 2) {
-          assert.fail(`the shared screen stalled in ${label}: ${arrived} frames in 12 s, sender ` +
+        // Nearly every encoded frame must be shown: a frame lost on the way
+        // leaves the viewer waiting for a keyframe (B18 to B20).
+        if (arrived < 2 || arrived < Math.floor(encoded * 0.9) - 1) {
+          assert.fail(`the shared screen stalled in ${label}: ${arrived} of ${encoded} encoded frames in 12 s, sender ` +
             JSON.stringify(await outboundVideoEvidence(pageA)));
         }
         const size = await pageB.evaluate(async () => {

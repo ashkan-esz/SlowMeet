@@ -107,10 +107,44 @@ func queueVideoPacket(pub *publication, frame *videoFrameBuffer, history *videoF
 	case !complete:
 	case !pub.limiter.allowFrame(packets[0].Timestamp):
 		pub.videoDrops.FrameFPSLimit()
+		pub.keyFrameAfterDrop.Store(true)
 	case !enqueueVideoFrame(frames, videoFrame{packets: packets}):
 		pub.videoDrops.FrameQueueFull()
+		pub.keyFrameAfterDrop.Store(true)
 	default:
 		history.remember(packets, time.Now())
 	}
 	return false
+}
+
+// keyFrameAfterDropInterval bounds the keyframes a publisher is asked for
+// because the SFU dropped its frames: a stream that keeps exceeding the limits
+// is repaired once a second, not on every drop.
+const keyFrameAfterDropInterval = time.Second
+
+// keyFrameAfterDropDue reports whether to ask the publisher for a keyframe
+// now, after the SFU dropped a frame whole (the frame-rate gate or a full
+// pacing queue). Every later frame builds on the dropped one, so receivers
+// show nothing until a keyframe; left to them, that is their own timeout of
+// about three seconds (B20 in docs/network-testing.md). A frame larger than
+// the SFU buffers is not answered this way: the next keyframe would be too
+// large again.
+//
+// The need stays pending while it must wait, for the once-a-second bound or
+// for the shared request budget (allowKeyFrameRequest): a request that went
+// out moments ago may have produced its keyframe before the drop.
+func (pub *publication) keyFrameAfterDropDue(now time.Time) bool {
+	if !pub.keyFrameAfterDrop.Load() {
+		return false
+	}
+	last := pub.lastDropKeyFrameRequest.Load()
+	if last != 0 && now.UnixNano()-last < int64(keyFrameAfterDropInterval) {
+		return false
+	}
+	if !pub.allowKeyFrameRequest(now) {
+		return false
+	}
+	pub.lastDropKeyFrameRequest.Store(now.UnixNano())
+	pub.keyFrameAfterDrop.Store(false)
+	return true
 }

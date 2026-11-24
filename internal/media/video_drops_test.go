@@ -137,3 +137,78 @@ func TestFramesBehindALargeKeyframeAreNotDropped(t *testing.T) {
 		t.Fatalf("frames behind a large keyframe were dropped: %+v", got)
 	}
 }
+
+func TestDroppedFrameAsksForAKeyframeButAnOversizedOneDoesNot(t *testing.T) {
+	limiter := newBitrateLimiterAt(0, time.Now)
+	pub := &publication{limiter: limiter}
+	var frame videoFrameBuffer
+	var history videoFrameHistory
+	frames := make(chan videoFrame, 1)
+	feed := func(packets []*rtp.Packet) {
+		for _, packet := range packets {
+			queueVideoPacket(pub, &frame, &history, frames, packet)
+		}
+	}
+
+	feed(fastLinkFramePackets(9_000, 100, 2))
+	if pub.keyFrameAfterDrop.Load() {
+		t.Fatal("a forwarded frame asked for a keyframe")
+	}
+	feed(fastLinkFramePackets(18_000, 200, maxFramePackets+1))
+	if pub.keyFrameAfterDrop.Load() {
+		t.Fatal("an oversized frame asked for a keyframe; the next one would be oversized again")
+	}
+	feed(fastLinkFramePackets(27_000, 1_000, 2))
+	if !pub.keyFrameAfterDrop.Swap(false) {
+		t.Fatal("a frame dropped at the full queue did not ask for a keyframe")
+	}
+	<-frames
+	limiter.setFPS(10)
+	feed(fastLinkFramePackets(900_000, 2_000, 1))
+	<-frames
+	feed(fastLinkFramePackets(900_000+4_500, 2_001, 1))
+	if !pub.keyFrameAfterDrop.Load() {
+		t.Fatal("a frame dropped by the frame-rate gate did not ask for a keyframe")
+	}
+}
+
+func TestKeyframeAfterDropIsBoundedAndWaitsForTheSharedBudget(t *testing.T) {
+	start := time.Unix(1_000, 0)
+	pub := &publication{}
+	if pub.keyFrameAfterDropDue(start) {
+		t.Fatal("a keyframe was due without a drop")
+	}
+
+	pub.keyFrameAfterDrop.Store(true)
+	if !pub.keyFrameAfterDropDue(start) {
+		t.Fatal("the first drop did not ask at once")
+	}
+	if pub.keyFrameAfterDropDue(start.Add(time.Millisecond)) {
+		t.Fatal("one drop asked twice")
+	}
+
+	// A stream that keeps being dropped is asked once a second, and the need
+	// is kept until then.
+	pub.keyFrameAfterDrop.Store(true)
+	if pub.keyFrameAfterDropDue(start.Add(400 * time.Millisecond)) {
+		t.Fatal("a second drop within a second asked again")
+	}
+	if !pub.keyFrameAfterDropDue(start.Add(keyFrameAfterDropInterval)) {
+		t.Fatal("the pending need was forgotten when its second was up")
+	}
+
+	// A request from a receiver just used the shared budget; its keyframe may
+	// have been made before the drop, so the need waits for the budget and
+	// then asks.
+	later := start.Add(10 * time.Second)
+	if !pub.allowKeyFrameRequest(later) {
+		t.Fatal("the shared budget refused a request after ten quiet seconds")
+	}
+	pub.keyFrameAfterDrop.Store(true)
+	if pub.keyFrameAfterDropDue(later.Add(50 * time.Millisecond)) {
+		t.Fatal("asked inside the shared budget of another request")
+	}
+	if !pub.keyFrameAfterDropDue(later.Add(keyFrameRequestInterval)) {
+		t.Fatal("the need was lost while it waited for the shared budget")
+	}
+}
