@@ -3126,7 +3126,13 @@ function startAdaptationSampler(roleList, intervalMs = 1000) {
             estimatedOutgoingKbps: quality.estimatedOutgoingKbps ?? null,
             outgoingVideoKbps: quality.outgoingVideoKbps ?? null,
             ownLinkStreams: quality.ownLinkStreams ?? null,
-            senderReports: quality.senderReports ?? null
+            senderReports: quality.senderReports ?? null,
+            // The SFU's measurement of this participant's own download
+            // (downlink_quality), and which one the adaptation used.
+            serverLossPct: quality.serverDownlink?.lossPct ?? null,
+            serverJitterMs: quality.serverDownlink?.jitterMs ?? null,
+            serverAgeMs: quality.serverDownlink ? Date.now() - quality.serverDownlink.at : null,
+            ownLinkSource: quality.ownLinkSource ?? null
           };
         }).catch(() => null);
         if (sample) sampler.timeline.get(role).push({ t: elapsed(), ...sample });
@@ -3137,6 +3143,11 @@ function startAdaptationSampler(roleList, intervalMs = 1000) {
   sampler.mark = (label) => sampler.marks.push({ t: elapsed(), label });
   sampler.stop = async () => { sampler.stopped = true; await loop; return sampler; };
   return sampler;
+}
+
+function median(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
 }
 
 function summarizeAdaptationTimeline(samples) {
@@ -3700,7 +3711,7 @@ async function scenarioBadDownlinkAmongBadSenders() {
     await waitForTopAutomaticLevel("P1", 45000, "on a clean link before its download turned lossy");
     armer = armParticipantTiers(tierByRole);
     const impairedAt = Date.now();
-    sampler = startAdaptationSampler(["P1"]);
+    sampler = startAdaptationSampler(roles);
     for (const role of roles) {
       await waitForAudioFlow(pages.get(role), `${role} receiving audio with every link impaired`);
     }
@@ -3715,15 +3726,24 @@ async function scenarioBadDownlinkAmongBadSenders() {
       const p1Samples = sampled.timeline.get("P1");
       // The first seconds belong to the tiers arming.
       const settled = p1Samples.filter((sample) => sample.t >= 5);
+      // The SFU's own measurement of each download, fresh (re-sent every
+      // second) samples only.
+      const serverLoss = Object.fromEntries(roles.map((role) => {
+        const fresh = sampled.timeline.get(role).filter((sample) => sample.t >= 5 &&
+          Number.isFinite(sample.serverLossPct) && sample.serverAgeMs !== null && sample.serverAgeMs < 3000);
+        return [role, { samples: fresh.length, medianPct: median(fresh.map((sample) => sample.serverLossPct)) }];
+      }));
       evidence = {
         tiers: tierByRole,
         summary: summarizeAdaptationTimeline(settled),
         samples: settled.length,
         lossyOwnSamples: settled.filter((sample) => Number.isFinite(sample.lossPct) && sample.lossPct > 5).length,
+        serverSourcedSamples: settled.filter((sample) => sample.ownLinkSource === "server").length,
+        serverLoss,
         timeline: Object.fromEntries(sampled.timeline)
       };
       recordEvidence("own-downlink-evidence", evidence);
-      console.log(`[${tag}] P1 own link with a lossy download among three bad senders: ${JSON.stringify(evidence.summary)}; own loss above 5 % in ${evidence.lossyOwnSamples} of ${evidence.samples} samples`);
+      console.log(`[${tag}] P1 own link with a lossy download among three bad senders: ${JSON.stringify(evidence.summary)}; own loss above 5 % in ${evidence.lossyOwnSamples} of ${evidence.samples} samples, ${evidence.serverSourcedSamples} from the SFU's measurement; SFU-measured download loss ${JSON.stringify(serverLoss)}`);
       console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
     }
   }
@@ -3738,6 +3758,20 @@ async function scenarioBadDownlinkAmongBadSenders() {
     `P1's own lossy download showed as own loss in only ${evidence.lossyOwnSamples} of ${evidence.samples} samples: the sender discount hid it`);
   assert.ok(evidence.summary.minLevel < topAutomaticLevel,
     `P1 never stepped its ladder down on a download losing 12 % (own loss above 5 % in ${evidence.lossyOwnSamples} of ${evidence.samples} samples)`);
+  // The SFU measures each download from that participant's transport-cc
+  // feedback, with nothing of the senders' uplinks in it: P1's reads the
+  // tier's 12 % (before NACK repair), the clean downloads read about 0 even
+  // though every packet they receive crossed a lossy uplink, and P1's
+  // adaptation uses that measurement rather than its estimate.
+  assert.ok(evidence.serverLoss.P1.samples >= 10 &&
+    evidence.serverLoss.P1.medianPct >= 8 && evidence.serverLoss.P1.medianPct <= 16,
+    `the SFU measured P1's 12 % download as ${JSON.stringify(evidence.serverLoss.P1)}`);
+  for (const role of ["P2", "P3", "P4"]) {
+    assert.ok(evidence.serverLoss[role].samples >= 10 && evidence.serverLoss[role].medianPct < 3,
+      `the SFU measured ${role}'s clean download as ${JSON.stringify(evidence.serverLoss[role])}`);
+  }
+  assert.ok(evidence.serverSourcedSamples >= evidence.samples * 0.8,
+    `P1's own link came from the SFU's measurement in only ${evidence.serverSourcedSamples} of ${evidence.samples} samples`);
 
   // Recovery: every ladder back at the top and audio everywhere.
   await Promise.all(roles.map((role) =>

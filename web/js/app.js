@@ -2632,6 +2632,10 @@ const remoteReceiverOwners = new Map();
 // server relayed them (source_quality). The own-link estimate discounts them,
 // so a sender's bad uplink is not charged to this participant's link (B1).
 const remoteSourceQuality = new Map();
+// This participant's own download as the SFU measures it from this browser's
+// transport-cc feedback (downlink_quality): { lossPct, jitterMs, at }, or
+// null before the first one.
+let serverDownlink = null;
 // The camera uplink's jitter from the latest SFU receiver report, reported in
 // network_state alongside the uplink loss.
 let cameraUplinkJitterMs = null;
@@ -4284,6 +4288,13 @@ function connectSocket(name, password) {
         audioJitterMs: milliseconds(message.audio_uplink_jitter_ms)
       });
     }
+    if (message.type === "downlink_quality") {
+      const tenths = Number(message.packet_loss10 ?? 0);
+      const jitter = Number(message.jitter_ms ?? 0);
+      serverDownlink = Number.isFinite(tenths) && tenths >= 0 && Number.isFinite(jitter) && jitter >= 0
+        ? { lossPct: tenths / 10, jitterMs: jitter, at: Date.now() }
+        : null;
+    }
     if (message.type === "participant_left" && message.participant?.id) {
       const leftParticipant = message.participant;
       addChatSystem(`${leftParticipant.name || "A participant"} left the room`);
@@ -4385,6 +4396,7 @@ function resetMediaConnection() {
   participantElements.clear();
   remoteTrackMemory?.clear();
   remoteSourceQuality.clear();
+  serverDownlink = null;
   participantOrder.splice(0);
   pendingHandState = undefined;
   updateRaisedHandsUI();
@@ -4466,6 +4478,8 @@ function resetMediaConnection() {
   cameraLayerGoodSamples = 0;
   criticalSamples = 0;
   recoverySamples = 0;
+  // The server measured the old peer connection's download.
+  serverDownlink = null;
   videoSuspended = preserveVideoSuspension || Boolean(audioOnly?.checked);
   videoSuspendedAutomatically = preserveAutomaticSuspension && !audioOnly?.checked;
 }
@@ -5898,7 +5912,9 @@ async function runDiagnosticsUpdate() {
     values.outboundAudioKbps = Math.round((sentAudioBytes - previousStats.sentAudioBytes) * 8 / seconds / 1000);
     values.inboundAudioKbps = Math.round((receivedAudioBytes - previousStats.receivedAudioBytes) * 8 / seconds / 1000);
   }
-  const ownLink = selectOwnLinkMeasurements(streamLossSamples, {
+  // The SFU's measurement of this download (downlink_quality) when it is
+  // recent; the estimate from the inbound streams otherwise.
+  const ownLinkEstimate = selectOwnLinkMeasurements(streamLossSamples, {
     pooledLossPct: packetLossPercentFromDeltas(
       lostPacketsSincePreviousSample,
       receivedPacketsSincePreviousSample
@@ -5906,6 +5922,10 @@ async function runDiagnosticsUpdate() {
     fallbackJitterMs: values.jitterMs,
     senderUplink: (participantID, stream) => senderUplinkForStream(remoteSourceQuality.get(participantID), stream)
   });
+  const ownLink = chooseOwnLinkQuality(serverDownlink, ownLinkEstimate, Date.now());
+  // The video pause is judged on the estimate even while the server's
+  // measurement drives the ladder (see pauseCondition below).
+  const estimatedJitterMs = ownLinkEstimate.unmeasurable ? null : ownLinkEstimate.jitterMs ?? values.jitterMs;
   values.packetLoss = ownLink.lossPct;
   // The in-loop assignments above keep the video-wins/audio-fills fallback;
   // the own-link minimum (a clean sender's stream proves my path is calm)
@@ -6001,7 +6021,21 @@ async function runDiagnosticsUpdate() {
     jitterMs: values.jitterMs,
     availableOutgoingKbps: values.availableOutgoingKbps
   });
-  const { poor, critical, good, transportHealthy } = networkCondition;
+  const { poor, good, transportHealthy } = networkCondition;
+  // Pausing the own camera, and resuming it, stays on the browser's estimate.
+  // The server counts transport loss before NACK repairs it, so a download
+  // steadily losing 12 % crosses the critical bar in most samples although
+  // most of the loss is repaired, and pausing the upload cannot help a
+  // download: it kept the camera paused in 34 of 35 samples, against 0-9 on
+  // the estimate. The measurement still drives the ladder.
+  const pauseCondition = ownLink.source === "server" ? classifyNetworkSample({
+    rttMs: values.rttMs,
+    rttBaselineMs: rttBaseline.value(),
+    packetLoss: ownLinkEstimate.lossPct ?? undefined,
+    jitterMs: estimatedJitterMs,
+    availableOutgoingKbps: values.availableOutgoingKbps
+  }) : networkCondition;
+  const { critical } = pauseCondition;
   criticalSamples = critical ? criticalSamples + 1 : 0;
   if (profile.value === "auto") {
     // The sender's own saturated uplink is invisible to inbound-rtp; the
@@ -6052,8 +6086,8 @@ async function runDiagnosticsUpdate() {
   // nothing is being sent), so recovery keys on transport health alone —
   // otherwise a paused sender with a fixed profile could never resume.
   const atFloorProfile = profile.value === "auto" && adaptationLevel === 0;
-  const suspendedHealthy = videoSuspended && transportHealthy && !critical;
-  const recoverable = good || (atFloorProfile && !poor && !critical) || suspendedHealthy;
+  const suspendedHealthy = videoSuspended && pauseCondition.transportHealthy && !critical;
+  const recoverable = pauseCondition.good || (atFloorProfile && !pauseCondition.poor && !critical) || suspendedHealthy;
   recoverySamples = recoverable ? recoverySamples + 1 : 0;
   if (simulcastEnabled) {
     // Decode-side frame drops are not network damage: when the measured
@@ -6098,7 +6132,9 @@ async function runDiagnosticsUpdate() {
       // measured, and each sender's last relayed uplink report.
       ownLinkStreams: streamLossSamples.map(({ participantID, kind, lossPct, jitterMs, receivedDelta }) =>
         ({ participantID, kind, lossPct, jitterMs, receivedDelta })),
-      senderReports: Object.fromEntries(remoteSourceQuality)
+      senderReports: Object.fromEntries(remoteSourceQuality),
+      serverDownlink,
+      ownLinkSource: ownLink.source
     };
     window.__slowMeetTest.adaptationState = {
       selectedProfile: profile.value,

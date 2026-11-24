@@ -10,6 +10,7 @@ const path = require("node:path");
 const {
   packetLossPercentFromDeltas,
   selectOwnLinkMeasurements,
+  chooseOwnLinkQuality,
   senderUplinkForStream,
   classifyParticipantQuality,
   stabilizeParticipantQuality,
@@ -46,7 +47,14 @@ const localBadge = "local";
   for (const statement of [
     `let adaptationLevel = ${initialAdaptationLevel};`,
     'let cameraLayer = "medium";',
-    "const ownLink = selectOwnLinkMeasurements(streamLossSamples, {",
+    "const ownLinkEstimate = selectOwnLinkMeasurements(streamLossSamples, {",
+    "const ownLink = chooseOwnLinkQuality(serverDownlink, ownLinkEstimate, Date.now());",
+    "const estimatedJitterMs = ownLinkEstimate.unmeasurable ? null : ownLinkEstimate.jitterMs ?? values.jitterMs;",
+    'const pauseCondition = ownLink.source === "server" ? classifyNetworkSample({',
+    "rttBaselineMs: rttBaseline.value(),",
+    "packetLoss: ownLinkEstimate.lossPct ?? undefined,",
+    "jitterMs: estimatedJitterMs,",
+    "const { critical } = pauseCondition;",
     "values.packetLoss = ownLink.lossPct;",
     "if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;",
     "if (ownLink.unmeasurable) values.jitterMs = null;",
@@ -66,8 +74,8 @@ const localBadge = "local";
     "climbBackoff.noteStepDown(uplinkPoor || networkCondition.sendPathPoor);",
     "climbBackoff.noteClimb();",
     'const atFloorProfile = profile.value === "auto" && adaptationLevel === 0;',
-    "const suspendedHealthy = videoSuspended && transportHealthy && !critical;",
-    "const recoverable = good || (atFloorProfile && !poor && !critical) || suspendedHealthy;",
+    "const suspendedHealthy = videoSuspended && pauseCondition.transportHealthy && !critical;",
+    "const recoverable = pauseCondition.good || (atFloorProfile && !pauseCondition.poor && !critical) || suspendedHealthy;",
     "recoverySamples = recoverable ? recoverySamples + 1 : 0;",
     "const decodeDropsNotNetwork = lossKnown && packetLoss === 0;",
     "decodeDropsNotNetwork ? 0 : values.cameraDroppedFramesPct",
@@ -179,7 +187,9 @@ function runLadder(ticks, sampleAt, {
       }
     }
 
-    const ownLink = selectOwnLinkMeasurements(streamLossSamples, {
+    // sample.serverDownlink is what the server's downlink_quality delivers
+    // (its measurement of this receiver's download), fresh at the tick.
+    const ownLinkEstimate = selectOwnLinkMeasurements(streamLossSamples, {
       pooledLossPct: packetLossPercentFromDeltas(
         lostPacketsSincePreviousSample,
         receivedPacketsSincePreviousSample
@@ -191,6 +201,9 @@ function runLadder(ticks, sampleAt, {
       senderUplink: (participantID, stream) =>
         senderUplinkForStream(sample.senderUplinks?.get(participantID), stream)
     });
+    const ownLink = chooseOwnLinkQuality(sample.serverDownlink ? { ...sample.serverDownlink, at: 0 } : null,
+      ownLinkEstimate, sample.serverDownlinkAgeMs ?? 0);
+    const estimatedJitterMs = ownLinkEstimate.unmeasurable ? null : ownLinkEstimate.jitterMs ?? values.jitterMs;
     values.packetLoss = ownLink.lossPct;
     if (ownLink.jitterMs !== null) values.jitterMs = ownLink.jitterMs;
     // Only near-outage senders: the streams cannot judge this link at all.
@@ -227,7 +240,15 @@ function runLadder(ticks, sampleAt, {
       jitterMs: values.jitterMs,
       availableOutgoingKbps: values.availableOutgoingKbps
     });
-    const { poor, critical, good, transportHealthy } = networkCondition;
+    const { poor, good, transportHealthy } = networkCondition;
+    const pauseCondition = ownLink.source === "server" ? classifyNetworkSample({
+      rttMs: values.rttMs,
+      rttBaselineMs: rttBaseline.value(),
+      packetLoss: ownLinkEstimate.lossPct ?? undefined,
+      jitterMs: estimatedJitterMs,
+      availableOutgoingKbps: values.availableOutgoingKbps
+    }) : networkCondition;
+    const { critical } = pauseCondition;
     criticalSamples = critical ? criticalSamples + 1 : 0;
 
     const uplinkPoor = uplinkLossPct != null && uplinkLossPct > 5;
@@ -256,8 +277,8 @@ function runLadder(ticks, sampleAt, {
     }
 
     const atFloorProfile = adaptationLevel === 0;
-    const suspendedHealthy = videoSuspended && transportHealthy && !critical;
-    const recoverable = good || (atFloorProfile && !poor && !critical) || suspendedHealthy;
+    const suspendedHealthy = videoSuspended && pauseCondition.transportHealthy && !critical;
+    const recoverable = pauseCondition.good || (atFloorProfile && !pauseCondition.poor && !critical) || suspendedHealthy;
     recoverySamples = recoverable ? recoverySamples + 1 : 0;
     if (simulcastEnabled) {
       const decodeDropsNotNetwork = lossKnown && packetLoss === 0;
@@ -1046,6 +1067,89 @@ for (const [name, uplinkLossPcts] of [
   const fortyHigh = runLadder(30, jitteryRoom(40), { startLevel: topLevel, uplinkLossPct: 0 });
   assert.ok(fortyHigh.samples.every((sample) => sample.jitterMs === 20 && sample.good),
     "sender jitter reports 40 ms high cancel the observer's own jitter (the limit of the discount)");
+}
+
+// The SFU's own measurement of the receiver's download (downlink_quality)
+// replaces the estimate while it is fresh, and it holds exactly where the
+// estimate fails: sender reports that over-state their loss cancel the
+// receiver's own 12 % (B14), and senders near an outage leave the estimate
+// unmeasurable. The server value has nothing of any sender's uplink in it.
+// A stale value (older than 3 s: an older server, no transport-cc) falls
+// back to the estimate.
+{
+  const badUplinks = [8, 12, 9];
+  const overstatedByTen = new Map([...senderReports(badUplinks)].map(([id, report]) =>
+    [id, { ...report, videoLossPct: report.videoLossPct + 10, audioLossPct: report.audioLossPct + 10 }]));
+  const maskedRoom = (serverDownlink, serverDownlinkAgeMs = 0) => () => ({
+    ...goodParticipantLink,
+    streams: roomStreams(badUplinks, { ownDownlinkLossPct: 12 }),
+    senderUplinks: overstatedByTen,
+    serverDownlink,
+    serverDownlinkAgeMs
+  });
+  const measured = runLadder(30, maskedRoom({ lossPct: 12, jitterMs: 2 }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(measured.samples.every((sample) => sample.packetLoss === 12 && sample.poor),
+    "the server's measured 12 % download loss shows where over-stated sender reports cancel the estimate");
+  assert.ok(measured.stepDowns.length > 0, "and the ladder steps down on it");
+  // It drives the ladder only. The server counts loss before NACK repair, and
+  // pausing the own camera cannot help a download, so the pause and the
+  // resume stay on the browser's estimate.
+  assert.equal(measured.level, 0, "a measured 12 % download rests at the floor");
+  assert.deepEqual(measured.pauses, [],
+    "a measured critical download loss alone must not pause the own camera");
+  const pausedByEstimate = runLadder(30, () => ({
+    ...goodParticipantLink,
+    streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: 15 }),
+    senderUplinks: senderReports([0, 0, 0]),
+    serverDownlink: { lossPct: 15, jitterMs: 2 }
+  }), { startLevel: 0, uplinkLossPct: 0 });
+  assert.deepEqual(pausedByEstimate.pauses, [3],
+    "an estimate that itself reads critical still pauses the camera at the floor");
+  const resumes = runLadder(40, (tick) => ({
+    ...goodParticipantLink,
+    streams: roomStreams([0, 0, 0], { ownDownlinkLossPct: tick <= 10 ? 15 : 0 }),
+    senderUplinks: senderReports([0, 0, 0]),
+    serverDownlink: { lossPct: 12, jitterMs: 2 }
+  }), { startLevel: 0, uplinkLossPct: 0 });
+  assert.equal(resumes.pauses.length, 1, "the estimate pauses the camera once");
+  assert.equal(resumes.resumes.length, 1,
+    "and a healed estimate resumes it although the server still measures 12 % before repair");
+  // A queue only the streams see must reach the pause decision too.
+  const jitterPause = runLadder(10, () => ({
+    ...goodParticipantLink,
+    streams: roomStreams([0, 0, 0], { jitterMs: 200 }),
+    senderUplinks: senderReports([0, 0, 0]),
+    serverDownlink: { lossPct: 0, jitterMs: 1 }
+  }), { startLevel: 0, uplinkLossPct: 0 });
+  assert.ok(jitterPause.samples.every((sample) => sample.critical && sample.jitterMs === 1),
+    "the pause is judged on the estimate's jitter while the server's is the reported one");
+  const stale = runLadder(30, maskedRoom({ lossPct: 12, jitterMs: 2 }, 3500), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(stale.samples.every((sample) => sample.packetLoss < 2),
+    "a downlink_quality older than 3 s is not used: the estimate (here masked) applies");
+
+  const nearOutage = [72, 80, 85];
+  const outageRoom = (serverDownlink, ownDownlinkLossPct = 0) => () => ({
+    ...goodParticipantLink,
+    streams: roomStreams(nearOutage, { ownDownlinkLossPct }),
+    senderUplinks: senderReports(nearOutage),
+    serverDownlink
+  });
+  const cleanAmongOutages = runLadder(30, outageRoom({ lossPct: 0, jitterMs: 1 }), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(cleanAmongOutages.samples.every((sample) => sample.packetLoss === 0 && sample.jitterMs === 1 && !sample.poor),
+    "among near-outage senders the server's measurement still judges a clean download (no longer unmeasurable)");
+  assert.deepEqual(cleanAmongOutages.stepDowns, [], "and a clean download among near-outage senders holds the top level");
+  const lossyAmongOutages = runLadder(30, outageRoom({ lossPct: 12, jitterMs: 1 }, 12), { startLevel: topLevel, uplinkLossPct: 0 });
+  assert.ok(lossyAmongOutages.samples.every((sample) => sample.packetLoss === 12 && sample.poor),
+    "among near-outage senders the server's measurement shows the receiver's own 12 % loss");
+
+  assert.deepEqual(chooseOwnLinkQuality({ lossPct: 3, jitterMs: 4, at: 1000 }, { lossPct: 0, jitterMs: 0 }, 4000),
+    { lossPct: 3, jitterMs: 4, unmeasurable: false, source: "server" });
+  assert.deepEqual(chooseOwnLinkQuality({ lossPct: 3, jitterMs: 4, at: 1000 }, { lossPct: 0, jitterMs: 0 }, 4001),
+    { lossPct: 0, jitterMs: 0, unmeasurable: false, source: "estimate" });
+  assert.deepEqual(chooseOwnLinkQuality(null, { lossPct: null, jitterMs: null, unmeasurable: true }, 0),
+    { lossPct: null, jitterMs: null, unmeasurable: true, source: "estimate" });
+  assert.equal(chooseOwnLinkQuality({ lossPct: -1, jitterMs: 4, at: 0 }, { lossPct: 1, jitterMs: 1 }, 0).source, "estimate",
+    "an unknown server value is not used");
 }
 
 console.log("Room network scenario tests passed");

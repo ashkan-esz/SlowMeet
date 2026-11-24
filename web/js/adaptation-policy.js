@@ -500,6 +500,29 @@ function selectOwnLinkMeasurements(streams, {
   };
 }
 
+// The receiver's own-link loss and jitter: the SFU's measurement of this
+// participant's download when it has a recent one, otherwise the estimate
+// from the inbound streams (selectOwnLinkMeasurements). The SFU measures the
+// download from this browser's transport-cc feedback about the SFU's own
+// packets (downlink_quality), with nothing of any sender's uplink in it, so
+// it holds where the estimate fails: every sender near an outage leaves the
+// estimate unmeasurable, and over-stated sender reports cancel real download
+// loss (B1, B14 in docs/network-testing.md). `server` is the last
+// downlink_quality ({ lossPct, jitterMs, at }) or null; the server re-sends it
+// about once a second, so one older than maxAgeMs is stale (an older server,
+// a connection without transport-cc, or the first seconds of a call). It drives
+// the ladder; the video pause stays on the estimate (pauseCondition in app.js),
+// because the server's loss is counted before NACK repairs it.
+function chooseOwnLinkQuality(server, estimate, nowMs, { maxAgeMs = 3000 } = {}) {
+  const fresh = server && Number.isFinite(server.at) && nowMs - server.at <= maxAgeMs &&
+    Number.isFinite(server.lossPct) && server.lossPct >= 0 &&
+    Number.isFinite(server.jitterMs) && server.jitterMs >= 0;
+  if (fresh) {
+    return { lossPct: server.lossPct, jitterMs: server.jitterMs, unmeasurable: false, source: "server" };
+  }
+  return { ...estimate, unmeasurable: Boolean(estimate?.unmeasurable), source: "estimate" };
+}
+
 // What one remote sender's stream loses and queues before it leaves the SFU,
 // for selectOwnLinkMeasurements' senderUplink: `source` is the sender's last
 // source_quality ({ videoLossPct, audioLossPct, jitterMs, audioJitterMs }, each
@@ -584,6 +607,7 @@ if (typeof module !== "undefined") {
     packetCounterDeltas,
     packetLossPercentFromDeltas,
     selectOwnLinkMeasurements,
+    chooseOwnLinkQuality,
     senderUplinkForStream,
     classifyParticipantQuality,
     stabilizeParticipantQuality,

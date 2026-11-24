@@ -215,9 +215,9 @@ console.log("Media fix checks passed");
 // Automatic congestion pauses on fixed (non-auto) profiles must have a
 // recovery path: while video is suspended the bandwidth estimate starves, so
 // recovery has to key on transport health instead of the capacity estimate.
-assert.match(appSource, /const suspendedHealthy = videoSuspended && transportHealthy && !critical;/,
+assert.match(appSource, /const suspendedHealthy = videoSuspended && pauseCondition\.transportHealthy && !critical;/,
   "the diagnostics loop must count suspended-and-healthy samples toward recovery");
-assert.match(appSource, /const recoverable = good \(?\|\|/s,
+assert.match(appSource, /const recoverable = pauseCondition\.good \(?\|\|/s,
   "the recovery gate must keep the good and floor-profile paths");
 
 console.log("Media fix checks passed (adaptation recovery)");
@@ -239,13 +239,13 @@ assert.match(setSenderEncodingActiveSource,
 
 // Video recovery must not be gated on the BWE threshold inside `good`: at the
 // floor profile, recovered loss/RTT/jitter are enough.
-const adaptationTick = slice(appSource, "const { poor, critical, good, transportHealthy } = networkCondition;",
+const adaptationTick = slice(appSource, "const { poor, good, transportHealthy } = networkCondition;",
   "} else if (!critical && videoSuspended && shouldRecoverVideo(recoverySamples, recoverable))");
 assert.match(adaptationTick,
   /const atFloorProfile = profile\.value === "auto" && adaptationLevel === 0;/,
   "the floor profile must be detected for ungated video recovery");
 assert.match(adaptationTick,
-  /const recoverable = good \|\| \(atFloorProfile && !poor && !critical\) \|\| suspendedHealthy;/,
+  /const recoverable = pauseCondition\.good \|\| \(atFloorProfile && !pauseCondition\.poor && !critical\) \|\| suspendedHealthy;/,
   "recovery must accept floor-profile non-poor samples and healthy transports while suspended");
 
 // ICE-restart exhaustion schedules one full reconnect instead of stranding
