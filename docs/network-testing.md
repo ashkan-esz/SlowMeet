@@ -79,7 +79,10 @@ host interface:
     transport health once the tiers lift.
   - `all-fast-link-top-quality` — all four participants on the `fast` tier
     (20 mbit/10 ms/0% loss, both directions; shaped, unlike the unshaped
-    clean default class). Every participant's Auto ladder reaches and holds
+    clean default class), each on its own copy of it (`fast-2`…`fast-4`,
+    opt-in like `moderate-2`…`moderate-4`), so the four links do not share
+    one 20 mbit queue and one participant's burst cannot read as another's
+    loss. Every participant's Auto ladder reaches and holds
     level 3 (`high`) with no suspension or degraded tile, and the camera
     sender runs at the `high` bitrate. A short moderate window on one
     participant then lifts, and all four climb back to level 3.
@@ -103,7 +106,10 @@ host interface:
     10 % (`lossy-uplink`). Only inbound loss can show that participant's
     damage, and the discount for the senders' loss must not cancel it: its
     own loss must read above 5 % in at least 60 % of the samples and its
-    ladder must step down (fixed issue B14 below).
+    ladder must step down (fixed issue B14 below). The SFU's own measurement
+    of each download (F4 below) must read 8-16 % for that participant and
+    under 3 % for the three clean downloads, and that participant's
+    adaptation must use it in at least 80 % of the samples.
 
 Deterministic coverage for the same rooms runs in `make check` without a
 namespace:
@@ -243,7 +249,50 @@ what should change. Fixing an issue means flipping that assertion.
     shape and limit: a receiver's own 60 ms of download jitter shows through
     accurate sender reports and reads poor, reports 20 ms too high leave it
     neither poor nor healthy, 40 ms too high hide it (unit cases in the same
-    script).
+    script). Superseded by a direct measurement (F4, next).
+  - F4, a receiver's own download measured at the SFU: the estimate above
+    can only infer the download from what the senders' streams lost, so
+    over-stated sender reports hide it and near-outage senders leave it
+    unmeasurable. Since B15 every SFU transport numbers its own packets, so
+    each browser's transport-cc feedback says which of the SFU's packets
+    reached it and when. A per-peer interceptor (`downlinkMeter`, registered
+    before the transport-cc stamper so it sees the stamped number) records
+    each send time and reads that feedback: loss is the share reported
+    missing (a late arrival corrects it within the window), jitter is RFC
+    3550 jitter of the one-way transit. It keeps the same one-second
+    windows and 250 ms window-in-progress as the forward measurements and
+    reports the worse of the two, loss and jitter each on its own. The hub
+    sends each room member its own value (`downlink_quality`, server-only):
+    a worsening at once, otherwise once a second, which also tells the
+    browser the value is fresh. The browser uses it for its own-link loss
+    and jitter while it is under 3 s old and falls back to
+    `selectOwnLinkMeasurements` otherwise (old servers, a peer without
+    transport-cc, the first seconds of a call; `chooseOwnLinkQuality`).
+    It drives the quality ladder only. The loss is counted before NACK
+    repair, so a 12 % download reads about 12 % steadily and crosses the 10 %
+    critical bar in most samples, and pausing the own camera cannot help a
+    download: when it drove the pause too, the camera was paused in 34 of 35
+    samples in each of three runs of `bad-downlink-among-bad-senders`.
+    Pausing and resuming therefore stay on the estimate (`pauseCondition` in
+    `app.js`): of seven runs each, the camera paused in two (21 and 16
+    samples), and before this change in three (9, 25 and 6).
+    Measured in the netns rooms: the `lossy-downlink` receiver read a median
+    of 9.9-13.2 % over twelve runs of its 12 % tier, from the SFU's
+    measurement in every sample; the three clean downloads behind lossy
+    senders read a median of 0 %; the fast participant in
+    `one-fast-three-bad-uplinks` held the top level in 40 of 40 samples. The
+    jitter is far above a browser's own on an overloaded link (up to 662 ms),
+    but no sample in `bad-downlink-among-bad-senders` or
+    `one-fast-three-bad-uplinks` was poor by its jitter alone, and on the
+    700 kbit download it stayed at or under 30 ms. In a mixed room Firefox
+    received and used the value like Chromium (clean link only).
+    `TestDownlinkMeterMeasuresLossAndJitterFromFeedback`,
+    `TestDownlinkMeterReportsTheWorseOfEachMeasure`,
+    `TestRouterMeasuresEachReceiversDownlink` (reads nothing with the meter
+    registered after the stamper), `TestHubTellsEachMemberItsOwnDownlink`
+    (fails when the value is broadcast), `bad-downlink-among-bad-senders`
+    (asserts the SFU-measured loss per participant and that the receiver's
+    adaptation used it).
   - B15, a transport-cc feedback flood: `all-fast-link-top-quality` failed
     in every full CI-list run (also on code from before B14) yet passed on
     its own. Late in a long session the browsers sent 1,600-12,600 non-RTP
