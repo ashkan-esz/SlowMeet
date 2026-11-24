@@ -70,6 +70,15 @@ for (const name of ["thin-uplink", "bursty", "relay-lossy", "flap"]) {
   assert.equal(netem.tiers[name].optIn, true);
   assert.ok(!netem.defaultTierNames.includes(name));
 }
+// The fast replicas copy `fast` on classes of their own, opt-in like the
+// impairment tiers.
+for (const [name, minor] of [["fast-2", "81"], ["fast-3", "82"], ["fast-4", "83"]]) {
+  assert.equal(netem.tiers[name].optIn, true);
+  assert.ok(!netem.defaultTierNames.includes(name));
+  assert.equal(netem.tiers[name].classID, `1:${minor}`);
+  assert.equal(netem.tiers[name].rate, netem.tiers.fast.rate);
+  assert.equal(netem.tiers[name].delay, netem.tiers.fast.delay);
+}
 netem.installRoomQdisc({ include: ["thin-uplink", "bursty"] });
 const withOptIn = take();
 assert.deepEqual(withOptIn.slice(0, expectedInstall.length), expectedInstall);

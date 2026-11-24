@@ -81,10 +81,10 @@ const tiers = {
   // the top Auto level, and that it stays the room's one good link while the
   // others are impaired. It is named `fast`, not `clean`, because
   // armParticipantTiers skips the `clean` name outright (those participants
-  // stay unclassified on the 10 gbit default class). The class is one shared
-  // queue, but four participants at the top Auto level offer ~12 mbit in
-  // total (4 uplinks plus 12 forwarded streams at ≤ 650 kbit video + audio),
-  // so the 20 mbit rate never becomes the bottleneck.
+  // stay unclassified on the 10 gbit default class). Its class is one
+  // queue; a room with several fast participants puts each on its own
+  // replica (fast-2..4 below), so one participant's burst never queues
+  // behind another's.
   fast: { classID: "1:80", handle: "80:", rate: "20mbit", delay: "10ms", loss: "0%" }
 };
 
@@ -144,6 +144,12 @@ const optInTiers = {
 };
 for (const [name, tier] of Object.entries(optInTiers)) {
   tiers[name] = { ...tier, optIn: true };
+}
+// Replicas of `fast`, as moderate-2..4 are of `moderate`, so each fast
+// participant has a 20 mbit link of its own. Opt-in: the default install,
+// pinned by scripts/test-netem-tiers.js, is unchanged.
+for (const [name, minor] of [["fast-2", "81"], ["fast-3", "82"], ["fast-4", "83"]]) {
+  tiers[name] = { ...tiers.fast, classID: `1:${minor}`, handle: `${minor}:`, optIn: true };
 }
 
 let tcRunner = (args) => execFileSync("tc", args, { stdio: ["ignore", "pipe", "pipe"] });

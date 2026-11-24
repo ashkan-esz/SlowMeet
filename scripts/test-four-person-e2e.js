@@ -3368,7 +3368,9 @@ async function scenarioAllFastLinkTopQuality() {
   // 650000 under the default caps; an admin cap left lowered by an earlier
   // scenario in a full run (admin-caps-and-chat-reset) lowers it with it.
   const expectedTopBitrate = Math.min(topAutomaticBitrate, config.max_video_bitrate);
-  const allFast = Object.fromEntries(roles.map((role) => [role, "fast"]));
+  // Each participant on a fast link of its own (one 20 mbit class each).
+  const fastTierByRole = { P1: "fast", P2: "fast-2", P3: "fast-3", P4: "fast-4" };
+  const allFast = Object.fromEntries(roles.map((role) => [role, fastTierByRole[role]]));
   let armer;
   // Moving a participant between tiers replaces the whole qdisc: classifier
   // filters accumulate per port, so a second filter for an already-classified
@@ -3376,7 +3378,7 @@ async function scenarioAllFastLinkTopQuality() {
   const arm = (tierByRole) => {
     if (armer) armer.stopped = true;
     clearRoomProfiles();
-    installRoomQdisc();
+    installRoomQdisc({ include: ["fast-2", "fast-3", "fast-4"] });
     armer = armParticipantTiers(tierByRole);
   };
   const snapshots = [];
