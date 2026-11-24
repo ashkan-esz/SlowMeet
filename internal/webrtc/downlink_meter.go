@@ -29,7 +29,9 @@ import (
 //
 // The meter must be registered before the header extension interceptor: the
 // last interceptor added wraps the others, so the stamper writes the sequence
-// number before this meter's writer reads it.
+// number before this meter's writer reads it. Both must be registered before
+// the NACK responder, so a resend gets a number and a record of its own (see
+// newMediaEngineAndRegistry) and the loss it repairs stays counted.
 type downlinkMeter struct {
 	interceptor.NoOp
 

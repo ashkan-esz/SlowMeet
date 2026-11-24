@@ -3150,6 +3150,61 @@ function median(values) {
   return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
 }
 
+// The SFU's own measurement of each role's download over the settled part of
+// a sampled timeline: fresh values only (they are re-sent every second).
+function serverDownlinkLoss(sampled, roleList) {
+  return Object.fromEntries(roleList.map((role) => {
+    const fresh = sampled.timeline.get(role).filter((sample) => sample.t >= 5 &&
+      Number.isFinite(sample.serverLossPct) && sample.serverAgeMs !== null && sample.serverAgeMs < 3000);
+    return [role, {
+      samples: fresh.length,
+      medianPct: median(fresh.map((sample) => sample.serverLossPct)),
+      medianJitterMs: median(fresh.map((sample) => sample.serverJitterMs))
+    }];
+  }));
+}
+
+// Takes a page's microphone off the wire without muting it: a muted track
+// still sends 50 packets of silence a second.
+async function detachMicrophone(page) {
+  await page.evaluate(async () => {
+    const peer = [...(window.__slowMeetTest?.peerConnections || [])].at(-1);
+    const sender = peer.getSenders().find((item) => item.track?.kind === "audio");
+    window.__detachedMicrophone = { sender, track: sender.track };
+    await sender.replaceTrack(null);
+  });
+}
+
+async function reattachMicrophone(page) {
+  await page.evaluate(async () => {
+    const detached = window.__detachedMicrophone;
+    if (!detached) return;
+    window.__detachedMicrophone = null;
+    if (!detached.sender.track) await detached.sender.replaceTrack(detached.track);
+  });
+}
+
+// What one participant's browser counted on its inbound streams, per kind:
+// the share of packets that did not arrive first time, and the packets that
+// did.
+function inboundLossByKind(samples) {
+  return Object.fromEntries(["audio", "video"].map((kind) => {
+    let received = 0;
+    let expected = 0;
+    for (const sample of samples) {
+      for (const stream of sample.ownLinkStreams || []) {
+        if (stream.kind !== kind || !(stream.receivedDelta > 0) || !(stream.lossPct >= 0 && stream.lossPct < 100)) continue;
+        received += stream.receivedDelta;
+        expected += stream.receivedDelta / (1 - stream.lossPct / 100);
+      }
+    }
+    return [kind, {
+      received: Math.round(received),
+      lossPct: expected > 0 ? Math.round(1000 * (1 - received / expected)) / 10 : null
+    }];
+  }));
+}
+
 function summarizeAdaptationTimeline(samples) {
   const finite = (values) => values.filter((value) => Number.isFinite(value));
   const levels = finite(samples.map((sample) => sample.level));
@@ -3728,13 +3783,7 @@ async function scenarioBadDownlinkAmongBadSenders() {
       const p1Samples = sampled.timeline.get("P1");
       // The first seconds belong to the tiers arming.
       const settled = p1Samples.filter((sample) => sample.t >= 5);
-      // The SFU's own measurement of each download, fresh (re-sent every
-      // second) samples only.
-      const serverLoss = Object.fromEntries(roles.map((role) => {
-        const fresh = sampled.timeline.get(role).filter((sample) => sample.t >= 5 &&
-          Number.isFinite(sample.serverLossPct) && sample.serverAgeMs !== null && sample.serverAgeMs < 3000);
-        return [role, { samples: fresh.length, medianPct: median(fresh.map((sample) => sample.serverLossPct)) }];
-      }));
+      const serverLoss = serverDownlinkLoss(sampled, roles);
       evidence = {
         tiers: tierByRole,
         summary: summarizeAdaptationTimeline(settled),
@@ -3781,6 +3830,74 @@ async function scenarioBadDownlinkAmongBadSenders() {
   for (const role of roles) {
     await waitForAudioFlow(pages.get(role), `${role} receiving audio after the impaired links lifted`);
   }
+  await assertMedia();
+}
+
+// One participant's download loses 12 % at a 10 ms delay and carries only
+// video: the other three, on clean links, send no audio. Every lost packet is
+// then resent within one round trip, and the SFU must still measure the loss.
+// A resend that repeated the lost packet's transport-wide number made the
+// browser report that number as arrived, and the loss disappeared. A download
+// with audio in it cannot show that: a receiver this lossy takes the low
+// camera layers, so most of its packets are audio, which is never resent.
+async function scenarioLossyDownlinkCleanSenders() {
+  const tag = "lossy-downlink-clean-senders";
+  await setupRoom();
+  await unmuteAllForAudioGuarantee();
+  await clearStaleVideoSuspensions();
+  let armer;
+  let sampler;
+  let evidence = null;
+  installRoomQdisc({ include: ["lossy-downlink"] });
+  try {
+    await restartAutomaticLadders();
+    await Promise.all(roles.map((role) =>
+      waitForTopAutomaticLevel(role, 60000, "on a clean link before P1's download turned lossy")));
+    for (const role of ["P2", "P3", "P4"]) await detachMicrophone(pages.get(role));
+    armer = armParticipantTiers({ P1: "lossy-downlink" });
+    sampler = startAdaptationSampler(roles);
+    await delay(40000);
+  } finally {
+    if (armer) armer.stopped = true;
+    clearRoomProfiles();
+    for (const role of ["P2", "P3", "P4"]) await reattachMicrophone(pages.get(role));
+    if (sampler) {
+      const sampled = await sampler.stop();
+      const p1Samples = sampled.timeline.get("P1");
+      // The first seconds belong to the tier arming.
+      const settled = p1Samples.filter((sample) => sample.t >= 5);
+      evidence = {
+        summary: summarizeAdaptationTimeline(settled),
+        samples: settled.length,
+        serverSourcedSamples: settled.filter((sample) => sample.ownLinkSource === "server").length,
+        inbound: inboundLossByKind(settled),
+        serverLoss: serverDownlinkLoss(sampled, roles),
+        timeline: Object.fromEntries(sampled.timeline)
+      };
+      recordEvidence("lossy-downlink-clean-senders-evidence", evidence);
+      console.log(`[${tag}] P1's lossy download: ${JSON.stringify(evidence.summary)}; its browser's inbound streams ${JSON.stringify(evidence.inbound)}; SFU-measured download loss ${JSON.stringify(evidence.serverLoss)}; ${evidence.serverSourcedSamples} of ${evidence.samples} samples from the SFU's measurement`);
+      console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
+    }
+  }
+  assert.ok(evidence && evidence.serverLoss.P1.samples >= 10,
+    `the SFU measured P1's download in only ${evidence?.serverLoss.P1.samples ?? 0} samples`);
+  // With audio in the download the resends are too few to prove anything.
+  assert.ok(evidence.inbound.video.received > 10 * evidence.inbound.audio.received,
+    `P1's download was not only video, so this run cannot show what resends hide: ${JSON.stringify(evidence.inbound)}`);
+  // Ten runs: 10.9-15.6 % (the worse of two windows of about 50 packets reads
+  // a little over the 12 %) and no jitter. With resends repeating the lost
+  // packets' numbers: 4.8, 4.8 and 10.3 %, and 7, 7 and 14 ms, because a
+  // repair that arrives before the first feedback reads as a late packet.
+  assert.ok(evidence.serverLoss.P1.medianPct >= 8 && evidence.serverLoss.P1.medianPct <= 19,
+    `the SFU measured P1's 12 % download as ${JSON.stringify(evidence.serverLoss.P1)}`);
+  assert.ok(evidence.serverLoss.P1.medianJitterMs <= 3,
+    `the SFU measured jitter on a download that has none: ${JSON.stringify(evidence.serverLoss.P1)}`);
+  for (const role of ["P2", "P3", "P4"]) {
+    assert.ok(evidence.serverLoss[role].samples >= 10 && evidence.serverLoss[role].medianPct < 3,
+      `the SFU measured ${role}'s clean download as ${JSON.stringify(evidence.serverLoss[role])}`);
+  }
+  await Promise.all(roles.map((role) =>
+    waitForTopAutomaticLevel(role, 90000, "after P1's download recovered")));
   await assertMedia();
 }
 
@@ -4987,6 +5104,7 @@ const scenarios = [
   { name: "all-fast-link-top-quality", description: "All four participants on a shaped-but-fast link (20 mbit, RTT ~20 ms, no loss): every Automatic ladder reaches the top level and holds it with the top profile's sender bitrate, no pause, and no degraded tile; while one link turns moderate the other three hold the top level, and after it lifts the whole room returns to the top level.", run: scenarioAllFastLinkTopQuality, netns: true },
   { name: "one-fast-three-bad-uplinks", description: "One fast link and three participants impaired in both directions (moderate/severe/moderate): audio flows for everyone and from every bad publisher, the good camera reaches each bad participant as a trickle or a degradation reaction, the bad cameras degrade on the good participant, the severe participant leaving does not disturb the good participant's connection, and the room recovers on lift.", run: scenarioOneFastThreeBadUplinks, netns: true },
   { name: "bad-downlink-among-bad-senders", description: "One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.", run: scenarioBadDownlinkAmongBadSenders, netns: true },
+  { name: "lossy-downlink-clean-senders", description: "One participant's download loses 12 % and carries only video, from three senders on clean links: the SFU measures the loss although every lost packet is resent, and the room recovers.", run: scenarioLossyDownlinkCleanSenders, netns: true },
   { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true },
   // Opt-in resilience scenarios: MEDIA_E2E_FOUR_GROUP=resilience (or
   // resilience-slow), or each by its exact name. Never in CI.
