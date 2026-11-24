@@ -889,6 +889,97 @@ const scenarios = [
         assert.fail(`the screen still crawls: ${JSON.stringify(rounds)}, sender ${JSON.stringify(await outboundVideoEvidence(pageA))}, ` +
           `adaptation ${JSON.stringify(await pageA.evaluate(() => screenShareAdaptation?.state()))}`);
       }
+      // What starved VP9 does not starve AV1: back in AV1 the share is full
+      // size again within a few samples, not after the three minutes the
+      // starved size stays ruled out for VP9.
+      await pickCodec(pageA, "av1");
+      await waitForSentCodec(pageA, "AV1");
+      await pageA.waitForFunction(() => (screenSender?.getParameters().encodings[0]?.scaleResolutionDownBy ?? 1) === 1,
+        null, { timeout: 30000 });
+      const before = await frames();
+      await pageB.waitForTimeout(12000);
+      const backInAV1 = (await frames()) - before;
+      console.log(`[screen share codec evidence] back in AV1 at full size, per 12 s: ${backInAV1} frames, ` +
+        `sender ${JSON.stringify(await outboundVideoEvidence(pageA))}`);
+      // Firefox encodes a 1920x1080 AV1 screen at about two frames a second
+      // on this bitrate from the start of a share as well (25 in 12 s).
+      assert.ok(backInAV1 >= 15, `the screen crawls after returning to AV1: ${backInAV1} frames in 12 s`);
+    }
+  },
+  {
+    // B22 and B23 in docs/network-testing.md. A profile above the server's
+    // limit makes the browser encode at exactly the limit, a few percent over
+    // it with packet headers; a moving screen keeps the encoder there. The
+    // server's pacing queue used to fill (63 frames, every frame 12 s late,
+    // nothing dropped), after a start in which three keyframe requests cost
+    // three extra keyframes.
+    name: "a sender at the server's bitrate limit does not fall seconds behind",
+    localCapacityLimit: 2,
+    connectionMethodTest: true,
+    serverEnv: { MAX_VIDEO_BITRATE: "300000" },
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      await pageA.evaluate((profileName) => {
+        const select = document.querySelector("#profile");
+        select.value = profileName;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }, "ultra");
+      await pickCodec(pageA, "vp8");
+      await offerGeneratedScreen(pageA, 1920, 1080, true);
+      await pageA.locator("#screen").click();
+      const sent = () => pageA.evaluate(async () => {
+        const out = { bytes: 0, header: 0, frames: 0, keys: 0, pli: 0, target: 0, size: "" };
+        (await peer.getStats()).forEach((stat) => {
+          if (stat.type !== "outbound-rtp" || stat.kind !== "video") return;
+          out.bytes += stat.bytesSent || 0;
+          out.header += stat.headerBytesSent || 0;
+          out.frames += stat.framesEncoded || 0;
+          out.keys += stat.keyFramesEncoded || 0;
+          out.pli += stat.pliCount || 0;
+          out.target = stat.targetBitrate || out.target;
+          if (stat.frameWidth) out.size = `${stat.frameWidth}x${stat.frameHeight}`;
+        });
+        return out;
+      });
+      const decoded = () => pageB.evaluate(async () => {
+        let frames = 0;
+        (await window.__slowMeetTest.peerConnections.at(-1).getStats()).forEach((stat) => {
+          if (stat.type === "inbound-rtp" && stat.kind === "video") frames += stat.framesDecoded || 0;
+        });
+        return frames;
+      });
+      const serverNumber = async (name) => {
+        const text = await (await fetch(`${fixture.baseURL}/metrics`)).text();
+        return Number(text.match(new RegExp(`^slowmeet_video_${name} (\\d+)$`, "m"))?.[1] ?? NaN);
+      };
+      // The start: the first keyframe of the share must not be followed by
+      // one for every request the server used to send.
+      await pageB.waitForTimeout(20000);
+      const start = await sent();
+      const startDecoded = await decoded();
+      // Then 40 s in which the sender stays at the limit.
+      await pageB.waitForTimeout(40000);
+      const end = await sent();
+      const endDecoded = await decoded();
+      const evidence = {
+        startKeyFrames: start.keys, startRequests: start.pli,
+        kbpsWithHeaders: Math.round((end.bytes + end.header - start.bytes - start.header) * 8 / 40000),
+        encoded: end.frames - start.frames, decoded: endDecoded - startDecoded, size: end.size,
+        queuePeak: await serverNumber("frame_queue_peak_frames"), waitMaxMs: await serverNumber("frame_wait_max_ms"),
+        queueFull: await serverNumber('frames_dropped_total\\{reason="queue_full"\\}')
+      };
+      console.log(`[bitrate limit evidence] ${JSON.stringify(evidence)}`);
+      assert.ok(evidence.kbpsWithHeaders >= 270, `the sender did not stay at the limit: ${JSON.stringify(evidence)}`);
+      assert.ok(evidence.queuePeak <= 30 && evidence.waitMaxMs <= 6000 && evidence.queueFull === 0,
+        `the server fell behind a sender at its limit: ${JSON.stringify(evidence)}`);
+      assert.ok(evidence.decoded >= evidence.encoded * 0.9 - 2,
+        `the viewer decoded ${evidence.decoded} of ${evidence.encoded} frames: ${JSON.stringify(evidence)}`);
+      assert.ok(evidence.startKeyFrames <= 3, `the share started with ${evidence.startKeyFrames} keyframes: ${JSON.stringify(evidence)}`);
     }
   }
 ];

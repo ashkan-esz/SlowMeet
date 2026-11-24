@@ -54,6 +54,34 @@
     // that starved the encoder is ruled out (holdSamples counts that down).
     let minimumScale = 1;
     let holdSamples = 0;
+    // The codec the sender was last seen sending, and for each codec the size
+    // that starved it. A size that starves VP9 is fine for AV1: without this a
+    // share that shrank in one codec stayed small for minutes after the room
+    // moved to another.
+    let sentCodec = "";
+    const starvedScales = new Map();
+
+    // Moves what starvation taught to the codec now in use. Returns whether
+    // the sender's parameters changed.
+    function noteSentCodec(codec) {
+      if (codec === sentCodec) return false;
+      const first = sentCodec === "";
+      if (minimumScale > 1) starvedScales.set(sentCodec, minimumScale);
+      else starvedScales.delete(sentCodec);
+      sentCodec = codec;
+      if (first) return false;
+      const learned = starvedScales.get(codec) || 1;
+      const previousScale = resolutionScale;
+      // Without the size starvation forced for the previous codec, the scale
+      // the bitrate rule reached on its own stays.
+      resolutionScale = Math.max(learned, minimumScale > 1 ? 1 : resolutionScale);
+      minimumScale = learned;
+      holdSamples = learned > 1 ? starvationHoldSamples : 0;
+      starvedSamples = 0;
+      overLimitSamples = 0;
+      underLimitSamples = 0;
+      return resolutionScale !== previousScale;
+    }
 
     async function applyParameters() {
       if (stopped || !sender) return;
@@ -100,17 +128,31 @@
         sampleInProgress = false;
         return;
       }
+      const codec = String(stats.get?.(outbound.codecId)?.mimeType || "").toLowerCase();
+      if (codec && codec !== sentCodec) {
+        const first = sentCodec === "";
+        const changed = noteSentCodec(codec);
+        if (!first) {
+          // This window holds frames of both codecs: it starts a new baseline
+          // instead of giving a verdict.
+          previousBytes = undefined;
+          previousTimestamp = undefined;
+          if (changed) await applyParameters();
+        }
+      }
+      // A counter that starts again (a replaced stream) gives a negative
+      // difference, which says nothing about the encoder.
+      const rate = (current, previous, elapsedMs) =>
+        Number.isFinite(current) && Number.isFinite(previous) && current >= previous
+          ? (current - previous) * 1000 / elapsedMs
+          : NaN;
       if (Number.isFinite(previousBytes) && Number.isFinite(previousTimestamp)) {
         const elapsedMs = outbound.timestamp - previousTimestamp;
-        if (elapsedMs > 0) {
+        if (elapsedMs > 0 && outbound.bytesSent >= previousBytes) {
           const bitrate = ((outbound.bytesSent - previousBytes) * 8 * 1000) / elapsedMs;
           lastMeasuredBitrate = bitrate;
-          const encodedFrameRate = Number.isFinite(outbound.framesEncoded) && Number.isFinite(previousFrames)
-            ? (outbound.framesEncoded - previousFrames) * 1000 / elapsedMs
-            : NaN;
-          const sourceFrameRate = source && Number.isFinite(previousSourceFrames)
-            ? (source.frames - previousSourceFrames) * 1000 / elapsedMs
-            : NaN;
+          const encodedFrameRate = rate(outbound.framesEncoded, previousFrames, elapsedMs);
+          const sourceFrameRate = rate(source?.frames, previousSourceFrames, elapsedMs);
           if (holdSamples > 0 && --holdSamples === 0) minimumScale = 1;
           if (screenShareStarving({ encodedFrameRate, sourceFrameRate, bitrate, maxBitrate })) starvedSamples++;
           else starvedSamples = 0;
@@ -186,6 +228,7 @@
           // A larger budget may feed the resolution that starved before.
           minimumScale = 1;
           holdSamples = 0;
+          starvedScales.clear();
         }
         starvedSamples = 0;
         // A changed budget used to reset the learned stepping to full quality,

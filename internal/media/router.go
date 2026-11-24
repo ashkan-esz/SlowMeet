@@ -69,6 +69,16 @@ type publication struct {
 	// reason; see keyFrameAfterDropDue.
 	keyFrameAfterDrop       atomic.Bool
 	lastDropKeyFrameRequest atomic.Int64
+	// lastKeyFrameStart is when the first packet of this publication's latest
+	// keyframe arrived (startsVideoKeyFrame), in Unix nanoseconds.
+	lastKeyFrameStart atomic.Int64
+	// keyFrameTimestamp is that keyframe's RTP timestamp (keyFrameStamp).
+	keyFrameTimestamp atomic.Uint64
+	// lastKeyFrameForward is when the pacer last took a keyframe to pass on
+	// to this publication's receivers, in Unix nanoseconds.
+	lastKeyFrameForward atomic.Int64
+	// lastKeyFrameSent is when the pacer finished passing a keyframe on.
+	lastKeyFrameSent atomic.Int64
 	// forwardLoss measures the publisher's packets the SFU did not forward
 	// (forward_loss.go).
 	forwardLoss forwardLoss
@@ -321,6 +331,7 @@ type videoKeyFrameRequestKey struct {
 type videoKeyFrameRetry struct {
 	publication *publication
 	remaining   int
+	startedAt   int64
 	timer       *time.Timer
 	onError     func(error)
 }
@@ -827,8 +838,18 @@ func (r *Router) RequestVideoKeyFrameForPublisher(sourceID string, onError ...fu
 	r.mu.Unlock()
 
 	for _, request := range requests {
-		r.writeVideoKeyFrame(request.publication, request.onError)
+		r.writeFirstVideoKeyFrame(request.publication, request.onError)
 	}
+}
+
+// writeFirstVideoKeyFrame sends the first request of a series, unless a
+// keyframe is already on its way to the receivers (keyFrameComing). The
+// repeats still follow and ask if that keyframe never goes out.
+func (r *Router) writeFirstVideoKeyFrame(pub *publication, onError func(error)) {
+	if now := time.Now(); pub.keyFrameComing(now, now.UnixNano()) {
+		return
+	}
+	r.writeVideoKeyFrame(pub, onError)
 }
 
 func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
@@ -848,7 +869,7 @@ func (r *Router) requestVideoKeyFrame(receiverID string, onError func(error)) {
 	r.mu.Unlock()
 
 	for _, request := range requests {
-		r.writeVideoKeyFrame(request.publication, request.onError)
+		r.writeFirstVideoKeyFrame(request.publication, request.onError)
 	}
 }
 
@@ -871,6 +892,7 @@ func (r *Router) scheduleVideoKeyFrameRetryLocked(pub *publication, receiverID s
 	request := &videoKeyFrameRetry{
 		publication: pub,
 		remaining:   videoKeyFrameRequestCount - 1,
+		startedAt:   time.Now().UnixNano(),
 		onError:     onError,
 	}
 	request.timer = time.AfterFunc(videoKeyFrameRetryDelay, func() {
@@ -890,7 +912,13 @@ func (r *Router) retryVideoKeyFrame(key videoKeyFrameRequestKey, request *videoK
 	if key.receiverID == "" {
 		hasSubscriber = hasVideoKeyFrameSubscriber(request.publication)
 	}
-	if r.pubs[request.publication.key] != request.publication || !hasSubscriber {
+	// The repeats cover a request lost on the way. Once a keyframe has started
+	// to arrive, the request was answered, and every further one makes the
+	// encoder produce another: measured with a shared screen at a 300 kbps
+	// limit, one series of three cost three extra keyframes of about 250 KB,
+	// 20 s of the stream's bitrate (B23 in docs/network-testing.md).
+	answered := request.publication.keyFrameComing(time.Now(), request.startedAt)
+	if r.pubs[request.publication.key] != request.publication || !hasSubscriber || answered {
 		delete(r.videoKeyFrameRetries, key)
 		r.mu.Unlock()
 		return
@@ -1228,7 +1256,9 @@ func relayRTCP(sender *pion.RTPSender, route *atomic.Pointer[feedbackRoute], rel
 		now := time.Now()
 		var keyFrameAllowed func() bool
 		if current.pub != nil {
-			keyFrameAllowed = func() bool { return current.pub.allowKeyFrameRequest(now) }
+			keyFrameAllowed = func() bool {
+				return !current.pub.keyFrameInTransit(now) && current.pub.allowKeyFrameRequest(now)
+			}
 		}
 		routed := routeFilteredRTCPFeedback(packets, current.ssrc, current.publisherResendable(now), keyFrameAllowed)
 		relayed.Observe(packets)
@@ -1509,6 +1539,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 		case <-stop:
 			return
 		case frame := <-frames:
+			if frame.repairTargets == nil && !frame.queuedAt.IsZero() {
+				pub.videoDrops.ObserveFrameQueue(len(frames)+1, time.Since(frame.queuedAt))
+			}
 			// The camera-layer selection can only change per frame, not per
 			// packet; resolve the target list and any layer transitions once.
 			targets, layerStarts := r.resolveFrameTargets(pub)
@@ -1533,6 +1566,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 				}
 				continue
 			}
+			if frame.keyFrame && frame.repairTargets == nil {
+				pub.lastKeyFrameForward.Store(time.Now().UnixNano())
+			}
 			for _, packet := range frame.packets {
 				if pub.paused.Load() {
 					break
@@ -1542,7 +1578,7 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 					return
 				default:
 				}
-				if !pub.limiter.waitForBytes(packet.MarshalSize(), stop) {
+				if !pub.limiter.waitForBytes(pacedVideoBytes(packet.MarshalSize(), frame.queuedAt), stop) {
 					return
 				}
 				if frame.repairTargets == nil {
@@ -1562,6 +1598,9 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 					}
 				}
 			}
+			if frame.keyFrame && frame.repairTargets == nil {
+				pub.lastKeyFrameSent.Store(time.Now().UnixNano())
+			}
 			// A receiver just started receiving this publication's layer
 			// mid-GOP; ask its publisher for a keyframe so the tile recovers
 			// immediately instead of waiting for the next natural keyframe.
@@ -1572,7 +1611,40 @@ func (r *Router) forwardVideoFrames(pub *publication, frames <-chan videoFrame, 
 	}
 }
 
+// A frame that has waited this long for the pacer is late for a live call, and
+// the pacer sends it faster to catch up: at one and a half times the rate
+// after videoCatchUpAfter, at twice the rate after videoCatchUpFastAfter.
+//
+// Without this the queue only ever drains at the rate it fills. A sender that
+// encodes at exactly the server's limit is a few percent over it once packet
+// headers are counted, so the queue grew until it was full and stayed there:
+// measured with a browser sharing a moving screen at a 300 kbps limit, every
+// frame reached the viewers 12 s late (B22 in docs/network-testing.md). The
+// limit still holds for a sender's average; only a backlog, such as the one a
+// keyframe leaves behind, is sent above it, and never above twice.
+const (
+	videoCatchUpAfter     = 250 * time.Millisecond
+	videoCatchUpFastAfter = time.Second
+)
+
+// pacedVideoBytes is what the pacer charges for a packet of size bytes that
+// belongs to a frame queued at queuedAt: less than its size once the frame is
+// late, which is what sends it faster.
+func pacedVideoBytes(size int, queuedAt time.Time) int {
+	if queuedAt.IsZero() {
+		return size
+	}
+	switch waited := time.Since(queuedAt); {
+	case waited >= videoCatchUpFastAfter:
+		return (size + 1) / 2
+	case waited >= videoCatchUpAfter:
+		return (size*2 + 2) / 3
+	}
+	return size
+}
+
 func enqueueVideoFrame(queue chan<- videoFrame, frame videoFrame) bool {
+	frame.queuedAt = time.Now()
 	select {
 	case queue <- frame:
 		return true
@@ -1651,7 +1723,7 @@ func (r *Router) requestVideoKeyFrameForPublication(pub *publication, receiverID
 	if request == nil || pub.source == nil || pub.remote == nil {
 		return
 	}
-	r.writeVideoKeyFrame(pub, nil)
+	r.writeFirstVideoKeyFrame(pub, nil)
 }
 
 func (r *Router) selectedCameraLayerLocked(pub *publication, receiverID string, now time.Time) string {
@@ -1715,6 +1787,10 @@ type videoFrameBuffer struct {
 type videoFrame struct {
 	packets       []*rtp.Packet
 	repairTargets []*publicationTarget
+	// queuedAt is when the frame entered the pacing queue (enqueueVideoFrame).
+	queuedAt time.Time
+	// keyFrame marks a frame whose first packet starts a keyframe.
+	keyFrame bool
 }
 
 // add returns a complete video frame only after its marker packet arrives.
