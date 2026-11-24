@@ -252,6 +252,46 @@ async function updateAdminConfig(fixture, body) {
   assert.equal(response.status, 200, `admin update failed: ${await response.text()}`);
 }
 
+// Hands the page a generated screen in place of a captured one: the screen
+// picker cannot run headless. From there the app takes its whole
+// screen-share path. Without motion it is a document in which only a small
+// counter changes, ten times a second.
+async function offerGeneratedScreen(page, width, height, motion = false) {
+  await page.evaluate(([width, height, motion]) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    let frame = 0;
+    const draw = () => {
+      frame += 1;
+      if (!motion && frame > 1) {
+        // A document on screen: only a small counter changes.
+        context.fillStyle = "#fff";
+        context.fillRect(canvas.width - 420, canvas.height - 80, 400, 60);
+        context.fillStyle = "#111";
+        context.fillText(`frame ${frame}`, canvas.width - 410, canvas.height - 40);
+        return;
+      }
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#111";
+      context.font = "20px monospace";
+      for (let row = 0; row < 40; row += 1) {
+        context.fillText(`${frame} ${"shared screen text ".repeat(7)}${row * frame}`, 10, 22 * (row + 1));
+      }
+      for (let block = 0; block < 320; block += 1) {
+        context.fillStyle = `hsl(${(block * 37 + frame * 11) % 360} 80% 50%)`;
+        context.fillRect((block % 40) * 48, 900 + Math.floor(block / 40) * 22, 48, 22);
+      }
+    };
+    draw();
+    window.__screenDrawTimer = setInterval(draw, 100);
+    const stream = canvas.captureStream(10);
+    Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { configurable: true, value: async () => stream });
+  }, [width, height, motion]);
+}
+
 // How many video streams the server republished because a publisher changed
 // codec, from /metrics.
 async function codecSwitches(fixture) {
@@ -667,39 +707,7 @@ const scenarios = [
       const screenSize = (process.env.MEDIA_E2E_SCREEN_SIZE || "1920x1080").split("x").map(Number);
       const order = (process.env.MEDIA_E2E_SCREEN_ORDER || "av1,vp9,vp8").split(",");
       const labels = { av1: "AV1", vp9: "VP9", vp8: "VP8", h264: "H.264" };
-      await pageA.evaluate(([width, height, motion]) => {
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const context = canvas.getContext("2d");
-        let frame = 0;
-        const draw = () => {
-          frame += 1;
-          if (!motion && frame > 1) {
-            // A document on screen: only a small counter changes.
-            context.fillStyle = "#fff";
-            context.fillRect(canvas.width - 420, canvas.height - 80, 400, 60);
-            context.fillStyle = "#111";
-            context.fillText(`frame ${frame}`, canvas.width - 410, canvas.height - 40);
-            return;
-          }
-          context.fillStyle = "#fff";
-          context.fillRect(0, 0, canvas.width, canvas.height);
-          context.fillStyle = "#111";
-          context.font = "20px monospace";
-          for (let row = 0; row < 40; row += 1) {
-            context.fillText(`${frame} ${"shared screen text ".repeat(7)}${row * frame}`, 10, 22 * (row + 1));
-          }
-          for (let block = 0; block < 320; block += 1) {
-            context.fillStyle = `hsl(${(block * 37 + frame * 11) % 360} 80% 50%)`;
-            context.fillRect((block % 40) * 48, 900 + Math.floor(block / 40) * 22, 48, 22);
-          }
-        };
-        draw();
-        window.__screenDrawTimer = setInterval(draw, 100);
-        const stream = canvas.captureStream(10);
-        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", { configurable: true, value: async () => stream });
-      }, [...screenSize, process.env.MEDIA_E2E_SCREEN_CONTENT === "motion"]);
+      await offerGeneratedScreen(pageA, ...screenSize, process.env.MEDIA_E2E_SCREEN_CONTENT === "motion");
       const setScreen = async (on) => {
         await pageA.locator("#screen").click();
         await pageA.waitForFunction((pressed) =>
@@ -836,6 +844,51 @@ const scenarios = [
       await pageA.waitForTimeout(20000);
       await assertNoVerdict("after twenty quiet seconds");
       await waitForReceivedCodec(pageB, codecMimes.vp9);
+    }
+  },
+  {
+    name: "a shared screen too large for its bitrate shrinks until it moves again",
+    async run(fixture) {
+      const pageA = pageFor(fixture, "A");
+      const pageB = pageFor(fixture, "B");
+      await fixture.join("A", "Alice");
+      await fixture.waitForConnected("A");
+      await fixture.join("B", "Bob");
+      await fixture.waitForConnected();
+      // On the default slow profile (180 kbps) one full-size VP9 keyframe
+      // costs seconds of bitrate. A codec change in the middle of a share
+      // asks for several, the viewer sees nothing for longer than it waits
+      // before asking again, and every frame becomes a keyframe: a frame
+      // every few seconds, for as long as the picture stays this large. The
+      // sender must notice and send a smaller one.
+      await offerGeneratedScreen(pageA, 1920, 1080);
+      await pickCodec(pageA, "av1");
+      await pageA.locator("#screen").click();
+      await pageA.waitForFunction(() => document.querySelector("#screen")?.getAttribute("aria-pressed") === "true",
+        null, { timeout: 30000 });
+      await waitForSentCodec(pageA, "AV1");
+      await waitForReceivedCodec(pageB, codecMimes.av1);
+      await pickCodec(pageA, "vp9");
+      await waitForSentCodec(pageA, "VP9");
+      const screenScale = () => pageA.evaluate(() => screenSender?.getParameters().encodings[0]?.scaleResolutionDownBy ?? 1);
+      const frames = () => pageB.evaluate(async () => {
+        let decoded = 0;
+        (await window.__slowMeetTest.peerConnections.at(-1).getStats()).forEach((stat) => {
+          if (stat.type === "inbound-rtp" && stat.kind === "video") decoded += stat.framesDecoded || 0;
+        });
+        return decoded;
+      });
+      const rounds = [];
+      for (let round = 0; round < 8 && (rounds.at(-1)?.frames ?? 0) < 30; round += 1) {
+        const before = await frames();
+        await pageB.waitForTimeout(12000);
+        rounds.push({ frames: (await frames()) - before, scale: await screenScale() });
+      }
+      console.log(`[screen share codec evidence] VP9 screen after a codec change, per 12 s: ${JSON.stringify(rounds)}`);
+      if (rounds.at(-1).frames < 30) {
+        assert.fail(`the screen still crawls: ${JSON.stringify(rounds)}, sender ${JSON.stringify(await outboundVideoEvidence(pageA))}, ` +
+          `adaptation ${JSON.stringify(await pageA.evaluate(() => screenShareAdaptation?.state()))}`);
+      }
     }
   }
 ];

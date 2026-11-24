@@ -7,6 +7,31 @@
   // was degraded by transient congestion steps back up instead of staying at
   // the floor forever.
   const underLimitSamplesToRecover = 5;
+  // An encoder held at full resolution on a small budget can starve: it uses
+  // the budget and still makes a frame every few seconds. Measured at
+  // 180 kbps with a 1920x1080 screen: VP9 2 frames in 12 s and VP8 12, against
+  // 87 and 90 at 960x540. Its bitrate stays inside the cap, so the over-limit
+  // rule above never sees it.
+  const starvationFrameRate = 2;
+  const starvationSourceFrameRate = 4;
+  const starvationSamples = 2;
+  const starvationScales = [1, 1.5, 2, 3];
+  // Samples (of 5 s) a starved resolution stays ruled out before recovery may
+  // try it again.
+  const starvationHoldSamples = 36;
+
+  // Whether the encoder is starving. Where the browser reports the frames its
+  // video source delivers, it is what the screen offers against what the
+  // encoder makes: a screen that does not change offers nothing and is never
+  // starving. Without that report, only an encoder that spends half its
+  // budget on less than a frame a second counts.
+  function screenShareStarving({ encodedFrameRate, sourceFrameRate, bitrate, maxBitrate }) {
+    if (!Number.isFinite(encodedFrameRate)) return false;
+    if (Number.isFinite(sourceFrameRate)) {
+      return sourceFrameRate >= starvationSourceFrameRate && encodedFrameRate < starvationFrameRate;
+    }
+    return encodedFrameRate < 1 && Number.isFinite(bitrate) && maxBitrate > 0 && bitrate >= maxBitrate / 2;
+  }
 
   function createScreenShareAdaptation(sender) {
     let timer;
@@ -22,6 +47,13 @@
     let underLimitSamples = 0;
     let sampleInProgress = false;
     let generation = 0;
+    let previousFrames;
+    let previousSourceFrames;
+    let starvedSamples = 0;
+    // The smallest scale recovery may return to; above 1 while a resolution
+    // that starved the encoder is ruled out (holdSamples counts that down).
+    let minimumScale = 1;
+    let holdSamples = 0;
 
     async function applyParameters() {
       if (stopped || !sender) return;
@@ -55,7 +87,9 @@
         return;
       }
       let outbound;
+      let source;
       stats.forEach((stat) => {
+        if (stat.type === "media-source" && stat.kind === "video" && Number.isFinite(stat.frames)) source = stat;
         if (stat.type === "outbound-rtp" &&
             (stat.kind === "video" || stat.mediaType === "video") &&
             Number.isFinite(stat.bytesSent) && Number.isFinite(stat.timestamp)) {
@@ -71,16 +105,37 @@
         if (elapsedMs > 0) {
           const bitrate = ((outbound.bytesSent - previousBytes) * 8 * 1000) / elapsedMs;
           lastMeasuredBitrate = bitrate;
+          const encodedFrameRate = Number.isFinite(outbound.framesEncoded) && Number.isFinite(previousFrames)
+            ? (outbound.framesEncoded - previousFrames) * 1000 / elapsedMs
+            : NaN;
+          const sourceFrameRate = source && Number.isFinite(previousSourceFrames)
+            ? (source.frames - previousSourceFrames) * 1000 / elapsedMs
+            : NaN;
+          if (holdSamples > 0 && --holdSamples === 0) minimumScale = 1;
+          if (screenShareStarving({ encodedFrameRate, sourceFrameRate, bitrate, maxBitrate })) starvedSamples++;
+          else starvedSamples = 0;
+          const starved = starvedSamples >= starvationSamples && resolutionScale < maximumResolutionScale;
           if (bitrate > maxBitrate * 1.1) {
             overLimitSamples++;
             underLimitSamples = 0;
           } else {
             overLimitSamples = 0;
             // Full quality already: nothing to step up into.
-            if (frameRate < maxFrameRate || resolutionScale > 1) underLimitSamples++;
+            if (frameRate < maxFrameRate || resolutionScale > minimumScale) underLimitSamples++;
             else underLimitSamples = 0;
           }
-          if (overLimitSamples >= 2) {
+          if (starved) {
+            // A smaller picture is the only thing that feeds a starving
+            // encoder; step straight to the next size and keep the starved
+            // one ruled out for a while, or recovery would walk back into it.
+            starvedSamples = 0;
+            overLimitSamples = 0;
+            underLimitSamples = 0;
+            resolutionScale = starvationScales.find((scale) => scale > resolutionScale) ?? maximumResolutionScale;
+            minimumScale = resolutionScale;
+            holdSamples = starvationHoldSamples;
+            await applyParameters();
+          } else if (overLimitSamples >= 2) {
             overLimitSamples = 0;
             underLimitSamples = 0;
             if (frameRate > minimumFrameRate) {
@@ -95,8 +150,8 @@
             // of moving content), then resolution.
             if (frameRate < maxFrameRate) {
               frameRate = Math.min(maxFrameRate, Math.ceil(frameRate * 1.25));
-            } else if (resolutionScale > 1) {
-              resolutionScale = Math.max(1, resolutionScale - 0.25);
+            } else if (resolutionScale > minimumScale) {
+              resolutionScale = Math.max(minimumScale, resolutionScale - 0.25);
             }
             await applyParameters();
           }
@@ -104,6 +159,8 @@
       }
       previousBytes = outbound.bytesSent;
       previousTimestamp = outbound.timestamp;
+      previousFrames = outbound.framesEncoded;
+      previousSourceFrames = source?.frames;
       sampleInProgress = false;
     }
 
@@ -125,6 +182,12 @@
         const previousBitrate = maxBitrate;
         maxBitrate = nextBitrate;
         maxFrameRate = nextFrameRate;
+        if (nextBitrate > previousBitrate) {
+          // A larger budget may feed the resolution that starved before.
+          minimumScale = 1;
+          holdSamples = 0;
+        }
+        starvedSamples = 0;
         // A changed budget used to reset the learned stepping to full quality,
         // which overspends for two sampling windows right after a camera
         // up-step and can re-trigger congestion. Keep the learned adaptation
@@ -164,6 +227,6 @@
 
   root.createScreenShareAdaptation = createScreenShareAdaptation;
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { createScreenShareAdaptation };
+    module.exports = { createScreenShareAdaptation, screenShareStarving };
   }
 })(typeof window !== "undefined" ? window : globalThis);

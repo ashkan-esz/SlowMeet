@@ -161,7 +161,7 @@ what should change. Fixing an issue means flipping that assertion.
   and the server log has no warning, so neither B18 nor B19 is the cause.
   Not investigated further.
 
-- **Fixed: B1–B9 and B11–B20.** Their tests now enforce the fix without a gate.
+- **Fixed: B1–B9 and B11–B21.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
     remote sender on a bad uplink there is no clean stream. In
@@ -347,6 +347,27 @@ what should change. Fixing an issue means flipping that assertion.
     would be too large again.
     `TestDroppedFrameAsksForAKeyframeButAnOversizedOneDoesNot`,
     `TestKeyframeAfterDropIsBoundedAndWaitsForTheSharedBudget`.
+  - B21, a shared screen stuck at a frame every few seconds: on the default
+    slow profile (180 kbps) a full-size screen in VP9 or VP8 fell into a
+    keyframe loop after a codec change in the middle of the share. One
+    1920x1080 keyframe costs seconds of that bitrate; the change asks for
+    several, the viewer sees nothing for longer than the three seconds it
+    waits before asking again, and every frame becomes a keyframe. Measured
+    per 12 s, loss-free: VP9 2 to 4 frames at 1920x1080 and at 1280x720, 87 at
+    960x540; VP8 12, 61 and 90; AV1 119 at full size (its keyframes are small).
+    The same on the production server: VP9 2 frames in 12 s. VP9 from the
+    start of a share did not loop in Chromium (10 fps at 34 kbps). The
+    sender's screen adaptation only watched the bitrate, which stays inside
+    the cap. It now also compares the frames the screen offers with the
+    frames the encoder makes (`screenShareStarving`); below 2 a second for two
+    samples it sends the next smaller size (1.5, 2, 3) and keeps the starved
+    size ruled out for three minutes or until the budget grows. Browser
+    scenario "a shared screen too large for its bitrate shrinks until it
+    moves again": 4 frames in the first 12 s, then 76 (Chromium) and 46
+    (Firefox). Where the browser does not report its video source, only an
+    encoder using half its budget for less than a frame a second counts, so
+    a slow VP8 encoder in Firefox (6 to 8 frames in 12 s at 55 kbps) is not
+    caught.
   - B2, keyframe requests not coalesced: one retry series per publication
     (not per receiver), and relayed PLI/FIR share a 200 ms budget per
     publication with the SFU's own requests, so N receivers losing the

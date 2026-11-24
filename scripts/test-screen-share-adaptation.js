@@ -282,6 +282,82 @@ async function main() {
     assert.equal(harness.parameters.encodings[0].maxBitrate, 500_000, "update after stop does not touch the sender");
   }
 
+  {
+    // A starving encoder: the screen offers ten frames a second, the encoder
+    // makes one every few seconds and stays inside its budget.
+    const { screenShareStarving } = require("../web/js/screen-share-adaptation.js");
+    const starving = { encodedFrameRate: 0.2, sourceFrameRate: 10, bitrate: 150_000, maxBitrate: 180_000 };
+    assert.equal(screenShareStarving(starving), true);
+    assert.equal(screenShareStarving({ ...starving, sourceFrameRate: 0.3, bitrate: 5_000 }), false,
+      "a screen that hardly changes is not starving");
+    assert.equal(screenShareStarving({ ...starving, encodedFrameRate: 5 }), false, "five frames a second is fed");
+    assert.equal(screenShareStarving({ ...starving, sourceFrameRate: NaN }), true,
+      "without a source report, a spent budget for less than a frame a second counts");
+    assert.equal(screenShareStarving({ ...starving, sourceFrameRate: NaN, bitrate: 20_000 }), false,
+      "without a source report, a quiet screen is left alone");
+    assert.equal(screenShareStarving({ ...starving, encodedFrameRate: NaN }), false, "no frame count, no verdict");
+
+    const makeFedSender = () => {
+      const fed = { parameters: { encodings: [{}] }, time: 0, bytes: 0, encoded: 0, sourceFrames: 0 };
+      fed.sender = {
+        getParameters: () => structuredClone(fed.parameters),
+        async setParameters(next) { fed.parameters = next; },
+        async getStats() {
+          return new Map([
+            ["outbound", { type: "outbound-rtp", kind: "video", bytesSent: fed.bytes, timestamp: fed.time, framesEncoded: fed.encoded }],
+            ["source", { type: "media-source", kind: "video", frames: fed.sourceFrames }]
+          ]);
+        }
+      };
+      fed.adaptation = createScreenShareAdaptation(fed.sender);
+      // One 5 s sampling window: frames encoded, frames the screen offered,
+      // and bytes sent (93 750 bytes is 150 kbps).
+      fed.window = async (encodedFrames, sourceFrames = 50, bytes = 93_750) => {
+        fed.time += 5_000;
+        fed.bytes += bytes;
+        fed.encoded += encodedFrames;
+        fed.sourceFrames += sourceFrames;
+        await fed.adaptation.sample();
+      };
+      return fed;
+    };
+
+    const fed = makeFedSender();
+    try {
+      await fed.adaptation.update(180_000, 15);
+      await fed.adaptation.sample(); // baseline
+      await fed.window(1);
+      assert.equal(fed.adaptation.state().resolutionScale, 1, "one starved window is not enough");
+      await fed.window(1);
+      assert.equal(fed.adaptation.state().resolutionScale, 1.5, "two starved windows shrink the picture to the next size");
+      assert.equal(fed.parameters.encodings[0].scaleResolutionDownBy, 1.5);
+      await fed.window(1);
+      await fed.window(1);
+      assert.equal(fed.adaptation.state().resolutionScale, 2, "still starving: the next size");
+      for (let index = 0; index < 12; index += 1) await fed.window(35);
+      assert.equal(fed.adaptation.state().resolutionScale, 2, "recovery does not walk back into a resolution that starved");
+      assert.equal(fed.adaptation.state().frameRate, 15, "starvation does not touch the frame-rate cap");
+
+      // A larger budget may feed the larger picture again.
+      await fed.adaptation.update(400_000, 15);
+      for (let index = 0; index < 7; index += 1) await fed.window(35);
+      assert.ok(fed.adaptation.state().resolutionScale < 2, "a larger budget lets the picture grow again");
+    } finally {
+      fed.adaptation.stop();
+    }
+
+    // A document on screen: the screen itself offers a frame now and then.
+    const quiet = makeFedSender();
+    try {
+      await quiet.adaptation.update(180_000, 15);
+      await quiet.adaptation.sample();
+      for (let index = 0; index < 6; index += 1) await quiet.window(1, 1, 4_000);
+      assert.equal(quiet.adaptation.state().resolutionScale, 1, "a quiet screen keeps its full resolution");
+    } finally {
+      quiet.adaptation.stop();
+    }
+  }
+
   console.log("Screen-share adaptation tests passed");
 }
 
