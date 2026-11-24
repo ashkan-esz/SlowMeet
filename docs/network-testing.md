@@ -173,6 +173,15 @@ what should change. Fixing an issue means flipping that assertion.
   only with AV1, was not found; its link figures at the end are clean (0 %
   loss, estimated 558 kbps out against 948 and 1023 for P2 and P4).
 
+- **Open: "signaling reconnects under network impairment" fails every
+  second run** of `make test-media-e2e-netns`: a participant's join does not
+  reach the meeting view within 20 s. It is not new: 3 failures in 6 runs on
+  `c506d5a`, 2 in 5 on `d42c094`, 3 in 5 after B20 and B21. In all three
+  series passes and failures alternate strictly (pass, fail, pass, fail), the
+  run after a pass fails and the run after a failure passes, which points at
+  something a passing run leaves behind for the next one rather than at the
+  network. Not investigated further.
+
 - **Fixed: B1–B9 and B11–B21.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
     estimate is the minimum loss across inbound streams, and with every
