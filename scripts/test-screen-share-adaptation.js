@@ -304,8 +304,10 @@ async function main() {
         async setParameters(next) { fed.parameters = next; },
         async getStats() {
           return new Map([
-            ["outbound", { type: "outbound-rtp", kind: "video", bytesSent: fed.bytes, timestamp: fed.time, framesEncoded: fed.encoded }],
-            ["source", { type: "media-source", kind: "video", frames: fed.sourceFrames }]
+            ["outbound", { type: "outbound-rtp", kind: "video", bytesSent: fed.bytes, timestamp: fed.time,
+              framesEncoded: fed.encoded, codecId: fed.codec ? "codec" : undefined }],
+            ["source", { type: "media-source", kind: "video", frames: fed.sourceFrames }],
+            ...(fed.codec ? [["codec", { type: "codec", mimeType: fed.codec }]] : [])
           ]);
         }
       };
@@ -355,6 +357,61 @@ async function main() {
       assert.equal(quiet.adaptation.state().resolutionScale, 1, "a quiet screen keeps its full resolution");
     } finally {
       quiet.adaptation.stop();
+    }
+
+    // What starvation taught belongs to the codec that starved: a share that
+    // shrank in VP9 is full size again once it is sent in AV1, instead of
+    // staying small for the three minutes the starved size is ruled out.
+    const switching = makeFedSender();
+    try {
+      switching.codec = "video/VP9";
+      await switching.adaptation.update(180_000, 15);
+      await switching.adaptation.sample();
+      await switching.window(1);
+      await switching.window(1);
+      assert.equal(switching.adaptation.state().resolutionScale, 1.5);
+      switching.codec = "video/AV1";
+      await switching.window(1);
+      assert.equal(switching.adaptation.state().resolutionScale, 1, "full size as soon as the codec that starved is gone");
+      assert.equal(switching.parameters.encodings[0].scaleResolutionDownBy, 1);
+      await switching.window(1);
+      assert.equal(switching.adaptation.state().resolutionScale, 1,
+        "the window in which the codec changed starts a new baseline; one starved window after it is not enough");
+      for (let index = 0; index < 6; index += 1) await switching.window(45);
+      assert.equal(switching.adaptation.state().resolutionScale, 1);
+      // Back in the codec that starved: not into the slideshow a second time.
+      switching.codec = "video/VP9";
+      await switching.window(45);
+      assert.equal(switching.adaptation.state().resolutionScale, 1.5, "the size that starved a codec is remembered for it");
+      assert.equal(switching.parameters.encodings[0].scaleResolutionDownBy, 1.5);
+      for (let index = 0; index < 12; index += 1) await switching.window(35);
+      assert.equal(switching.adaptation.state().resolutionScale, 1.5, "and stays ruled out while that codec is in use");
+      // A larger budget forgets it for every codec.
+      await switching.adaptation.update(400_000, 15);
+      switching.codec = "video/AV1";
+      await switching.window(45);
+      switching.codec = "video/VP9";
+      await switching.window(45);
+      assert.ok(switching.adaptation.state().resolutionScale <= 1.5);
+      for (let index = 0; index < 12; index += 1) await switching.window(45);
+      assert.equal(switching.adaptation.state().resolutionScale, 1, "after a larger budget the picture grows back in any codec");
+    } finally {
+      switching.adaptation.stop();
+    }
+
+    // A frame counter that starts again (a replaced stream) says nothing.
+    const restarted = makeFedSender();
+    try {
+      await restarted.adaptation.update(180_000, 15);
+      await restarted.adaptation.sample();
+      await restarted.window(45);
+      for (let index = 0; index < 3; index += 1) {
+        restarted.encoded -= 400;
+        await restarted.window(0);
+      }
+      assert.equal(restarted.adaptation.state().resolutionScale, 1, "a counter running backwards is not starvation");
+    } finally {
+      restarted.adaptation.stop();
     }
   }
 
