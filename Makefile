@@ -58,7 +58,7 @@ tidy: ## Synchronize Go module dependencies
 	$(GO) mod tidy
 
 test-js: ## Run all JavaScript checks
-	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-opus-dtx test-video-codec test-relay-rotation test-plain-relay-probe test-path-memory test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-reconnect-policy test-remote-track-memory test-netem-tiers test-audio-continuity test-signaling-relay test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
+	$(MAKE) test-js-syntax test-admin test-protocol test-connection-methods test-login-url test-opus-dtx test-video-codec test-relay-rotation test-plain-relay-probe test-path-memory test-adaptation test-room-network-scenarios test-screen-share-adaptation test-remote-camera-video test-camera-quality test-layout test-chat-notifications test-muted-speech-warning test-chat-history test-meeting-status test-renegotiation-queue test-reconnect-policy test-remote-track-memory test-netem-tiers test-audio-continuity test-signaling-relay test-remote-screen-video test-participant-identity test-connection-history test-media-fixes
 
 test-js-syntax: ## Syntax-check every browser JavaScript file
 	@status=0; \
@@ -75,6 +75,9 @@ test-protocol: ## Test the signaling protocol
 
 test-connection-methods: ## Test strict ICE server selection by connection method
 	$(NODE) scripts/test-connection-methods.js
+
+test-login-url: ## Test login link query parsing and updates
+	$(NODE) scripts/test-login-url.js
 
 test-opus-dtx: ## Test the per-participant Opus DTX (silence suppression) switch
 	$(NODE) scripts/test-opus-dtx.js

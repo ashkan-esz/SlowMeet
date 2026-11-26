@@ -60,6 +60,10 @@ const connectionSummaryCopy = document.querySelector("#connection-summary-copy")
 const connectionPreference = document.querySelector("#connection-preference");
 const connectionActivePath = document.querySelector("#connection-active-path");
 const joinConnectionMethod = document.querySelector("#join-connection-method");
+const loginURLPreferences = window.SlowMeetLoginURL.read(
+  window.location.search,
+  [...joinConnectionMethod.options].map((option) => option.value)
+);
 const settingsConnectionMethod = document.querySelector("#settings-connection-method");
 const joinConnectionMethodHelp = document.querySelector("#join-connection-method-help");
 const settingsConnectionMethodHelp = document.querySelector("#settings-connection-method-help");
@@ -1870,6 +1874,7 @@ function writeStoredValue(key, value) {
 
 const storedName = readStoredValue("meeting.displayName");
 if (storedName) nameInput.value = storedName;
+if (loginURLPreferences.hasUser) nameInput.value = loginURLPreferences.user;
 
 let socket;
 let socketGeneration = 0;
@@ -2463,7 +2468,8 @@ if (videoCodecsDevice && navigator.mediaCapabilities?.encodingInfo) {
 }
 refreshVideoCodecUI();
 const connectionMethodOptions = new Map();
-let connectionMethod = readStoredValue("meeting.connectionMethod") || "auto";
+let connectionMethod = loginURLPreferences.connectionType ||
+  readStoredValue("meeting.connectionMethod") || "auto";
 // True while the saved method is only set aside because the ICE configuration
 // could not be fetched; the next successful response brings it back.
 let connectionMethodSetAside = false;
@@ -2580,6 +2586,16 @@ function refreshConnectionMethodSelectors({ authoritative = true } = {}) {
   }
   if (settingsConnectionMethodHelp) settingsConnectionMethodHelp.textContent = help;
   updateConnectionMethodSummary();
+  syncLoginURL();
+}
+
+function syncLoginURL() {
+  const url = window.SlowMeetLoginURL.update(
+    window.location.href,
+    nameInput.value,
+    joinConnectionMethod?.value || connectionMethod
+  );
+  window.history.replaceState(window.history.state, "", url);
 }
 
 function updateConnectionMethodSummary() {
@@ -4083,6 +4099,7 @@ document.addEventListener("visibilitychange", () => {
 });
 refreshRoomRoster();
 
+nameInput.addEventListener("input", syncLoginURL);
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (joinButton.disabled) return;
@@ -4114,7 +4131,9 @@ form.addEventListener("submit", async (event) => {
   connectSocket(name, passwordInput.value);
 });
 
-joinConnectionMethod?.addEventListener("change", () => selectConnectionMethod(joinConnectionMethod.value));
+joinConnectionMethod?.addEventListener("change", () => {
+  if (selectConnectionMethod(joinConnectionMethod.value)) syncLoginURL();
+});
 settingsConnectionMethod?.addEventListener("change", () => selectConnectionMethod(settingsConnectionMethod.value));
 
 function connectSocket(name, password) {
