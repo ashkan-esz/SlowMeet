@@ -169,7 +169,13 @@ async function createParticipant(role, name, expectRejected = false, skipJoin = 
     ...(browserName === "firefox"
       ? { firefoxUserPrefs: { "media.navigator.streams.fake": true, "media.navigator.permission.disabled": true,
           // Loopback e2e must bypass ambient HTTP(S)_PROXY environment settings.
-          "network.proxy.type": 0 } }
+          "network.proxy.type": 0,
+          // Inside the netns 127.0.0.1 is the SFU's only candidate, and the
+          // SFU cannot resolve mDNS host names. Firefox's own address there
+          // comes from the runner's dummy interface
+          // (scripts/test-four-person-e2e-netns.sh).
+          ...(netnsRoom ? { "media.peerconnection.ice.loopback": true,
+            "media.peerconnection.ice.obfuscate_host_addresses": false } : {}) } }
       : { args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required",
           "--no-proxy-server",
           // Inside the netns the only route is loopback. Mirror the
