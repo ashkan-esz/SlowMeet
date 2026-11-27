@@ -3846,8 +3846,8 @@ async function scenarioBadDownlinkAmongBadSenders() {
 // browser report that number as arrived, and the loss disappeared. A download
 // with audio in it cannot show that: a receiver this lossy takes the low
 // camera layers, so most of its packets are audio, which is never resent.
-async function scenarioLossyDownlinkCleanSenders() {
-  const tag = "lossy-downlink-clean-senders";
+async function lossyDownlinkCleanSenders(receiver, tag) {
+  const senders = roles.filter((role) => role !== receiver);
   await setupRoom();
   await unmuteAllForAudioGuarantee();
   await clearStaleVideoSuspensions();
@@ -3858,21 +3858,23 @@ async function scenarioLossyDownlinkCleanSenders() {
   try {
     await restartAutomaticLadders();
     await Promise.all(roles.map((role) =>
-      waitForTopAutomaticLevel(role, 60000, "on a clean link before P1's download turned lossy")));
-    for (const role of ["P2", "P3", "P4"]) await detachMicrophone(pages.get(role));
-    armer = armParticipantTiers({ P1: "lossy-downlink" });
+      waitForTopAutomaticLevel(role, 60000, `on a clean link before ${receiver}'s download turned lossy`)));
+    for (const role of senders) await detachMicrophone(pages.get(role));
+    armer = armParticipantTiers({ [receiver]: "lossy-downlink" });
     sampler = startAdaptationSampler(roles);
     await delay(40000);
   } finally {
     if (armer) armer.stopped = true;
     clearRoomProfiles();
-    for (const role of ["P2", "P3", "P4"]) await reattachMicrophone(pages.get(role));
+    for (const role of senders) await reattachMicrophone(pages.get(role));
     if (sampler) {
       const sampled = await sampler.stop();
-      const p1Samples = sampled.timeline.get("P1");
+      const receiverSamples = sampled.timeline.get(receiver);
       // The first seconds belong to the tier arming.
-      const settled = p1Samples.filter((sample) => sample.t >= 5);
+      const settled = receiverSamples.filter((sample) => sample.t >= 5);
       evidence = {
+        engines: Object.fromEntries(browserNames),
+        receiver,
         summary: summarizeAdaptationTimeline(settled),
         samples: settled.length,
         serverSourcedSamples: settled.filter((sample) => sample.ownLinkSource === "server").length,
@@ -3880,31 +3882,47 @@ async function scenarioLossyDownlinkCleanSenders() {
         serverLoss: serverDownlinkLoss(sampled, roles),
         timeline: Object.fromEntries(sampled.timeline)
       };
-      recordEvidence("lossy-downlink-clean-senders-evidence", evidence);
-      console.log(`[${tag}] P1's lossy download: ${JSON.stringify(evidence.summary)}; its browser's inbound streams ${JSON.stringify(evidence.inbound)}; SFU-measured download loss ${JSON.stringify(evidence.serverLoss)}; ${evidence.serverSourcedSamples} of ${evidence.samples} samples from the SFU's measurement`);
-      console.log(`[${tag}] P1 own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(p1Samples)}`);
+      recordEvidence(`${tag}-evidence`, evidence);
+      console.log(`[${tag}] ${receiver}'s lossy download (${browserNames.get(receiver)}): ${JSON.stringify(evidence.summary)}; its browser's inbound streams ${JSON.stringify(evidence.inbound)}; SFU-measured download loss ${JSON.stringify(evidence.serverLoss)}; ${evidence.serverSourcedSamples} of ${evidence.samples} samples from the SFU's measurement`);
+      console.log(`[${tag}] ${receiver} own-link timeline (seconds:Level[P=paused][!critical ~poor +good .neither]loss%): ${formatAdaptationTimeline(receiverSamples)}`);
     }
   }
-  assert.ok(evidence && evidence.serverLoss.P1.samples >= 10,
-    `the SFU measured P1's download in only ${evidence?.serverLoss.P1.samples ?? 0} samples`);
+  const measured = evidence?.serverLoss[receiver];
+  assert.ok(measured && measured.samples >= 10,
+    `the SFU measured ${receiver}'s download in only ${measured?.samples ?? 0} samples`);
   // With audio in the download the resends are too few to prove anything.
   assert.ok(evidence.inbound.video.received > 10 * evidence.inbound.audio.received,
-    `P1's download was not only video, so this run cannot show what resends hide: ${JSON.stringify(evidence.inbound)}`);
+    `${receiver}'s download was not only video, so this run cannot show what resends hide: ${JSON.stringify(evidence.inbound)}`);
   // Ten runs: 10.9-15.6 % (the worse of two windows of about 50 packets reads
   // a little over the 12 %) and no jitter. With resends repeating the lost
   // packets' numbers: 4.8, 4.8 and 10.3 %, and 7, 7 and 14 ms, because a
   // repair that arrives before the first feedback reads as a late packet.
-  assert.ok(evidence.serverLoss.P1.medianPct >= 8 && evidence.serverLoss.P1.medianPct <= 19,
-    `the SFU measured P1's 12 % download as ${JSON.stringify(evidence.serverLoss.P1)}`);
-  assert.ok(evidence.serverLoss.P1.medianJitterMs <= 3,
-    `the SFU measured jitter on a download that has none: ${JSON.stringify(evidence.serverLoss.P1)}`);
-  for (const role of ["P2", "P3", "P4"]) {
+  assert.ok(measured.medianPct >= 8 && measured.medianPct <= 19,
+    `the SFU measured ${receiver}'s 12 % download as ${JSON.stringify(measured)}`);
+  assert.ok(measured.medianJitterMs <= 3,
+    `the SFU measured jitter on a download that has none: ${JSON.stringify(measured)}`);
+  for (const role of senders) {
     assert.ok(evidence.serverLoss[role].samples >= 10 && evidence.serverLoss[role].medianPct < 3,
       `the SFU measured ${role}'s clean download as ${JSON.stringify(evidence.serverLoss[role])}`);
   }
+  assert.ok(evidence.serverSourcedSamples >= evidence.samples * 0.8,
+    `${receiver}'s own link came from the SFU's measurement in only ${evidence.serverSourcedSamples} of ${evidence.samples} samples`);
   await Promise.all(roles.map((role) =>
-    waitForTopAutomaticLevel(role, 90000, "after P1's download recovered")));
+    waitForTopAutomaticLevel(role, 90000, `after ${receiver}'s download recovered`)));
   await assertMedia();
+}
+
+async function scenarioLossyDownlinkCleanSenders() {
+  await lossyDownlinkCleanSenders("P1", "lossy-downlink-clean-senders");
+}
+
+// The same with a Firefox receiver, whose transport-cc feedback, resends and
+// stats are its own. Run with MEDIA_E2E_FOUR_ENGINES=mixed (P2 and P4 are
+// Firefox).
+async function scenarioLossyDownlinkCleanSendersFirefox() {
+  assert.equal(browserNames.get("P2"), "firefox",
+    "lossy-downlink-clean-senders-firefox needs MEDIA_E2E_FOUR_ENGINES=mixed, which puts P2 on Firefox");
+  await lossyDownlinkCleanSenders("P2", "lossy-downlink-clean-senders-firefox");
 }
 
 async function scenarioAllFourImpaired() {
@@ -5112,6 +5130,9 @@ const scenarios = [
   { name: "bad-downlink-among-bad-senders", description: "One participant's own download loses 12 % (no rate cap, clean uplink) while the other three send over uploads losing 10 %: the discount for the senders' own loss must not hide the receiver's, so its link still reads poor and its ladder steps down, and the room recovers.", run: scenarioBadDownlinkAmongBadSenders, netns: true },
   { name: "lossy-downlink-clean-senders", description: "One participant's download loses 12 % and carries only video, from three senders on clean links: the SFU measures the loss although every lost packet is resent, and the room recovers.", run: scenarioLossyDownlinkCleanSenders, netns: true },
   { name: "all-four-impaired", description: "All four participants on a moderate link of their own at once: audio keeps flowing everywhere, the impairment does not turn into a peer-rebuild storm, and every camera and Automatic ladder recovers when the links lift.", run: scenarioAllFourImpaired, netns: true },
+  // Opt-in mixed-engine netns scenarios: MEDIA_E2E_FOUR_GROUP=firefox, or by
+  // exact name, with MEDIA_E2E_FOUR_ENGINES=mixed. Never in CI.
+  { name: "lossy-downlink-clean-senders-firefox", group: "firefox", description: "A Firefox participant's download loses 12 % and carries only video, from three senders on clean links: the SFU measures it from Firefox's transport-cc feedback although every lost packet is resent, Firefox's adaptation uses that measurement, and the room recovers.", run: scenarioLossyDownlinkCleanSendersFirefox, netns: true },
   // Opt-in resilience scenarios: MEDIA_E2E_FOUR_GROUP=resilience (or
   // resilience-slow), or each by its exact name. Never in CI.
   { name: "sharer-reconnect-mid-share", group: "resilience", description: "The screen-share owner's signaling drops and resumes inside the grace window: the share ends cleanly for all three viewers, the lease is free for someone else, and the owner can share again.", run: scenarioSharerReconnectMidShare },
