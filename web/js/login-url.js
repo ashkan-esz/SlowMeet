@@ -6,7 +6,8 @@
     return Object.freeze({
       hasUser: params.has("user"),
       user: params.get("user") || "",
-      connectionType: knownConnectionTypes.has(requestedConnectionType) ? requestedConnectionType : null
+      connectionType: knownConnectionTypes.has(requestedConnectionType) ? requestedConnectionType : null,
+      autoLogin: params.get("autologin") === "true"
     });
   }
 

@@ -4136,6 +4136,10 @@ joinConnectionMethod?.addEventListener("change", () => {
 });
 settingsConnectionMethod?.addEventListener("change", () => selectConnectionMethod(settingsConnectionMethod.value));
 
+iceConfigReady.then(() => {
+  if (loginURLPreferences.autoLogin) form.requestSubmit();
+});
+
 function connectSocket(name, password) {
   const generation = ++socketGeneration;
   if (socket && socket.readyState !== WebSocket.CLOSED) {

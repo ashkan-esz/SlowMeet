@@ -8,6 +8,11 @@ const prefilled = read("?user=arman&connectionType=turn-tcp&room=weekly", connec
 assert.equal(prefilled.hasUser, true);
 assert.equal(prefilled.user, "arman");
 assert.equal(prefilled.connectionType, "turn-tcp");
+assert.equal(prefilled.autoLogin, false);
+
+assert.equal(read("?user=arman&autologin=true", connectionTypes).autoLogin, true);
+assert.equal(read("?autologin=false", connectionTypes).autoLogin, false);
+assert.equal(read("?autologin=TRUE", connectionTypes).autoLogin, false);
 
 const invalidConnectionType = read("?user=arman&connectionType=tcp-routing", connectionTypes);
 assert.equal(invalidConnectionType.connectionType, null);
@@ -41,5 +46,7 @@ assert.match(appSource, /history\.replaceState\(window\.history\.state, "", url\
   "link updates must replace the current history entry");
 assert.match(appSource, /joinConnectionMethod\?\.addEventListener\("change", \(\) => \{/,
   "connection method edits must update the link");
+assert.match(appSource, /iceConfigReady\.then\(\(\) => \{\s*if \(loginURLPreferences\.autoLogin\) form\.requestSubmit\(\);\s*\}\);/,
+  "autologin must submit once after initial connection settings resolve");
 
 console.log("Login URL behavior tests passed");
