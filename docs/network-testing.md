@@ -114,6 +114,11 @@ host interface:
     NACK repair: the same 12 % download carrying only video (the three
     senders' microphones are taken off the wire), so every lost packet is
     resent. The SFU must still read 8-19 % and no jitter. Not in the CI list.
+  - `lossy-downlink-clean-senders-firefox` — the same with a Firefox
+    receiver (P2), whose transport-cc feedback, resends and stats are its
+    own; it also asserts that Firefox's adaptation used the SFU's value. In
+    the `firefox` group, so it runs only by name or with
+    `MEDIA_E2E_FOUR_GROUP=firefox`, and needs `MEDIA_E2E_FOUR_ENGINES=mixed`.
 
 Deterministic coverage for the same rooms runs in `make check` without a
 namespace:
@@ -324,8 +329,16 @@ what should change. Fixing an issue means flipping that assertion.
     jitter is far above a browser's own on an overloaded link (up to 662 ms),
     but no sample in `bad-downlink-among-bad-senders` or
     `one-fast-three-bad-uplinks` was poor by its jitter alone, and on the
-    700 kbit download it stayed at or under 30 ms. In a mixed room Firefox
-    received and used the value like Chromium (clean link only).
+    700 kbit download it stayed at or under 30 ms. A Firefox receiver
+    measures the same (`lossy-downlink-clean-senders-firefox`, five runs of
+    the 12 % video-only download): the SFU read medians of 12.9-16.0 % with
+    no jitter from its feedback, against 12.0-12.9 % dropped by the tier and
+    11.8-13.0 % in Firefox's own estimate; Firefox's adaptation used the
+    SFU's value in every sample, its ladder reached the floor in 6-8 s and
+    the camera paused in 19-31 of 34 samples. On the code from before F4,
+    when Firefox's estimate drove the ladder, five runs reached the floor in
+    6-8 s with 22-33 paused samples. A Chromium receiver with two Firefox
+    senders read 13.5-15.0 % (three runs).
     `TestDownlinkMeterMeasuresLossAndJitterFromFeedback`,
     `TestDownlinkMeterReportsTheWorseOfEachMeasure`,
     `TestRouterMeasuresEachReceiversDownlink` (reads nothing with the meter
@@ -667,9 +680,20 @@ TURN/TCP fallback. None of them runs in CI. They also cover:
   lifts. It and `seat-handover-churn-simulcast` run on a server with
   `SIMULCAST_ENABLED=true`.
 
-Firefox is not covered under impairment: its candidate gathering stalls in
-the network namespace, so the netns runner uses Chromium for all four
-participants.
+The netns runner uses Chromium for all four participants unless
+`MEDIA_E2E_FOUR_ENGINES=mixed` puts P2 and P4 on Firefox. In the namespace
+Firefox gathers only the address of its default route, and the namespace has
+none, so it had no ICE candidate at all ("failed to find default addresses"
+in its nICEr log); `media.peerconnection.ice.default_address_only` does not
+change that, and a default route over loopback gives no source address. For
+a mixed run the runner adds a dummy interface (10.77.0.1) with the default
+route: that address becomes Firefox's host candidate, and its traffic to the
+SFU on 127.0.0.1 is local, so it still crosses `lo` and the tiers' port
+classifiers. The suite also allows loopback and turns mDNS host names off
+for Firefox there (`firefoxUserPrefs` in `scripts/test-four-person-e2e.js`);
+whether either is still needed with the dummy interface was not tested. Only
+`mixed-quality-room` and the lossy-download scenarios have been run that
+way; the rest of the netns list has not.
 
 | Target | What it runs | Time |
 | --- | --- | --- |

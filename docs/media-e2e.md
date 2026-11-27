@@ -205,7 +205,9 @@ Knobs:
   `knownIssue` checks for documented defects (B1–B11 in
   `docs/network-testing.md`) fail instead of logging `KNOWN ISSUE`.
 - `MEDIA_E2E_FOUR_ENGINES` — `mixed` (default, 2 Chromium + 2 Firefox) or
-  `chromium` to run every participant on Chromium.
+  `chromium` to run every participant on Chromium. The netns runner defaults
+  to `chromium`; pass `mixed` to it explicitly (see
+  `docs/network-testing.md`).
 - `MEDIA_E2E_FOUR_RECONNECT_GRACE` — server reconnect grace seconds for the
   run (default 5, which exercises true token resume; a 1s grace forces the
   reconnect-after-expiry full-rejoin path).
