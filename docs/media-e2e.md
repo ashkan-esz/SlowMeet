@@ -7,6 +7,20 @@ microphone media, reports every scenario as `PASS`, `FAIL`, or `NOT RUN`, and
 continues after an individual scenario fails. Any selected scenario failure
 returns a nonzero exit status.
 
+## Login-link checks
+
+Run the focused URL parsing and app-wiring checks with:
+
+```sh
+make test-login-url
+```
+
+These checks cover username and connection-type prefills, exact
+`autologin=true` matching, preservation of unrelated URL parameters, and the
+automatic form submission hook. They do not exercise a live signaling server,
+successful room admission, or protected-room password retry. Validate those
+behaviors against a running app when changing the join flow.
+
 ## Audio quality and delay
 
 Microphone E2E checks verify outbound and inbound audio RTP progress in both

@@ -11,6 +11,29 @@ and graceful degradation on unstable connections.
 - Automatic video quality reduction, audio continuity controls, and diagnostics
 - Optional meeting password, runtime admin controls, and a built-in TURN relay
 
+## Login links
+
+Share a link with `user` and `connectionType` query parameters to prefill the
+login form. For example:
+
+```text
+https://meet.example/?user=Arman&connectionType=turn-tcp
+```
+
+Use a connection type offered by the app, such as `auto`, `direct`, `turn-udp`,
+`turn-tcp`, `turn-tls`, `turn-tcp-rotate`, or `turn-tls-rotate`. Add
+`autologin=true` to submit the form automatically after connection settings
+load:
+
+```text
+https://meet.example/?user=Arman&connectionType=turn-tcp&autologin=true
+```
+
+Automatic joining still follows the normal login flow and browser media
+permission prompts. Passwords are not accepted in the URL; if a protected room
+rejects the attempt, enter its password in the login form and retry. Only the
+exact value `autologin=true` enables automatic submission.
+
 ## How SlowMeet handles weak connections
 
 SlowMeet uses an SFU: each participant sends one copy of their published media
