@@ -485,7 +485,16 @@ what should change. Fixing an issue means flipping that assertion.
     Firefox's share (to 1280x720, then 853x480), because its encoder was
     using the budget. What starvation teaches is kept per codec: a share that shrank
     in VP9 is full size again within one sample of being sent in AV1, and
-    shrinks at once when the room returns to VP9.
+    shrinks at once when the room returns to VP9. For 20 s after a codec
+    change the rule samples every 2 s instead of every 5 s: measured from the
+    codec pick on a moving 1920x1080 screen at 180 kbps, the share shrank
+    after 12 to 16 s and moved again (ten frames in four seconds) after 21 to
+    29 s before, and shrinks after 6 to 7 s and moves after 14 to 17 s now, in
+    Chromium and Firefox. Two things the short samples must not do, both seen
+    in the first attempt: the bitrate rule does not read them (it cut the
+    frame-rate cap from 15 to between 7 and 12 after every codec change), and
+    the sample right after a size change is not judged (it holds the new
+    size's keyframe and took the picture straight on to 960x540).
   - B22, video many seconds late with nothing lost: a sender whose profile
     reaches `MAX_VIDEO_BITRATE` encodes at exactly the rate the SFU's pacer
     lets through, and is 1 to 3% over it once packet headers and the
@@ -523,9 +532,11 @@ what should change. Fixing an issue means flipping that assertion.
     a keyframe is arriving, queued, being sent, or was sent in the last
     250 ms: after a codec change in the middle of a 1080p share at 180 kbps
     the sender received 9 requests and made 7 keyframes in the first seconds
-    before, 4 and 4 after. That change still costs 12 to 24 s of a crawling
-    picture in VP9 until the sender shrinks it (B21); one full-size VP9
-    keyframe is simply seconds of that bitrate.
+    before, 4 and 4 after. That change still costs 14 to 17 s of a crawling
+    picture in VP9 (21 to 29 s before the faster sampling described under
+    B21) until the sender has shrunk it and the smaller picture's keyframe
+    has arrived; one full-size VP9 keyframe is simply seconds of that
+    bitrate.
     `slowmeet_video_keyframes_total` counts keyframes.
     `TestVideoKeyFrameStartIsRecognisedPerCodec`, `TestKeyFrameComing`,
     `TestKeyFrameInTransit`, `TestKeyFramesAreCountedOnceAndMarkedOnTheirWayOut`,

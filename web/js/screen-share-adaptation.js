@@ -1,5 +1,11 @@
 (function (root) {
   const sampleIntervalMs = 5000;
+  // For a while after a codec change the sampler runs faster. A full-size
+  // keyframe in a codec that cannot carry the picture costs seconds of
+  // bitrate, and at 5 s a sample the share stood still for 10 to 15 s before
+  // two starved samples had been seen and it shrank.
+  const codecChangeSampleIntervalMs = 2000;
+  const codecChangeFastMs = 20000;
   const minimumFrameRate = 5;
   const maximumResolutionScale = 3;
   // Consecutive within-budget samples before one recovery step up. Mirrors
@@ -60,6 +66,10 @@
     // moved to another.
     let sentCodec = "";
     const starvedScales = new Map();
+    let timerIntervalMs = 0;
+    let fastPending = false;
+    let fastUntil = 0;
+    let settleWindows = 0;
 
     // Moves what starvation taught to the codec now in use. Returns whether
     // the sender's parameters changed.
@@ -95,8 +105,22 @@
       await sender.setParameters(parameters).catch(() => {});
     }
 
+    function setSampling(intervalMs) {
+      if (timer && timerIntervalMs === intervalMs) return;
+      if (timer) root.clearInterval(timer);
+      timerIntervalMs = intervalMs;
+      timer = root.setInterval(sample, intervalMs);
+    }
+
     function ensureSampling() {
-      if (!timer) timer = root.setInterval(sample, sampleIntervalMs);
+      if (!timer) setSampling(fastPending || fastUntil ? codecChangeSampleIntervalMs : sampleIntervalMs);
+    }
+
+    // Samples faster from now until codecChangeFastMs after the next sample
+    // (the sampler's clock is the stats' own).
+    function sampleFaster() {
+      fastPending = true;
+      if (timer) setSampling(codecChangeSampleIntervalMs);
     }
 
     async function sample() {
@@ -137,8 +161,16 @@
           // instead of giving a verdict.
           previousBytes = undefined;
           previousTimestamp = undefined;
+          sampleFaster();
           if (changed) await applyParameters();
         }
+      }
+      if (fastPending) {
+        fastPending = false;
+        fastUntil = outbound.timestamp + codecChangeFastMs;
+      } else if (fastUntil && outbound.timestamp >= fastUntil) {
+        fastUntil = 0;
+        if (timer) setSampling(sampleIntervalMs);
       }
       // A counter that starts again (a replaced stream) gives a negative
       // difference, which says nothing about the encoder.
@@ -146,18 +178,31 @@
         Number.isFinite(current) && Number.isFinite(previous) && current >= previous
           ? (current - previous) * 1000 / elapsedMs
           : NaN;
-      if (Number.isFinite(previousBytes) && Number.isFinite(previousTimestamp)) {
+      // The window right after a size change made by a short sample holds the
+      // keyframe of the new size and is not judged.
+      const settling = settleWindows > 0;
+      if (settling) settleWindows -= 1;
+      const fast = fastUntil > 0;
+      if (!settling && Number.isFinite(previousBytes) && Number.isFinite(previousTimestamp)) {
         const elapsedMs = outbound.timestamp - previousTimestamp;
         if (elapsedMs > 0 && outbound.bytesSent >= previousBytes) {
           const bitrate = ((outbound.bytesSent - previousBytes) * 8 * 1000) / elapsedMs;
           lastMeasuredBitrate = bitrate;
           const encodedFrameRate = rate(outbound.framesEncoded, previousFrames, elapsedMs);
           const sourceFrameRate = rate(source?.frames, previousSourceFrames, elapsedMs);
-          if (holdSamples > 0 && --holdSamples === 0) minimumScale = 1;
+          // The hold is counted in 5 s samples.
+          if (!fast && holdSamples > 0 && --holdSamples === 0) minimumScale = 1;
           if (screenShareStarving({ encodedFrameRate, sourceFrameRate, bitrate, maxBitrate })) starvedSamples++;
           else starvedSamples = 0;
           const starved = starvedSamples >= starvationSamples && resolutionScale < maximumResolutionScale;
-          if (bitrate > maxBitrate * 1.1) {
+          if (fast) {
+            // A short window is all burst or all pause, with a keyframe in
+            // it more often than not: only the starvation rule reads it.
+            // Measured with the bitrate rule on: the frame-rate cap fell from
+            // 15 to between 7 and 12 after every codec change.
+            overLimitSamples = 0;
+            underLimitSamples = 0;
+          } else if (bitrate > maxBitrate * 1.1) {
             overLimitSamples++;
             underLimitSamples = 0;
           } else {
@@ -176,6 +221,10 @@
             resolutionScale = starvationScales.find((scale) => scale > resolutionScale) ?? maximumResolutionScale;
             minimumScale = resolutionScale;
             holdSamples = starvationHoldSamples;
+            // Measured without this: two more short windows, both holding
+            // the smaller size's first keyframe, took the picture straight
+            // on to the size after it.
+            if (fast) settleWindows = 1;
             await applyParameters();
           } else if (overLimitSamples >= 2) {
             overLimitSamples = 0;
@@ -256,6 +305,12 @@
         ensureSampling();
       },
       sample,
+      // The app has picked another codec; the encoder follows with the next
+      // negotiation. The sampler sees the change in its own stats, this only
+      // makes it look sooner.
+      codecChanged() {
+        if (!stopped) sampleFaster();
+      },
       stop() {
         stopped = true;
         generation++;
@@ -263,7 +318,7 @@
         timer = undefined;
       },
       state() {
-        return { maxBitrate, maxFrameRate, frameRate, resolutionScale };
+        return { maxBitrate, maxFrameRate, frameRate, resolutionScale, sampleIntervalMs: timerIntervalMs };
       }
     };
   }

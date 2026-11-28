@@ -2307,6 +2307,7 @@ function updateVideoCodecChoice(immediate) {
   } else if (plan === "apply") {
     videoCodecApplied = target;
     videoCodecCpu = { samples: [], lastAt: 0 };
+    screenShareAdaptation?.codecChanged();
     // The choice reaches the encoder through the next remote description
     // (applyRemoteSDPChoices), so a call that is sending video renegotiates
     // once to apply it. A participant who sends none has nothing to switch;

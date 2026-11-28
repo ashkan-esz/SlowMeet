@@ -321,6 +321,15 @@ async function main() {
         fed.sourceFrames += sourceFrames;
         await fed.adaptation.sample();
       };
+      // One 2 s window, as sampled for a while after a codec change (37 500
+      // bytes is 150 kbps; the screen offers ten frames a second).
+      fed.shortWindow = async (encodedFrames, sourceFrames = 20, bytes = 37_500) => {
+        fed.time += 2_000;
+        fed.bytes += bytes;
+        fed.encoded += encodedFrames;
+        fed.sourceFrames += sourceFrames;
+        await fed.adaptation.sample();
+      };
       return fed;
     };
 
@@ -393,10 +402,64 @@ async function main() {
       switching.codec = "video/VP9";
       await switching.window(45);
       assert.ok(switching.adaptation.state().resolutionScale <= 1.5);
-      for (let index = 0; index < 12; index += 1) await switching.window(45);
+      // Recovery does not count the 20 s of faster sampling after a codec
+      // change (four of these 5 s windows).
+      for (let index = 0; index < 16; index += 1) await switching.window(45);
       assert.equal(switching.adaptation.state().resolutionScale, 1, "after a larger budget the picture grows back in any codec");
     } finally {
       switching.adaptation.stop();
+    }
+
+    // After a codec change the sampler runs every 2 s for 20 s: a share that
+    // starves in the new codec shrinks two short windows after the change was
+    // seen, not two 5 s windows after it.
+    const quick = makeFedSender();
+    try {
+      quick.codec = "video/AV1";
+      await quick.adaptation.update(180_000, 15);
+      await quick.adaptation.sample();
+      await quick.window(45);
+      assert.equal(quick.adaptation.state().sampleIntervalMs, 5000);
+      quick.adaptation.codecChanged();
+      assert.equal(quick.adaptation.state().sampleIntervalMs, 2000, "the app's codec pick makes the sampler look sooner");
+      quick.codec = "video/VP9";
+      await quick.shortWindow(1);
+      await quick.shortWindow(1);
+      assert.equal(quick.adaptation.state().resolutionScale, 1, "one starved window after the change is not enough");
+      await quick.shortWindow(1);
+      assert.equal(quick.adaptation.state().resolutionScale, 1.5, "two starved 2 s windows shrink the picture");
+      await quick.shortWindow(1);
+      await quick.shortWindow(1);
+      assert.equal(quick.adaptation.state().resolutionScale, 1.5,
+        "the window right after the size change holds the new size's keyframe and is not judged");
+      await quick.shortWindow(1);
+      assert.equal(quick.adaptation.state().resolutionScale, 2, "still starving after it: the next size");
+      // Short windows over the budget do not touch the frame-rate cap.
+      for (let index = 0; index < 4; index += 1) await quick.shortWindow(14, 20, 60_000);
+      assert.equal(quick.adaptation.state().frameRate, 15, "the bitrate rule does not read 2 s windows");
+      for (let index = 0; index < 6; index += 1) await quick.shortWindow(14);
+      assert.equal(quick.adaptation.state().sampleIntervalMs, 5000, "20 s after the change the sampler is back at 5 s");
+      assert.equal(quick.adaptation.state().resolutionScale, 2);
+    } finally {
+      quick.adaptation.stop();
+    }
+
+    // The faster sampler keeps the rule: a screen that offers nothing after a
+    // codec change is not shrunk, and a change the app did not announce is
+    // sampled faster as well.
+    const still = makeFedSender();
+    try {
+      still.codec = "video/AV1";
+      await still.adaptation.update(180_000, 15);
+      await still.adaptation.sample();
+      await still.window(45);
+      still.codec = "video/VP9";
+      await still.window(1, 1, 4_000);
+      assert.equal(still.adaptation.state().sampleIntervalMs, 2000, "a codec change seen in the stats is sampled faster");
+      for (let index = 0; index < 6; index += 1) await still.shortWindow(0, 0, 1_500);
+      assert.equal(still.adaptation.state().resolutionScale, 1, "a still screen keeps its full size after a codec change");
+    } finally {
+      still.adaptation.stop();
     }
 
     // A frame counter that starts again (a replaced stream) says nothing.

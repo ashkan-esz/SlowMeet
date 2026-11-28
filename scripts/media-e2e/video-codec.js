@@ -868,8 +868,6 @@ const scenarios = [
         null, { timeout: 30000 });
       await waitForSentCodec(pageA, "AV1");
       await waitForReceivedCodec(pageB, codecMimes.av1);
-      await pickCodec(pageA, "vp9");
-      await waitForSentCodec(pageA, "VP9");
       const screenScale = () => pageA.evaluate(() => screenSender?.getParameters().encodings[0]?.scaleResolutionDownBy ?? 1);
       const frames = () => pageB.evaluate(async () => {
         let decoded = 0;
@@ -878,13 +876,38 @@ const scenarios = [
         });
         return decoded;
       });
+      const changedAt = Date.now();
+      await pickCodec(pageA, "vp9");
+      await waitForSentCodec(pageA, "VP9");
+      // Once a second from the codec pick: what the viewer has decoded and the
+      // size the sender uses. "Moving" is ten frames in four seconds.
+      const samples = [];
       const rounds = [];
-      for (let round = 0; round < 8 && (rounds.at(-1)?.frames ?? 0) < 30; round += 1) {
-        const before = await frames();
-        await pageB.waitForTimeout(12000);
-        rounds.push({ frames: (await frames()) - before, scale: await screenScale() });
+      let shrankAfterMs;
+      let movingAfterMs;
+      let roundStart = { at: Date.now(), frames: await frames() };
+      while (rounds.length < 8 && (rounds.at(-1)?.frames ?? 0) < 30) {
+        await pageB.waitForTimeout(1000);
+        const sample = { at: Date.now(), frames: await frames(), scale: await screenScale() };
+        samples.push(sample);
+        if (shrankAfterMs === undefined && sample.scale > 1) shrankAfterMs = sample.at - changedAt;
+        const earlier = samples.findLast((entry) => sample.at - entry.at >= 4000);
+        if (movingAfterMs === undefined && earlier && sample.frames - earlier.frames >= 10) {
+          movingAfterMs = sample.at - changedAt;
+        }
+        if (sample.at - roundStart.at >= 12000) {
+          rounds.push({ frames: sample.frames - roundStart.frames, scale: sample.scale });
+          roundStart = sample;
+        }
       }
-      console.log(`[screen share codec evidence] VP9 screen after a codec change, per 12 s: ${JSON.stringify(rounds)}`);
+      console.log(`[screen share codec evidence] VP9 screen after a codec change, per 12 s: ${JSON.stringify(rounds)}; ` +
+        `shrank after ${shrankAfterMs} ms, moving after ${movingAfterMs} ms`);
+      // Sampled every 5 s the share shrank 12 to 16 s after the pick and moved
+      // again after 21 to 29 s; sampled every 2 s after a codec change it
+      // shrinks after 6 to 7 s and moves after 14 to 17 s.
+      if (shrankAfterMs !== undefined) {
+        assert.ok(shrankAfterMs <= 10000, `the share took ${shrankAfterMs} ms to shrink after the codec change`);
+      }
       if (rounds.at(-1).frames < 30) {
         assert.fail(`the screen still crawls: ${JSON.stringify(rounds)}, sender ${JSON.stringify(await outboundVideoEvidence(pageA))}, ` +
           `adaptation ${JSON.stringify(await pageA.evaluate(() => screenShareAdaptation?.state()))}`);
