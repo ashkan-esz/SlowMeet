@@ -206,6 +206,42 @@ function planCameraSimulcast(width, height) {
   };
 }
 
+// fitCameraSimulcastEncodings writes one planCameraSimulcast plan to a
+// simulcast camera's encodings: which layers run, their scales and their
+// bitrates together. The writers used to split this: the profile pass wrote
+// the whole plan, while the post-negotiation reconcile and the pause/resume
+// write recomputed the plan but wrote only `active`. When the capture size
+// changed between the two (a 360x240 `slow` capture going to 640x360), a
+// resume or reconcile switched on the medium layer of a one-layer plan,
+// leaving two full-size layers: low at the whole bitrate and medium at the
+// 0.15 fallback share, 60 kbit/s at 400 kbit/s (B12). A capture with no
+// known size keeps the size of the last fit (`fallback`). Returns whether
+// any field changed.
+function fitCameraSimulcastEncodings(encodings, { width, height, bitrate, fps, sending, fallback } = {}) {
+  if (!Array.isArray(encodings)) return false;
+  const known = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+  const size = known(width) && known(height)
+    ? { width: Number(width), height: Number(height) }
+    : { width: fallback?.width, height: fallback?.height };
+  const plan = planCameraSimulcast(size.width, size.height);
+  let changed = false;
+  encodings.forEach((encoding, index) => {
+    const wanted = {
+      active: Boolean(sending && plan.active[index]),
+      scaleResolutionDownBy: plan.scales[index]
+    };
+    if (known(bitrate)) wanted.maxBitrate = Math.max(30000, Math.floor(bitrate * (plan.shares[index] || 0.15)));
+    if (known(fps)) wanted.maxFramerate = fps;
+    for (const [key, value] of Object.entries(wanted)) {
+      if (encoding[key] !== value) {
+        encoding[key] = value;
+        changed = true;
+      }
+    }
+  });
+  return changed;
+}
+
 function applyServerDefaults(profile, defaults, enabled) {
   if (!enabled || !profile) return profile;
   return {
@@ -616,6 +652,7 @@ if (typeof module !== "undefined") {
     shouldRecoverVideo,
     chooseCameraLayer,
     planCameraSimulcast,
+    fitCameraSimulcastEncodings,
     applyServerDefaults,
     resolveCodecName,
     profileNameForQuality,

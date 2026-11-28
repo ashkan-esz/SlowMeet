@@ -169,7 +169,8 @@ what should change. Fixing an issue means flipping that assertion.
   not the 360 px top layer after the cap lifted": P3's receiver for P1's
   medium layer is bound and live but stopped receiving at about 150 to
   230 KB while the other cameras' medium layers passed 950 KB. One fails the
-  sender-side B12 check (P1's medium layer capped at 60 kbps). In every
+  sender-side B12 check (P1's medium layer capped at 60 kbps); that one was
+  the split layer writers, fixed under B12 below. In every
   failing run the server's video path dropped nothing
   (`slowmeet_video_frames_dropped_total` and
   `slowmeet_video_mailbox_drops_total` all 0), no publisher changed codec,
@@ -187,6 +188,14 @@ what should change. Fixing an issue means flipping that assertion.
   receiver that gets nothing. What makes P1 step down on a clean link, and
   only with AV1, was not found; its link figures at the end are clean (0 %
   loss, estimated 558 kbps out against 948 and 1023 for P2 and P4).
+  Later "0 px" failures had P1 on `normal`, with the medium encoding active
+  but no longer encoded: its `outbound-rtp` had no frame size and
+  `qualityLimitationReason` `bandwidth` (AV1 through
+  `SimulcastEncoderAdapter`), so Chromium had dropped the layer for its
+  bandwidth estimate and the SFU had nothing to forward. The rate follows
+  machine load: in alternating runs while another browser suite ran beside
+  them, 3 of 6 failed without the B12 layer-writer fix and 1 of 6 with it,
+  and 6 of 10 failed with the fix in a run of its own beside that suite.
 
 - **Open: "signaling reconnects under network impairment" fails every
   second run** of `make test-media-e2e-netns`: a participant's join does not
@@ -601,7 +610,19 @@ what should change. Fixing an issue means flipping that assertion.
     90x60 layer, so per-receiver layer selection had nothing to choose
     from. First reported as "impaired participants' cameras reach no one";
     that part was the protect-audio pause, which happens the same way with
-    simulcast off. Four causes, all fixed:
+    simulcast off. Five causes, all fixed:
+    - Only the profile pass wrote the layers' scales and bitrates; the
+      reconcile after a negotiation and the pause/resume write recomputed
+      the plan from the capture but wrote only `active`. A camera whose
+      layers were last fitted to a one-layer plan (the 360x240 `slow`
+      capture, or a capture size read before it changed) and that then ran
+      at 640x360 had its medium layer switched on at full size with the
+      0.15 fallback share: `low:true:1:400000`, `medium:true:1:60000`,
+      `high:false`, failing `simulcast-mixed-room`'s sender-side check now
+      and then. Every writer
+      now fits active, scale and bitrate together from one plan
+      (`fitCameraSimulcastEncodings`), reusing the last profile bitrate
+      and frame rate.
     - The three encodings had fixed 4/2/1 scales. Chrome caps simulcast
       layers by capture size (one below 480x270, two below 960x540) and
       keeps the lowest, so a 240p or 360p camera sent only the quarter-scale
