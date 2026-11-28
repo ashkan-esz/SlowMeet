@@ -188,14 +188,27 @@ what should change. Fixing an issue means flipping that assertion.
   only with AV1, was not found; its link figures at the end are clean (0 %
   loss, estimated 558 kbps out against 948 and 1023 for P2 and P4).
 
-- **Open: "signaling reconnects under network impairment" fails every
-  second run** of `make test-media-e2e-netns`: a participant's join does not
-  reach the meeting view within 20 s. It is not new: 3 failures in 6 runs on
-  `c506d5a`, 2 in 5 on `d42c094`, 3 in 5 after B20 and B21. In all three
-  series passes and failures alternate strictly (pass, fail, pass, fail), the
-  run after a pass fails and the run after a failure passes, which points at
-  something a passing run leaves behind for the next one rather than at the
-  network. Not investigated further.
+- **Closed, a fault of the test: "signaling reconnects under network
+  impairment" failed every second run** of `make test-media-e2e-netns` (3
+  failures in 6 runs on `c506d5a`, 2 in 5 on `d42c094`, 3 in 5 after B20 and
+  B21, 2 in 4 after B23, and in CI on a fresh machine): its second
+  participant's join did not reach the meeting view within 20 s. The join
+  page said why: "This room is full". The scenario before it ends under a
+  severe profile. When that scenario's pages were closed, one participant's
+  leave reached the server 2.2 s late (its TCP connection was still backing
+  off from the impairment; the media connection closed at once), and the
+  seat is held for the reconnect timeout after that (1 s in this suite):
+  3.2 s in all. The harness waited a fixed 1.1 s between scenarios, so the
+  next scenario's first participant took one seat, the participant who had
+  not left yet held the other, and the room of two refused the second. The
+  harness now waits until `/metrics` reports
+  `slowmeet_active_participants 0` (`waitForEmptyRoom` in
+  `scripts/test-media-e2e.js`): 6 passes in 6 runs. The server did what it
+  is meant to. Not explained: why passes and failures alternated strictly.
+  Seen on the way, once in 10 runs and not looked into: before any
+  impairment, one participant's audio element for the other was playing
+  with a playback clock that stood still at 16004 s while audio packets
+  arrived ("remote audio playback time did not advance").
 
 - **Fixed: B1–B9 and B11–B23.** Their tests now enforce the fix without a gate.
   - B1, a participant on a good link blaming its own link: its own-link
