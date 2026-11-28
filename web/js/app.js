@@ -6317,6 +6317,12 @@ async function applyVideoCaptureConstraints(videoTrack, resolvedProfile) {
 // updates, device switches, and camera enables can all race. Serialize them
 // so a stale getParameters snapshot cannot clobber a newer write.
 let senderParameterChain = Promise.resolve();
+// The bitrate, frame rate and capture size the profile pass last fitted the
+// simulcast camera's layers to. The reconcile and pause/resume writes refit
+// every layer from it (fitCameraSimulcastEncodings), so no writer switches
+// a layer on without its scale and bitrate (B12). 400 kbit/s matches the
+// first offer's encodings, before any profile pass.
+let cameraSimulcastFit = { bitrate: 400000 };
 
 function applyProfile(name, targetPeer = peer, targetStream = localStream, options = {}) {
   if (!targetPeer) return Promise.resolve();
@@ -6360,13 +6366,15 @@ async function doApplyProfile(name, targetPeer, targetStream, options = {}) {
       // Refit the layers to the capture actually running (B12): a paused
       // camera stays paused, a sending one sends exactly the planned layers.
       const settings = sender.track.getSettings?.() || {};
-      const plan = planCameraSimulcast(settings.width || width, settings.height || height);
-      const sending = parameters.encodings.some((encoding) => encoding.active !== false);
-      parameters.encodings.forEach((encoding, index) => {
-        encoding.active = sending && plan.active[index];
-        encoding.scaleResolutionDownBy = plan.scales[index];
-        encoding.maxBitrate = Math.max(30000, Math.floor(bitrate * (plan.shares[index] || 0.15)));
-        encoding.maxFramerate = fps;
+      cameraSimulcastFit = {
+        bitrate,
+        fps,
+        width: settings.width || width,
+        height: settings.height || height
+      };
+      fitCameraSimulcastEncodings(parameters.encodings, {
+        ...cameraSimulcastFit,
+        sending: parameters.encodings.some((encoding) => encoding.active !== false)
       });
     } else {
       parameters.encodings[0].maxBitrate = bitrate;
@@ -6694,15 +6702,12 @@ function reconcileCameraSimulcast(targetPeer) {
     const parameters = sender.getParameters();
     if (!parameters.encodings || parameters.encodings.length < 3) return;
     const settings = sender.track.getSettings?.() || {};
-    const plan = planCameraSimulcast(settings.width, settings.height);
-    const sending = cameraRequested && !videoSuspended;
-    let changed = false;
-    parameters.encodings.forEach((encoding, index) => {
-      const active = sending && plan.active[index];
-      if (encoding.active !== active) {
-        encoding.active = active;
-        changed = true;
-      }
+    const changed = fitCameraSimulcastEncodings(parameters.encodings, {
+      ...cameraSimulcastFit,
+      width: settings.width,
+      height: settings.height,
+      sending: cameraRequested && !videoSuspended,
+      fallback: cameraSimulcastFit
     });
     if (changed) await sender.setParameters(parameters).catch(() => {});
   };
@@ -6718,13 +6723,22 @@ async function writeSenderEncodingActive(sender, enabled) {
   // protect-audio pause would recover a fraction of the uplink exactly when
   // it matters most.
   // A simulcast camera resumes only the layers its capture supports
-  // (planCameraSimulcast); the others stay off.
-  const plan = sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3
-    ? planCameraSimulcast(sender.track?.getSettings?.().width, sender.track?.getSettings?.().height)
-    : null;
-  parameters.encodings.forEach((encoding, index) => {
-    encoding.active = enabled && (!plan || plan.active[index]);
-  });
+  // (planCameraSimulcast), each at its planned scale and bitrate; the others
+  // stay off.
+  if (sender === cameraSender && simulcastEnabled && parameters.encodings.length >= 3) {
+    const settings = sender.track?.getSettings?.() || {};
+    fitCameraSimulcastEncodings(parameters.encodings, {
+      ...cameraSimulcastFit,
+      width: settings.width,
+      height: settings.height,
+      sending: enabled,
+      fallback: cameraSimulcastFit
+    });
+  } else {
+    parameters.encodings.forEach((encoding) => {
+      encoding.active = enabled;
+    });
+  }
   try {
     await sender.setParameters(parameters);
     return true;

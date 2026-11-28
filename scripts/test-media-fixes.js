@@ -231,8 +231,8 @@ const setSenderEncodingActiveSource = appSource.slice(
   appSource.indexOf("function setSenderEncodingActive("),
   appSource.indexOf("\nasync function setVideoSenderActive("));
 assert.match(setSenderEncodingActiveSource,
-  /parameters\.encodings\.forEach\(\(encoding, index\) => \{\n\s+encoding\.active = enabled && \(!plan \|\| plan\.active\[index\]\);/,
-  "pausing a sender must flip all of its encodings");
+  /fitCameraSimulcastEncodings\(parameters\.encodings, \{[^}]*sending: enabled,[\s\S]*?\} else \{\n\s+parameters\.encodings\.forEach\(\(encoding\) => \{\n\s+encoding\.active = enabled;/,
+  "pausing a sender must flip all of its encodings (a simulcast camera through its layer fit)");
 assert.match(setSenderEncodingActiveSource,
   /senderParameterChain = senderParameterChain\.then\(run, run\);/,
   "the pause and resume write must join the serialized sender-parameter chain");

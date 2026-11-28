@@ -12,6 +12,7 @@ const {
   shouldRecoverVideo,
   chooseCameraLayer,
   planCameraSimulcast,
+  fitCameraSimulcastEncodings,
   applyServerDefaults,
   resolveCodecName,
   profileNameForQuality,
@@ -198,6 +199,38 @@ const simulcastPlanCases = [
 ];
 for (const { size, ...expected } of simulcastPlanCases) {
   require("node:assert").deepStrictEqual(planCameraSimulcast(...size), expected, `simulcast plan for ${size.join("x")}`);
+}
+
+// B12 again: the profile pass fitted a 360x240 capture (one layer, the whole
+// 400 kbit/s on low at full size) and the capture then ran at 640x360. The
+// reconcile after the next negotiation, or a resume, wrote only `active`
+// from the new two-layer plan, so medium came on at full size with the 0.15
+// fallback share: low:true:1:400000, medium:true:1:60000, high:false. Every
+// writer now fits active, scale and bitrate from one plan.
+{
+  const { deepStrictEqual, strictEqual } = require("node:assert");
+  const describe = (encodings) => encodings.map((encoding) =>
+    `${encoding.rid}:${encoding.active}:${encoding.scaleResolutionDownBy}:${encoding.maxBitrate}:${encoding.maxFramerate}`);
+  const oneLayer = () => [
+    { rid: "low", active: true, scaleResolutionDownBy: 1, maxBitrate: 400000, maxFramerate: 15 },
+    { rid: "medium", active: false, scaleResolutionDownBy: 1, maxBitrate: 60000, maxFramerate: 15 },
+    { rid: "high", active: false, scaleResolutionDownBy: 1, maxBitrate: 60000, maxFramerate: 15 }
+  ];
+  const fit = { bitrate: 400000, fps: 15, width: 360, height: 240 };
+  let encodings = oneLayer();
+  strictEqual(fitCameraSimulcastEncodings(encodings, { ...fit, width: 640, height: 360, sending: true, fallback: fit }), true);
+  deepStrictEqual(describe(encodings), ["low:true:2:120000:15", "medium:true:1:280000:15", "high:false:1:60000:15"],
+    "a refit at 640x360 must scale and budget the layers it switches on");
+  strictEqual(fitCameraSimulcastEncodings(encodings, { ...fit, width: 640, height: 360, sending: true }), false,
+    "an encoding set that already fits must not be rewritten");
+  encodings = oneLayer();
+  fitCameraSimulcastEncodings(encodings, { ...fit, width: 640, height: 360, sending: false });
+  deepStrictEqual(describe(encodings), ["low:false:2:120000:15", "medium:false:1:280000:15", "high:false:1:60000:15"],
+    "a paused camera keeps every layer off");
+  encodings = oneLayer();
+  fitCameraSimulcastEncodings(encodings, { bitrate: 650000, fps: 24, sending: true, fallback: { width: 854, height: 480 } });
+  deepStrictEqual(describe(encodings), ["low:true:2:195000:24", "medium:true:1:455000:24", "high:false:1:97500:24"],
+    "a capture with no known size keeps the size of the last fit");
 }
 
 let layerState = { layer: "high", poorSamples: 0, goodSamples: 0 };
@@ -937,6 +970,19 @@ for (const behavior of [
   if (!appSource.includes(behavior)) {
     throw new Error(`simulcast configuration or layer adaptation is missing: ${behavior}`);
   }
+}
+// The profile pass, the post-negotiation reconcile and the pause/resume write
+// all refit the camera's layers through fitCameraSimulcastEncodings; only the
+// first offer's encodings read the plan directly (B12).
+for (const name of ["async function doApplyProfile(", "function reconcileCameraSimulcast(", "async function writeSenderEncodingActive("]) {
+  const start = appSource.indexOf(name);
+  const body = start >= 0 ? appSource.slice(start, appSource.indexOf("\n}\n", start)) : "";
+  if (!body.includes("fitCameraSimulcastEncodings(parameters.encodings, {")) {
+    throw new Error(`${name.replace(/\($/, "")} must fit every camera layer (active, scale, bitrate) from one plan`);
+  }
+}
+if ((appSource.match(/planCameraSimulcast\(/g) || []).length !== 1) {
+  throw new Error("only the first offer's encodings may read planCameraSimulcast directly; every refit goes through fitCameraSimulcastEncodings");
 }
 if (!appSource.includes('setConnection("fair", "Reconnecting");') ||
     !appSource.includes('setConnection("poor", "Offline");')) {
