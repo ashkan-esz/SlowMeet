@@ -1638,6 +1638,26 @@ async function closeScenarioFixture(fixture, contexts, traceContexts) {
   }
 }
 
+// The next scenario needs every seat of this one free again. A fixed wait of
+// the reconnect timeout was not enough: after an impaired scenario a closed
+// page's leave can reach the server seconds late (its TCP connection is still
+// backing off), and the seat is held for the reconnect timeout after that.
+// Measured 3.2 s, during which the room was full for the next scenario's
+// second participant ("signaling reconnects under network impairment").
+async function waitForEmptyRoom(baseURL, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const metrics = await (await fetch(`${baseURL}/metrics`)).text();
+      if (/^slowmeet_active_participants 0$/m.test(metrics)) return;
+    } catch (_) {
+      // The server may be gone; the deadline ends the wait.
+    }
+    await delay(200);
+  }
+  console.warn(`[warn] the room still had participants ${timeoutMs} ms after the scenario closed its pages`);
+}
+
 async function leaveMeetingBeforeClose(page) {
   if (page.isClosed()) return;
   const meeting = page.locator("#meeting");
@@ -4005,7 +4025,7 @@ async function main() {
           await context.close().catch(() => {});
         }
         if (scenarioServer) await scenarioServer.stop();
-        else if (server) await delay(1100);
+        else if (server) await waitForEmptyRoom(baseURL);
       }
     }
 
